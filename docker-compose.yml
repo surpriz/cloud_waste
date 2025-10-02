@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   # PostgreSQL Database
   postgres:
@@ -44,14 +42,13 @@ services:
       - "8000:8000"
     volumes:
       - ./backend:/app
+    env_file:
+      - .env
     environment:
       - DATABASE_URL=postgresql+asyncpg://cloudwaste:cloudwaste_dev_password@postgres:5432/cloudwaste
       - REDIS_URL=redis://redis:6379/0
       - CELERY_BROKER_URL=redis://redis:6379/0
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
-      - ENCRYPTION_KEY=${ENCRYPTION_KEY}
-      - JWT_SECRET_KEY=${JWT_SECRET_KEY}
-      - DEBUG=True
     depends_on:
       postgres:
         condition: service_healthy

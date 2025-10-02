@@ -1,0 +1,317 @@
+"""Cloud accounts API endpoints."""
+
+import uuid
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.api.deps import get_current_active_user, get_db
+from app.crud import cloud_account as cloud_account_crud
+from app.models.user import User
+from app.schemas.cloud_account import (
+    AWSCredentials,
+    CloudAccount,
+    CloudAccountCreate,
+    CloudAccountUpdate,
+)
+from app.services.aws_validator import AWSValidationError, validate_aws_credentials
+
+router = APIRouter()
+
+
+@router.post("/", response_model=CloudAccount, status_code=status.HTTP_201_CREATED)
+async def create_cloud_account(
+    account_in: CloudAccountCreate,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_active_user)],
+) -> CloudAccount:
+    """
+    Create a new cloud account connection.
+
+    This endpoint:
+    1. Validates the provided credentials
+    2. Encrypts the credentials before storage
+    3. Creates the cloud account record
+
+    Args:
+        account_in: Cloud account creation data
+        db: Database session
+        current_user: Current authenticated user
+
+    Returns:
+        Created cloud account (without credentials)
+
+    Raises:
+        HTTPException: If validation fails or account creation fails
+    """
+    # Validate credentials before storing
+    if account_in.provider == "aws":
+        if not account_in.aws_access_key_id or not account_in.aws_secret_access_key:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="AWS Access Key ID and Secret Access Key are required for AWS accounts",
+            )
+
+        # Validate AWS credentials
+        try:
+            credentials = AWSCredentials(
+                access_key_id=account_in.aws_access_key_id,
+                secret_access_key=account_in.aws_secret_access_key,
+                region=account_in.regions[0] if account_in.regions else "us-east-1",
+            )
+            account_info = await validate_aws_credentials(credentials)
+
+            # Optionally update account_identifier with actual AWS account ID
+            if not account_in.account_identifier:
+                account_in.account_identifier = account_info["account_id"]
+
+        except AWSValidationError as e:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"AWS credentials validation failed: {str(e)}",
+            )
+
+    # Create cloud account with encrypted credentials
+    try:
+        cloud_account = await cloud_account_crud.create_cloud_account(
+            db=db,
+            user_id=current_user.id,
+            account_in=account_in,
+        )
+        return cloud_account
+
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
+
+
+@router.get("/", response_model=list[CloudAccount])
+async def list_cloud_accounts(
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_active_user)],
+    skip: int = 0,
+    limit: int = 100,
+) -> list[CloudAccount]:
+    """
+    List all cloud accounts for the current user.
+
+    Args:
+        db: Database session
+        current_user: Current authenticated user
+        skip: Number of records to skip
+        limit: Maximum number of records to return
+
+    Returns:
+        List of cloud accounts (without credentials)
+    """
+    accounts = await cloud_account_crud.get_cloud_accounts_by_user(
+        db=db,
+        user_id=current_user.id,
+        skip=skip,
+        limit=limit,
+    )
+    return accounts
+
+
+@router.get("/{account_id}", response_model=CloudAccount)
+async def get_cloud_account(
+    account_id: uuid.UUID,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_active_user)],
+) -> CloudAccount:
+    """
+    Get a specific cloud account by ID.
+
+    Args:
+        account_id: Cloud account UUID
+        db: Database session
+        current_user: Current authenticated user
+
+    Returns:
+        Cloud account (without credentials)
+
+    Raises:
+        HTTPException: If account not found
+    """
+    account = await cloud_account_crud.get_cloud_account_by_id(
+        db=db,
+        account_id=account_id,
+        user_id=current_user.id,
+    )
+
+    if not account:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Cloud account not found",
+        )
+
+    return account
+
+
+@router.patch("/{account_id}", response_model=CloudAccount)
+async def update_cloud_account(
+    account_id: uuid.UUID,
+    account_in: CloudAccountUpdate,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_active_user)],
+) -> CloudAccount:
+    """
+    Update a cloud account.
+
+    Note: If updating AWS credentials, both access_key_id and secret_access_key
+    must be provided together.
+
+    Args:
+        account_id: Cloud account UUID
+        account_in: Cloud account update data
+        db: Database session
+        current_user: Current authenticated user
+
+    Returns:
+        Updated cloud account (without credentials)
+
+    Raises:
+        HTTPException: If account not found or validation fails
+    """
+    # Get existing account
+    account = await cloud_account_crud.get_cloud_account_by_id(
+        db=db,
+        account_id=account_id,
+        user_id=current_user.id,
+    )
+
+    if not account:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Cloud account not found",
+        )
+
+    # If updating AWS credentials, validate them
+    if account_in.aws_access_key_id and account_in.aws_secret_access_key:
+        try:
+            credentials = AWSCredentials(
+                access_key_id=account_in.aws_access_key_id,
+                secret_access_key=account_in.aws_secret_access_key,
+                region=account.regions[0] if account.regions else "us-east-1",
+            )
+            await validate_aws_credentials(credentials)
+
+        except AWSValidationError as e:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"AWS credentials validation failed: {str(e)}",
+            )
+
+    # Update account
+    updated_account = await cloud_account_crud.update_cloud_account(
+        db=db,
+        db_account=account,
+        account_in=account_in,
+    )
+
+    return updated_account
+
+
+@router.delete("/{account_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_cloud_account(
+    account_id: uuid.UUID,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_active_user)],
+) -> None:
+    """
+    Delete a cloud account.
+
+    Args:
+        account_id: Cloud account UUID
+        db: Database session
+        current_user: Current authenticated user
+
+    Raises:
+        HTTPException: If account not found
+    """
+    # Get existing account
+    account = await cloud_account_crud.get_cloud_account_by_id(
+        db=db,
+        account_id=account_id,
+        user_id=current_user.id,
+    )
+
+    if not account:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Cloud account not found",
+        )
+
+    # Delete account
+    await cloud_account_crud.delete_cloud_account(db=db, db_account=account)
+
+
+@router.post("/{account_id}/validate", response_model=dict)
+async def validate_cloud_account(
+    account_id: uuid.UUID,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_active_user)],
+) -> dict:
+    """
+    Validate cloud account credentials and permissions.
+
+    This endpoint re-validates the stored credentials and checks
+    for required read permissions.
+
+    Args:
+        account_id: Cloud account UUID
+        db: Database session
+        current_user: Current authenticated user
+
+    Returns:
+        Validation result with account info and permissions
+
+    Raises:
+        HTTPException: If account not found or validation fails
+    """
+    # Get existing account
+    account = await cloud_account_crud.get_cloud_account_by_id(
+        db=db,
+        account_id=account_id,
+        user_id=current_user.id,
+    )
+
+    if not account:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Cloud account not found",
+        )
+
+    # Get decrypted credentials (internal use only)
+    account_with_creds = await cloud_account_crud.get_decrypted_credentials(account)
+
+    if account.provider == "aws" and account_with_creds.aws_credentials:
+        try:
+            # Validate credentials
+            account_info = await validate_aws_credentials(account_with_creds.aws_credentials)
+
+            # Check permissions
+            from app.services.aws_validator import check_aws_read_permissions
+
+            permissions = await check_aws_read_permissions(account_with_creds.aws_credentials)
+
+            return {
+                "status": "valid",
+                "provider": "aws",
+                "account_info": account_info,
+                "permissions": permissions,
+            }
+
+        except AWSValidationError as e:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Validation failed: {str(e)}",
+            )
+
+    raise HTTPException(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        detail=f"Provider {account.provider} is not yet supported for validation",
+    )

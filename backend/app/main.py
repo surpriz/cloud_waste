@@ -49,13 +49,10 @@ async def root() -> dict[str, str]:
     }
 
 
-# Include routers (will be added in future sprints)
-# from app.api.v1 import auth, accounts, scans, resources, costs
-# app.include_router(auth.router, prefix="/api/v1/auth", tags=["auth"])
-# app.include_router(accounts.router, prefix="/api/v1/accounts", tags=["accounts"])
-# app.include_router(scans.router, prefix="/api/v1/scans", tags=["scans"])
-# app.include_router(resources.router, prefix="/api/v1/resources", tags=["resources"])
-# app.include_router(costs.router, prefix="/api/v1/costs", tags=["costs"])
+# Include API v1 routers
+from app.api.v1 import api_router
+
+app.include_router(api_router, prefix=settings.API_V1_PREFIX)
 
 
 if __name__ == "__main__":
