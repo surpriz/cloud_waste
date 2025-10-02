@@ -1,0 +1,88 @@
+/**
+ * Zustand store for scans
+ */
+
+import { create } from "zustand";
+import { scansAPI } from "@/lib/api";
+import type { Scan, ScanCreate, ScanWithResources, ScanSummary } from "@/types";
+
+interface ScanState {
+  scans: Scan[];
+  selectedScan: ScanWithResources | null;
+  summary: ScanSummary | null;
+  isLoading: boolean;
+  error: string | null;
+
+  // Actions
+  fetchScans: () => Promise<void>;
+  fetchScan: (id: string) => Promise<void>;
+  createScan: (data: ScanCreate) => Promise<Scan>;
+  fetchSummary: (cloudAccountId?: string) => Promise<void>;
+  fetchScansByAccount: (accountId: string) => Promise<void>;
+  clearError: () => void;
+}
+
+export const useScanStore = create<ScanState>((set) => ({
+  scans: [],
+  selectedScan: null,
+  summary: null,
+  isLoading: false,
+  error: null,
+
+  fetchScans: async () => {
+    set({ isLoading: true, error: null });
+    try {
+      const scans = await scansAPI.list();
+      set({ scans, isLoading: false });
+    } catch (error: any) {
+      set({ error: error.message || "Failed to fetch scans", isLoading: false });
+    }
+  },
+
+  fetchScan: async (id: string) => {
+    set({ isLoading: true, error: null });
+    try {
+      const scan = await scansAPI.get(id);
+      set({ selectedScan: scan, isLoading: false });
+    } catch (error: any) {
+      set({ error: error.message || "Failed to fetch scan", isLoading: false });
+    }
+  },
+
+  createScan: async (data: ScanCreate) => {
+    set({ isLoading: true, error: null });
+    try {
+      const scan = await scansAPI.create(data);
+      set((state) => ({
+        scans: [scan, ...state.scans],
+        isLoading: false,
+      }));
+      return scan;
+    } catch (error: any) {
+      set({ error: error.message || "Failed to create scan", isLoading: false });
+      throw error;
+    }
+  },
+
+  fetchSummary: async (cloudAccountId?: string) => {
+    set({ isLoading: true, error: null });
+    try {
+      const summary = await scansAPI.getSummary(cloudAccountId);
+      set({ summary, isLoading: false });
+    } catch (error: any) {
+      set({ error: error.message || "Failed to fetch summary", isLoading: false });
+    }
+  },
+
+  fetchScansByAccount: async (accountId: string) => {
+    set({ isLoading: true, error: null });
+    try {
+      const scans = await scansAPI.listByAccount(accountId);
+      set({ scans, isLoading: false });
+    } catch (error: any) {
+      set({ error: error.message || "Failed to fetch scans", isLoading: false });
+    }
+  },
+
+  clearError: () => set({ error: null }),
+}));

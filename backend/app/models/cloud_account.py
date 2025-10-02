@@ -80,6 +80,16 @@ class CloudAccount(Base):
 
     # Relationships
     user: Mapped["User"] = relationship("User", back_populates="cloud_accounts")  # type: ignore
+    scans: Mapped[list["Scan"]] = relationship(  # type: ignore
+        "Scan",
+        back_populates="cloud_account",
+        cascade="all, delete-orphan",
+    )
+    orphan_resources: Mapped[list["OrphanResource"]] = relationship(  # type: ignore
+        "OrphanResource",
+        back_populates="cloud_account",
+        cascade="all, delete-orphan",
+    )
 
     def __repr__(self) -> str:
         """String representation."""
