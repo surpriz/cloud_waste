@@ -12,6 +12,8 @@ import {
   Loader2,
   DollarSign,
   AlertTriangle,
+  Trash2,
+  Info,
 } from "lucide-react";
 
 export default function ScansPage() {
@@ -155,6 +157,8 @@ function StatCard({ title, value, icon: Icon, color }: any) {
 
 function ScanRow({ scan }: any) {
   const { accounts } = useAccountStore();
+  const { deleteScan, fetchScans } = useScanStore();
+  const [isDeleting, setIsDeleting] = useState(false);
   const account = accounts.find((a) => a.id === scan.cloud_account_id);
 
   const statusConfig: any = {
@@ -187,6 +191,20 @@ function ScanRow({ scan }: any) {
 
   const config = statusConfig[scan.status] || statusConfig.pending;
   const StatusIcon = config.icon;
+
+  const handleDelete = async () => {
+    if (!confirm("Are you sure you want to delete this scan?")) return;
+
+    setIsDeleting(true);
+    try {
+      await deleteScan(scan.id);
+      await fetchScans();
+    } catch (err) {
+      console.error("Failed to delete scan:", err);
+    } finally {
+      setIsDeleting(false);
+    }
+  };
 
   return (
     <div className="p-6 hover:bg-gray-50">
@@ -236,15 +254,57 @@ function ScanRow({ scan }: any) {
               ? new Date(scan.completed_at).toLocaleString()
               : new Date(scan.created_at).toLocaleString()}
           </div>
+          <button
+            onClick={handleDelete}
+            disabled={isDeleting}
+            className="rounded-lg p-2 text-gray-400 hover:bg-red-50 hover:text-red-600 transition-colors disabled:opacity-50"
+            title="Delete scan"
+          >
+            <Trash2 className={`h-5 w-5 ${isDeleting ? "animate-spin" : ""}`} />
+          </button>
         </div>
       </div>
 
-      {scan.error_message && (
-        <div className="mt-4 rounded-lg bg-red-50 p-3 text-sm text-red-600">
+      {/* Success message - No orphans found */}
+      {scan.status === "completed" && scan.orphan_resources_found === 0 && (
+        <div className="mt-4 rounded-lg bg-green-50 border border-green-200 p-3 text-sm text-green-700">
+          <div className="flex items-center gap-2">
+            <CheckCircle className="h-4 w-4" />
+            <span className="font-semibold">
+              ✨ Great news! No orphaned resources found.
+            </span>
+          </div>
+          <p className="ml-6 mt-1 text-green-600">
+            Your cloud infrastructure is clean and optimized.
+          </p>
+        </div>
+      )}
+
+      {/* Warning message - Orphans found */}
+      {scan.status === "completed" && scan.orphan_resources_found > 0 && (
+        <div className="mt-4 rounded-lg bg-orange-50 border border-orange-200 p-3 text-sm text-orange-700">
           <div className="flex items-center gap-2">
             <AlertTriangle className="h-4 w-4" />
-            <span>{scan.error_message}</span>
+            <span className="font-semibold">
+              ⚠️ Found {scan.orphan_resources_found} orphaned resource
+              {scan.orphan_resources_found > 1 ? "s" : ""}.
+            </span>
           </div>
+          <p className="ml-6 mt-1 text-orange-600">
+            Potential savings: ${scan.estimated_monthly_waste.toFixed(2)}/month
+            (${(scan.estimated_monthly_waste * 12).toFixed(2)}/year)
+          </p>
+        </div>
+      )}
+
+      {/* Error message */}
+      {scan.error_message && (
+        <div className="mt-4 rounded-lg bg-red-50 border border-red-200 p-3 text-sm text-red-600">
+          <div className="flex items-center gap-2">
+            <XCircle className="h-4 w-4" />
+            <span className="font-semibold">Scan failed</span>
+          </div>
+          <p className="ml-6 mt-1">{scan.error_message}</p>
         </div>
       )}
     </div>

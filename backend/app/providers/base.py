@@ -177,20 +177,26 @@ class CloudProviderBase(ABC):
         """
         pass
 
-    async def scan_all_resources(self, region: str) -> list[OrphanResourceData]:
+    async def scan_all_resources(
+        self, region: str, detection_rules: dict[str, dict] | None = None
+    ) -> list[OrphanResourceData]:
         """
         Scan all resource types in a specific region.
 
         Args:
             region: Region to scan
+            detection_rules: Optional user-defined detection rules per resource type
 
         Returns:
             Combined list of all orphan resources found
         """
         results: list[OrphanResourceData] = []
+        rules = detection_rules or {}
 
-        # Execute all scan methods
-        results.extend(await self.scan_unattached_volumes(region))
+        # Execute all scan methods with user's rules
+        results.extend(
+            await self.scan_unattached_volumes(region, rules.get("ebs_volume"))
+        )
         results.extend(await self.scan_unassigned_ips(region))
         results.extend(await self.scan_orphaned_snapshots(region))
         results.extend(await self.scan_stopped_instances(region))

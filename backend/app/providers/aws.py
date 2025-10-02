@@ -85,7 +85,9 @@ class AWSProvider(CloudProviderBase):
             response = await ec2.describe_regions()
             return [region["RegionName"] for region in response["Regions"]]
 
-    async def scan_unattached_volumes(self, region: str) -> list[OrphanResourceData]:
+    async def scan_unattached_volumes(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
         """
         Scan for unattached EBS volumes in a region.
 
@@ -93,11 +95,25 @@ class AWSProvider(CloudProviderBase):
 
         Args:
             region: AWS region to scan
+            detection_rules: Optional detection rules (uses defaults if None)
 
         Returns:
             List of orphan EBS volume resources
         """
         orphans: list[OrphanResourceData] = []
+
+        # Use provided rules or defaults
+        if detection_rules is None:
+            from app.models.detection_rule import DEFAULT_DETECTION_RULES
+
+            detection_rules = DEFAULT_DETECTION_RULES.get("ebs_volume", {})
+
+        # Check if detection is enabled
+        if not detection_rules.get("enabled", True):
+            return orphans
+
+        min_age_days = detection_rules.get("min_age_days", 7)
+        confidence_threshold_days = detection_rules.get("confidence_threshold_days", 30)
 
         try:
             async with self.session.client("ec2", region_name=region) as ec2:
@@ -109,6 +125,14 @@ class AWSProvider(CloudProviderBase):
                     volume_id = volume["VolumeId"]
                     size_gb = volume["Size"]
                     volume_type = volume["VolumeType"]
+                    created_at = volume["CreateTime"]
+
+                    # Calculate volume age in days
+                    age_days = (datetime.now(timezone.utc) - created_at).days
+
+                    # Skip if volume is too young
+                    if age_days < min_age_days:
+                        continue
 
                     # Calculate monthly cost based on volume type
                     price_key = f"ebs_{volume_type}_per_gb"
@@ -124,6 +148,11 @@ class AWSProvider(CloudProviderBase):
                             name = tag["Value"]
                             break
 
+                    # Determine confidence level
+                    confidence = (
+                        "high" if age_days >= confidence_threshold_days else "medium"
+                    )
+
                     orphans.append(
                         OrphanResourceData(
                             resource_type="ebs_volume",
@@ -134,9 +163,11 @@ class AWSProvider(CloudProviderBase):
                             resource_metadata={
                                 "size_gb": size_gb,
                                 "volume_type": volume_type,
-                                "created_at": volume["CreateTime"].isoformat(),
+                                "created_at": created_at.isoformat(),
                                 "availability_zone": volume["AvailabilityZone"],
                                 "encrypted": volume.get("Encrypted", False),
+                                "age_days": age_days,
+                                "confidence": confidence,
                             },
                         )
                     )

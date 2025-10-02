@@ -61,15 +61,16 @@ services:
       context: ./backend
       dockerfile: Dockerfile
     container_name: cloudwaste_celery_worker
-    command: celery -A app.workers.celery_app worker --loglevel=info
+    command: celery -A app.workers.celery_app worker --pool=solo --loglevel=info
     volumes:
       - ./backend:/app
+    env_file:
+      - .env
     environment:
       - DATABASE_URL=postgresql+asyncpg://cloudwaste:cloudwaste_dev_password@postgres:5432/cloudwaste
       - REDIS_URL=redis://redis:6379/0
       - CELERY_BROKER_URL=redis://redis:6379/0
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
-      - ENCRYPTION_KEY=${ENCRYPTION_KEY}
     depends_on:
       postgres:
         condition: service_healthy
@@ -85,6 +86,8 @@ services:
     command: celery -A app.workers.celery_app beat --loglevel=info
     volumes:
       - ./backend:/app
+    env_file:
+      - .env
     environment:
       - DATABASE_URL=postgresql+asyncpg://cloudwaste:cloudwaste_dev_password@postgres:5432/cloudwaste
       - REDIS_URL=redis://redis:6379/0

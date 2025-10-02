@@ -30,19 +30,13 @@ async def create_scan(
     """
     # Verify account belongs to user
     account = await cloud_account_crud.get_cloud_account_by_id(
-        db, scan_in.cloud_account_id
+        db, scan_in.cloud_account_id, current_user.id
     )
 
     if not account:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="Cloud account not found",
-        )
-
-    if account.user_id != current_user.id:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Not authorized to scan this account",
+            detail="Cloud account not found or you don't have permission to access it",
         )
 
     if not account.is_active:
@@ -87,8 +81,10 @@ async def get_scan_summary(
     """
     # If cloud_account_id provided, verify it belongs to user
     if cloud_account_id:
-        account = await cloud_account_crud.get_cloud_account_by_id(db, cloud_account_id)
-        if not account or account.user_id != current_user.id:
+        account = await cloud_account_crud.get_cloud_account_by_id(
+            db, cloud_account_id, current_user.id
+        )
+        if not account:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Cloud account not found",
@@ -117,10 +113,10 @@ async def get_scan(
 
     # Verify scan belongs to user's account
     account = await cloud_account_crud.get_cloud_account_by_id(
-        db, scan.cloud_account_id
+        db, scan.cloud_account_id, current_user.id
     )
 
-    if not account or account.user_id != current_user.id:
+    if not account:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Not authorized to view this scan",
@@ -141,7 +137,9 @@ async def list_scans_by_account(
     List all scans for a specific cloud account.
     """
     # Verify account belongs to user
-    account = await cloud_account_crud.get_cloud_account_by_id(db, cloud_account_id)
+    account = await cloud_account_crud.get_cloud_account_by_id(
+        db, cloud_account_id, current_user.id
+    )
 
     if not account:
         raise HTTPException(
@@ -149,11 +147,38 @@ async def list_scans_by_account(
             detail="Cloud account not found",
         )
 
-    if account.user_id != current_user.id:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Not authorized to view this account's scans",
-        )
-
     scans = await scan_crud.get_scans_by_account(db, cloud_account_id, skip, limit)
     return scans
+
+
+@router.delete("/{scan_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_scan(
+    scan_id: uuid.UUID,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_active_user)],
+) -> None:
+    """
+    Delete a scan and all its associated orphan resources.
+    """
+    # Get scan to verify ownership
+    scan = await scan_crud.get_scan_by_id(db, scan_id)
+
+    if not scan:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Scan not found",
+        )
+
+    # Verify scan belongs to user's account
+    account = await cloud_account_crud.get_cloud_account_by_id(
+        db, scan.cloud_account_id, current_user.id
+    )
+
+    if not account:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Not authorized to delete this scan",
+        )
+
+    # Delete scan (cascade will delete orphan resources)
+    await scan_crud.delete_scan(db, scan_id)

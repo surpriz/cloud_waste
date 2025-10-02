@@ -364,9 +364,183 @@ cloudwaste/
 
 ---
 
+## 🛠️ Useful Commands
+
+### Docker Commands
+
+```bash
+# Start all services
+docker-compose up -d
+
+# Stop all services
+docker-compose down
+
+# View logs
+docker-compose logs -f                    # All services
+docker-compose logs -f backend            # Backend only
+docker-compose logs -f celery_worker      # Worker only
+docker-compose logs -f frontend           # Frontend only
+
+# Restart a service
+docker-compose restart backend
+docker-compose restart celery_worker
+
+# Rebuild images
+docker-compose build backend
+docker-compose up -d --build
+
+# Check status
+docker-compose ps
+docker stats
+```
+
+### Database Commands
+
+```bash
+# Connect to PostgreSQL
+docker-compose exec postgres psql -U cloudwaste -d cloudwaste
+
+# Useful queries
+SELECT COUNT(*) FROM users;
+SELECT COUNT(*) FROM cloud_accounts;
+SELECT COUNT(*) FROM scans WHERE status = 'completed';
+SELECT COUNT(*) FROM orphan_resources;
+
+# Resources by type
+SELECT resource_type, COUNT(*), SUM(estimated_monthly_cost)
+FROM orphan_resources
+GROUP BY resource_type;
+
+# Resources by region
+SELECT region, COUNT(*)
+FROM orphan_resources
+GROUP BY region;
+
+# Latest scan
+SELECT id, status, orphan_resources_found, estimated_monthly_waste, completed_at
+FROM scans
+ORDER BY created_at DESC
+LIMIT 1;
+```
+
+### Database Migrations
+
+```bash
+# Create new migration
+docker-compose exec backend alembic revision --autogenerate -m "description"
+
+# Apply migrations
+docker-compose exec backend alembic upgrade head
+
+# Rollback one migration
+docker-compose exec backend alembic downgrade -1
+
+# View migration history
+docker-compose exec backend alembic history
+```
+
+### Celery Commands
+
+```bash
+# View active workers
+docker-compose exec celery_worker celery -A app.workers.celery_app inspect active
+
+# View queued tasks
+docker-compose exec celery_worker celery -A app.workers.celery_app inspect scheduled
+
+# View worker stats
+docker-compose exec celery_worker celery -A app.workers.celery_app inspect stats
+
+# Purge all queued tasks
+docker-compose exec celery_worker celery -A app.workers.celery_app purge
+```
+
+---
+
+## 🔧 Troubleshooting
+
+### Backend Won't Start
+
+```bash
+# Check logs
+docker-compose logs backend
+
+# Common issues:
+# - Port 8000 already in use → Change port in docker-compose.yml
+# - DB connection failed → Verify PostgreSQL is running
+# - Import error → Rebuild image: docker-compose build backend
+```
+
+### Scan Stuck in "pending" Status
+
+```bash
+# Verify Celery worker is running
+docker-compose ps celery_worker
+
+# Check worker logs
+docker-compose logs -f celery_worker
+
+# Verify Redis is working
+docker-compose exec redis redis-cli ping
+# Should respond: PONG
+
+# Restart worker
+docker-compose restart celery_worker
+```
+
+### AWS Credentials Validation Failed
+
+```bash
+# Test credentials manually with AWS CLI
+aws sts get-caller-identity \
+  --access-key-id AKIA... \
+  --secret-access-key wJalr...
+
+# Check IAM permissions
+aws iam simulate-principal-policy \
+  --policy-source-arn arn:aws:iam::123456789012:user/cloudwaste-scanner \
+  --action-names ec2:DescribeVolumes rds:DescribeDBInstances
+
+# Common errors:
+# - "InvalidClientTokenId" → Incorrect Access Key ID
+# - "AccessDenied" → Insufficient permissions
+```
+
+### Frontend Can't Connect to API
+
+```bash
+# Verify API URL environment variable
+echo $NEXT_PUBLIC_API_URL
+# Should be: http://localhost:8000
+
+# Check CORS configuration
+curl -H "Origin: http://localhost:3000" \
+  -H "Access-Control-Request-Method: POST" \
+  -X OPTIONS http://localhost:8000/api/v1/auth/login -v
+
+# Should include: Access-Control-Allow-Origin: http://localhost:3000
+```
+
+### Database Connection Issues
+
+```bash
+# Verify PostgreSQL is running
+docker-compose ps postgres
+
+# Test connection
+docker-compose exec postgres pg_isready -U cloudwaste
+
+# Reset database (WARNING: deletes all data)
+docker-compose down -v
+docker-compose up -d
+docker-compose exec backend alembic upgrade head
+```
+
+---
+
 ## 🤝 Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for development guidelines.
+See [CLAUDE.md](CLAUDE.md) for development guidelines.
 
 ### Code Standards
 
@@ -395,6 +569,13 @@ docs(readme): update setup instructions
 
 ---
 
+## 📖 Additional Documentation
+
+- **[SETUP_GUIDE.md](SETUP_GUIDE.md)** - Detailed AWS setup and API examples
+- **[CLAUDE.md](CLAUDE.md)** - AI assistant guidance and project rules
+
+---
+
 ## 📄 License
 
 [MIT License](LICENSE)
@@ -405,8 +586,8 @@ docs(readme): update setup instructions
 
 For questions or issues:
 - Open an issue on GitHub
-- See [CLAUDE.md](CLAUDE.md) for AI assistant guidance
-- Check [CLAUDE_CODE_RULES.md](CLAUDE_CODE_RULES.md) for specifications
+- See documentation in [SETUP_GUIDE.md](SETUP_GUIDE.md)
+- Check [CLAUDE.md](CLAUDE.md) for project specifications
 
 ---
 

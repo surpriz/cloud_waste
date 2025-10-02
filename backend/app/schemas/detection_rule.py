@@ -1,0 +1,51 @@
+"""DetectionRule Pydantic schemas for request/response validation."""
+
+import uuid
+from datetime import datetime
+
+from pydantic import BaseModel, Field
+
+
+class DetectionRuleBase(BaseModel):
+    """Base detection rule schema."""
+
+    resource_type: str = Field(
+        ...,
+        pattern="^(ebs_volume|elastic_ip|ebs_snapshot|ec2_instance|nat_gateway|load_balancer|rds_instance)$",
+    )
+    rules: dict[str, bool | int | float | str] = Field(
+        ...,
+        description="Custom detection rules (e.g., {'enabled': true, 'min_age_days': 14})",
+    )
+
+
+class DetectionRuleCreate(DetectionRuleBase):
+    """Schema for creating a detection rule."""
+
+    pass
+
+
+class DetectionRuleUpdate(BaseModel):
+    """Schema for updating a detection rule."""
+
+    rules: dict[str, bool | int | float | str] | None = None
+
+
+class DetectionRule(DetectionRuleBase):
+    """Detection rule schema for API responses."""
+
+    id: uuid.UUID
+    user_id: uuid.UUID
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class DetectionRuleWithDefaults(BaseModel):
+    """Detection rule with default values shown."""
+
+    resource_type: str
+    current_rules: dict[str, bool | int | float | str]
+    default_rules: dict[str, bool | int | float | str]
+    description: str

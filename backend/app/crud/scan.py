@@ -185,3 +185,25 @@ async def get_scan_statistics(
         "total_monthly_waste": round(total_monthly_waste, 2),
         "last_scan_at": last_scan,
     }
+
+
+async def delete_scan(db: AsyncSession, scan_id: uuid.UUID) -> bool:
+    """
+    Delete a scan and all its associated orphan resources.
+
+    Args:
+        db: Database session
+        scan_id: Scan UUID
+
+    Returns:
+        True if deleted, False if not found
+    """
+    result = await db.execute(select(Scan).where(Scan.id == scan_id))
+    scan = result.scalar_one_or_none()
+
+    if not scan:
+        return False
+
+    await db.delete(scan)
+    await db.commit()
+    return True

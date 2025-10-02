@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { useAccountStore } from "@/stores/useAccountStore";
-import { Plus, Trash2, RefreshCw, CheckCircle, XCircle } from "lucide-react";
+import { Plus, Trash2, RefreshCw, CheckCircle, XCircle, HelpCircle, ChevronDown, ChevronUp, Copy, ExternalLink } from "lucide-react";
 
 export default function AccountsPage() {
   const { accounts, fetchAccounts, deleteAccount, isLoading } = useAccountStore();
@@ -121,8 +121,151 @@ function AccountCard({ account, onDelete }: any) {
   );
 }
 
+function AWSCredentialsHelp() {
+  const [copiedPolicy, setCopiedPolicy] = useState(false);
+
+  const iamPolicy = `{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Effect": "Allow",
+    "Action": [
+      "ec2:Describe*",
+      "rds:Describe*",
+      "s3:List*",
+      "s3:Get*",
+      "elasticloadbalancing:Describe*",
+      "ce:GetCostAndUsage",
+      "ce:GetCostForecast",
+      "cloudwatch:GetMetricStatistics",
+      "cloudwatch:ListMetrics",
+      "sts:GetCallerIdentity"
+    ],
+    "Resource": "*"
+  }]
+}`;
+
+  const copyPolicy = () => {
+    navigator.clipboard.writeText(iamPolicy);
+    setCopiedPolicy(true);
+    setTimeout(() => setCopiedPolicy(false), 2000);
+  };
+
+  return (
+    <div className="mb-6 rounded-xl border-2 border-green-200 bg-gradient-to-br from-green-50 to-blue-50 p-6">
+      <div className="flex items-start gap-3 mb-4">
+        <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-green-600 text-white shadow-md">
+          <HelpCircle className="h-6 w-6" />
+        </div>
+        <div>
+          <h3 className="text-lg font-bold text-gray-900">How to get your AWS credentials</h3>
+          <p className="text-sm text-gray-600 mt-1">Follow these steps to create a read-only IAM user</p>
+        </div>
+      </div>
+
+      <div className="space-y-4">
+        {/* Step 1 */}
+        <div className="flex gap-3">
+          <div className="flex h-7 w-7 items-center justify-center rounded-full bg-blue-600 text-white font-bold text-sm flex-shrink-0">
+            1
+          </div>
+          <div className="flex-1">
+            <h4 className="font-semibold text-gray-900">Go to AWS IAM Console</h4>
+            <p className="text-sm text-gray-600 mt-1">
+              Search for "IAM" in AWS Console → Click "Users" → "Create user"
+            </p>
+            <a
+              href="https://console.aws.amazon.com/iam/home#/users"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="mt-2 inline-flex items-center gap-1 text-sm text-blue-600 hover:text-blue-700 font-medium"
+            >
+              <ExternalLink className="h-4 w-4" />
+              Open IAM Console
+            </a>
+          </div>
+        </div>
+
+        {/* Step 2 */}
+        <div className="flex gap-3">
+          <div className="flex h-7 w-7 items-center justify-center rounded-full bg-purple-600 text-white font-bold text-sm flex-shrink-0">
+            2
+          </div>
+          <div className="flex-1">
+            <h4 className="font-semibold text-gray-900">Create IAM User</h4>
+            <p className="text-sm text-gray-600 mt-1">
+              User name: <code className="bg-gray-200 px-2 py-0.5 rounded">cloudwaste-scanner</code>
+              <br />
+              Access type: ✓ Programmatic access (NOT Console access)
+            </p>
+          </div>
+        </div>
+
+        {/* Step 3 */}
+        <div className="flex gap-3">
+          <div className="flex h-7 w-7 items-center justify-center rounded-full bg-orange-600 text-white font-bold text-sm flex-shrink-0">
+            3
+          </div>
+          <div className="flex-1">
+            <h4 className="font-semibold text-gray-900">Attach Read-Only Policy</h4>
+            <p className="text-sm text-gray-600 mt-1">
+              Click "Create policy" → Select JSON tab → Paste this policy:
+            </p>
+            <div className="mt-2 relative">
+              <pre className="bg-gray-900 text-green-400 p-4 rounded-lg text-xs overflow-x-auto">
+                {iamPolicy}
+              </pre>
+              <button
+                onClick={copyPolicy}
+                className="absolute top-2 right-2 flex items-center gap-1 rounded bg-gray-700 px-3 py-1 text-xs text-white hover:bg-gray-600 transition-colors"
+              >
+                <Copy className="h-3 w-3" />
+                {copiedPolicy ? "Copied!" : "Copy"}
+              </button>
+            </div>
+            <p className="text-xs text-gray-500 mt-2">
+              Policy name: <code className="bg-gray-200 px-2 py-0.5 rounded">CloudWasteReadOnlyPolicy</code>
+            </p>
+          </div>
+        </div>
+
+        {/* Step 4 */}
+        <div className="flex gap-3">
+          <div className="flex h-7 w-7 items-center justify-center rounded-full bg-green-600 text-white font-bold text-sm flex-shrink-0">
+            4
+          </div>
+          <div className="flex-1">
+            <h4 className="font-semibold text-gray-900">Get Credentials & Account ID</h4>
+            <p className="text-sm text-gray-600 mt-1">
+              After creating the user, AWS will show:
+            </p>
+            <ul className="text-sm text-gray-600 mt-2 space-y-1 list-disc list-inside">
+              <li><strong>Access Key ID</strong>: AKIAIOSFODNN7EXAMPLE</li>
+              <li><strong>Secret Access Key</strong>: wJalrXUtnFEMI/...</li>
+            </ul>
+            <div className="mt-3 rounded-lg bg-amber-50 border border-amber-200 p-3">
+              <p className="text-xs text-amber-800 font-medium">
+                ⚠️ Save the Secret Key now - you won't see it again!
+              </p>
+            </div>
+            <p className="text-sm text-gray-600 mt-3">
+              <strong>Account ID</strong>: Click your name (top-right) → 12-digit number
+            </p>
+          </div>
+        </div>
+      </div>
+
+      <div className="mt-6 rounded-lg bg-blue-50 border border-blue-200 p-4">
+        <p className="text-sm text-blue-900">
+          <strong>🔒 Security:</strong> CloudWaste only uses READ-ONLY permissions. We never modify or delete your AWS resources.
+        </p>
+      </div>
+    </div>
+  );
+}
+
 function AddAccountForm({ onClose }: { onClose: () => void }) {
   const { createAccount, isLoading, error } = useAccountStore();
+  const [showHelp, setShowHelp] = useState(false);
   const [formData, setFormData] = useState({
     account_name: "",
     account_identifier: "",
@@ -151,17 +294,35 @@ function AddAccountForm({ onClose }: { onClose: () => void }) {
   };
 
   return (
-    <div className="rounded-lg border bg-white p-6 shadow-sm">
-      <h2 className="text-xl font-semibold text-gray-900">Add AWS Account</h2>
-      <form onSubmit={handleSubmit} className="mt-4 space-y-4">
+    <div className="rounded-2xl border-2 border-blue-200 bg-white p-8 shadow-xl">
+      <div className="flex items-center justify-between mb-6">
+        <h2 className="text-2xl font-bold bg-gradient-to-r from-blue-600 to-purple-600 bg-clip-text text-transparent">
+          Add AWS Account
+        </h2>
+        <button
+          type="button"
+          onClick={() => setShowHelp(!showHelp)}
+          className="flex items-center gap-2 rounded-lg bg-blue-50 px-4 py-2 text-sm font-medium text-blue-700 hover:bg-blue-100 transition-colors"
+        >
+          <HelpCircle className="h-4 w-4" />
+          {showHelp ? "Hide" : "How to get credentials?"}
+          {showHelp ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
+        </button>
+      </div>
+
+      {/* Help Section */}
+      {showHelp && <AWSCredentialsHelp />}
+
+      <form onSubmit={handleSubmit} className="mt-6 space-y-5">
         {error && (
-          <div className="rounded-lg bg-red-50 p-4 text-sm text-red-600">
-            {error}
+          <div className="rounded-xl bg-red-50 border border-red-200 p-4 text-sm text-red-700 flex items-start gap-2">
+            <XCircle className="h-5 w-5 flex-shrink-0 mt-0.5" />
+            <span>{error}</span>
           </div>
         )}
 
         <div>
-          <label className="block text-sm font-medium text-gray-700">
+          <label className="block text-sm font-semibold text-gray-700 mb-2">
             Account Name *
           </label>
           <input
@@ -171,14 +332,15 @@ function AddAccountForm({ onClose }: { onClose: () => void }) {
             onChange={(e) =>
               setFormData({ ...formData, account_name: e.target.value })
             }
-            className="mt-1 block w-full rounded-lg border border-gray-300 px-3 py-2"
+            className="block w-full rounded-xl border-2 border-gray-300 px-4 py-3 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/20 transition-all"
             placeholder="Production AWS"
           />
         </div>
 
         <div>
-          <label className="block text-sm font-medium text-gray-700">
+          <label className="block text-sm font-semibold text-gray-700 mb-2">
             AWS Account ID *
+            <span className="ml-2 text-xs font-normal text-gray-500">(12 digits)</span>
           </label>
           <input
             required
@@ -187,13 +349,13 @@ function AddAccountForm({ onClose }: { onClose: () => void }) {
             onChange={(e) =>
               setFormData({ ...formData, account_identifier: e.target.value })
             }
-            className="mt-1 block w-full rounded-lg border border-gray-300 px-3 py-2"
+            className="block w-full rounded-xl border-2 border-gray-300 px-4 py-3 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/20 transition-all font-mono"
             placeholder="123456789012"
           />
         </div>
 
         <div>
-          <label className="block text-sm font-medium text-gray-700">
+          <label className="block text-sm font-semibold text-gray-700 mb-2">
             AWS Access Key ID *
           </label>
           <input
@@ -203,13 +365,13 @@ function AddAccountForm({ onClose }: { onClose: () => void }) {
             onChange={(e) =>
               setFormData({ ...formData, aws_access_key_id: e.target.value })
             }
-            className="mt-1 block w-full rounded-lg border border-gray-300 px-3 py-2"
+            className="block w-full rounded-xl border-2 border-gray-300 px-4 py-3 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/20 transition-all font-mono text-sm"
             placeholder="AKIAIOSFODNN7EXAMPLE"
           />
         </div>
 
         <div>
-          <label className="block text-sm font-medium text-gray-700">
+          <label className="block text-sm font-semibold text-gray-700 mb-2">
             AWS Secret Access Key *
           </label>
           <input
@@ -222,13 +384,13 @@ function AddAccountForm({ onClose }: { onClose: () => void }) {
                 aws_secret_access_key: e.target.value,
               })
             }
-            className="mt-1 block w-full rounded-lg border border-gray-300 px-3 py-2"
+            className="block w-full rounded-xl border-2 border-gray-300 px-4 py-3 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/20 transition-all font-mono text-sm"
             placeholder="wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
           />
         </div>
 
         <div>
-          <label className="block text-sm font-medium text-gray-700">
+          <label className="block text-sm font-semibold text-gray-700 mb-2">
             Regions (comma-separated, max 3)
           </label>
           <input
@@ -237,38 +399,51 @@ function AddAccountForm({ onClose }: { onClose: () => void }) {
             onChange={(e) =>
               setFormData({ ...formData, regions: e.target.value })
             }
-            className="mt-1 block w-full rounded-lg border border-gray-300 px-3 py-2"
-            placeholder="us-east-1,eu-west-1"
+            className="block w-full rounded-xl border-2 border-gray-300 px-4 py-3 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/20 transition-all font-mono"
+            placeholder="us-east-1,eu-west-1,eu-central-1"
           />
+          <p className="mt-2 text-xs text-gray-500">
+            💡 Tip: Limit to 3 regions for faster scans
+          </p>
         </div>
 
         <div>
-          <label className="block text-sm font-medium text-gray-700">
-            Description
+          <label className="block text-sm font-semibold text-gray-700 mb-2">
+            Description (optional)
           </label>
           <textarea
             value={formData.description}
             onChange={(e) =>
               setFormData({ ...formData, description: e.target.value })
             }
-            className="mt-1 block w-full rounded-lg border border-gray-300 px-3 py-2"
+            className="block w-full rounded-xl border-2 border-gray-300 px-4 py-3 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/20 transition-all"
             rows={3}
             placeholder="Production environment AWS account"
           />
         </div>
 
-        <div className="flex gap-3">
+        <div className="flex gap-4 pt-4">
           <button
             type="submit"
             disabled={isLoading}
-            className="flex-1 rounded-lg bg-blue-600 px-4 py-2 font-medium text-white hover:bg-blue-700 disabled:bg-blue-300"
+            className="flex-1 rounded-xl bg-gradient-to-r from-blue-600 to-purple-600 px-6 py-3 font-semibold text-white shadow-lg hover:shadow-xl transition-all hover:scale-[1.02] disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
           >
-            {isLoading ? "Adding..." : "Add Account"}
+            {isLoading ? (
+              <>
+                <RefreshCw className="h-5 w-5 animate-spin" />
+                Adding...
+              </>
+            ) : (
+              <>
+                <Plus className="h-5 w-5" />
+                Add Account
+              </>
+            )}
           </button>
           <button
             type="button"
             onClick={onClose}
-            className="flex-1 rounded-lg border border-gray-300 px-4 py-2 font-medium text-gray-700 hover:bg-gray-50"
+            className="flex-1 rounded-xl border-2 border-gray-300 bg-white px-6 py-3 font-semibold text-gray-700 hover:bg-gray-50 transition-all"
           >
             Cancel
           </button>

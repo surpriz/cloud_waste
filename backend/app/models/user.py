@@ -62,6 +62,11 @@ class User(Base):
         back_populates="user",
         cascade="all, delete-orphan",
     )
+    detection_rules: Mapped[list["DetectionRule"]] = relationship(  # type: ignore
+        "DetectionRule",
+        back_populates="user",
+        cascade="all, delete-orphan",
+    )
 
     def __repr__(self) -> str:
         """String representation."""
