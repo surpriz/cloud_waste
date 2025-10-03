@@ -177,6 +177,104 @@ class CloudProviderBase(ABC):
         """
         pass
 
+    @abstractmethod
+    async def scan_unused_fsx_file_systems(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """Scan for unused FSx file systems."""
+        pass
+
+    @abstractmethod
+    async def scan_idle_neptune_clusters(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """Scan for idle Neptune clusters."""
+        pass
+
+    @abstractmethod
+    async def scan_idle_msk_clusters(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """Scan for idle MSK clusters."""
+        pass
+
+    @abstractmethod
+    async def scan_idle_eks_clusters(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """Scan for idle EKS clusters."""
+        pass
+
+    @abstractmethod
+    async def scan_idle_sagemaker_endpoints(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """Scan for idle SageMaker endpoints."""
+        pass
+
+    @abstractmethod
+    async def scan_idle_redshift_clusters(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """Scan for idle Redshift clusters."""
+        pass
+
+    @abstractmethod
+    async def scan_idle_elasticache_clusters(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """Scan for idle ElastiCache clusters."""
+        pass
+
+    @abstractmethod
+    async def scan_idle_vpn_connections(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """Scan for idle VPN connections."""
+        pass
+
+    @abstractmethod
+    async def scan_idle_transit_gateway_attachments(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """Scan for idle Transit Gateway attachments."""
+        pass
+
+    @abstractmethod
+    async def scan_idle_opensearch_domains(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """Scan for idle OpenSearch domains."""
+        pass
+
+    @abstractmethod
+    async def scan_idle_global_accelerators(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """Scan for idle Global Accelerators."""
+        pass
+
+    @abstractmethod
+    async def scan_idle_kinesis_streams(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """Scan for idle Kinesis streams."""
+        pass
+
+    @abstractmethod
+    async def scan_unused_vpc_endpoints(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """Scan for unused VPC endpoints."""
+        pass
+
+    @abstractmethod
+    async def scan_idle_documentdb_clusters(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """Scan for idle DocumentDB clusters."""
+        pass
+
     async def scan_all_resources(
         self, region: str, detection_rules: dict[str, dict] | None = None
     ) -> list[OrphanResourceData]:
@@ -194,6 +292,7 @@ class CloudProviderBase(ABC):
         rules = detection_rules or {}
 
         # Execute all scan methods with user's rules
+        # Original 7 resource types
         results.extend(
             await self.scan_unattached_volumes(region, rules.get("ebs_volume"))
         )
@@ -203,5 +302,55 @@ class CloudProviderBase(ABC):
         results.extend(await self.scan_unused_load_balancers(region))
         results.extend(await self.scan_stopped_databases(region))
         results.extend(await self.scan_unused_nat_gateways(region))
+
+        # TOP 15 high-cost idle resources
+        results.extend(
+            await self.scan_unused_fsx_file_systems(region, rules.get("fsx_file_system"))
+        )
+        results.extend(
+            await self.scan_idle_neptune_clusters(region, rules.get("neptune_cluster"))
+        )
+        results.extend(await self.scan_idle_msk_clusters(region, rules.get("msk_cluster")))
+        results.extend(await self.scan_idle_eks_clusters(region, rules.get("eks_cluster")))
+        results.extend(
+            await self.scan_idle_sagemaker_endpoints(
+                region, rules.get("sagemaker_endpoint")
+            )
+        )
+        results.extend(
+            await self.scan_idle_redshift_clusters(region, rules.get("redshift_cluster"))
+        )
+        results.extend(
+            await self.scan_idle_elasticache_clusters(
+                region, rules.get("elasticache_cluster")
+            )
+        )
+        results.extend(
+            await self.scan_idle_vpn_connections(region, rules.get("vpn_connection"))
+        )
+        results.extend(
+            await self.scan_idle_transit_gateway_attachments(
+                region, rules.get("transit_gateway_attachment")
+            )
+        )
+        results.extend(
+            await self.scan_idle_opensearch_domains(region, rules.get("opensearch_domain"))
+        )
+        results.extend(
+            await self.scan_idle_global_accelerators(
+                region, rules.get("global_accelerator")
+            )
+        )
+        results.extend(
+            await self.scan_idle_kinesis_streams(region, rules.get("kinesis_stream"))
+        )
+        results.extend(
+            await self.scan_unused_vpc_endpoints(region, rules.get("vpc_endpoint"))
+        )
+        results.extend(
+            await self.scan_idle_documentdb_clusters(
+                region, rules.get("documentdb_cluster")
+            )
+        )
 
         return results

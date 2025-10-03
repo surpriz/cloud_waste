@@ -8,8 +8,8 @@ from app.core.config import settings
 # Create Celery application
 celery_app = Celery(
     "cloudwaste",
-    broker=settings.REDIS_URL,
-    backend=settings.REDIS_URL,
+    broker=str(settings.REDIS_URL),
+    backend=str(settings.REDIS_URL),
     include=["app.workers.tasks"],
 )
 

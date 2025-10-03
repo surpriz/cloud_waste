@@ -58,6 +58,91 @@ DEFAULT_DETECTION_RULES = {
         "confidence_threshold_days": 14,
         "description": "RDS instances in stopped state",
     },
+    # TOP 15 high-cost idle resources
+    "fsx_file_system": {
+        "enabled": True,
+        "min_age_days": 3,
+        "confidence_threshold_days": 30,
+        "description": "FSx file systems with no data transfer activity",
+    },
+    "neptune_cluster": {
+        "enabled": True,
+        "min_age_days": 3,
+        "confidence_threshold_days": 7,
+        "description": "Neptune clusters with no active connections",
+    },
+    "msk_cluster": {
+        "enabled": True,
+        "min_age_days": 3,
+        "confidence_threshold_days": 7,
+        "description": "MSK clusters with no data traffic",
+    },
+    "eks_cluster": {
+        "enabled": True,
+        "min_age_days": 3,
+        "confidence_threshold_days": 7,
+        "description": "EKS clusters with no worker nodes",
+    },
+    "sagemaker_endpoint": {
+        "enabled": True,
+        "min_age_days": 3,
+        "confidence_threshold_days": 7,
+        "description": "SageMaker endpoints with no invocations",
+    },
+    "redshift_cluster": {
+        "enabled": True,
+        "min_age_days": 3,
+        "confidence_threshold_days": 7,
+        "description": "Redshift clusters with no database connections",
+    },
+    "elasticache_cluster": {
+        "enabled": True,
+        "min_age_days": 3,
+        "confidence_threshold_days": 7,
+        "description": "ElastiCache clusters with no cache hits",
+    },
+    "vpn_connection": {
+        "enabled": True,
+        "min_age_days": 3,
+        "confidence_threshold_days": 30,
+        "description": "VPN connections with no data transfer",
+    },
+    "transit_gateway_attachment": {
+        "enabled": True,
+        "min_age_days": 3,
+        "confidence_threshold_days": 30,
+        "description": "Transit Gateway attachments with no traffic",
+    },
+    "opensearch_domain": {
+        "enabled": True,
+        "min_age_days": 3,
+        "confidence_threshold_days": 7,
+        "description": "OpenSearch domains with no search requests",
+    },
+    "global_accelerator": {
+        "enabled": True,
+        "min_age_days": 3,
+        "confidence_threshold_days": 7,
+        "description": "Global Accelerators with no endpoints",
+    },
+    "kinesis_stream": {
+        "enabled": True,
+        "min_age_days": 3,
+        "confidence_threshold_days": 7,
+        "description": "Kinesis streams with no incoming records",
+    },
+    "vpc_endpoint": {
+        "enabled": True,
+        "min_age_days": 3,
+        "confidence_threshold_days": 7,
+        "description": "VPC endpoints with no network interfaces",
+    },
+    "documentdb_cluster": {
+        "enabled": True,
+        "min_age_days": 3,
+        "confidence_threshold_days": 7,
+        "description": "DocumentDB clusters with no database connections",
+    },
 }
 
 

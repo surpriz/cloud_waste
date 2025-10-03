@@ -34,6 +34,30 @@ class AWSProvider(CloudProviderBase):
         "alb": 22.00,  # Application Load Balancer
         "nlb": 22.00,  # Network Load Balancer
         "clb": 18.00,  # Classic Load Balancer
+        # TOP 15 high-cost idle resources
+        "fsx_lustre_per_gb": 0.145,  # FSx for Lustre
+        "fsx_windows_per_gb": 0.13,  # FSx for Windows
+        "fsx_ontap_per_gb": 0.144,  # FSx for NetApp ONTAP
+        "fsx_openzfs_per_gb": 0.14,  # FSx for OpenZFS
+        "neptune_db_r5_large": 0.348,  # Neptune db.r5.large (per hour) = ~$250/month
+        "neptune_db_r5_xlarge": 0.696,  # Neptune db.r5.xlarge = ~$500/month
+        "msk_kafka_m5_large": 0.21,  # MSK kafka.m5.large (per broker/hour) = ~$150/month
+        "msk_kafka_m5_xlarge": 0.42,  # MSK kafka.m5.xlarge = ~$300/month
+        "eks_cluster": 73.00,  # EKS Control Plane
+        "sagemaker_ml_m5_large": 0.115,  # SageMaker ml.m5.large (per hour) = ~$83/month
+        "sagemaker_ml_m5_xlarge": 0.23,  # SageMaker ml.m5.xlarge = ~$165/month
+        "redshift_dc2_large": 0.25,  # Redshift dc2.large (per hour) = ~$180/month
+        "redshift_dc2_xlarge": 1.00,  # Redshift dc2.xlarge = ~$720/month
+        "elasticache_cache_m5_large": 0.126,  # ElastiCache cache.m5.large (per hour) = ~$90/month
+        "elasticache_cache_r5_large": 0.188,  # ElastiCache cache.r5.large = ~$135/month
+        "vpn_connection": 36.00,  # VPN Connection
+        "transit_gateway_attachment": 36.00,  # Transit Gateway Attachment (per month)
+        "opensearch_m5_large": 0.161,  # OpenSearch m5.large.search (per hour) = ~$116/month
+        "opensearch_r5_large": 0.228,  # OpenSearch r5.large.search = ~$164/month
+        "global_accelerator": 18.00,  # Global Accelerator (base cost)
+        "kinesis_shard": 15.00,  # Kinesis shard (per month)
+        "vpc_endpoint": 7.20,  # VPC Endpoint (per month)
+        "documentdb_r5_large": 0.277,  # DocumentDB db.r5.large (per hour) = ~$199/month
     }
 
     def __init__(
@@ -821,5 +845,1455 @@ class AWSProvider(CloudProviderBase):
 
         except ClientError as e:
             print(f"Error scanning unused NAT gateways in {region}: {e}")
+
+        return orphans
+
+    async def scan_unused_fsx_file_systems(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scan for unused FSx file systems using CloudWatch metrics.
+
+        Detection: File systems with no data read/write activity for 30+ days.
+
+        Args:
+            region: AWS region to scan
+            detection_rules: Optional detection configuration
+
+        Returns:
+            List of orphaned FSx file systems
+        """
+        orphans = []
+        min_age_days = detection_rules.get("min_age_days", 3) if detection_rules else 3
+        confidence_threshold_days = (
+            detection_rules.get("confidence_threshold_days", 30)
+            if detection_rules
+            else 30
+        )
+
+        try:
+            async with self.session.client("fsx", region_name=region) as fsx:
+                async with self.session.client("cloudwatch", region_name=region) as cw:
+                    response = await fsx.describe_file_systems()
+
+                    for fs in response.get("FileSystems", []):
+                        fs_id = fs["FileSystemId"]
+                        fs_type = fs["FileSystemType"]  # LUSTRE, WINDOWS, ONTAP, OPENZFS
+                        created_at = fs["CreationTime"]
+                        age_days = (datetime.now(timezone.utc) - created_at).days
+
+                        if age_days < min_age_days:
+                            continue
+
+                        # Query CloudWatch for data transfer metrics (30-day lookback)
+                        now = datetime.now(timezone.utc)
+                        start_time = now - timedelta(days=30)
+
+                        # Different metrics based on file system type
+                        metric_name = "DataReadBytes" if fs_type == "LUSTRE" else "DataWriteBytes"
+
+                        metrics_response = await cw.get_metric_statistics(
+                            Namespace="AWS/FSx",
+                            MetricName=metric_name,
+                            Dimensions=[
+                                {"Name": "FileSystemId", "Value": fs_id},
+                            ],
+                            StartTime=start_time,
+                            EndTime=now,
+                            Period=86400,  # 1 day
+                            Statistics=["Sum"],
+                        )
+
+                        datapoints = metrics_response.get("Datapoints", [])
+                        total_bytes = sum(dp["Sum"] for dp in datapoints)
+
+                        # Determine usage category
+                        ever_used = total_bytes > 1_000_000  # > 1MB = used
+                        last_active_date = None
+
+                        if datapoints:
+                            sorted_points = sorted(
+                                datapoints, key=lambda x: x["Timestamp"], reverse=True
+                            )
+                            for dp in sorted_points:
+                                if dp["Sum"] > 1_000_000:
+                                    last_active_date = dp["Timestamp"]
+                                    break
+
+                        # Categorize usage
+                        if not ever_used:
+                            usage_category = "never_used"
+                        elif last_active_date:
+                            days_since_last_use = (now - last_active_date).days
+                            if days_since_last_use < 7:
+                                usage_category = "recently_active"
+                            elif days_since_last_use < 30:
+                                usage_category = "recently_abandoned"
+                            else:
+                                usage_category = "long_abandoned"
+                        else:
+                            usage_category = "never_used"
+
+                        # Skip recently active resources
+                        if usage_category == "recently_active":
+                            continue
+
+                        # Determine confidence and orphan reason
+                        if usage_category == "never_used" and age_days >= 30:
+                            confidence = "high"
+                            reason = f"Never used since creation {age_days} days ago"
+                        elif usage_category == "long_abandoned":
+                            confidence = "high"
+                            days_abandoned = (
+                                (now - last_active_date).days if last_active_date else 0
+                            )
+                            reason = f"No activity for {days_abandoned} days (was active before)"
+                        elif usage_category == "recently_abandoned":
+                            confidence = "medium"
+                            days_abandoned = (
+                                (now - last_active_date).days if last_active_date else 0
+                            )
+                            reason = f"No activity for {days_abandoned} days"
+                        else:
+                            confidence = "low"
+                            reason = f"Created {age_days} days ago, usage pattern unclear"
+
+                        # Calculate cost based on storage capacity and type
+                        storage_capacity = fs["StorageCapacity"]  # in GB
+                        pricing_key = f"fsx_{fs_type.lower()}_per_gb"
+                        if pricing_key in self.PRICING:
+                            monthly_cost = storage_capacity * self.PRICING[pricing_key]
+                        else:
+                            monthly_cost = storage_capacity * 0.14  # Default FSx pricing
+
+                        # Extract name from tags
+                        name = None
+                        for tag in fs.get("Tags", []):
+                            if tag["Key"] == "Name":
+                                name = tag["Value"]
+                                break
+
+                        orphans.append(
+                            OrphanResourceData(
+                                resource_type="fsx_file_system",
+                                resource_id=fs_id,
+                                resource_name=name,
+                                region=region,
+                                estimated_monthly_cost=monthly_cost,
+                                resource_metadata={
+                                    "file_system_type": fs_type,
+                                    "storage_capacity_gb": storage_capacity,
+                                    "lifecycle_status": fs.get("Lifecycle", "Unknown"),
+                                    "created_at": created_at.isoformat(),
+                                    "age_days": age_days,
+                                    "confidence": confidence,
+                                    "orphan_reason": reason,
+                                    "total_bytes_transferred_30d": int(total_bytes),
+                                },
+                            )
+                        )
+
+        except ClientError as e:
+            print(f"Error scanning FSx file systems in {region}: {e}")
+
+        return orphans
+
+    async def scan_idle_neptune_clusters(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scan for idle Neptune clusters using CloudWatch metrics.
+
+        Detection: Neptune clusters with no active connections for 7+ days.
+
+        Args:
+            region: AWS region to scan
+            detection_rules: Optional detection configuration
+
+        Returns:
+            List of orphaned Neptune clusters
+        """
+        orphans = []
+        min_age_days = detection_rules.get("min_age_days", 3) if detection_rules else 3
+
+        try:
+            async with self.session.client("neptune", region_name=region) as neptune:
+                async with self.session.client("cloudwatch", region_name=region) as cw:
+                    response = await neptune.describe_db_clusters()
+
+                    for cluster in response.get("DBClusters", []):
+                        cluster_id = cluster["DBClusterIdentifier"]
+                        created_at = cluster["ClusterCreateTime"]
+                        age_days = (datetime.now(timezone.utc) - created_at).days
+
+                        if age_days < min_age_days:
+                            continue
+
+                        # Query CloudWatch for DatabaseConnections metric (7-day lookback)
+                        now = datetime.now(timezone.utc)
+                        start_time = now - timedelta(days=7)
+
+                        metrics_response = await cw.get_metric_statistics(
+                            Namespace="AWS/Neptune",
+                            MetricName="DatabaseConnections",
+                            Dimensions=[
+                                {"Name": "DBClusterIdentifier", "Value": cluster_id},
+                            ],
+                            StartTime=start_time,
+                            EndTime=now,
+                            Period=3600,  # 1 hour
+                            Statistics=["Average"],
+                        )
+
+                        datapoints = metrics_response.get("Datapoints", [])
+                        avg_connections = (
+                            sum(dp["Average"] for dp in datapoints) / len(datapoints)
+                            if datapoints
+                            else 0
+                        )
+
+                        # If average connections < 0.1 over 7 days, consider idle
+                        if avg_connections < 0.1:
+                            # Determine confidence
+                            if age_days >= 7:
+                                confidence = "high"
+                                reason = f"No active connections for 7+ days (cluster age: {age_days} days)"
+                            else:
+                                confidence = "medium"
+                                reason = f"No active connections detected (cluster age: {age_days} days)"
+
+                            # Estimate cost based on instance type
+                            instance_class = cluster.get("DBClusterInstanceClass", "db.r5.large")
+                            if "r5.large" in instance_class:
+                                monthly_cost = self.PRICING["neptune_db_r5_large"] * 730
+                            elif "r5.xlarge" in instance_class:
+                                monthly_cost = self.PRICING["neptune_db_r5_xlarge"] * 730
+                            else:
+                                monthly_cost = 250.00  # Default estimate
+
+                            orphans.append(
+                                OrphanResourceData(
+                                    resource_type="neptune_cluster",
+                                    resource_id=cluster_id,
+                                    resource_name=cluster_id,
+                                    region=region,
+                                    estimated_monthly_cost=monthly_cost,
+                                    resource_metadata={
+                                        "engine": cluster.get("Engine", "neptune"),
+                                        "engine_version": cluster.get("EngineVersion", "Unknown"),
+                                        "status": cluster.get("Status", "Unknown"),
+                                        "created_at": created_at.isoformat(),
+                                        "age_days": age_days,
+                                        "confidence": confidence,
+                                        "orphan_reason": reason,
+                                        "avg_connections_7d": round(avg_connections, 2),
+                                    },
+                                )
+                            )
+
+        except ClientError as e:
+            print(f"Error scanning Neptune clusters in {region}: {e}")
+
+        return orphans
+
+    async def scan_idle_msk_clusters(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scan for idle MSK (Managed Kafka) clusters using CloudWatch metrics.
+
+        Detection: MSK clusters with no data in/out for 7+ days.
+
+        Args:
+            region: AWS region to scan
+            detection_rules: Optional detection configuration
+
+        Returns:
+            List of orphaned MSK clusters
+        """
+        orphans = []
+        min_age_days = detection_rules.get("min_age_days", 3) if detection_rules else 3
+
+        try:
+            async with self.session.client("kafka", region_name=region) as kafka:
+                async with self.session.client("cloudwatch", region_name=region) as cw:
+                    response = await kafka.list_clusters_v2()
+
+                    for cluster in response.get("ClusterInfoList", []):
+                        cluster_arn = cluster["ClusterArn"]
+                        cluster_name = cluster["ClusterName"]
+                        created_at = cluster["CreationTime"]
+                        age_days = (datetime.now(timezone.utc) - created_at).days
+
+                        if age_days < min_age_days:
+                            continue
+
+                        # Query CloudWatch for BytesInPerSec metric (7-day lookback)
+                        now = datetime.now(timezone.utc)
+                        start_time = now - timedelta(days=7)
+
+                        metrics_response = await cw.get_metric_statistics(
+                            Namespace="AWS/Kafka",
+                            MetricName="BytesInPerSec",
+                            Dimensions=[
+                                {"Name": "Cluster Name", "Value": cluster_name},
+                            ],
+                            StartTime=start_time,
+                            EndTime=now,
+                            Period=3600,  # 1 hour
+                            Statistics=["Average"],
+                        )
+
+                        datapoints = metrics_response.get("Datapoints", [])
+                        avg_bytes_in = (
+                            sum(dp["Average"] for dp in datapoints) / len(datapoints)
+                            if datapoints
+                            else 0
+                        )
+
+                        # If average < 1 byte/sec over 7 days, consider idle
+                        if avg_bytes_in < 1:
+                            # Determine confidence
+                            if age_days >= 7:
+                                confidence = "high"
+                                reason = f"No data traffic for 7+ days (cluster age: {age_days} days)"
+                            else:
+                                confidence = "medium"
+                                reason = f"No data traffic detected (cluster age: {age_days} days)"
+
+                            # Estimate cost based on broker count and instance type
+                            broker_node_info = cluster.get("Provisioned", {}).get(
+                                "BrokerNodeGroupInfo", {}
+                            )
+                            broker_count = cluster.get("Provisioned", {}).get(
+                                "NumberOfBrokerNodes", 3
+                            )
+                            instance_type = broker_node_info.get("InstanceType", "kafka.m5.large")
+
+                            if "m5.large" in instance_type:
+                                cost_per_broker = self.PRICING["msk_kafka_m5_large"] * 730
+                            elif "m5.xlarge" in instance_type:
+                                cost_per_broker = self.PRICING["msk_kafka_m5_xlarge"] * 730
+                            else:
+                                cost_per_broker = 150.00  # Default
+
+                            monthly_cost = cost_per_broker * broker_count
+
+                            orphans.append(
+                                OrphanResourceData(
+                                    resource_type="msk_cluster",
+                                    resource_id=cluster_arn,
+                                    resource_name=cluster_name,
+                                    region=region,
+                                    estimated_monthly_cost=monthly_cost,
+                                    resource_metadata={
+                                        "broker_count": broker_count,
+                                        "instance_type": instance_type,
+                                        "state": cluster.get("State", "Unknown"),
+                                        "created_at": created_at.isoformat(),
+                                        "age_days": age_days,
+                                        "confidence": confidence,
+                                        "orphan_reason": reason,
+                                        "avg_bytes_in_per_sec_7d": round(avg_bytes_in, 2),
+                                    },
+                                )
+                            )
+
+        except ClientError as e:
+            print(f"Error scanning MSK clusters in {region}: {e}")
+
+        return orphans
+
+    async def scan_idle_eks_clusters(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scan for idle EKS clusters (no worker nodes or no activity).
+
+        Detection: EKS clusters with 0 nodes or no API activity for 7+ days.
+
+        Args:
+            region: AWS region to scan
+            detection_rules: Optional detection configuration
+
+        Returns:
+            List of orphaned EKS clusters
+        """
+        orphans = []
+        min_age_days = detection_rules.get("min_age_days", 3) if detection_rules else 3
+
+        try:
+            async with self.session.client("eks", region_name=region) as eks:
+                async with self.session.client("cloudwatch", region_name=region) as cw:
+                    response = await eks.list_clusters()
+
+                    for cluster_name in response.get("clusters", []):
+                        cluster_info = await eks.describe_cluster(name=cluster_name)
+                        cluster = cluster_info["cluster"]
+
+                        created_at = cluster["createdAt"]
+                        age_days = (datetime.now(timezone.utc) - created_at).days
+
+                        if age_days < min_age_days:
+                            continue
+
+                        # Check node groups
+                        nodegroups_response = await eks.list_nodegroups(
+                            clusterName=cluster_name
+                        )
+                        nodegroups = nodegroups_response.get("nodegroups", [])
+
+                        total_nodes = 0
+                        for ng_name in nodegroups:
+                            ng_info = await eks.describe_nodegroup(
+                                clusterName=cluster_name, nodegroupName=ng_name
+                            )
+                            ng = ng_info["nodegroup"]
+                            total_nodes += ng.get("scalingConfig", {}).get("desiredSize", 0)
+
+                        # Query CloudWatch for cluster API calls (7-day lookback)
+                        now = datetime.now(timezone.utc)
+                        start_time = now - timedelta(days=7)
+
+                        # Note: EKS doesn't have direct API call metrics, so we check if nodes = 0
+                        is_orphaned = False
+                        reason = ""
+                        confidence = "medium"
+
+                        if total_nodes == 0:
+                            if age_days >= 7:
+                                confidence = "high"
+                                reason = f"No worker nodes for 7+ days (cluster age: {age_days} days)"
+                            else:
+                                confidence = "medium"
+                                reason = f"No worker nodes (cluster age: {age_days} days)"
+                            is_orphaned = True
+
+                        if is_orphaned:
+                            orphans.append(
+                                OrphanResourceData(
+                                    resource_type="eks_cluster",
+                                    resource_id=cluster_name,
+                                    resource_name=cluster_name,
+                                    region=region,
+                                    estimated_monthly_cost=self.PRICING["eks_cluster"],
+                                    resource_metadata={
+                                        "version": cluster.get("version", "Unknown"),
+                                        "status": cluster.get("status", "Unknown"),
+                                        "nodegroup_count": len(nodegroups),
+                                        "total_nodes": total_nodes,
+                                        "created_at": created_at.isoformat(),
+                                        "age_days": age_days,
+                                        "confidence": confidence,
+                                        "orphan_reason": reason,
+                                    },
+                                )
+                            )
+
+        except ClientError as e:
+            print(f"Error scanning EKS clusters in {region}: {e}")
+
+        return orphans
+
+    async def scan_idle_sagemaker_endpoints(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scan for idle SageMaker endpoints using CloudWatch metrics.
+
+        Detection: Endpoints with no invocations for 7+ days.
+
+        Args:
+            region: AWS region to scan
+            detection_rules: Optional detection configuration
+
+        Returns:
+            List of orphaned SageMaker endpoints
+        """
+        orphans = []
+        min_age_days = detection_rules.get("min_age_days", 3) if detection_rules else 3
+
+        try:
+            async with self.session.client("sagemaker", region_name=region) as sagemaker:
+                async with self.session.client("cloudwatch", region_name=region) as cw:
+                    response = await sagemaker.list_endpoints()
+
+                    for endpoint in response.get("Endpoints", []):
+                        endpoint_name = endpoint["EndpointName"]
+                        created_at = endpoint["CreationTime"]
+                        age_days = (datetime.now(timezone.utc) - created_at).days
+
+                        if age_days < min_age_days:
+                            continue
+
+                        # Query CloudWatch for Invocations metric (7-day lookback)
+                        now = datetime.now(timezone.utc)
+                        start_time = now - timedelta(days=7)
+
+                        metrics_response = await cw.get_metric_statistics(
+                            Namespace="AWS/SageMaker",
+                            MetricName="ModelInvocations",
+                            Dimensions=[
+                                {"Name": "EndpointName", "Value": endpoint_name},
+                            ],
+                            StartTime=start_time,
+                            EndTime=now,
+                            Period=3600,  # 1 hour
+                            Statistics=["Sum"],
+                        )
+
+                        datapoints = metrics_response.get("Datapoints", [])
+                        total_invocations = sum(dp["Sum"] for dp in datapoints)
+
+                        # If 0 invocations over 7 days, consider idle
+                        if total_invocations == 0:
+                            # Get endpoint config to estimate cost
+                            endpoint_config_name = endpoint["EndpointConfigName"]
+                            config_response = await sagemaker.describe_endpoint_config(
+                                EndpointConfigName=endpoint_config_name
+                            )
+
+                            # Get instance type from production variants
+                            instance_type = "ml.m5.large"  # Default
+                            instance_count = 1
+                            for variant in config_response.get("ProductionVariants", []):
+                                instance_type = variant.get("InstanceType", "ml.m5.large")
+                                instance_count = variant.get("InitialInstanceCount", 1)
+                                break
+
+                            # Estimate cost
+                            if "m5.large" in instance_type:
+                                cost_per_instance = self.PRICING["sagemaker_ml_m5_large"] * 730
+                            elif "m5.xlarge" in instance_type:
+                                cost_per_instance = self.PRICING["sagemaker_ml_m5_xlarge"] * 730
+                            else:
+                                cost_per_instance = 83.00  # Default
+
+                            monthly_cost = cost_per_instance * instance_count
+
+                            # Determine confidence
+                            if age_days >= 7:
+                                confidence = "high"
+                                reason = f"No invocations for 7+ days (endpoint age: {age_days} days)"
+                            else:
+                                confidence = "medium"
+                                reason = (
+                                    f"No invocations detected (endpoint age: {age_days} days)"
+                                )
+
+                            orphans.append(
+                                OrphanResourceData(
+                                    resource_type="sagemaker_endpoint",
+                                    resource_id=endpoint_name,
+                                    resource_name=endpoint_name,
+                                    region=region,
+                                    estimated_monthly_cost=monthly_cost,
+                                    resource_metadata={
+                                        "instance_type": instance_type,
+                                        "instance_count": instance_count,
+                                        "status": endpoint.get("EndpointStatus", "Unknown"),
+                                        "created_at": created_at.isoformat(),
+                                        "age_days": age_days,
+                                        "confidence": confidence,
+                                        "orphan_reason": reason,
+                                        "invocations_7d": int(total_invocations),
+                                    },
+                                )
+                            )
+
+        except ClientError as e:
+            print(f"Error scanning SageMaker endpoints in {region}: {e}")
+
+        return orphans
+
+    async def scan_idle_redshift_clusters(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scan for idle Redshift clusters using CloudWatch metrics.
+
+        Detection: Clusters with no database connections for 7+ days.
+
+        Args:
+            region: AWS region to scan
+            detection_rules: Optional detection configuration
+
+        Returns:
+            List of orphaned Redshift clusters
+        """
+        orphans = []
+        min_age_days = detection_rules.get("min_age_days", 3) if detection_rules else 3
+
+        try:
+            async with self.session.client("redshift", region_name=region) as redshift:
+                async with self.session.client("cloudwatch", region_name=region) as cw:
+                    response = await redshift.describe_clusters()
+
+                    for cluster in response.get("Clusters", []):
+                        cluster_id = cluster["ClusterIdentifier"]
+                        created_at = cluster["ClusterCreateTime"]
+                        age_days = (datetime.now(timezone.utc) - created_at).days
+
+                        if age_days < min_age_days:
+                            continue
+
+                        # Query CloudWatch for DatabaseConnections metric (7-day lookback)
+                        now = datetime.now(timezone.utc)
+                        start_time = now - timedelta(days=7)
+
+                        metrics_response = await cw.get_metric_statistics(
+                            Namespace="AWS/Redshift",
+                            MetricName="DatabaseConnections",
+                            Dimensions=[
+                                {"Name": "ClusterIdentifier", "Value": cluster_id},
+                            ],
+                            StartTime=start_time,
+                            EndTime=now,
+                            Period=3600,  # 1 hour
+                            Statistics=["Average"],
+                        )
+
+                        datapoints = metrics_response.get("Datapoints", [])
+                        avg_connections = (
+                            sum(dp["Average"] for dp in datapoints) / len(datapoints)
+                            if datapoints
+                            else 0
+                        )
+
+                        # If average connections < 0.1 over 7 days, consider idle
+                        if avg_connections < 0.1:
+                            # Estimate cost based on node type
+                            node_type = cluster.get("NodeType", "dc2.large")
+                            num_nodes = cluster.get("NumberOfNodes", 1)
+
+                            if "dc2.large" in node_type:
+                                cost_per_node = self.PRICING["redshift_dc2_large"] * 730
+                            elif "dc2.xlarge" in node_type or "dc2.8xlarge" in node_type:
+                                cost_per_node = self.PRICING["redshift_dc2_xlarge"] * 730
+                            else:
+                                cost_per_node = 180.00  # Default
+
+                            monthly_cost = cost_per_node * num_nodes
+
+                            # Determine confidence
+                            if age_days >= 7:
+                                confidence = "high"
+                                reason = f"No database connections for 7+ days (cluster age: {age_days} days)"
+                            else:
+                                confidence = "medium"
+                                reason = f"No connections detected (cluster age: {age_days} days)"
+
+                            orphans.append(
+                                OrphanResourceData(
+                                    resource_type="redshift_cluster",
+                                    resource_id=cluster_id,
+                                    resource_name=cluster_id,
+                                    region=region,
+                                    estimated_monthly_cost=monthly_cost,
+                                    resource_metadata={
+                                        "node_type": node_type,
+                                        "num_nodes": num_nodes,
+                                        "cluster_status": cluster.get("ClusterStatus", "Unknown"),
+                                        "created_at": created_at.isoformat(),
+                                        "age_days": age_days,
+                                        "confidence": confidence,
+                                        "orphan_reason": reason,
+                                        "avg_connections_7d": round(avg_connections, 2),
+                                    },
+                                )
+                            )
+
+        except ClientError as e:
+            print(f"Error scanning Redshift clusters in {region}: {e}")
+
+        return orphans
+
+    async def scan_idle_elasticache_clusters(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scan for idle ElastiCache clusters using CloudWatch metrics.
+
+        Detection: Clusters with no cache hits/gets for 7+ days.
+
+        Args:
+            region: AWS region to scan
+            detection_rules: Optional detection configuration
+
+        Returns:
+            List of orphaned ElastiCache clusters
+        """
+        orphans = []
+        min_age_days = detection_rules.get("min_age_days", 3) if detection_rules else 3
+
+        try:
+            async with self.session.client("elasticache", region_name=region) as elasticache:
+                async with self.session.client("cloudwatch", region_name=region) as cw:
+                    # Check Redis clusters
+                    response = await elasticache.describe_cache_clusters()
+
+                    for cluster in response.get("CacheClusters", []):
+                        cluster_id = cluster["CacheClusterId"]
+                        created_at = cluster.get("CacheClusterCreateTime")
+                        if not created_at:
+                            continue
+
+                        age_days = (datetime.now(timezone.utc) - created_at).days
+
+                        if age_days < min_age_days:
+                            continue
+
+                        # Query CloudWatch for CacheHits metric (7-day lookback)
+                        now = datetime.now(timezone.utc)
+                        start_time = now - timedelta(days=7)
+
+                        metrics_response = await cw.get_metric_statistics(
+                            Namespace="AWS/ElastiCache",
+                            MetricName="CacheHits",
+                            Dimensions=[
+                                {"Name": "CacheClusterId", "Value": cluster_id},
+                            ],
+                            StartTime=start_time,
+                            EndTime=now,
+                            Period=3600,  # 1 hour
+                            Statistics=["Sum"],
+                        )
+
+                        datapoints = metrics_response.get("Datapoints", [])
+                        total_hits = sum(dp["Sum"] for dp in datapoints)
+
+                        # If 0 cache hits over 7 days, consider idle
+                        if total_hits == 0:
+                            # Estimate cost based on node type
+                            node_type = cluster.get("CacheNodeType", "cache.m5.large")
+                            num_nodes = cluster.get("NumCacheNodes", 1)
+
+                            if "m5.large" in node_type:
+                                cost_per_node = self.PRICING["elasticache_cache_m5_large"] * 730
+                            elif "r5.large" in node_type:
+                                cost_per_node = self.PRICING["elasticache_cache_r5_large"] * 730
+                            else:
+                                cost_per_node = 90.00  # Default
+
+                            monthly_cost = cost_per_node * num_nodes
+
+                            # Determine confidence
+                            if age_days >= 7:
+                                confidence = "high"
+                                reason = f"No cache hits for 7+ days (cluster age: {age_days} days)"
+                            else:
+                                confidence = "medium"
+                                reason = f"No cache activity detected (cluster age: {age_days} days)"
+
+                            orphans.append(
+                                OrphanResourceData(
+                                    resource_type="elasticache_cluster",
+                                    resource_id=cluster_id,
+                                    resource_name=cluster_id,
+                                    region=region,
+                                    estimated_monthly_cost=monthly_cost,
+                                    resource_metadata={
+                                        "node_type": node_type,
+                                        "num_nodes": num_nodes,
+                                        "engine": cluster.get("Engine", "Unknown"),
+                                        "engine_version": cluster.get("EngineVersion", "Unknown"),
+                                        "status": cluster.get("CacheClusterStatus", "Unknown"),
+                                        "created_at": created_at.isoformat(),
+                                        "age_days": age_days,
+                                        "confidence": confidence,
+                                        "orphan_reason": reason,
+                                        "cache_hits_7d": int(total_hits),
+                                    },
+                                )
+                            )
+
+        except ClientError as e:
+            print(f"Error scanning ElastiCache clusters in {region}: {e}")
+
+        return orphans
+
+    async def scan_idle_vpn_connections(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scan for idle VPN connections using CloudWatch metrics.
+
+        Detection: VPN connections with no data transfer for 30+ days.
+
+        Args:
+            region: AWS region to scan
+            detection_rules: Optional detection configuration
+
+        Returns:
+            List of orphaned VPN connections
+        """
+        orphans = []
+        min_age_days = detection_rules.get("min_age_days", 3) if detection_rules else 3
+
+        try:
+            async with self.session.client("ec2", region_name=region) as ec2:
+                async with self.session.client("cloudwatch", region_name=region) as cw:
+                    response = await ec2.describe_vpn_connections()
+
+                    for vpn in response.get("VpnConnections", []):
+                        vpn_id = vpn["VpnConnectionId"]
+                        state = vpn.get("State", "unknown")
+
+                        # Skip deleted/deleting VPNs
+                        if state in ["deleted", "deleting"]:
+                            continue
+
+                        # Query CloudWatch for TunnelDataIn metric (30-day lookback)
+                        now = datetime.now(timezone.utc)
+                        start_time = now - timedelta(days=30)
+
+                        metrics_response = await cw.get_metric_statistics(
+                            Namespace="AWS/VPN",
+                            MetricName="TunnelDataIn",
+                            Dimensions=[
+                                {"Name": "VpnId", "Value": vpn_id},
+                            ],
+                            StartTime=start_time,
+                            EndTime=now,
+                            Period=86400,  # 1 day
+                            Statistics=["Sum"],
+                        )
+
+                        datapoints = metrics_response.get("Datapoints", [])
+                        total_bytes = sum(dp["Sum"] for dp in datapoints)
+
+                        # If < 1MB over 30 days, consider idle
+                        if total_bytes < 1_000_000:
+                            # Extract name from tags
+                            name = None
+                            for tag in vpn.get("Tags", []):
+                                if tag["Key"] == "Name":
+                                    name = tag["Value"]
+                                    break
+
+                            # Determine confidence (we don't have creation date for VPN)
+                            if total_bytes == 0:
+                                confidence = "high"
+                                reason = "No data transfer for 30+ days"
+                            else:
+                                confidence = "medium"
+                                reason = f"Very low data transfer ({int(total_bytes)} bytes in 30 days)"
+
+                            orphans.append(
+                                OrphanResourceData(
+                                    resource_type="vpn_connection",
+                                    resource_id=vpn_id,
+                                    resource_name=name,
+                                    region=region,
+                                    estimated_monthly_cost=self.PRICING["vpn_connection"],
+                                    resource_metadata={
+                                        "state": state,
+                                        "type": vpn.get("Type", "Unknown"),
+                                        "confidence": confidence,
+                                        "orphan_reason": reason,
+                                        "bytes_transferred_30d": int(total_bytes),
+                                    },
+                                )
+                            )
+
+        except ClientError as e:
+            print(f"Error scanning VPN connections in {region}: {e}")
+
+        return orphans
+
+    async def scan_idle_transit_gateway_attachments(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scan for idle Transit Gateway attachments using CloudWatch metrics.
+
+        Detection: Attachments with no data transfer for 30+ days.
+
+        Args:
+            region: AWS region to scan
+            detection_rules: Optional detection configuration
+
+        Returns:
+            List of orphaned TGW attachments
+        """
+        orphans = []
+        min_age_days = detection_rules.get("min_age_days", 3) if detection_rules else 3
+
+        try:
+            async with self.session.client("ec2", region_name=region) as ec2:
+                async with self.session.client("cloudwatch", region_name=region) as cw:
+                    response = await ec2.describe_transit_gateway_attachments()
+
+                    for attachment in response.get("TransitGatewayAttachments", []):
+                        attachment_id = attachment["TransitGatewayAttachmentId"]
+                        state = attachment.get("State", "unknown")
+
+                        # Skip deleted/deleting attachments
+                        if state in ["deleted", "deleting", "failed"]:
+                            continue
+
+                        created_at = attachment.get("CreationTime")
+                        if not created_at:
+                            continue
+
+                        age_days = (datetime.now(timezone.utc) - created_at).days
+
+                        if age_days < min_age_days:
+                            continue
+
+                        # Query CloudWatch for BytesIn metric (30-day lookback)
+                        now = datetime.now(timezone.utc)
+                        start_time = now - timedelta(days=30)
+
+                        metrics_response = await cw.get_metric_statistics(
+                            Namespace="AWS/TransitGateway",
+                            MetricName="BytesIn",
+                            Dimensions=[
+                                {"Name": "TransitGatewayAttachment", "Value": attachment_id},
+                            ],
+                            StartTime=start_time,
+                            EndTime=now,
+                            Period=86400,  # 1 day
+                            Statistics=["Sum"],
+                        )
+
+                        datapoints = metrics_response.get("Datapoints", [])
+                        total_bytes = sum(dp["Sum"] for dp in datapoints)
+
+                        # If < 1MB over 30 days, consider idle
+                        if total_bytes < 1_000_000:
+                            # Extract name from tags
+                            name = None
+                            for tag in attachment.get("Tags", []):
+                                if tag["Key"] == "Name":
+                                    name = tag["Value"]
+                                    break
+
+                            # Determine confidence
+                            if age_days >= 30 and total_bytes == 0:
+                                confidence = "high"
+                                reason = f"No data transfer for 30+ days (attachment age: {age_days} days)"
+                            elif total_bytes == 0:
+                                confidence = "medium"
+                                reason = f"No data transfer (attachment age: {age_days} days)"
+                            else:
+                                confidence = "low"
+                                reason = f"Very low data transfer ({int(total_bytes)} bytes in 30 days)"
+
+                            orphans.append(
+                                OrphanResourceData(
+                                    resource_type="transit_gateway_attachment",
+                                    resource_id=attachment_id,
+                                    resource_name=name,
+                                    region=region,
+                                    estimated_monthly_cost=self.PRICING[
+                                        "transit_gateway_attachment"
+                                    ],
+                                    resource_metadata={
+                                        "state": state,
+                                        "resource_type": attachment.get(
+                                            "ResourceType", "Unknown"
+                                        ),
+                                        "created_at": created_at.isoformat(),
+                                        "age_days": age_days,
+                                        "confidence": confidence,
+                                        "orphan_reason": reason,
+                                        "bytes_transferred_30d": int(total_bytes),
+                                    },
+                                )
+                            )
+
+        except ClientError as e:
+            print(f"Error scanning Transit Gateway attachments in {region}: {e}")
+
+        return orphans
+
+    async def scan_idle_opensearch_domains(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scan for idle OpenSearch domains using CloudWatch metrics.
+
+        Detection: Domains with no search/indexing requests for 7+ days.
+
+        Args:
+            region: AWS region to scan
+            detection_rules: Optional detection configuration
+
+        Returns:
+            List of orphaned OpenSearch domains
+        """
+        orphans = []
+        min_age_days = detection_rules.get("min_age_days", 3) if detection_rules else 3
+
+        try:
+            async with self.session.client("opensearch", region_name=region) as opensearch:
+                async with self.session.client("cloudwatch", region_name=region) as cw:
+                    response = await opensearch.list_domain_names()
+
+                    for domain_info in response.get("DomainNames", []):
+                        domain_name = domain_info["DomainName"]
+
+                        # Get domain details
+                        domain_response = await opensearch.describe_domain(
+                            DomainName=domain_name
+                        )
+                        domain = domain_response["DomainStatus"]
+
+                        created_at = domain.get("Created")
+                        if not created_at:
+                            continue
+
+                        age_days = (datetime.now(timezone.utc) - created_at).days
+
+                        if age_days < min_age_days:
+                            continue
+
+                        # Query CloudWatch for SearchRate metric (7-day lookback)
+                        now = datetime.now(timezone.utc)
+                        start_time = now - timedelta(days=7)
+
+                        metrics_response = await cw.get_metric_statistics(
+                            Namespace="AWS/ES",
+                            MetricName="SearchRate",
+                            Dimensions=[
+                                {"Name": "DomainName", "Value": domain_name},
+                                {"Name": "ClientId", "Value": domain["ARN"].split(":")[4]},
+                            ],
+                            StartTime=start_time,
+                            EndTime=now,
+                            Period=3600,  # 1 hour
+                            Statistics=["Sum"],
+                        )
+
+                        datapoints = metrics_response.get("Datapoints", [])
+                        total_searches = sum(dp["Sum"] for dp in datapoints)
+
+                        # If 0 searches over 7 days, consider idle
+                        if total_searches == 0:
+                            # Estimate cost based on instance type and count
+                            cluster_config = domain.get("ClusterConfig", {})
+                            instance_type = cluster_config.get(
+                                "InstanceType", "m5.large.search"
+                            )
+                            instance_count = cluster_config.get("InstanceCount", 1)
+
+                            if "m5.large" in instance_type:
+                                cost_per_instance = self.PRICING["opensearch_m5_large"] * 730
+                            elif "r5.large" in instance_type:
+                                cost_per_instance = self.PRICING["opensearch_r5_large"] * 730
+                            else:
+                                cost_per_instance = 116.00  # Default
+
+                            monthly_cost = cost_per_instance * instance_count
+
+                            # Determine confidence
+                            if age_days >= 7:
+                                confidence = "high"
+                                reason = f"No search requests for 7+ days (domain age: {age_days} days)"
+                            else:
+                                confidence = "medium"
+                                reason = f"No search activity detected (domain age: {age_days} days)"
+
+                            orphans.append(
+                                OrphanResourceData(
+                                    resource_type="opensearch_domain",
+                                    resource_id=domain_name,
+                                    resource_name=domain_name,
+                                    region=region,
+                                    estimated_monthly_cost=monthly_cost,
+                                    resource_metadata={
+                                        "instance_type": instance_type,
+                                        "instance_count": instance_count,
+                                        "engine_version": domain.get(
+                                            "EngineVersion", "Unknown"
+                                        ),
+                                        "created_at": created_at.isoformat(),
+                                        "age_days": age_days,
+                                        "confidence": confidence,
+                                        "orphan_reason": reason,
+                                        "search_requests_7d": int(total_searches),
+                                    },
+                                )
+                            )
+
+        except ClientError as e:
+            print(f"Error scanning OpenSearch domains in {region}: {e}")
+
+        return orphans
+
+    async def scan_idle_global_accelerators(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scan for idle Global Accelerators (no endpoints or no traffic).
+
+        Detection: Accelerators with 0 endpoints or no processed bytes for 30+ days.
+
+        Args:
+            region: AWS region to scan (Global Accelerator is global but we need region for API)
+            detection_rules: Optional detection configuration
+
+        Returns:
+            List of orphaned Global Accelerators
+        """
+        orphans = []
+        min_age_days = detection_rules.get("min_age_days", 3) if detection_rules else 3
+
+        # Global Accelerator is a global service, only check in us-west-2
+        if region != "us-west-2":
+            return orphans
+
+        try:
+            async with self.session.client(
+                "globalaccelerator", region_name="us-west-2"
+            ) as ga:
+                async with self.session.client("cloudwatch", region_name="us-west-2") as cw:
+                    response = await ga.list_accelerators()
+
+                    for accelerator in response.get("Accelerators", []):
+                        accelerator_arn = accelerator["AcceleratorArn"]
+                        accelerator_name = accelerator.get("Name", accelerator_arn.split("/")[-1])
+                        created_at = accelerator.get("CreatedTime")
+
+                        if not created_at:
+                            continue
+
+                        age_days = (datetime.now(timezone.utc) - created_at).days
+
+                        if age_days < min_age_days:
+                            continue
+
+                        # Check endpoints
+                        listeners_response = await ga.list_listeners(
+                            AcceleratorArn=accelerator_arn
+                        )
+                        total_endpoints = 0
+
+                        for listener in listeners_response.get("Listeners", []):
+                            listener_arn = listener["ListenerArn"]
+                            endpoint_groups = await ga.list_endpoint_groups(
+                                ListenerArn=listener_arn
+                            )
+                            for eg in endpoint_groups.get("EndpointGroups", []):
+                                total_endpoints += len(eg.get("EndpointDescriptions", []))
+
+                        # If no endpoints, it's definitely orphaned
+                        is_orphaned = False
+                        reason = ""
+                        confidence = "medium"
+
+                        if total_endpoints == 0:
+                            if age_days >= 7:
+                                confidence = "high"
+                                reason = f"No endpoints configured for 7+ days (accelerator age: {age_days} days)"
+                            else:
+                                confidence = "medium"
+                                reason = f"No endpoints configured (accelerator age: {age_days} days)"
+                            is_orphaned = True
+
+                        if is_orphaned:
+                            orphans.append(
+                                OrphanResourceData(
+                                    resource_type="global_accelerator",
+                                    resource_id=accelerator_arn,
+                                    resource_name=accelerator_name,
+                                    region="global",
+                                    estimated_monthly_cost=self.PRICING["global_accelerator"],
+                                    resource_metadata={
+                                        "enabled": accelerator.get("Enabled", False),
+                                        "status": accelerator.get("Status", "Unknown"),
+                                        "endpoint_count": total_endpoints,
+                                        "created_at": created_at.isoformat(),
+                                        "age_days": age_days,
+                                        "confidence": confidence,
+                                        "orphan_reason": reason,
+                                    },
+                                )
+                            )
+
+        except ClientError as e:
+            print(f"Error scanning Global Accelerators: {e}")
+
+        return orphans
+
+    async def scan_idle_kinesis_streams(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scan for idle Kinesis streams using CloudWatch metrics.
+
+        Detection: Streams with no incoming/outgoing records for 7+ days.
+
+        Args:
+            region: AWS region to scan
+            detection_rules: Optional detection configuration
+
+        Returns:
+            List of orphaned Kinesis streams
+        """
+        orphans = []
+        min_age_days = detection_rules.get("min_age_days", 3) if detection_rules else 3
+
+        try:
+            async with self.session.client("kinesis", region_name=region) as kinesis:
+                async with self.session.client("cloudwatch", region_name=region) as cw:
+                    response = await kinesis.list_streams()
+
+                    for stream_name in response.get("StreamNames", []):
+                        # Get stream details
+                        stream_info = await kinesis.describe_stream(StreamName=stream_name)
+                        stream = stream_info["StreamDescription"]
+
+                        created_at = stream.get("StreamCreationTimestamp")
+                        if not created_at:
+                            continue
+
+                        age_days = (datetime.now(timezone.utc) - created_at).days
+
+                        if age_days < min_age_days:
+                            continue
+
+                        # Query CloudWatch for IncomingRecords metric (7-day lookback)
+                        now = datetime.now(timezone.utc)
+                        start_time = now - timedelta(days=7)
+
+                        metrics_response = await cw.get_metric_statistics(
+                            Namespace="AWS/Kinesis",
+                            MetricName="IncomingRecords",
+                            Dimensions=[
+                                {"Name": "StreamName", "Value": stream_name},
+                            ],
+                            StartTime=start_time,
+                            EndTime=now,
+                            Period=3600,  # 1 hour
+                            Statistics=["Sum"],
+                        )
+
+                        datapoints = metrics_response.get("Datapoints", [])
+                        total_records = sum(dp["Sum"] for dp in datapoints)
+
+                        # If 0 records over 7 days, consider idle
+                        if total_records == 0:
+                            # Calculate cost based on shard count
+                            shard_count = len(stream.get("Shards", []))
+                            monthly_cost = self.PRICING["kinesis_shard"] * shard_count
+
+                            # Determine confidence
+                            if age_days >= 7:
+                                confidence = "high"
+                                reason = f"No incoming records for 7+ days (stream age: {age_days} days)"
+                            else:
+                                confidence = "medium"
+                                reason = f"No data activity detected (stream age: {age_days} days)"
+
+                            orphans.append(
+                                OrphanResourceData(
+                                    resource_type="kinesis_stream",
+                                    resource_id=stream_name,
+                                    resource_name=stream_name,
+                                    region=region,
+                                    estimated_monthly_cost=monthly_cost,
+                                    resource_metadata={
+                                        "shard_count": shard_count,
+                                        "status": stream.get("StreamStatus", "Unknown"),
+                                        "retention_hours": stream.get(
+                                            "RetentionPeriodHours", 24
+                                        ),
+                                        "created_at": created_at.isoformat(),
+                                        "age_days": age_days,
+                                        "confidence": confidence,
+                                        "orphan_reason": reason,
+                                        "incoming_records_7d": int(total_records),
+                                    },
+                                )
+                            )
+
+        except ClientError as e:
+            print(f"Error scanning Kinesis streams in {region}: {e}")
+
+        return orphans
+
+    async def scan_unused_vpc_endpoints(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scan for unused VPC endpoints (no network interfaces or no traffic).
+
+        Detection: VPC endpoints with 0 network interfaces for 7+ days.
+
+        Args:
+            region: AWS region to scan
+            detection_rules: Optional detection configuration
+
+        Returns:
+            List of orphaned VPC endpoints
+        """
+        orphans = []
+        min_age_days = detection_rules.get("min_age_days", 3) if detection_rules else 3
+
+        try:
+            async with self.session.client("ec2", region_name=region) as ec2:
+                response = await ec2.describe_vpc_endpoints()
+
+                for endpoint in response.get("VpcEndpoints", []):
+                    endpoint_id = endpoint["VpcEndpointId"]
+                    created_at = endpoint.get("CreationTimestamp")
+
+                    if not created_at:
+                        continue
+
+                    age_days = (datetime.now(timezone.utc) - created_at).days
+
+                    if age_days < min_age_days:
+                        continue
+
+                    # Check network interfaces
+                    network_interfaces = endpoint.get("NetworkInterfaceIds", [])
+                    subnet_ids = endpoint.get("SubnetIds", [])
+
+                    # If no network interfaces or subnets, consider unused
+                    if len(network_interfaces) == 0 and len(subnet_ids) == 0:
+                        # Extract name from tags
+                        name = None
+                        for tag in endpoint.get("Tags", []):
+                            if tag["Key"] == "Name":
+                                name = tag["Value"]
+                                break
+
+                        # Determine confidence
+                        if age_days >= 7:
+                            confidence = "high"
+                            reason = f"No network interfaces for 7+ days (endpoint age: {age_days} days)"
+                        else:
+                            confidence = "medium"
+                            reason = f"No network interfaces (endpoint age: {age_days} days)"
+
+                        orphans.append(
+                            OrphanResourceData(
+                                resource_type="vpc_endpoint",
+                                resource_id=endpoint_id,
+                                resource_name=name,
+                                region=region,
+                                estimated_monthly_cost=self.PRICING["vpc_endpoint"],
+                                resource_metadata={
+                                    "vpc_id": endpoint.get("VpcId", "Unknown"),
+                                    "service_name": endpoint.get("ServiceName", "Unknown"),
+                                    "state": endpoint.get("State", "Unknown"),
+                                    "endpoint_type": endpoint.get("VpcEndpointType", "Unknown"),
+                                    "created_at": created_at.isoformat(),
+                                    "age_days": age_days,
+                                    "confidence": confidence,
+                                    "orphan_reason": reason,
+                                    "network_interface_count": len(network_interfaces),
+                                },
+                            )
+                        )
+
+        except ClientError as e:
+            print(f"Error scanning VPC endpoints in {region}: {e}")
+
+        return orphans
+
+    async def scan_idle_documentdb_clusters(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scan for idle DocumentDB clusters using CloudWatch metrics.
+
+        Detection: Clusters with no database connections for 7+ days.
+
+        Args:
+            region: AWS region to scan
+            detection_rules: Optional detection configuration
+
+        Returns:
+            List of orphaned DocumentDB clusters
+        """
+        orphans = []
+        min_age_days = detection_rules.get("min_age_days", 3) if detection_rules else 3
+
+        try:
+            async with self.session.client("docdb", region_name=region) as docdb:
+                async with self.session.client("cloudwatch", region_name=region) as cw:
+                    response = await docdb.describe_db_clusters()
+
+                    for cluster in response.get("DBClusters", []):
+                        cluster_id = cluster["DBClusterIdentifier"]
+                        created_at = cluster.get("ClusterCreateTime")
+
+                        if not created_at:
+                            continue
+
+                        age_days = (datetime.now(timezone.utc) - created_at).days
+
+                        if age_days < min_age_days:
+                            continue
+
+                        # Query CloudWatch for DatabaseConnections metric (7-day lookback)
+                        now = datetime.now(timezone.utc)
+                        start_time = now - timedelta(days=7)
+
+                        metrics_response = await cw.get_metric_statistics(
+                            Namespace="AWS/DocDB",
+                            MetricName="DatabaseConnections",
+                            Dimensions=[
+                                {"Name": "DBClusterIdentifier", "Value": cluster_id},
+                            ],
+                            StartTime=start_time,
+                            EndTime=now,
+                            Period=3600,  # 1 hour
+                            Statistics=["Average"],
+                        )
+
+                        datapoints = metrics_response.get("Datapoints", [])
+                        avg_connections = (
+                            sum(dp["Average"] for dp in datapoints) / len(datapoints)
+                            if datapoints
+                            else 0
+                        )
+
+                        # If average connections < 0.1 over 7 days, consider idle
+                        if avg_connections < 0.1:
+                            # Estimate cost based on instance class (from cluster members)
+                            cluster_members = cluster.get("DBClusterMembers", [])
+                            instance_count = len(cluster_members)
+
+                            # Default to r5.large pricing
+                            monthly_cost = self.PRICING["documentdb_r5_large"] * 730 * max(
+                                instance_count, 1
+                            )
+
+                            # Determine confidence
+                            if age_days >= 7:
+                                confidence = "high"
+                                reason = f"No database connections for 7+ days (cluster age: {age_days} days)"
+                            else:
+                                confidence = "medium"
+                                reason = f"No connections detected (cluster age: {age_days} days)"
+
+                            orphans.append(
+                                OrphanResourceData(
+                                    resource_type="documentdb_cluster",
+                                    resource_id=cluster_id,
+                                    resource_name=cluster_id,
+                                    region=region,
+                                    estimated_monthly_cost=monthly_cost,
+                                    resource_metadata={
+                                        "engine": cluster.get("Engine", "docdb"),
+                                        "engine_version": cluster.get("EngineVersion", "Unknown"),
+                                        "status": cluster.get("Status", "Unknown"),
+                                        "instance_count": instance_count,
+                                        "created_at": created_at.isoformat(),
+                                        "age_days": age_days,
+                                        "confidence": confidence,
+                                        "orphan_reason": reason,
+                                        "avg_connections_7d": round(avg_connections, 2),
+                                    },
+                                )
+                            )
+
+        except ClientError as e:
+            print(f"Error scanning DocumentDB clusters in {region}: {e}")
 
         return orphans

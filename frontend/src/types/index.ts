@@ -100,7 +100,21 @@ export type ResourceType =
   | "ec2_instance"
   | "load_balancer"
   | "rds_instance"
-  | "nat_gateway";
+  | "nat_gateway"
+  | "fsx_file_system"
+  | "neptune_cluster"
+  | "msk_cluster"
+  | "eks_cluster"
+  | "sagemaker_endpoint"
+  | "redshift_cluster"
+  | "elasticache_cluster"
+  | "vpn_connection"
+  | "transit_gateway_attachment"
+  | "opensearch_domain"
+  | "global_accelerator"
+  | "kinesis_stream"
+  | "vpc_endpoint"
+  | "documentdb_cluster";
 
 export interface OrphanResource {
   id: string;

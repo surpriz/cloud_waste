@@ -27,6 +27,20 @@ const resourceIcons: Record<ResourceType, any> = {
   load_balancer: Network,
   rds_instance: Database,
   nat_gateway: Network,
+  fsx_file_system: HardDrive,
+  neptune_cluster: Database,
+  msk_cluster: Server,
+  eks_cluster: Server,
+  sagemaker_endpoint: Server,
+  redshift_cluster: Database,
+  elasticache_cluster: Database,
+  vpn_connection: Network,
+  transit_gateway_attachment: Network,
+  opensearch_domain: Database,
+  global_accelerator: Network,
+  kinesis_stream: Server,
+  vpc_endpoint: Network,
+  documentdb_cluster: Database,
 };
 
 export default function ResourcesPage() {
@@ -176,13 +190,37 @@ export default function ResourcesPage() {
                 className="mt-1 block w-full rounded-lg border border-gray-300 px-3 py-2"
               >
                 <option value="">All Types</option>
-                <option value="ebs_volume">EBS Volume</option>
-                <option value="elastic_ip">Elastic IP</option>
-                <option value="ebs_snapshot">EBS Snapshot</option>
-                <option value="ec2_instance">EC2 Instance</option>
-                <option value="load_balancer">Load Balancer</option>
-                <option value="rds_instance">RDS Instance</option>
-                <option value="nat_gateway">NAT Gateway</option>
+                <optgroup label="Storage & Compute">
+                  <option value="ebs_volume">EBS Volume</option>
+                  <option value="ebs_snapshot">EBS Snapshot</option>
+                  <option value="ec2_instance">EC2 Instance</option>
+                  <option value="fsx_file_system">FSx File System</option>
+                </optgroup>
+                <optgroup label="Networking">
+                  <option value="elastic_ip">Elastic IP</option>
+                  <option value="nat_gateway">NAT Gateway</option>
+                  <option value="load_balancer">Load Balancer</option>
+                  <option value="vpn_connection">VPN Connection</option>
+                  <option value="transit_gateway_attachment">Transit Gateway Attachment</option>
+                  <option value="vpc_endpoint">VPC Endpoint</option>
+                  <option value="global_accelerator">Global Accelerator</option>
+                </optgroup>
+                <optgroup label="Databases">
+                  <option value="rds_instance">RDS Instance</option>
+                  <option value="neptune_cluster">Neptune Cluster</option>
+                  <option value="redshift_cluster">Redshift Cluster</option>
+                  <option value="documentdb_cluster">DocumentDB Cluster</option>
+                  <option value="elasticache_cluster">ElastiCache Cluster</option>
+                  <option value="opensearch_domain">OpenSearch Domain</option>
+                </optgroup>
+                <optgroup label="Containers & Streaming">
+                  <option value="eks_cluster">EKS Cluster</option>
+                  <option value="msk_cluster">MSK Cluster</option>
+                  <option value="kinesis_stream">Kinesis Stream</option>
+                </optgroup>
+                <optgroup label="Machine Learning">
+                  <option value="sagemaker_endpoint">SageMaker Endpoint</option>
+                </optgroup>
               </select>
             </div>
 

@@ -368,12 +368,110 @@ function SupportedResourcesSection() {
       cost: "~$32/month",
       confidence: "High - No traffic usage",
     },
+    {
+      name: "FSx File Systems",
+      icon: "📁",
+      detection: "File systems with no data transfer for 30+ days",
+      cost: "~$0.13-0.145/GB/month",
+      confidence: "High - CloudWatch data transfer metrics",
+    },
+    {
+      name: "Neptune Clusters",
+      icon: "🔵",
+      detection: "Clusters with no database connections for 7+ days",
+      cost: "~$250-500/month",
+      confidence: "High - No active connections",
+    },
+    {
+      name: "MSK (Kafka) Clusters",
+      icon: "📨",
+      detection: "Clusters with no data traffic for 7+ days",
+      cost: "~$150-300/month per broker",
+      confidence: "High - No data in/out",
+    },
+    {
+      name: "EKS Clusters",
+      icon: "☸️",
+      detection: "Clusters with 0 worker nodes for 7+ days",
+      cost: "~$73/month (control plane)",
+      confidence: "High - No worker nodes",
+    },
+    {
+      name: "SageMaker Endpoints",
+      icon: "🤖",
+      detection: "Endpoints with no invocations for 7+ days",
+      cost: "~$83-165/month",
+      confidence: "High - No model invocations",
+    },
+    {
+      name: "Redshift Clusters",
+      icon: "📊",
+      detection: "Clusters with no database connections for 7+ days",
+      cost: "~$180-720/month",
+      confidence: "High - No active queries",
+    },
+    {
+      name: "ElastiCache Clusters",
+      icon: "⚡",
+      detection: "Clusters with no cache hits for 7+ days",
+      cost: "~$90-135/month",
+      confidence: "High - No cache activity",
+    },
+    {
+      name: "VPN Connections",
+      icon: "🔐",
+      detection: "VPN with <1MB data transfer in 30 days",
+      cost: "~$36/month",
+      confidence: "High - No VPN traffic",
+    },
+    {
+      name: "Transit Gateway Attachments",
+      icon: "🌉",
+      detection: "Attachments with <1MB traffic in 30 days",
+      cost: "~$36/month",
+      confidence: "High - No traffic",
+    },
+    {
+      name: "OpenSearch Domains",
+      icon: "🔍",
+      detection: "Domains with no search requests for 7+ days",
+      cost: "~$116-164/month",
+      confidence: "High - No search activity",
+    },
+    {
+      name: "Global Accelerator",
+      icon: "🌍",
+      detection: "Accelerators with 0 endpoints for 7+ days",
+      cost: "~$18/month",
+      confidence: "High - No endpoints configured",
+    },
+    {
+      name: "Kinesis Streams",
+      icon: "🌊",
+      detection: "Streams with no incoming records for 7+ days",
+      cost: "~$15/month per shard",
+      confidence: "High - No data ingestion",
+    },
+    {
+      name: "VPC Endpoints",
+      icon: "🔗",
+      detection: "Endpoints with no network interfaces for 7+ days",
+      cost: "~$7/month",
+      confidence: "High - No network usage",
+    },
+    {
+      name: "DocumentDB Clusters",
+      icon: "📄",
+      detection: "Clusters with no database connections for 7+ days",
+      cost: "~$199/month",
+      confidence: "High - No active connections",
+    },
   ];
 
   return (
     <div className="space-y-6">
       <h1 className="text-4xl font-bold text-gray-900">Supported Resources</h1>
-      <p className="text-xl text-gray-600">Currently supporting 7 AWS resource types</p>
+      <p className="text-xl text-gray-600">Currently supporting 22 AWS resource types with intelligent CloudWatch-based detection</p>
 
       <div className="grid gap-4">
         {resources.map((resource, index) => (
