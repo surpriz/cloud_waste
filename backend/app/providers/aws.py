@@ -85,20 +85,120 @@ class AWSProvider(CloudProviderBase):
             response = await ec2.describe_regions()
             return [region["RegionName"] for region in response["Regions"]]
 
+    async def _check_volume_usage_history(
+        self, volume_id: str, region: str, created_at: datetime
+    ) -> dict:
+        """
+        Check EBS volume usage history via CloudWatch metrics.
+
+        Returns dict with:
+        - ever_used: bool (True if volume has any historical activity)
+        - last_active_date: datetime or None
+        - total_read_ops: int
+        - total_write_ops: int
+        - usage_category: str ("never_used", "recently_abandoned", "long_abandoned")
+        """
+        try:
+            async with self.session.client("cloudwatch", region_name=region) as cw:
+                now = datetime.now(timezone.utc)
+
+                # Check last 90 days of activity (or since creation if younger)
+                lookback_days = min(90, (now - created_at).days)
+                start_time = now - timedelta(days=lookback_days)
+
+                # Get VolumeReadOps metric
+                read_response = await cw.get_metric_statistics(
+                    Namespace="AWS/EBS",
+                    MetricName="VolumeReadOps",
+                    Dimensions=[{"Name": "VolumeId", "Value": volume_id}],
+                    StartTime=start_time,
+                    EndTime=now,
+                    Period=86400,  # 1 day
+                    Statistics=["Sum"],
+                )
+
+                # Get VolumeWriteOps metric
+                write_response = await cw.get_metric_statistics(
+                    Namespace="AWS/EBS",
+                    MetricName="VolumeWriteOps",
+                    Dimensions=[{"Name": "VolumeId", "Value": volume_id}],
+                    StartTime=start_time,
+                    EndTime=now,
+                    Period=86400,  # 1 day
+                    Statistics=["Sum"],
+                )
+
+                # Calculate total operations
+                read_datapoints = read_response.get("Datapoints", [])
+                write_datapoints = write_response.get("Datapoints", [])
+
+                total_read_ops = sum(dp["Sum"] for dp in read_datapoints)
+                total_write_ops = sum(dp["Sum"] for dp in write_datapoints)
+                total_ops = total_read_ops + total_write_ops
+
+                # Determine last active date
+                all_datapoints = read_datapoints + write_datapoints
+                last_active_date = None
+                if all_datapoints:
+                    # Find most recent datapoint with activity
+                    active_datapoints = [
+                        dp for dp in all_datapoints if dp.get("Sum", 0) > 0
+                    ]
+                    if active_datapoints:
+                        last_active_date = max(dp["Timestamp"] for dp in active_datapoints)
+
+                # Determine usage category
+                ever_used = total_ops > 0
+
+                if not ever_used:
+                    usage_category = "never_used"
+                elif last_active_date:
+                    days_since_last_use = (now - last_active_date).days
+                    if days_since_last_use < 7:
+                        usage_category = "recently_active"  # Not orphan
+                    elif days_since_last_use < 30:
+                        usage_category = "recently_abandoned"
+                    else:
+                        usage_category = "long_abandoned"
+                else:
+                    usage_category = "unknown"
+
+                return {
+                    "ever_used": ever_used,
+                    "last_active_date": last_active_date.isoformat() if last_active_date else None,
+                    "total_read_ops": int(total_read_ops),
+                    "total_write_ops": int(total_write_ops),
+                    "usage_category": usage_category,
+                    "days_since_last_use": (now - last_active_date).days if last_active_date else None,
+                }
+
+        except Exception as e:
+            print(f"Error checking volume usage history for {volume_id}: {e}")
+            return {
+                "ever_used": None,
+                "last_active_date": None,
+                "total_read_ops": 0,
+                "total_write_ops": 0,
+                "usage_category": "unknown",
+                "days_since_last_use": None,
+            }
+
     async def scan_unattached_volumes(
         self, region: str, detection_rules: dict | None = None
     ) -> list[OrphanResourceData]:
         """
-        Scan for unattached EBS volumes in a region.
+        Scan for unattached EBS volumes in a region with intelligent orphan detection.
 
-        Detects volumes with state='available' (not attached to any instance).
+        Uses CloudWatch metrics to detect:
+        - Volumes never used (never attached or no I/O activity)
+        - Volumes used in the past but abandoned (no recent activity)
 
         Args:
             region: AWS region to scan
             detection_rules: Optional detection rules (uses defaults if None)
 
         Returns:
-            List of orphan EBS volume resources
+            List of truly orphaned EBS volume resources
         """
         orphans: list[OrphanResourceData] = []
 
@@ -134,6 +234,15 @@ class AWSProvider(CloudProviderBase):
                     if age_days < min_age_days:
                         continue
 
+                    # Check usage history via CloudWatch
+                    usage_history = await self._check_volume_usage_history(
+                        volume_id, region, created_at
+                    )
+
+                    # Skip if volume was recently active (not orphaned)
+                    if usage_history["usage_category"] == "recently_active":
+                        continue
+
                     # Calculate monthly cost based on volume type
                     price_key = f"ebs_{volume_type}_per_gb"
                     price_per_gb = self.PRICING.get(
@@ -148,10 +257,32 @@ class AWSProvider(CloudProviderBase):
                             name = tag["Value"]
                             break
 
-                    # Determine confidence level
-                    confidence = (
-                        "high" if age_days >= confidence_threshold_days else "medium"
-                    )
+                    # Determine confidence level based on usage history
+                    if usage_history["usage_category"] == "never_used" and age_days >= 30:
+                        confidence = "high"
+                        reason = f"Never used since creation {age_days} days ago"
+                    elif usage_history["usage_category"] == "long_abandoned":
+                        confidence = "high"
+                        days_abandoned = usage_history.get("days_since_last_use", 0)
+                        reason = f"No activity for {days_abandoned} days (was active before)"
+                    elif usage_history["usage_category"] == "recently_abandoned":
+                        confidence = "medium"
+                        days_abandoned = usage_history.get("days_since_last_use", 0)
+                        reason = f"No activity for {days_abandoned} days"
+                    elif usage_history["usage_category"] == "never_used" and age_days < 30:
+                        confidence = "low"
+                        reason = f"Created {age_days} days ago, never used yet (may be for future use)"
+                    else:
+                        # Unknown usage history (CloudWatch metrics unavailable)
+                        if age_days == 0:
+                            confidence = "low"
+                            reason = "Recently created (less than 24h), usage pattern unclear"
+                        elif age_days >= confidence_threshold_days:
+                            confidence = "medium"
+                            reason = f"Unattached for {age_days} days (usage history unavailable)"
+                        else:
+                            confidence = "low"
+                            reason = f"Unattached for {age_days} days (usage history unavailable)"
 
                     orphans.append(
                         OrphanResourceData(
@@ -168,6 +299,8 @@ class AWSProvider(CloudProviderBase):
                                 "encrypted": volume.get("Encrypted", False),
                                 "age_days": age_days,
                                 "confidence": confidence,
+                                "orphan_reason": reason,
+                                "usage_history": usage_history,
                             },
                         )
                     )
@@ -178,7 +311,9 @@ class AWSProvider(CloudProviderBase):
 
         return orphans
 
-    async def scan_unassigned_ips(self, region: str) -> list[OrphanResourceData]:
+    async def scan_unassigned_ips(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
         """
         Scan for unassigned Elastic IP addresses in a region.
 
@@ -186,11 +321,24 @@ class AWSProvider(CloudProviderBase):
 
         Args:
             region: AWS region to scan
+            detection_rules: Optional detection rules for this resource type
 
         Returns:
             List of orphan Elastic IP resources
         """
         orphans: list[OrphanResourceData] = []
+
+        # Use provided rules or defaults
+        if detection_rules is None:
+            from app.models.detection_rule import DEFAULT_DETECTION_RULES
+            detection_rules = DEFAULT_DETECTION_RULES.get("elastic_ip", {})
+
+        # Check if detection is enabled
+        if not detection_rules.get("enabled", True):
+            return orphans
+
+        min_age_days = detection_rules.get("min_age_days", 3)
+        confidence_threshold_days = detection_rules.get("confidence_threshold_days", 7)
 
         try:
             async with self.session.client("ec2", region_name=region) as ec2:
@@ -202,12 +350,58 @@ class AWSProvider(CloudProviderBase):
                         allocation_id = address.get("AllocationId", "N/A")
                         public_ip = address.get("PublicIp", "Unknown")
 
-                        # Extract name from tags
+                        # AWS EC2 API doesn't provide allocation time for Elastic IPs
+                        # We need to use CloudWatch Logs or CloudTrail to get precise creation time
+                        # Workaround: Check the "NetworkInterfaceOwnerId" last state change
+
+                        # For MVP: Use a heuristic - if the IP has never been associated,
+                        # it's likely recent OR very old (both cases warrant investigation)
+                        # If user wants age filtering, they must add "CreatedDate" tag manually
+
                         name = None
+                        created_date = None
+
                         for tag in address.get("Tags", []):
                             if tag["Key"] == "Name":
                                 name = tag["Value"]
-                                break
+                            elif tag["Key"] == "CreatedDate":
+                                # User can manually tag IPs with creation date in ISO format
+                                try:
+                                    from datetime import datetime
+                                    created_date = datetime.fromisoformat(tag["Value"].replace('Z', '+00:00'))
+                                except Exception:
+                                    pass
+
+                        # Calculate age if creation date is available
+                        if created_date:
+                            age_days = (datetime.now(timezone.utc) - created_date).days
+                            if age_days < min_age_days:
+                                continue
+                            confidence = "high" if age_days >= confidence_threshold_days else "medium"
+                            reason = f"Not associated for {age_days} days"
+                        else:
+                            # No creation date available - can't determine age
+                            # If user requires min_age > 0, skip to avoid false positives
+                            if min_age_days > 0:
+                                continue  # Skip - can't verify age requirement
+
+                            # Only detect if min_age = 0 (immediate detection)
+                            age_days = -1  # -1 indicates unknown age
+                            confidence = "low"
+                            reason = "Not associated (age unknown - add 'CreatedDate' tag for tracking)"
+
+                        # Build metadata
+                        metadata = {
+                            "public_ip": public_ip,
+                            "domain": address.get("Domain", "vpc"),
+                            "age_days": age_days,
+                            "confidence": confidence,
+                            "orphan_reason": reason,
+                        }
+
+                        # Add created_at if we have it from the tag
+                        if created_date:
+                            metadata["created_at"] = created_date.isoformat()
 
                         orphans.append(
                             OrphanResourceData(
@@ -216,10 +410,7 @@ class AWSProvider(CloudProviderBase):
                                 resource_name=name,
                                 region=region,
                                 estimated_monthly_cost=self.PRICING["elastic_ip"],
-                                resource_metadata={
-                                    "public_ip": public_ip,
-                                    "domain": address.get("Domain", "vpc"),
-                                },
+                                resource_metadata=metadata,
                             )
                         )
 

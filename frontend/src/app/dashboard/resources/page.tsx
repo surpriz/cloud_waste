@@ -271,6 +271,48 @@ function ResourceCard({ resource, onIgnore, onMarkForDeletion, onDelete }: any) 
     marked_for_deletion: "bg-red-100 text-red-700",
   };
 
+  // Calculate cumulative cost lost since creation
+  const ageDays = resource.resource_metadata?.age_days;
+  const dailyCost = resource.estimated_monthly_cost / 30;
+
+  // Show cost even for resources less than 1 day old (age_days = 0)
+  // Calculate based on created_at timestamp if age_days is 0
+  let cumulativeCost = null;
+  let displayAge = "";
+
+  if (ageDays !== undefined && ageDays >= 0) {
+    if (ageDays > 0) {
+      // 1+ days old
+      cumulativeCost = dailyCost * ageDays;
+      displayAge = `${ageDays} day${ageDays !== 1 ? 's' : ''}`;
+    } else if (ageDays === 0 && resource.resource_metadata?.created_at) {
+      // Less than 24h old - calculate hours
+      try {
+        // Parse ISO date - replace +00:00 with Z for better compatibility
+        const dateString = resource.resource_metadata.created_at.replace('+00:00', 'Z');
+        const createdAt = new Date(dateString);
+        const now = new Date();
+
+        // Validate the date is valid
+        if (!isNaN(createdAt.getTime())) {
+          const ageHours = Math.floor((now.getTime() - createdAt.getTime()) / (1000 * 60 * 60));
+
+          if (ageHours > 0) {
+            const hourlyCost = dailyCost / 24;
+            cumulativeCost = hourlyCost * ageHours;
+            displayAge = `${ageHours} hour${ageHours !== 1 ? 's' : ''}`;
+          } else if (ageHours === 0) {
+            // Show "less than 1 hour" for very recent resources
+            displayAge = "less than 1 hour";
+            cumulativeCost = 0.01; // Minimum to show
+          }
+        }
+      } catch (e) {
+        // Silently ignore date parsing errors
+      }
+    }
+  }
+
   return (
     <div className="rounded-lg border bg-white p-6 shadow-sm">
       <div className="flex items-start justify-between">
@@ -292,15 +334,58 @@ function ResourceCard({ resource, onIgnore, onMarkForDeletion, onDelete }: any) 
               </span>
             </div>
             <p className="mt-1 text-sm text-gray-600">
-              {resource.resource_type.replace(/_/g, " ").toUpperCase()} "{" "}
-              {resource.region}
+              {resource.resource_type.replace(/_/g, " ").toUpperCase()} · {resource.region}
             </p>
-            <div className="mt-2 flex items-center gap-4 text-sm text-gray-500">
-              <span>ID: {resource.resource_id}</span>
-              <span>"</span>
-              <span className="font-semibold text-orange-600">
-                ${resource.estimated_monthly_cost.toFixed(2)}/month
-              </span>
+            <div className="mt-2 flex flex-col gap-2">
+              <div className="flex items-center gap-2 text-sm text-gray-500">
+                <span>ID: {resource.resource_id}</span>
+              </div>
+
+              {/* Orphan reason - why is this resource orphaned? */}
+              {resource.resource_metadata?.orphan_reason && (
+                <div className="flex items-center gap-2 text-sm">
+                  <span className="text-gray-600">🔍 Reason:</span>
+                  <span className="text-gray-700">{resource.resource_metadata.orphan_reason}</span>
+                  {resource.resource_metadata?.confidence && (
+                    <span className={`px-2 py-0.5 rounded text-xs font-medium ${
+                      resource.resource_metadata.confidence === 'high'
+                        ? 'bg-red-100 text-red-700'
+                        : resource.resource_metadata.confidence === 'medium'
+                        ? 'bg-orange-100 text-orange-700'
+                        : 'bg-yellow-100 text-yellow-700'
+                    }`}>
+                      {resource.resource_metadata.confidence} confidence
+                    </span>
+                  )}
+                </div>
+              )}
+
+              <div className="flex items-center gap-3 text-sm">
+                <div className="flex items-center gap-1">
+                  <span className="text-gray-500">Future waste:</span>
+                  <span className="font-semibold text-orange-600" title="Estimated monthly cost if this resource stays orphaned">
+                    ${resource.estimated_monthly_cost.toFixed(2)}/month
+                  </span>
+                </div>
+                {cumulativeCost !== null && displayAge && (
+                  <div className="flex items-center gap-1">
+                    <span className="text-gray-500">·</span>
+                    <span className="text-gray-500">Already wasted:</span>
+                    <span className="font-semibold text-red-600" title={`Money already wasted since resource creation (${displayAge} ago)`}>
+                      ${cumulativeCost.toFixed(2)}
+                    </span>
+                    <span className="text-xs text-gray-400">over {displayAge}</span>
+                  </div>
+                )}
+                {ageDays === -1 && (
+                  <div className="flex items-center gap-1">
+                    <span className="text-gray-500">·</span>
+                    <span className="text-xs text-gray-400 italic">
+                      Age unknown (add "CreatedDate" tag for tracking)
+                    </span>
+                  </div>
+                )}
+              </div>
             </div>
 
             {/* Metadata */}

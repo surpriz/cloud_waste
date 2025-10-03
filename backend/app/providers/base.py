@@ -197,7 +197,7 @@ class CloudProviderBase(ABC):
         results.extend(
             await self.scan_unattached_volumes(region, rules.get("ebs_volume"))
         )
-        results.extend(await self.scan_unassigned_ips(region))
+        results.extend(await self.scan_unassigned_ips(region, rules.get("elastic_ip")))
         results.extend(await self.scan_orphaned_snapshots(region))
         results.extend(await self.scan_stopped_instances(region))
         results.extend(await self.scan_unused_load_balancers(region))

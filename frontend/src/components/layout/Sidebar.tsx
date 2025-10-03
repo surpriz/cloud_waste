@@ -8,6 +8,7 @@ import {
   Search,
   FolderOpen,
   Settings,
+  BookOpen,
   LogOut
 } from "lucide-react";
 import { useAuthStore } from "@/stores/useAuthStore";
@@ -18,6 +19,7 @@ const navigation = [
   { name: "Scans", href: "/dashboard/scans", icon: Search },
   { name: "Resources", href: "/dashboard/resources", icon: FolderOpen },
   { name: "Settings", href: "/dashboard/settings", icon: Settings },
+  { name: "Documentation", href: "/dashboard/docs", icon: BookOpen },
 ];
 
 export function Sidebar() {

@@ -85,7 +85,7 @@ async def get_orphan_resources_by_account(
     limit: int = 100,
 ) -> list[OrphanResource]:
     """
-    Get orphan resources for a specific cloud account.
+    Get orphan resources for a specific cloud account from the latest scan.
 
     Args:
         db: Database session
@@ -96,10 +96,29 @@ async def get_orphan_resources_by_account(
         limit: Maximum number of records to return
 
     Returns:
-        List of orphan resource objects
+        List of orphan resource objects from the latest completed scan
     """
+    from app.models.scan import Scan
+
+    # Get the latest completed scan for this account
+    latest_scan_result = await db.execute(
+        select(Scan)
+        .where(
+            Scan.cloud_account_id == cloud_account_id,
+            Scan.status == "completed"
+        )
+        .order_by(Scan.created_at.desc())
+        .limit(1)
+    )
+    latest_scan = latest_scan_result.scalar_one_or_none()
+
+    if not latest_scan:
+        # No completed scans found
+        return []
+
+    # Query resources from the latest scan
     query = select(OrphanResource).where(
-        OrphanResource.cloud_account_id == cloud_account_id
+        OrphanResource.scan_id == latest_scan.id
     )
 
     if status:
@@ -179,7 +198,7 @@ async def get_orphan_resource_statistics(
     status: ResourceStatus | None = None,
 ) -> dict[str, Any]:
     """
-    Get orphan resource statistics.
+    Get orphan resource statistics from the latest scans.
 
     Args:
         db: Database session
@@ -189,7 +208,37 @@ async def get_orphan_resource_statistics(
     Returns:
         Dictionary with orphan resource statistics
     """
-    query = select(OrphanResource)
+    from app.models.scan import Scan
+    from app.models.cloud_account import CloudAccount
+    from sqlalchemy import and_, func
+
+    # Get latest scan IDs per cloud account
+    latest_scan_subquery = (
+        select(
+            Scan.cloud_account_id,
+            func.max(Scan.created_at).label("max_created_at")
+        )
+        .where(Scan.status == "completed")
+        .group_by(Scan.cloud_account_id)
+        .subquery()
+    )
+
+    latest_scan_ids = (
+        select(Scan.id)
+        .join(
+            latest_scan_subquery,
+            and_(
+                Scan.cloud_account_id == latest_scan_subquery.c.cloud_account_id,
+                Scan.created_at == latest_scan_subquery.c.max_created_at
+            )
+        )
+        .subquery()
+    )
+
+    # Query resources from latest scans only
+    query = select(OrphanResource).where(
+        OrphanResource.scan_id.in_(select(latest_scan_ids))
+    )
 
     if cloud_account_id:
         query = query.where(OrphanResource.cloud_account_id == cloud_account_id)
@@ -238,7 +287,7 @@ async def get_top_cost_resources(
     limit: int = 10,
 ) -> list[OrphanResource]:
     """
-    Get top orphan resources by estimated monthly cost.
+    Get top orphan resources by estimated monthly cost from latest scans.
 
     Args:
         db: Database session
@@ -248,8 +297,37 @@ async def get_top_cost_resources(
     Returns:
         List of orphan resources sorted by cost (descending)
     """
-    query = select(OrphanResource).order_by(
-        OrphanResource.estimated_monthly_cost.desc()
+    from app.models.scan import Scan
+    from sqlalchemy import and_, func
+
+    # Get latest scan IDs per cloud account
+    latest_scan_subquery = (
+        select(
+            Scan.cloud_account_id,
+            func.max(Scan.created_at).label("max_created_at")
+        )
+        .where(Scan.status == "completed")
+        .group_by(Scan.cloud_account_id)
+        .subquery()
+    )
+
+    latest_scan_ids = (
+        select(Scan.id)
+        .join(
+            latest_scan_subquery,
+            and_(
+                Scan.cloud_account_id == latest_scan_subquery.c.cloud_account_id,
+                Scan.created_at == latest_scan_subquery.c.max_created_at
+            )
+        )
+        .subquery()
+    )
+
+    # Query only from latest scans
+    query = (
+        select(OrphanResource)
+        .where(OrphanResource.scan_id.in_(select(latest_scan_ids)))
+        .order_by(OrphanResource.estimated_monthly_cost.desc())
     )
 
     if cloud_account_id:

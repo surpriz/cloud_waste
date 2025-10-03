@@ -291,8 +291,8 @@ function ScanRow({ scan }: any) {
             </span>
           </div>
           <p className="ml-6 mt-1 text-orange-600">
-            Potential savings: ${scan.estimated_monthly_waste.toFixed(2)}/month
-            (${(scan.estimated_monthly_waste * 12).toFixed(2)}/year)
+            Future savings: ${scan.estimated_monthly_waste.toFixed(2)}/month
+            (${(scan.estimated_monthly_waste * 12).toFixed(2)}/year) if cleaned up now
           </p>
         </div>
       )}

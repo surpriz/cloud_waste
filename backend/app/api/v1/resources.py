@@ -56,15 +56,44 @@ async def list_orphan_resources(
         )
     else:
         # Get resources for all user's accounts
-        # This requires joining through cloud_accounts
+        # Only show resources from the latest scan per account
         from app.models.cloud_account import CloudAccount
         from app.models.orphan_resource import OrphanResource as OrphanResourceModel
-        from sqlalchemy import select
+        from app.models.scan import Scan
+        from sqlalchemy import select, and_, func
+
+        # Subquery to get the latest scan ID per cloud account
+        latest_scan_subquery = (
+            select(
+                Scan.cloud_account_id,
+                func.max(Scan.created_at).label("max_created_at")
+            )
+            .where(Scan.status == "completed")
+            .group_by(Scan.cloud_account_id)
+            .subquery()
+        )
+
+        latest_scan_ids = (
+            select(Scan.id)
+            .join(
+                latest_scan_subquery,
+                and_(
+                    Scan.cloud_account_id == latest_scan_subquery.c.cloud_account_id,
+                    Scan.created_at == latest_scan_subquery.c.max_created_at
+                )
+            )
+            .subquery()
+        )
 
         query = (
             select(OrphanResourceModel)
             .join(CloudAccount)
-            .where(CloudAccount.user_id == current_user.id)
+            .where(
+                and_(
+                    CloudAccount.user_id == current_user.id,
+                    OrphanResourceModel.scan_id.in_(select(latest_scan_ids))
+                )
+            )
         )
 
         if status_filter:
