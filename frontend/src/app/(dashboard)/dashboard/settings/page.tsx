@@ -1,7 +1,8 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { User, Bell, Shield, Trash2, Save, Key, Sliders, RotateCcw, HardDrive, Globe, Camera, Server, Activity, Zap, Database } from "lucide-react";
+import { User, Bell, Shield, Trash2, Save, Key, Sliders, RotateCcw, HardDrive, Globe, Camera, Server, Activity, Zap, Database, ArrowLeft } from "lucide-react";
+import Link from "next/link";
 
 interface DetectionRule {
   resource_type: string;
@@ -75,8 +76,18 @@ export default function SettingsPage() {
     }
   };
 
-  const updateRule = async (resourceType: string, newRules: any) => {
+  const updateRule = async (resourceType: string) => {
     try {
+      // Find the current rule from state to get the latest values
+      const currentRule = detectionRules.find(r => r.resource_type === resourceType);
+      if (!currentRule) {
+        console.error("Rule not found:", resourceType);
+        return;
+      }
+
+      console.log("🔍 DEBUG - Saving rule for:", resourceType);
+      console.log("🔍 DEBUG - Current rules:", currentRule.current_rules);
+
       const token = localStorage.getItem("access_token");
       const response = await fetch(`http://localhost:8000/api/v1/detection-rules/${resourceType}`, {
         method: "PUT",
@@ -84,8 +95,11 @@ export default function SettingsPage() {
           "Content-Type": "application/json",
           Authorization: `Bearer ${token}`,
         },
-        body: JSON.stringify({ rules: newRules }),
+        body: JSON.stringify({ rules: currentRule.current_rules }),
       });
+
+      console.log("🔍 DEBUG - Response status:", response.status);
+      console.log("🔍 DEBUG - Response OK:", response.ok);
 
       if (response.ok) {
         await fetchDetectionRules();
@@ -121,6 +135,30 @@ export default function SettingsPage() {
     }
   };
 
+  const resetAllRules = async () => {
+    if (!confirm("⚠️ Reset ALL detection rules to default values?\n\nThis will delete all your custom settings for all 20+ resource types.")) return;
+
+    try {
+      const token = localStorage.getItem("access_token");
+      const response = await fetch(`http://localhost:8000/api/v1/detection-rules/`, {
+        method: "DELETE",
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      });
+
+      if (response.ok) {
+        await fetchDetectionRules();
+        setSaveMessage("✅ All rules reset to defaults!");
+        setTimeout(() => setSaveMessage(null), 3000);
+      }
+    } catch (error) {
+      console.error("Failed to reset all rules:", error);
+      setSaveMessage("❌ Failed to reset all rules");
+      setTimeout(() => setSaveMessage(null), 3000);
+    }
+  };
+
   const handleRuleChange = (resourceType: string, field: string, value: any) => {
     setDetectionRules((prev) =>
       prev.map((rule) =>
@@ -140,6 +178,15 @@ export default function SettingsPage() {
   return (
     <div className="min-h-screen bg-gradient-to-br from-gray-50 to-blue-50 p-8">
       <div className="mx-auto max-w-6xl">
+        {/* Back to Dashboard Button */}
+        <Link
+          href="/dashboard"
+          className="mb-6 inline-flex items-center gap-2 rounded-lg bg-white px-4 py-2 text-sm font-medium text-gray-700 shadow-sm hover:bg-gray-50 transition-colors border border-gray-200"
+        >
+          <ArrowLeft className="h-4 w-4" />
+          Back to Dashboard
+        </Link>
+
         {/* Header */}
         <div className="mb-8">
           <h1 className="text-4xl font-bold text-gray-900">Settings</h1>
@@ -205,11 +252,23 @@ export default function SettingsPage() {
         {activeTab === "detection" && (
           <div className="space-y-6">
             <div className="rounded-2xl bg-gradient-to-br from-blue-50 to-indigo-50 border-2 border-blue-200 p-6">
-              <h2 className="text-xl font-bold text-blue-900 mb-2">🎯 Configure Detection Criteria</h2>
-              <p className="text-blue-700">
-                Customize how CloudWaste identifies orphaned resources in your AWS infrastructure.
-                Adjust age thresholds and confidence levels to match your workflow.
-              </p>
+              <div className="flex items-start justify-between">
+                <div className="flex-1">
+                  <h2 className="text-xl font-bold text-blue-900 mb-2">🎯 Configure Detection Criteria</h2>
+                  <p className="text-blue-700">
+                    Customize how CloudWaste identifies orphaned resources in your AWS infrastructure.
+                    Adjust age thresholds and confidence levels to match your workflow.
+                  </p>
+                </div>
+                <button
+                  onClick={resetAllRules}
+                  className="ml-4 flex items-center gap-2 rounded-lg border-2 border-orange-400 bg-orange-50 px-4 py-2 text-sm font-semibold text-orange-700 hover:bg-orange-100 transition-colors whitespace-nowrap"
+                  title="Reset all detection rules to default values"
+                >
+                  <RotateCcw className="h-4 w-4" />
+                  Reset All to Defaults
+                </button>
+              </div>
             </div>
 
             {isLoading ? (
@@ -247,7 +306,7 @@ export default function SettingsPage() {
 
                       <div className="flex gap-2">
                         <button
-                          onClick={() => updateRule(rule.resource_type, rule.current_rules)}
+                          onClick={() => updateRule(rule.resource_type)}
                           className="flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-700 transition-colors"
                         >
                           <Save className="h-4 w-4" />
@@ -314,9 +373,37 @@ export default function SettingsPage() {
                           <span>0 days (detect immediately)</span>
                           <span>90 days</span>
                         </div>
-                        <p className="text-sm text-gray-600 mt-2">
-                          ⏰ Resources younger than this will be ignored to avoid false positives
-                        </p>
+
+                        {/* Interactive Example */}
+                        <div className="mt-4 rounded-lg bg-gradient-to-r from-blue-50 to-purple-50 border-2 border-blue-200 p-4">
+                          <h5 className="font-semibold text-blue-900 mb-2 flex items-center gap-2">
+                            <span>💡</span> What will be detected?
+                          </h5>
+                          <div className="space-y-2 text-sm">
+                            <div className="flex items-start gap-2">
+                              <span className="text-green-600 font-bold">✓</span>
+                              <span className="text-gray-700">
+                                Resources created <strong>{rule.current_rules.min_age_days || rule.current_rules.min_stopped_days}+ days ago</strong> will be detected
+                              </span>
+                            </div>
+                            <div className="flex items-start gap-2">
+                              <span className="text-red-600 font-bold">✗</span>
+                              <span className="text-gray-700">
+                                Resources created <strong>less than {rule.current_rules.min_age_days || rule.current_rules.min_stopped_days} days ago</strong> will be ignored
+                              </span>
+                            </div>
+                          </div>
+                          <div className="mt-3 p-3 bg-white rounded border border-blue-300">
+                            <p className="text-xs text-blue-800">
+                              <strong>Example:</strong> If set to <strong>{rule.current_rules.min_age_days || rule.current_rules.min_stopped_days} days</strong>:
+                              {(rule.current_rules.min_age_days || rule.current_rules.min_stopped_days) === 0 ? (
+                                <> All {rule.resource_type.replace('_', ' ')} will be detected immediately, even brand new ones.</>
+                              ) : (
+                                <> A {rule.resource_type.replace('_', ' ')} created on {new Date(Date.now() - (rule.current_rules.min_age_days || rule.current_rules.min_stopped_days) * 24 * 60 * 60 * 1000).toLocaleDateString()} or earlier will be detected. One created today will be ignored.</>
+                              )}
+                            </p>
+                          </div>
+                        </div>
                       </div>
                     )}
 
@@ -350,9 +437,32 @@ export default function SettingsPage() {
                           <span>7 days</span>
                           <span>180 days</span>
                         </div>
-                        <p className="text-sm text-gray-600 mt-2">
-                          🎯 Resources older than this are marked with "High Confidence"
-                        </p>
+
+                        {/* Interactive Example for Confidence */}
+                        <div className="mt-4 rounded-lg bg-gradient-to-r from-purple-50 to-pink-50 border-2 border-purple-200 p-4">
+                          <h5 className="font-semibold text-purple-900 mb-2 flex items-center gap-2">
+                            <span>🎯</span> Confidence Levels
+                          </h5>
+                          <div className="space-y-2 text-sm">
+                            <div className="flex items-start gap-2">
+                              <span className="text-green-600 font-bold">HIGH</span>
+                              <span className="text-gray-700">
+                                Resources <strong>{rule.current_rules.confidence_threshold_days}+ days old</strong> → marked as <span className="bg-green-100 text-green-800 px-2 py-0.5 rounded font-semibold">high confidence</span>
+                              </span>
+                            </div>
+                            <div className="flex items-start gap-2">
+                              <span className="text-yellow-600 font-bold">LOW</span>
+                              <span className="text-gray-700">
+                                Resources <strong>less than {rule.current_rules.confidence_threshold_days} days old</strong> → marked as <span className="bg-yellow-100 text-yellow-800 px-2 py-0.5 rounded font-semibold">low confidence</span>
+                              </span>
+                            </div>
+                          </div>
+                          <div className="mt-3 p-3 bg-white rounded border border-purple-300">
+                            <p className="text-xs text-purple-800">
+                              <strong>Why it matters:</strong> High confidence resources are very likely to be true orphans and safe to delete. Low confidence resources might still be in use or recently created for a purpose.
+                            </p>
+                          </div>
+                        </div>
                       </div>
                     )}
                   </div>

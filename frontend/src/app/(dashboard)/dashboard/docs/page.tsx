@@ -15,7 +15,9 @@ import {
   EyeOff,
   Trash2,
   Settings,
+  ArrowLeft,
 } from "lucide-react";
+import Link from "next/link";
 
 export default function DocsPage() {
   const [activeSection, setActiveSection] = useState<string>("introduction");
@@ -34,6 +36,13 @@ export default function DocsPage() {
     <div className="flex min-h-screen bg-gray-50">
       {/* Sidebar */}
       <div className="w-64 border-r bg-white p-6">
+        <Link
+          href="/dashboard"
+          className="mb-6 inline-flex items-center gap-2 rounded-lg bg-gray-100 px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-200 transition-colors"
+        >
+          <ArrowLeft className="h-4 w-4" />
+          Back to Dashboard
+        </Link>
         <h2 className="mb-6 text-xl font-bold text-gray-900">Documentation</h2>
         <nav className="space-y-2">
           {sections.map((section) => {

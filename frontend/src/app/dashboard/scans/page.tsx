@@ -28,6 +28,23 @@ export default function ScansPage() {
     fetchSummary();
   }, [fetchAccounts, fetchScans, fetchSummary]);
 
+  // Auto-refresh scans if there are any in progress or pending
+  useEffect(() => {
+    const hasActiveScan = scans.some(
+      (scan) => scan.status === "in_progress" || scan.status === "pending"
+    );
+
+    if (!hasActiveScan) return;
+
+    // Poll every 3 seconds while scans are active
+    const interval = setInterval(() => {
+      fetchScans();
+      fetchSummary();
+    }, 3000);
+
+    return () => clearInterval(interval);
+  }, [scans, fetchScans, fetchSummary]);
+
   const handleStartScan = async () => {
     if (!selectedAccountId) {
       alert("Please select an account");

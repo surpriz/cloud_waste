@@ -443,19 +443,33 @@ class AWSProvider(CloudProviderBase):
 
         return orphans
 
-    async def scan_orphaned_snapshots(self, region: str) -> list[OrphanResourceData]:
+    async def scan_orphaned_snapshots(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
         """
         Scan for orphaned EBS snapshots in a region.
 
-        Detects snapshots older than 90 days where source volume no longer exists.
+        Detects snapshots older than threshold where source volume no longer exists.
 
         Args:
             region: AWS region to scan
+            detection_rules: Optional user-defined detection rules
 
         Returns:
             List of orphan snapshot resources
         """
         orphans: list[OrphanResourceData] = []
+
+        # Get detection rules or use defaults
+        from app.models.detection_rule import DEFAULT_DETECTION_RULES
+
+        rules = detection_rules or DEFAULT_DETECTION_RULES.get("ebs_snapshot", {})
+        min_age_days = rules.get("min_age_days", 90)
+        confidence_threshold_days = rules.get("confidence_threshold_days", 180)
+        enabled = rules.get("enabled", True)
+
+        if not enabled:
+            return orphans
 
         try:
             async with self.session.client("ec2", region_name=region) as ec2:
@@ -472,17 +486,27 @@ class AWSProvider(CloudProviderBase):
                     vol["VolumeId"] for vol in volumes_response.get("Volumes", [])
                 }
 
-                cutoff_date = datetime.now(timezone.utc) - timedelta(days=90)
+                cutoff_date = datetime.now(timezone.utc) - timedelta(days=min_age_days)
 
                 for snapshot in response.get("Snapshots", []):
                     snapshot_id = snapshot["SnapshotId"]
                     volume_id = snapshot.get("VolumeId")
                     start_time = snapshot["StartTime"]
 
-                    # Check if snapshot is old and volume doesn't exist
-                    if start_time < cutoff_date and volume_id not in existing_volume_ids:
+                    # Check if snapshot is old enough and volume doesn't exist
+                    age_days = (datetime.now(timezone.utc) - start_time).days
+
+                    if age_days >= min_age_days and volume_id not in existing_volume_ids:
                         size_gb = snapshot["VolumeSize"]
                         monthly_cost = size_gb * self.PRICING["snapshot_per_gb"]
+
+                        # Determine confidence level based on age
+                        if age_days >= confidence_threshold_days:
+                            confidence = "high"
+                            reason = f"Orphaned EBS snapshots (source volume deleted) - age: {age_days} days"
+                        else:
+                            confidence = "low"
+                            reason = f"Orphaned EBS snapshots (source volume deleted) - age: {age_days} days"
 
                         # Extract name/description
                         description = snapshot.get("Description", "")
@@ -503,8 +527,11 @@ class AWSProvider(CloudProviderBase):
                                     "size_gb": size_gb,
                                     "volume_id": volume_id or "Unknown",
                                     "created_at": start_time.isoformat(),
+                                    "age_days": age_days,
                                     "description": description,
                                     "encrypted": snapshot.get("Encrypted", False),
+                                    "confidence": confidence,
+                                    "orphan_reason": reason,
                                 },
                             )
                         )
@@ -514,19 +541,33 @@ class AWSProvider(CloudProviderBase):
 
         return orphans
 
-    async def scan_stopped_instances(self, region: str) -> list[OrphanResourceData]:
+    async def scan_stopped_instances(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
         """
-        Scan for EC2 instances stopped for more than 30 days.
+        Scan for EC2 instances stopped for extended periods.
 
-        Detects instances in 'stopped' state with state transition > 30 days ago.
+        Detects instances in 'stopped' state with state transition > threshold.
 
         Args:
             region: AWS region to scan
+            detection_rules: Optional user-defined detection rules
 
         Returns:
             List of stopped instance resources
         """
         orphans: list[OrphanResourceData] = []
+
+        # Get detection rules or use defaults
+        from app.models.detection_rule import DEFAULT_DETECTION_RULES
+
+        rules = detection_rules or DEFAULT_DETECTION_RULES.get("ec2_instance", {})
+        min_stopped_days = rules.get("min_stopped_days", 30)
+        confidence_threshold_days = rules.get("confidence_threshold_days", 60)
+        enabled = rules.get("enabled", True)
+
+        if not enabled:
+            return orphans
 
         try:
             async with self.session.client("ec2", region_name=region) as ec2:
@@ -534,7 +575,9 @@ class AWSProvider(CloudProviderBase):
                     Filters=[{"Name": "instance-state-name", "Values": ["stopped"]}]
                 )
 
-                cutoff_date = datetime.now(timezone.utc) - timedelta(days=30)
+                cutoff_date = datetime.now(timezone.utc) - timedelta(
+                    days=min_stopped_days
+                )
 
                 for reservation in response.get("Reservations", []):
                     for instance in reservation.get("Instances", []):
@@ -557,8 +600,15 @@ class AWSProvider(CloudProviderBase):
                             except (ValueError, IndexError):
                                 pass
 
-                        # Only include if stopped > 30 days
-                        if stopped_date and stopped_date < cutoff_date:
+                        # Calculate stopped days
+                        stopped_days = 0
+                        if stopped_date:
+                            stopped_days = (
+                                datetime.now(timezone.utc) - stopped_date
+                            ).days
+
+                        # Only include if stopped >= min_stopped_days
+                        if stopped_date and stopped_days >= min_stopped_days:
                             instance_type = instance["InstanceType"]
 
                             # Extract name from tags
@@ -567,6 +617,14 @@ class AWSProvider(CloudProviderBase):
                                 if tag["Key"] == "Name":
                                     name = tag["Value"]
                                     break
+
+                            # Determine confidence level based on stopped days
+                            if stopped_days >= confidence_threshold_days:
+                                confidence = "high"
+                                reason = f"EC2 instance stopped for {stopped_days} days (high confidence)"
+                            else:
+                                confidence = "low"
+                                reason = f"EC2 instance stopped for {stopped_days} days (low confidence)"
 
                             # Note: Stopped instances don't incur compute costs,
                             # but EBS volumes attached still cost money
@@ -589,10 +647,10 @@ class AWSProvider(CloudProviderBase):
                                     resource_metadata={
                                         "instance_type": instance_type,
                                         "stopped_date": stopped_date.isoformat(),
-                                        "stopped_days": (
-                                            datetime.now(timezone.utc) - stopped_date
-                                        ).days,
+                                        "stopped_days": stopped_days,
                                         "state_transition_reason": state_transition_reason,
+                                        "confidence": confidence,
+                                        "orphan_reason": reason,
                                     },
                                 )
                             )

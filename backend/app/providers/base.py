@@ -111,12 +111,15 @@ class CloudProviderBase(ABC):
         pass
 
     @abstractmethod
-    async def scan_orphaned_snapshots(self, region: str) -> list[OrphanResourceData]:
+    async def scan_orphaned_snapshots(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
         """
         Scan for orphaned snapshots (parent resource deleted).
 
         Args:
             region: Region to scan
+            detection_rules: Optional user-defined detection rules
 
         Returns:
             List of orphan snapshot resources
@@ -124,12 +127,15 @@ class CloudProviderBase(ABC):
         pass
 
     @abstractmethod
-    async def scan_stopped_instances(self, region: str) -> list[OrphanResourceData]:
+    async def scan_stopped_instances(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
         """
         Scan for compute instances stopped for extended period.
 
         Args:
             region: Region to scan
+            detection_rules: Optional user-defined detection rules
 
         Returns:
             List of stopped instance resources
@@ -297,8 +303,12 @@ class CloudProviderBase(ABC):
             await self.scan_unattached_volumes(region, rules.get("ebs_volume"))
         )
         results.extend(await self.scan_unassigned_ips(region, rules.get("elastic_ip")))
-        results.extend(await self.scan_orphaned_snapshots(region))
-        results.extend(await self.scan_stopped_instances(region))
+        results.extend(
+            await self.scan_orphaned_snapshots(region, rules.get("ebs_snapshot"))
+        )
+        results.extend(
+            await self.scan_stopped_instances(region, rules.get("ec2_instance"))
+        )
         results.extend(await self.scan_unused_load_balancers(region))
         results.extend(await self.scan_stopped_databases(region))
         results.extend(await self.scan_unused_nat_gateways(region))

@@ -5,12 +5,9 @@ from typing import Any
 
 from cryptography.fernet import Fernet
 from jose import JWTError, jwt
-from passlib.context import CryptContext
+import bcrypt as _bcrypt
 
 from app.core.config import settings
-
-# Password hashing context (bcrypt with cost factor 12)
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto", bcrypt__rounds=12)
 
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
@@ -24,7 +21,13 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
     Returns:
         True if password matches, False otherwise
     """
-    return pwd_context.verify(plain_password, hashed_password)
+    # Bcrypt has a 72 byte limit - truncate password bytes if necessary
+    password_bytes = plain_password.encode('utf-8')
+    if len(password_bytes) > 72:
+        password_bytes = password_bytes[:72]
+
+    # Use bcrypt directly to avoid passlib's internal checks
+    return _bcrypt.checkpw(password_bytes, hashed_password.encode('utf-8'))
 
 
 def get_password_hash(password: str) -> str:
@@ -37,7 +40,15 @@ def get_password_hash(password: str) -> str:
     Returns:
         Hashed password
     """
-    return pwd_context.hash(password)
+    # Bcrypt has a 72 byte limit - truncate password bytes if necessary
+    password_bytes = password.encode('utf-8')
+    if len(password_bytes) > 72:
+        password_bytes = password_bytes[:72]
+
+    # Use bcrypt directly with cost factor 12
+    salt = _bcrypt.gensalt(rounds=12)
+    hashed = _bcrypt.hashpw(password_bytes, salt)
+    return hashed.decode('utf-8')
 
 
 def create_access_token(data: dict[str, Any], expires_delta: timedelta | None = None) -> str:

@@ -99,22 +99,38 @@ async def create_or_update_rule(
     # Check if rule already exists
     existing_rule = await get_rule_by_type(db, user_id, resource_type)
 
+    print(f"\n🔍 DEBUG - Resource type: {resource_type}")
+    print(f"🔍 DEBUG - User ID: {user_id}")
+    print(f"🔍 DEBUG - Existing rule found: {existing_rule is not None}")
+    print(f"🔍 DEBUG - Rules to save: {rules}\n")
+
     if existing_rule:
         # Update existing rule
+        print(f"🔍 DEBUG - Updating existing rule ID: {existing_rule.id}")
         existing_rule.rules = rules
-        await db.commit()
-        await db.refresh(existing_rule)
+        await db.flush()  # Flush to DB but don't commit yet
+        print("🔍 DEBUG - Flushed")
+        await db.refresh(existing_rule)  # Refresh before commit
+        print("🔍 DEBUG - Refreshed")
+        await db.commit()  # Now commit
+        print("🔍 DEBUG - Rule updated successfully\n")
         return existing_rule
     else:
         # Create new rule
+        print("🔍 DEBUG - Creating new rule")
         new_rule = DetectionRule(
             user_id=user_id,
             resource_type=resource_type,
             rules=rules,
         )
         db.add(new_rule)
-        await db.commit()
-        await db.refresh(new_rule)
+        print(f"🔍 DEBUG - New rule ID: {new_rule.id}")
+        await db.flush()  # Flush to DB to generate ID
+        print("🔍 DEBUG - Flushed to DB")
+        await db.refresh(new_rule)  # Refresh to get generated fields
+        print("🔍 DEBUG - Refreshed from DB")
+        await db.commit()  # Now commit the transaction
+        print("🔍 DEBUG - Committed transaction\n")
         return new_rule
 
 

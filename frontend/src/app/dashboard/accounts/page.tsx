@@ -2,11 +2,12 @@
 
 import { useEffect, useState } from "react";
 import { useAccountStore } from "@/stores/useAccountStore";
-import { Plus, Trash2, RefreshCw, CheckCircle, XCircle, HelpCircle, ChevronDown, ChevronUp, Copy, ExternalLink } from "lucide-react";
+import { Plus, Trash2, RefreshCw, CheckCircle, XCircle, HelpCircle, ChevronDown, ChevronUp, Copy, ExternalLink, Edit } from "lucide-react";
 
 export default function AccountsPage() {
   const { accounts, fetchAccounts, deleteAccount, isLoading } = useAccountStore();
   const [showAddForm, setShowAddForm] = useState(false);
+  const [editingAccount, setEditingAccount] = useState<any>(null);
 
   useEffect(() => {
     fetchAccounts();
@@ -34,6 +35,14 @@ export default function AccountsPage() {
       {/* Add Account Form */}
       {showAddForm && <AddAccountForm onClose={() => setShowAddForm(false)} />}
 
+      {/* Edit Account Form */}
+      {editingAccount && (
+        <EditAccountForm
+          account={editingAccount}
+          onClose={() => setEditingAccount(null)}
+        />
+      )}
+
       {/* Accounts List */}
       {isLoading ? (
         <div className="flex items-center justify-center py-12">
@@ -59,6 +68,7 @@ export default function AccountsPage() {
             <AccountCard
               key={account.id}
               account={account}
+              onEdit={() => setEditingAccount(account)}
               onDelete={() => deleteAccount(account.id)}
             />
           ))}
@@ -68,7 +78,7 @@ export default function AccountsPage() {
   );
 }
 
-function AccountCard({ account, onDelete }: any) {
+function AccountCard({ account, onEdit, onDelete }: any) {
   const providerColors: any = {
     aws: "bg-orange-100 text-orange-700",
     azure: "bg-blue-100 text-blue-700",
@@ -110,12 +120,22 @@ function AccountCard({ account, onDelete }: any) {
             </p>
           )}
         </div>
-        <button
-          onClick={onDelete}
-          className="rounded-lg p-2 text-gray-400 transition-colors hover:bg-red-50 hover:text-red-600"
-        >
-          <Trash2 className="h-5 w-5" />
-        </button>
+        <div className="flex gap-2">
+          <button
+            onClick={onEdit}
+            className="rounded-lg p-2 text-gray-400 transition-colors hover:bg-blue-50 hover:text-blue-600"
+            title="Edit account"
+          >
+            <Edit className="h-5 w-5" />
+          </button>
+          <button
+            onClick={onDelete}
+            className="rounded-lg p-2 text-gray-400 transition-colors hover:bg-red-50 hover:text-red-600"
+            title="Delete account"
+          >
+            <Trash2 className="h-5 w-5" />
+          </button>
+        </div>
       </div>
     </div>
   );
@@ -138,7 +158,24 @@ function AWSCredentialsHelp() {
       "ce:GetCostForecast",
       "cloudwatch:GetMetricStatistics",
       "cloudwatch:ListMetrics",
-      "sts:GetCallerIdentity"
+      "sts:GetCallerIdentity",
+      "fsx:DescribeFileSystems",
+      "kafka:ListClusters",
+      "kafka:ListClustersV2",
+      "eks:ListClusters",
+      "eks:DescribeCluster",
+      "eks:ListNodegroups",
+      "eks:DescribeNodegroup",
+      "sagemaker:ListEndpoints",
+      "sagemaker:DescribeEndpoint",
+      "sagemaker:DescribeEndpointConfig",
+      "redshift:DescribeClusters",
+      "elasticache:DescribeCacheClusters",
+      "globalaccelerator:ListAccelerators",
+      "globalaccelerator:ListListeners",
+      "globalaccelerator:ListEndpointGroups",
+      "kinesis:ListStreams",
+      "kinesis:DescribeStream"
     ],
     "Resource": "*"
   }]
@@ -449,6 +486,158 @@ function AddAccountForm({ onClose }: { onClose: () => void }) {
           </button>
         </div>
       </form>
+    </div>
+  );
+}
+
+function EditAccountForm({ account, onClose }: { account: any; onClose: () => void }) {
+  const { updateAccount, isLoading, error } = useAccountStore();
+  const [formData, setFormData] = useState({
+    account_name: account.account_name || "",
+    aws_access_key_id: "",
+    aws_secret_access_key: "",
+    regions: account.regions?.join(",") || "us-east-1",
+  });
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    try {
+      const updateData: any = {
+        account_name: formData.account_name,
+        regions: formData.regions.split(",").map((r) => r.trim()),
+      };
+
+      // Only include credentials if they were provided
+      if (formData.aws_access_key_id && formData.aws_secret_access_key) {
+        updateData.aws_access_key_id = formData.aws_access_key_id;
+        updateData.aws_secret_access_key = formData.aws_secret_access_key;
+      }
+
+      await updateAccount(account.id, updateData);
+      onClose();
+    } catch (err) {
+      // Error handled by store
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50 p-4">
+      <div className="max-w-2xl w-full rounded-2xl border-2 border-blue-200 bg-white p-8 shadow-xl max-h-[90vh] overflow-y-auto">
+        <div className="flex items-center justify-between mb-6">
+          <h2 className="text-2xl font-bold bg-gradient-to-r from-blue-600 to-purple-600 bg-clip-text text-transparent">
+            Edit AWS Account
+          </h2>
+        </div>
+
+        <form onSubmit={handleSubmit} className="space-y-5">
+          {error && (
+            <div className="rounded-xl bg-red-50 border border-red-200 p-4 text-sm text-red-700 flex items-start gap-2">
+              <XCircle className="h-5 w-5 flex-shrink-0 mt-0.5" />
+              <span>{error}</span>
+            </div>
+          )}
+
+          <div>
+            <label className="block text-sm font-semibold text-gray-700 mb-2">
+              Account Name *
+            </label>
+            <input
+              required
+              type="text"
+              value={formData.account_name}
+              onChange={(e) =>
+                setFormData({ ...formData, account_name: e.target.value })
+              }
+              className="block w-full rounded-xl border-2 border-gray-300 px-4 py-3 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/20 transition-all"
+              placeholder="Production AWS"
+            />
+          </div>
+
+          <div className="rounded-xl bg-blue-50 border border-blue-200 p-4">
+            <p className="text-sm text-blue-900">
+              <strong>Update Credentials (optional):</strong> Leave empty to keep existing credentials. Fill both fields to update.
+            </p>
+          </div>
+
+          <div>
+            <label className="block text-sm font-semibold text-gray-700 mb-2">
+              New AWS Access Key ID (optional)
+            </label>
+            <input
+              type="text"
+              value={formData.aws_access_key_id}
+              onChange={(e) =>
+                setFormData({ ...formData, aws_access_key_id: e.target.value })
+              }
+              className="block w-full rounded-xl border-2 border-gray-300 px-4 py-3 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/20 transition-all font-mono text-sm"
+              placeholder="AKIAIOSFODNN7EXAMPLE"
+            />
+          </div>
+
+          <div>
+            <label className="block text-sm font-semibold text-gray-700 mb-2">
+              New AWS Secret Access Key (optional)
+            </label>
+            <input
+              type="password"
+              value={formData.aws_secret_access_key}
+              onChange={(e) =>
+                setFormData({
+                  ...formData,
+                  aws_secret_access_key: e.target.value,
+                })
+              }
+              className="block w-full rounded-xl border-2 border-gray-300 px-4 py-3 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/20 transition-all font-mono text-sm"
+              placeholder="wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+            />
+          </div>
+
+          <div>
+            <label className="block text-sm font-semibold text-gray-700 mb-2">
+              Regions (comma-separated, max 3)
+            </label>
+            <input
+              type="text"
+              value={formData.regions}
+              onChange={(e) =>
+                setFormData({ ...formData, regions: e.target.value })
+              }
+              className="block w-full rounded-xl border-2 border-gray-300 px-4 py-3 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/20 transition-all font-mono"
+              placeholder="us-east-1,eu-west-1,eu-central-1"
+            />
+            <p className="mt-2 text-xs text-gray-500">
+              💡 Tip: Limit to 3 regions for faster scans
+            </p>
+          </div>
+
+          <div className="flex gap-4 pt-4">
+            <button
+              type="submit"
+              disabled={isLoading}
+              className="flex-1 rounded-xl bg-gradient-to-r from-blue-600 to-purple-600 px-6 py-3 font-semibold text-white shadow-lg hover:shadow-xl transition-all hover:scale-[1.02] disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+            >
+              {isLoading ? (
+                <>
+                  <RefreshCw className="h-5 w-5 animate-spin" />
+                  Updating...
+                </>
+              ) : (
+                <>
+                  <CheckCircle className="h-5 w-5" />
+                  Update Account
+                </>
+              )}
+            </button>
+            <button
+              type="button"
+              onClick={onClose}
+              className="flex-1 rounded-xl border-2 border-gray-300 bg-white px-6 py-3 font-semibold text-gray-700 hover:bg-gray-50 transition-all"
+            >
+              Cancel
+            </button>
+          </div>
+        </form>
+      </div>
     </div>
   );
 }
