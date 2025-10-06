@@ -481,10 +481,46 @@ function ResourceCard({ resource, onIgnore, onMarkForDeletion, onDelete }: any) 
                   {/* Elastic IP specific criteria */}
                   {resource.resource_type === 'elastic_ip' && (
                     <div className="space-y-1 text-sm">
-                      <div className="flex items-center gap-2 text-red-700">
-                        <span className="font-semibold">✗</span>
-                        <span>Not associated with any instance or network interface</span>
-                      </div>
+                      {resource.resource_metadata?.orphan_type === 'unassociated' && (
+                        <div className="flex items-center gap-2 text-red-700">
+                          <span className="font-semibold">✗</span>
+                          <span>Not associated with any instance or network interface</span>
+                        </div>
+                      )}
+                      {resource.resource_metadata?.orphan_type === 'associated_stopped_instance' && (
+                        <>
+                          <div className="flex items-center gap-2 text-red-700">
+                            <span className="font-semibold">✗</span>
+                            <span>
+                              Associated to <span className="font-semibold">STOPPED</span> instance{' '}
+                              <code className="bg-red-100 px-1 rounded text-xs">
+                                {resource.resource_metadata?.associated_instance_id}
+                              </code>
+                            </span>
+                          </div>
+                          <div className="flex items-center gap-2 text-red-700">
+                            <span className="font-semibold">✗</span>
+                            <span>Elastic IP on stopped instance is charged ($3.60/month)</span>
+                          </div>
+                        </>
+                      )}
+                      {resource.resource_metadata?.orphan_type === 'associated_orphaned_eni' && (
+                        <>
+                          <div className="flex items-center gap-2 text-red-700">
+                            <span className="font-semibold">✗</span>
+                            <span>
+                              Associated to orphaned network interface{' '}
+                              <code className="bg-red-100 px-1 rounded text-xs">
+                                {resource.resource_metadata?.network_interface_id}
+                              </code>
+                            </span>
+                          </div>
+                          <div className="flex items-center gap-2 text-red-700">
+                            <span className="font-semibold">✗</span>
+                            <span>ENI not attached to any instance (still charged)</span>
+                          </div>
+                        </>
+                      )}
                       <div className="flex items-center gap-2 text-gray-600 mt-1">
                         <span className="font-semibold">ℹ️</span>
                         <span className="italic">{resource.resource_metadata.orphan_reason}</span>
