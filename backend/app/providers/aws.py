@@ -417,9 +417,12 @@ class AWSProvider(CloudProviderBase):
         self, region: str, detection_rules: dict | None = None
     ) -> list[OrphanResourceData]:
         """
-        Scan for unassigned Elastic IP addresses in a region.
+        Scan for unassigned Elastic IP addresses AND associated IPs on stopped instances.
 
-        Detects Elastic IPs not associated with any instance or network interface.
+        Detects:
+        - Elastic IPs not associated with any instance or network interface
+        - Elastic IPs associated to stopped EC2 instances (still charged!)
+        - Elastic IPs associated to orphaned ENIs (network interfaces not attached)
 
         Args:
             region: AWS region to scan
@@ -446,75 +449,124 @@ class AWSProvider(CloudProviderBase):
             async with self.session.client("ec2", region_name=region) as ec2:
                 response = await ec2.describe_addresses()
 
+                # Get all instances to check their state
+                instances_response = await ec2.describe_instances()
+                instance_states = {}
+                for reservation in instances_response.get("Reservations", []):
+                    for instance in reservation.get("Instances", []):
+                        instance_states[instance["InstanceId"]] = instance["State"]["Name"]
+
                 for address in response.get("Addresses", []):
-                    # Check if IP is not associated
-                    if "AssociationId" not in address:
-                        allocation_id = address.get("AllocationId", "N/A")
-                        public_ip = address.get("PublicIp", "Unknown")
+                    allocation_id = address.get("AllocationId", "N/A")
+                    public_ip = address.get("PublicIp", "Unknown")
+                    association_id = address.get("AssociationId")
+                    instance_id = address.get("InstanceId")
+                    network_interface_id = address.get("NetworkInterfaceId")
 
-                        # AWS EC2 API doesn't provide allocation time for Elastic IPs
-                        # We need to use CloudWatch Logs or CloudTrail to get precise creation time
-                        # Workaround: Check the "NetworkInterfaceOwnerId" last state change
+                    # Determine orphan status
+                    should_flag = False
+                    orphan_type = ""
 
-                        # For MVP: Use a heuristic - if the IP has never been associated,
-                        # it's likely recent OR very old (both cases warrant investigation)
-                        # If user wants age filtering, they must add "CreatedDate" tag manually
+                    if not association_id:
+                        # CASE 1: Not associated at all (original logic)
+                        should_flag = True
+                        orphan_type = "unassociated"
+                    elif instance_id and instance_id in instance_states:
+                        # CASE 2: Associated to an instance - check if instance is stopped
+                        instance_state = instance_states[instance_id]
+                        if instance_state == "stopped":
+                            should_flag = True
+                            orphan_type = "associated_stopped_instance"
+                    elif network_interface_id and not instance_id:
+                        # CASE 3: Associated to ENI but ENI not attached to instance
+                        should_flag = True
+                        orphan_type = "associated_orphaned_eni"
 
-                        name = None
-                        created_date = None
+                    if not should_flag:
+                        continue
 
-                        for tag in address.get("Tags", []):
-                            if tag["Key"] == "Name":
-                                name = tag["Value"]
-                            elif tag["Key"] == "CreatedDate":
-                                # User can manually tag IPs with creation date in ISO format
-                                try:
-                                    from datetime import datetime
-                                    created_date = datetime.fromisoformat(tag["Value"].replace('Z', '+00:00'))
-                                except Exception:
-                                    pass
+                    # Extract tags
+                    name = None
+                    created_date = None
 
-                        # Calculate age if creation date is available
+                    for tag in address.get("Tags", []):
+                        if tag["Key"] == "Name":
+                            name = tag["Value"]
+                        elif tag["Key"] == "CreatedDate":
+                            # User can manually tag IPs with creation date in ISO format
+                            try:
+                                from datetime import datetime
+                                created_date = datetime.fromisoformat(tag["Value"].replace('Z', '+00:00'))
+                            except Exception:
+                                pass
+
+                    # Calculate age if creation date is available
+                    age_days = -1
+                    if created_date:
+                        age_days = (datetime.now(timezone.utc) - created_date).days
+                        if age_days < min_age_days:
+                            continue
+
+                    # Determine confidence and reason based on orphan type
+                    if orphan_type == "unassociated":
+                        # Original logic for unassociated IPs
                         if created_date:
-                            age_days = (datetime.now(timezone.utc) - created_date).days
-                            if age_days < min_age_days:
-                                continue
                             confidence = "high" if age_days >= confidence_threshold_days else "medium"
                             reason = f"Not associated for {age_days} days"
                         else:
-                            # No creation date available - can't determine age
-                            # If user requires min_age > 0, skip to avoid false positives
+                            # No creation date available
                             if min_age_days > 0:
                                 continue  # Skip - can't verify age requirement
-
-                            # Only detect if min_age = 0 (immediate detection)
-                            age_days = -1  # -1 indicates unknown age
                             confidence = "low"
                             reason = "Not associated (age unknown - add 'CreatedDate' tag for tracking)"
 
-                        # Build metadata
-                        metadata = {
-                            "public_ip": public_ip,
-                            "domain": address.get("Domain", "vpc"),
-                            "age_days": age_days,
-                            "confidence": confidence,
-                            "orphan_reason": reason,
-                        }
+                    elif orphan_type == "associated_stopped_instance":
+                        # IP associated to stopped instance - CHARGED!
+                        confidence = "high"
+                        reason = f"Associated to stopped instance {instance_id} (charged $3.60/month)"
 
-                        # Add created_at if we have it from the tag
-                        if created_date:
-                            metadata["created_at"] = created_date.isoformat()
+                    elif orphan_type == "associated_orphaned_eni":
+                        # IP associated to ENI but ENI not attached to instance
+                        confidence = "high"
+                        reason = f"Associated to orphaned network interface {network_interface_id} (charged)"
 
-                        orphans.append(
-                            OrphanResourceData(
-                                resource_type="elastic_ip",
-                                resource_id=allocation_id,
-                                resource_name=name,
-                                region=region,
-                                estimated_monthly_cost=self.PRICING["elastic_ip"],
-                                resource_metadata=metadata,
-                            )
+                    else:
+                        # Fallback
+                        confidence = "low"
+                        reason = "Detected as potentially orphaned"
+
+                    # Build metadata
+                    metadata = {
+                        "public_ip": public_ip,
+                        "domain": address.get("Domain", "vpc"),
+                        "age_days": age_days,
+                        "confidence": confidence,
+                        "orphan_reason": reason,
+                        "orphan_type": orphan_type,
+                        "is_associated": bool(association_id),
+                    }
+
+                    # Add association info if available
+                    if instance_id:
+                        metadata["associated_instance_id"] = instance_id
+                        metadata["instance_state"] = instance_states.get(instance_id, "unknown")
+                    if network_interface_id:
+                        metadata["network_interface_id"] = network_interface_id
+
+                    # Add created_at if we have it from the tag
+                    if created_date:
+                        metadata["created_at"] = created_date.isoformat()
+
+                    orphans.append(
+                        OrphanResourceData(
+                            resource_type="elastic_ip",
+                            resource_id=allocation_id,
+                            resource_name=name,
+                            region=region,
+                            estimated_monthly_cost=self.PRICING["elastic_ip"],
+                            resource_metadata=metadata,
                         )
+                    )
 
         except ClientError as e:
             print(f"Error scanning unassigned IPs in {region}: {e}")
