@@ -599,20 +599,121 @@ function ResourceCard({ resource, onIgnore, onMarkForDeletion, onDelete }: any) 
                   {/* EBS Snapshot specific criteria */}
                   {resource.resource_type === 'ebs_snapshot' && (
                     <div className="space-y-1 text-sm">
-                      <div className="flex items-center gap-2 text-red-700">
-                        <span className="font-semibold">✗</span>
-                        <span>Source volume no longer exists</span>
-                      </div>
-                      {resource.resource_metadata?.age_days && resource.resource_metadata.age_days >= 90 && (
+                      {/* Check orphan type */}
+                      {resource.resource_metadata?.orphan_type === 'volume_deleted' && (
                         <div className="flex items-center gap-2 text-red-700">
                           <span className="font-semibold">✗</span>
-                          <span>Snapshot is {resource.resource_metadata.age_days} days old</span>
+                          <span>Source volume no longer exists (deleted)</span>
+                        </div>
+                      )}
+                      {resource.resource_metadata?.orphan_type === 'idle_volume_snapshot' && (
+                        <>
+                          {resource.resource_metadata?.source_volume_status === 'unattached' && (
+                            <div className="flex items-center gap-2 text-orange-700">
+                              <span className="font-semibold">⚠️</span>
+                              <span>
+                                Snapshot of <span className="font-semibold">unattached</span> volume{' '}
+                                <code className="bg-orange-100 px-1 rounded text-xs">
+                                  {resource.resource_metadata?.volume_id}
+                                </code>
+                              </span>
+                            </div>
+                          )}
+                          {resource.resource_metadata?.source_volume_status === 'attached_idle' && (
+                            <div className="flex items-center gap-2 text-orange-700">
+                              <span className="font-semibold">⚠️</span>
+                              <span>
+                                Snapshot of <span className="font-semibold">idle</span> volume{' '}
+                                <code className="bg-orange-100 px-1 rounded text-xs">
+                                  {resource.resource_metadata?.volume_id}
+                                </code>
+                              </span>
+                            </div>
+                          )}
+                          <div className="flex items-center gap-2 text-red-700">
+                            <span className="font-semibold">✗</span>
+                            <span>Source volume is orphaned/unused (snapshot likely unnecessary)</span>
+                          </div>
+                        </>
+                      )}
+                      {resource.resource_metadata?.orphan_type === 'redundant_snapshot' && (
+                        <>
+                          <div className="flex items-center gap-2 text-purple-700">
+                            <span className="font-semibold">🔄</span>
+                            <span>
+                              Redundant snapshot (position{' '}
+                              <span className="font-semibold">
+                                #{resource.resource_metadata?.redundant_info?.position}
+                              </span>{' '}
+                              of {resource.resource_metadata?.redundant_info?.total_snapshots})
+                            </span>
+                          </div>
+                          <div className="flex items-center gap-2 text-red-700">
+                            <span className="font-semibold">✗</span>
+                            <span>
+                              Exceeds retention limit ({resource.resource_metadata?.redundant_info?.retention_limit} snapshots)
+                            </span>
+                          </div>
+                          <div className="flex items-center gap-2 text-purple-700">
+                            <span className="font-semibold">💾</span>
+                            <span>
+                              Volume{' '}
+                              <code className="bg-purple-100 px-1 rounded text-xs">
+                                {resource.resource_metadata?.volume_id}
+                              </code>{' '}
+                              has too many backups
+                            </span>
+                          </div>
+                        </>
+                      )}
+                      {resource.resource_metadata?.orphan_type === 'unused_ami_snapshot' && (
+                        <>
+                          <div className="flex items-center gap-2 text-indigo-700">
+                            <span className="font-semibold">📀</span>
+                            <span>
+                              Snapshot of unused AMI{' '}
+                              <code className="bg-indigo-100 px-1 rounded text-xs">
+                                {resource.resource_metadata?.ami_info?.ami_id}
+                              </code>
+                            </span>
+                          </div>
+                          <div className="flex items-center gap-2 text-red-700">
+                            <span className="font-semibold">✗</span>
+                            <span>AMI not used to launch instances in 180+ days</span>
+                          </div>
+                          <div className="flex items-center gap-2 text-indigo-700">
+                            <span className="font-semibold">ℹ️</span>
+                            <span className="text-xs">Snapshot can be deleted if AMI is no longer needed</span>
+                          </div>
+                        </>
+                      )}
+                      {resource.resource_metadata?.age_days !== undefined && (
+                        <div className="flex items-center gap-2 text-gray-700">
+                          <span className="font-semibold">📅</span>
+                          <span>
+                            Snapshot created {resource.resource_metadata.age_days} day{resource.resource_metadata.age_days !== 1 ? 's' : ''} ago
+                            {resource.resource_metadata.age_days >= 180 && ' (very old)'}
+                            {resource.resource_metadata.age_days >= 90 && resource.resource_metadata.age_days < 180 && ' (old)'}
+                            {resource.resource_metadata.age_days < 90 && ' (recent)'}
+                          </span>
+                        </div>
+                      )}
+                      {resource.resource_metadata?.size_gb && (
+                        <div className="flex items-center gap-2 text-gray-700">
+                          <span className="font-semibold">💾</span>
+                          <span>Size: {resource.resource_metadata.size_gb} GB</span>
                         </div>
                       )}
                       <div className="flex items-center gap-2 text-gray-600 mt-1">
                         <span className="font-semibold">ℹ️</span>
                         <span className="italic">{resource.resource_metadata.orphan_reason}</span>
                       </div>
+                      {resource.resource_metadata?.confidence === 'high' && (
+                        <div className="flex items-center gap-2 text-green-700 mt-1 bg-green-50 p-2 rounded">
+                          <span className="font-semibold">💡</span>
+                          <span className="text-xs">Safe to delete if not needed for recovery or compliance</span>
+                        </div>
+                      )}
                     </div>
                   )}
 

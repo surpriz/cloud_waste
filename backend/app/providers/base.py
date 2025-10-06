@@ -112,14 +112,15 @@ class CloudProviderBase(ABC):
 
     @abstractmethod
     async def scan_orphaned_snapshots(
-        self, region: str, detection_rules: dict | None = None
+        self, region: str, detection_rules: dict | None = None, orphaned_volume_ids: list[str] | None = None
     ) -> list[OrphanResourceData]:
         """
-        Scan for orphaned snapshots (parent resource deleted).
+        Scan for orphaned snapshots (parent resource deleted or idle).
 
         Args:
             region: Region to scan
             detection_rules: Optional user-defined detection rules
+            orphaned_volume_ids: List of volume IDs detected as orphaned/idle
 
         Returns:
             List of orphan snapshot resources
@@ -299,12 +300,22 @@ class CloudProviderBase(ABC):
 
         # Execute all scan methods with user's rules
         # Original 7 resource types
-        results.extend(
-            await self.scan_unattached_volumes(region, rules.get("ebs_volume"))
-        )
+
+        # First, scan volumes to collect orphaned/idle volume IDs
+        volume_orphans = await self.scan_unattached_volumes(region, rules.get("ebs_volume"))
+        results.extend(volume_orphans)
+
+        # Extract orphaned volume IDs to pass to snapshot scanner
+        orphaned_volume_ids = [
+            vol.resource_id for vol in volume_orphans
+            if vol.resource_metadata.get("orphan_type") in ["unattached", "attached_never_used", "attached_idle"]
+        ]
+
         results.extend(await self.scan_unassigned_ips(region, rules.get("elastic_ip")))
+
+        # Scan snapshots with orphaned volume IDs
         results.extend(
-            await self.scan_orphaned_snapshots(region, rules.get("ebs_snapshot"))
+            await self.scan_orphaned_snapshots(region, rules.get("ebs_snapshot"), orphaned_volume_ids)
         )
         results.extend(
             await self.scan_stopped_instances(region, rules.get("ec2_instance"))

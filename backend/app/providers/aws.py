@@ -574,16 +574,19 @@ class AWSProvider(CloudProviderBase):
         return orphans
 
     async def scan_orphaned_snapshots(
-        self, region: str, detection_rules: dict | None = None
+        self, region: str, detection_rules: dict | None = None, orphaned_volume_ids: list[str] | None = None
     ) -> list[OrphanResourceData]:
         """
         Scan for orphaned EBS snapshots in a region.
 
-        Detects snapshots older than threshold where source volume no longer exists.
+        Detects:
+        - Snapshots where source volume no longer exists
+        - Snapshots of volumes that are idle/orphaned (if enabled)
 
         Args:
             region: AWS region to scan
             detection_rules: Optional user-defined detection rules
+            orphaned_volume_ids: List of volume IDs detected as orphaned/idle (optional)
 
         Returns:
             List of orphan snapshot resources
@@ -596,10 +599,19 @@ class AWSProvider(CloudProviderBase):
         rules = detection_rules or DEFAULT_DETECTION_RULES.get("ebs_snapshot", {})
         min_age_days = rules.get("min_age_days", 90)
         confidence_threshold_days = rules.get("confidence_threshold_days", 180)
+        detect_idle_volume_snapshots = rules.get("detect_idle_volume_snapshots", True)
+        detect_redundant_snapshots = rules.get("detect_redundant_snapshots", True)
+        max_snapshots_per_volume = rules.get("max_snapshots_per_volume", 7)
+        detect_unused_ami_snapshots = rules.get("detect_unused_ami_snapshots", True)
+        min_ami_unused_days = rules.get("min_ami_unused_days", 180)
         enabled = rules.get("enabled", True)
 
         if not enabled:
             return orphans
+
+        # Use provided orphaned volume IDs or empty list
+        if orphaned_volume_ids is None:
+            orphaned_volume_ids = []
 
         try:
             async with self.session.client("ec2", region_name=region) as ec2:
@@ -609,16 +621,75 @@ class AWSProvider(CloudProviderBase):
 
                 # Get all snapshots owned by this account
                 response = await ec2.describe_snapshots(OwnerIds=[account_id])
+                all_snapshots = response.get("Snapshots", [])
 
-                # Get all existing volume IDs
+                # Get all existing volumes with their status
                 volumes_response = await ec2.describe_volumes()
-                existing_volume_ids = {
-                    vol["VolumeId"] for vol in volumes_response.get("Volumes", [])
-                }
+                volume_info = {}
+                for vol in volumes_response.get("Volumes", []):
+                    volume_info[vol["VolumeId"]] = {
+                        "state": vol["State"],
+                        "attachments": vol.get("Attachments", []),
+                    }
+
+                # Get all AMIs owned by this account (for unused AMI detection)
+                amis_response = await ec2.describe_images(Owners=[account_id])
+                all_amis = amis_response.get("Images", [])
+
+                # Build AMI usage info
+                ami_snapshot_ids = set()  # Snapshots used by AMIs
+                unused_ami_snapshot_ids = set()  # Snapshots of unused AMIs
+
+                if detect_unused_ami_snapshots:
+                    for ami in all_amis:
+                        ami_id = ami["ImageId"]
+                        ami_creation_date = datetime.fromisoformat(ami["CreationDate"].replace('Z', '+00:00'))
+                        ami_age_days = (datetime.now(timezone.utc) - ami_creation_date).days
+
+                        # Extract snapshot IDs from AMI block device mappings
+                        ami_snapshots = []
+                        for block_device in ami.get("BlockDeviceMappings", []):
+                            if "Ebs" in block_device and "SnapshotId" in block_device["Ebs"]:
+                                snapshot_id = block_device["Ebs"]["SnapshotId"]
+                                ami_snapshots.append(snapshot_id)
+                                ami_snapshot_ids.add(snapshot_id)
+
+                        # Check if AMI has been used to launch instances
+                        if ami_age_days >= min_ami_unused_days:
+                            # Check if any instances use this AMI
+                            instances_with_ami = await ec2.describe_instances(
+                                Filters=[{"Name": "image-id", "Values": [ami_id]}]
+                            )
+
+                            has_instances = False
+                            for reservation in instances_with_ami.get("Reservations", []):
+                                if len(reservation.get("Instances", [])) > 0:
+                                    has_instances = True
+                                    break
+
+                            # If AMI unused, mark its snapshots as orphaned
+                            if not has_instances:
+                                unused_ami_snapshot_ids.update(ami_snapshots)
+
+                # Group snapshots by volume for redundancy detection
+                snapshots_by_volume = {}
+                if detect_redundant_snapshots:
+                    for snapshot in all_snapshots:
+                        volume_id = snapshot.get("VolumeId")
+                        if volume_id:
+                            if volume_id not in snapshots_by_volume:
+                                snapshots_by_volume[volume_id] = []
+                            snapshots_by_volume[volume_id].append(snapshot)
+
+                    # Sort snapshots by creation date (newest first) for each volume
+                    for volume_id in snapshots_by_volume:
+                        snapshots_by_volume[volume_id].sort(
+                            key=lambda s: s["StartTime"], reverse=True
+                        )
 
                 cutoff_date = datetime.now(timezone.utc) - timedelta(days=min_age_days)
 
-                for snapshot in response.get("Snapshots", []):
+                for snapshot in all_snapshots:
                     snapshot_id = snapshot["SnapshotId"]
                     volume_id = snapshot.get("VolumeId")
                     start_time = snapshot["StartTime"]
@@ -626,17 +697,126 @@ class AWSProvider(CloudProviderBase):
                     # Check if snapshot is old enough and volume doesn't exist
                     age_days = (datetime.now(timezone.utc) - start_time).days
 
-                    if age_days >= min_age_days and volume_id not in existing_volume_ids:
+                    # Determine orphan status
+                    should_flag = False
+                    orphan_type = ""
+                    source_volume_status = "unknown"
+                    redundant_info = None
+                    ami_info = None
+
+                    # CASE 1: Volume no longer exists (original logic)
+                    if volume_id not in volume_info and age_days >= min_age_days:
+                        should_flag = True
+                        orphan_type = "volume_deleted"
+                        source_volume_status = "deleted"
+
+                    # CASE 2: Snapshot of idle/orphaned volume
+                    elif detect_idle_volume_snapshots and volume_id in orphaned_volume_ids:
+                        should_flag = True
+                        orphan_type = "idle_volume_snapshot"
+                        if volume_id in volume_info:
+                            vol_state = volume_info[volume_id]["state"]
+                            is_attached = len(volume_info[volume_id]["attachments"]) > 0
+                            if not is_attached:
+                                source_volume_status = "unattached"
+                            else:
+                                source_volume_status = "attached_idle"
+                        else:
+                            source_volume_status = "deleted"
+
+                    # CASE 3: Redundant snapshot (too many snapshots for same volume)
+                    elif detect_redundant_snapshots and volume_id and volume_id in snapshots_by_volume:
+                        volume_snapshots = snapshots_by_volume[volume_id]
+                        if len(volume_snapshots) > max_snapshots_per_volume:
+                            # Find position of this snapshot in the sorted list
+                            snapshot_index = next(
+                                (i for i, s in enumerate(volume_snapshots) if s["SnapshotId"] == snapshot_id),
+                                None
+                            )
+                            # Flag snapshots beyond the retention limit
+                            if snapshot_index is not None and snapshot_index >= max_snapshots_per_volume:
+                                should_flag = True
+                                orphan_type = "redundant_snapshot"
+                                redundant_info = {
+                                    "total_snapshots": len(volume_snapshots),
+                                    "retention_limit": max_snapshots_per_volume,
+                                    "position": snapshot_index + 1,
+                                }
+                                source_volume_status = "exists" if volume_id in volume_info else "deleted"
+
+                    # CASE 4: Snapshot of unused AMI
+                    elif detect_unused_ami_snapshots and snapshot_id in unused_ami_snapshot_ids:
+                        should_flag = True
+                        orphan_type = "unused_ami_snapshot"
+                        # Find the AMI that uses this snapshot
+                        associated_ami = None
+                        for ami in all_amis:
+                            for block_device in ami.get("BlockDeviceMappings", []):
+                                if block_device.get("Ebs", {}).get("SnapshotId") == snapshot_id:
+                                    associated_ami = ami["ImageId"]
+                                    break
+                            if associated_ami:
+                                break
+                        ami_info = {
+                            "ami_id": associated_ami,
+                            "ami_unused": True,
+                        }
+                        source_volume_status = "ami_snapshot"
+
+                    if not should_flag:
+                        continue
+
+                    # Continue with orphan processing
+                    if should_flag:
                         size_gb = snapshot["VolumeSize"]
                         monthly_cost = size_gb * self.PRICING["snapshot_per_gb"]
 
-                        # Determine confidence level based on age
-                        if age_days >= confidence_threshold_days:
+                        # Determine confidence level based on orphan type and age
+                        if orphan_type == "volume_deleted":
+                            # Original logic for deleted volumes
+                            if age_days >= confidence_threshold_days:
+                                confidence = "high"
+                                reason = f"Snapshot {age_days} days old with deleted source volume (safe to delete)"
+                            elif age_days >= min_age_days * 2:
+                                confidence = "high"
+                                reason = f"Snapshot {age_days} days old with deleted source volume"
+                            elif age_days >= min_age_days:
+                                confidence = "medium"
+                                reason = f"Snapshot {age_days} days old with deleted source volume"
+                            else:
+                                confidence = "low"
+                                reason = f"Recent snapshot ({age_days} days) with deleted source volume (verify before deleting)"
+
+                        elif orphan_type == "idle_volume_snapshot":
+                            # Snapshot of idle/orphaned volume
+                            if source_volume_status == "unattached":
+                                confidence = "high"
+                                reason = f"Snapshot of unattached volume {volume_id} (volume is orphaned)"
+                            elif source_volume_status == "attached_idle":
+                                confidence = "medium"
+                                reason = f"Snapshot of idle volume {volume_id} (volume has no I/O activity)"
+                            else:
+                                confidence = "medium"
+                                reason = f"Snapshot of orphaned volume {volume_id}"
+
+                        elif orphan_type == "redundant_snapshot":
+                            # Redundant snapshot (exceeds retention limit)
+                            total = redundant_info["total_snapshots"]
+                            limit = redundant_info["retention_limit"]
+                            position = redundant_info["position"]
                             confidence = "high"
-                            reason = f"Orphaned EBS snapshots (source volume deleted) - age: {age_days} days"
+                            reason = f"Redundant snapshot #{position} of {total} (retention limit: {limit})"
+
+                        elif orphan_type == "unused_ami_snapshot":
+                            # Snapshot of unused AMI
+                            ami_id = ami_info.get("ami_id", "unknown")
+                            confidence = "high"
+                            reason = f"Snapshot of unused AMI {ami_id} (AMI not used for 180+ days)"
+
                         else:
+                            # Fallback
                             confidence = "low"
-                            reason = f"Orphaned EBS snapshots (source volume deleted) - age: {age_days} days"
+                            reason = "Detected as potentially orphaned"
 
                         # Extract name/description
                         description = snapshot.get("Description", "")
@@ -646,6 +826,28 @@ class AWSProvider(CloudProviderBase):
                                 name = tag["Value"]
                                 break
 
+                        # Build metadata
+                        metadata = {
+                            "size_gb": size_gb,
+                            "volume_id": volume_id or "Unknown",
+                            "created_at": start_time.isoformat(),
+                            "age_days": age_days,
+                            "description": description,
+                            "encrypted": snapshot.get("Encrypted", False),
+                            "confidence": confidence,
+                            "orphan_reason": reason,
+                            "orphan_type": orphan_type,  # 'volume_deleted', 'idle_volume_snapshot', 'redundant_snapshot', 'unused_ami_snapshot'
+                            "source_volume_status": source_volume_status,  # 'deleted', 'unattached', 'attached_idle', 'exists', 'ami_snapshot'
+                        }
+
+                        # Add redundant snapshot info if applicable
+                        if redundant_info:
+                            metadata["redundant_info"] = redundant_info
+
+                        # Add AMI info if applicable
+                        if ami_info:
+                            metadata["ami_info"] = ami_info
+
                         orphans.append(
                             OrphanResourceData(
                                 resource_type="ebs_snapshot",
@@ -653,16 +855,7 @@ class AWSProvider(CloudProviderBase):
                                 resource_name=name or description,
                                 region=region,
                                 estimated_monthly_cost=round(monthly_cost, 2),
-                                resource_metadata={
-                                    "size_gb": size_gb,
-                                    "volume_id": volume_id or "Unknown",
-                                    "created_at": start_time.isoformat(),
-                                    "age_days": age_days,
-                                    "description": description,
-                                    "encrypted": snapshot.get("Encrypted", False),
-                                    "confidence": confidence,
-                                    "orphan_reason": reason,
-                                },
+                                resource_metadata=metadata,
                             )
                         )
 

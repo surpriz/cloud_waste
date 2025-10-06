@@ -31,8 +31,13 @@ DEFAULT_DETECTION_RULES = {
         "enabled": True,
         "min_age_days": 90,  # Snapshots older than 90 days
         "require_orphaned_volume": True,  # Volume must be deleted
+        "detect_idle_volume_snapshots": True,  # Also detect snapshots of idle/orphaned volumes
+        "detect_redundant_snapshots": True,  # Detect redundant snapshots (too many per volume)
+        "max_snapshots_per_volume": 7,  # Keep only N most recent snapshots per volume
+        "detect_unused_ami_snapshots": True,  # Detect snapshots of unused AMIs
+        "min_ami_unused_days": 180,  # AMI unused for 180+ days
         "confidence_threshold_days": 180,
-        "description": "Orphaned EBS snapshots (source volume deleted)",
+        "description": "Orphaned, redundant, and unused AMI snapshots",
     },
     "ec2_instance": {
         "enabled": True,
