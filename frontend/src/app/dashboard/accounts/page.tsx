@@ -497,6 +497,11 @@ function EditAccountForm({ account, onClose }: { account: any; onClose: () => vo
     aws_access_key_id: "",
     aws_secret_access_key: "",
     regions: account.regions?.join(",") || "us-east-1",
+    scheduled_scan_enabled: account.scheduled_scan_enabled ?? true,
+    scheduled_scan_frequency: account.scheduled_scan_frequency || "daily",
+    scheduled_scan_hour: account.scheduled_scan_hour ?? 2,
+    scheduled_scan_day_of_week: account.scheduled_scan_day_of_week ?? 0,
+    scheduled_scan_day_of_month: account.scheduled_scan_day_of_month ?? 1,
   });
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -505,7 +510,17 @@ function EditAccountForm({ account, onClose }: { account: any; onClose: () => vo
       const updateData: any = {
         account_name: formData.account_name,
         regions: formData.regions.split(",").map((r) => r.trim()),
+        scheduled_scan_enabled: formData.scheduled_scan_enabled,
+        scheduled_scan_frequency: formData.scheduled_scan_frequency,
+        scheduled_scan_hour: formData.scheduled_scan_hour,
       };
+
+      // Add day fields based on frequency
+      if (formData.scheduled_scan_frequency === "weekly") {
+        updateData.scheduled_scan_day_of_week = formData.scheduled_scan_day_of_week;
+      } else if (formData.scheduled_scan_frequency === "monthly") {
+        updateData.scheduled_scan_day_of_month = formData.scheduled_scan_day_of_month;
+      }
 
       // Only include credentials if they were provided
       if (formData.aws_access_key_id && formData.aws_secret_access_key) {
@@ -608,6 +623,113 @@ function EditAccountForm({ account, onClose }: { account: any; onClose: () => vo
             <p className="mt-2 text-xs text-gray-500">
               💡 Tip: Limit to 3 regions for faster scans
             </p>
+          </div>
+
+          {/* Scheduled Scan Settings */}
+          <div className="space-y-4 rounded-xl bg-purple-50 border border-purple-200 p-6">
+            <h3 className="text-lg font-bold text-purple-900">Scheduled Scan Settings</h3>
+
+            <div className="flex items-center gap-3">
+              <input
+                type="checkbox"
+                id="scheduled_scan_enabled"
+                checked={formData.scheduled_scan_enabled}
+                onChange={(e) =>
+                  setFormData({ ...formData, scheduled_scan_enabled: e.target.checked })
+                }
+                className="h-5 w-5 rounded border-gray-300 text-purple-600 focus:ring-purple-500"
+              />
+              <label htmlFor="scheduled_scan_enabled" className="text-sm font-semibold text-gray-700">
+                Enable automatic scheduled scans
+              </label>
+            </div>
+
+            {formData.scheduled_scan_enabled && (
+              <>
+                <div>
+                  <label className="block text-sm font-semibold text-gray-700 mb-2">
+                    Scan Frequency
+                  </label>
+                  <select
+                    value={formData.scheduled_scan_frequency}
+                    onChange={(e) =>
+                      setFormData({ ...formData, scheduled_scan_frequency: e.target.value })
+                    }
+                    className="block w-full rounded-xl border-2 border-gray-300 px-4 py-3 focus:border-purple-500 focus:outline-none focus:ring-2 focus:ring-purple-500/20 transition-all"
+                  >
+                    <option value="daily">Daily</option>
+                    <option value="weekly">Weekly</option>
+                    <option value="monthly">Monthly</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-sm font-semibold text-gray-700 mb-2">
+                    Scan Hour (UTC)
+                  </label>
+                  <select
+                    value={formData.scheduled_scan_hour}
+                    onChange={(e) =>
+                      setFormData({ ...formData, scheduled_scan_hour: parseInt(e.target.value) })
+                    }
+                    className="block w-full rounded-xl border-2 border-gray-300 px-4 py-3 focus:border-purple-500 focus:outline-none focus:ring-2 focus:ring-purple-500/20 transition-all"
+                  >
+                    {Array.from({ length: 24 }, (_, i) => (
+                      <option key={i} value={i}>
+                        {i.toString().padStart(2, '0')}:00 UTC
+                      </option>
+                    ))}
+                  </select>
+                  <p className="mt-2 text-xs text-gray-500">
+                    💡 Current UTC time: {new Date().toUTCString()}
+                  </p>
+                </div>
+
+                {formData.scheduled_scan_frequency === "weekly" && (
+                  <div>
+                    <label className="block text-sm font-semibold text-gray-700 mb-2">
+                      Day of Week
+                    </label>
+                    <select
+                      value={formData.scheduled_scan_day_of_week}
+                      onChange={(e) =>
+                        setFormData({ ...formData, scheduled_scan_day_of_week: parseInt(e.target.value) })
+                      }
+                      className="block w-full rounded-xl border-2 border-gray-300 px-4 py-3 focus:border-purple-500 focus:outline-none focus:ring-2 focus:ring-purple-500/20 transition-all"
+                    >
+                      <option value={0}>Monday</option>
+                      <option value={1}>Tuesday</option>
+                      <option value={2}>Wednesday</option>
+                      <option value={3}>Thursday</option>
+                      <option value={4}>Friday</option>
+                      <option value={5}>Saturday</option>
+                      <option value={6}>Sunday</option>
+                    </select>
+                  </div>
+                )}
+
+                {formData.scheduled_scan_frequency === "monthly" && (
+                  <div>
+                    <label className="block text-sm font-semibold text-gray-700 mb-2">
+                      Day of Month
+                    </label>
+                    <select
+                      value={formData.scheduled_scan_day_of_month}
+                      onChange={(e) =>
+                        setFormData({ ...formData, scheduled_scan_day_of_month: parseInt(e.target.value) })
+                      }
+                      className="block w-full rounded-xl border-2 border-gray-300 px-4 py-3 focus:border-purple-500 focus:outline-none focus:ring-2 focus:ring-purple-500/20 transition-all"
+                    >
+                      {Array.from({ length: 31 }, (_, i) => (
+                        <option key={i + 1} value={i + 1}>
+                          {i + 1}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                )}
+              </>
+            )}
           </div>
 
           <div className="flex gap-4 pt-4">

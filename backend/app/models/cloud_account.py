@@ -3,7 +3,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, ForeignKey, LargeBinary, String, Text
+from sqlalchemy import Boolean, ForeignKey, Integer, LargeBinary, String, Text
 from sqlalchemy.dialects.postgresql import JSON, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.sql import func
@@ -67,6 +67,31 @@ class CloudAccount(Base):
     last_scan_at: Mapped[datetime | None] = mapped_column(
         nullable=True,
     )
+
+    # Scheduled scan settings
+    scheduled_scan_enabled: Mapped[bool] = mapped_column(
+        Boolean,
+        default=True,
+        nullable=False,
+    )
+    scheduled_scan_frequency: Mapped[str] = mapped_column(
+        String(20),
+        default="daily",
+        nullable=False,
+    )  # 'daily', 'weekly', 'monthly'
+    scheduled_scan_hour: Mapped[int] = mapped_column(
+        Integer,
+        default=2,
+        nullable=False,
+    )  # Hour in UTC (0-23)
+    scheduled_scan_day_of_week: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+    )  # 0-6 (Monday=0) for weekly scans
+    scheduled_scan_day_of_month: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+    )  # 1-31 for monthly scans
 
     created_at: Mapped[datetime] = mapped_column(
         server_default=func.now(),

@@ -211,11 +211,13 @@ class AWSProvider(CloudProviderBase):
         self, region: str, detection_rules: dict | None = None
     ) -> list[OrphanResourceData]:
         """
-        Scan for unattached EBS volumes in a region with intelligent orphan detection.
+        Scan for unattached AND attached-but-unused EBS volumes in a region.
 
         Uses CloudWatch metrics to detect:
+        - Unattached volumes (status = 'available')
         - Volumes never used (never attached or no I/O activity)
         - Volumes used in the past but abandoned (no recent activity)
+        - Attached volumes with no I/O activity for extended periods
 
         Args:
             region: AWS region to scan
@@ -238,18 +240,27 @@ class AWSProvider(CloudProviderBase):
 
         min_age_days = detection_rules.get("min_age_days", 7)
         confidence_threshold_days = detection_rules.get("confidence_threshold_days", 30)
+        detect_attached_unused = detection_rules.get("detect_attached_unused", True)
+        min_idle_days_attached = detection_rules.get("min_idle_days_attached", 30)
 
         try:
             async with self.session.client("ec2", region_name=region) as ec2:
-                response = await ec2.describe_volumes(
-                    Filters=[{"Name": "status", "Values": ["available"]}]
-                )
+                # Get ALL volumes (both available and in-use)
+                response = await ec2.describe_volumes()
 
                 for volume in response.get("Volumes", []):
                     volume_id = volume["VolumeId"]
                     size_gb = volume["Size"]
                     volume_type = volume["VolumeType"]
                     created_at = volume["CreateTime"]
+                    volume_state = volume["State"]  # 'available', 'in-use', etc.
+                    attachments = volume.get("Attachments", [])
+
+                    # Determine if volume is attached
+                    is_attached = len(attachments) > 0 and volume_state == "in-use"
+                    attached_instance_id = None
+                    if is_attached:
+                        attached_instance_id = attachments[0].get("InstanceId")
 
                     # Calculate volume age in days
                     age_days = (datetime.now(timezone.utc) - created_at).days
@@ -263,8 +274,31 @@ class AWSProvider(CloudProviderBase):
                         volume_id, region, created_at
                     )
 
-                    # Skip if volume was recently active (not orphaned)
-                    if usage_history["usage_category"] == "recently_active":
+                    # Determine if this volume should be flagged as orphaned
+                    should_flag = False
+                    orphan_type = ""
+
+                    if not is_attached:
+                        # CASE 1: Unattached volume
+                        # Skip if volume was recently active (not orphaned)
+                        if usage_history["usage_category"] != "recently_active":
+                            should_flag = True
+                            orphan_type = "unattached"
+                    elif is_attached and detect_attached_unused:
+                        # CASE 2: Attached volume but unused
+                        # Check if there's no I/O activity for min_idle_days_attached
+                        days_since_last_use = usage_history.get("days_since_last_use")
+
+                        # Flag if never used OR idle for min_idle_days_attached
+                        if usage_history["usage_category"] == "never_used" and age_days >= min_idle_days_attached:
+                            should_flag = True
+                            orphan_type = "attached_never_used"
+                        elif days_since_last_use and days_since_last_use >= min_idle_days_attached:
+                            should_flag = True
+                            orphan_type = "attached_idle"
+
+                    # Skip if should not be flagged
+                    if not should_flag:
                         continue
 
                     # Calculate monthly cost based on volume type
@@ -281,32 +315,86 @@ class AWSProvider(CloudProviderBase):
                             name = tag["Value"]
                             break
 
-                    # Determine confidence level based on usage history
-                    if usage_history["usage_category"] == "never_used" and age_days >= 30:
-                        confidence = "high"
-                        reason = f"Never used since creation {age_days} days ago"
-                    elif usage_history["usage_category"] == "long_abandoned":
-                        confidence = "high"
-                        days_abandoned = usage_history.get("days_since_last_use", 0)
-                        reason = f"No activity for {days_abandoned} days (was active before)"
-                    elif usage_history["usage_category"] == "recently_abandoned":
-                        confidence = "medium"
-                        days_abandoned = usage_history.get("days_since_last_use", 0)
-                        reason = f"No activity for {days_abandoned} days"
-                    elif usage_history["usage_category"] == "never_used" and age_days < 30:
-                        confidence = "low"
-                        reason = f"Created {age_days} days ago, never used yet (may be for future use)"
-                    else:
-                        # Unknown usage history (CloudWatch metrics unavailable)
-                        if age_days == 0:
-                            confidence = "low"
-                            reason = "Recently created (less than 24h), usage pattern unclear"
-                        elif age_days >= confidence_threshold_days:
+                    # Determine confidence level and reason based on orphan type
+                    if orphan_type == "unattached":
+                        # Original logic for unattached volumes
+                        if usage_history["usage_category"] == "never_used" and age_days >= 30:
+                            confidence = "high"
+                            reason = f"Never used since creation {age_days} days ago"
+                        elif usage_history["usage_category"] == "long_abandoned":
+                            confidence = "high"
+                            days_abandoned = usage_history.get("days_since_last_use", 0)
+                            reason = f"No activity for {days_abandoned} days (was active before)"
+                        elif usage_history["usage_category"] == "recently_abandoned":
                             confidence = "medium"
-                            reason = f"Unattached for {age_days} days (usage history unavailable)"
+                            days_abandoned = usage_history.get("days_since_last_use", 0)
+                            reason = f"No activity for {days_abandoned} days"
+                        elif usage_history["usage_category"] == "never_used" and age_days < 30:
+                            confidence = "low"
+                            reason = f"Created {age_days} days ago, never used yet (may be for future use)"
+                        else:
+                            # Unknown usage history (CloudWatch metrics unavailable)
+                            if age_days == 0:
+                                confidence = "low"
+                                reason = "Recently created (less than 24h), usage pattern unclear"
+                            elif age_days >= confidence_threshold_days:
+                                confidence = "medium"
+                                reason = f"Unattached for {age_days} days (usage history unavailable)"
+                            else:
+                                confidence = "low"
+                                reason = f"Unattached for {age_days} days (usage history unavailable)"
+
+                    elif orphan_type == "attached_never_used":
+                        # Attached to an instance but NEVER used
+                        if age_days >= 60:
+                            confidence = "high"
+                            reason = f"Attached to {attached_instance_id} but never used in {age_days} days"
+                        elif age_days >= min_idle_days_attached:
+                            confidence = "medium"
+                            reason = f"Attached to {attached_instance_id} but never used in {age_days} days"
                         else:
                             confidence = "low"
-                            reason = f"Unattached for {age_days} days (usage history unavailable)"
+                            reason = f"Attached to {attached_instance_id} but no I/O detected yet ({age_days} days old)"
+
+                    elif orphan_type == "attached_idle":
+                        # Attached but idle for extended period
+                        days_idle = usage_history.get("days_since_last_use", 0)
+                        if days_idle >= 60:
+                            confidence = "high"
+                            reason = f"Attached to {attached_instance_id} but idle for {days_idle} days (was active before)"
+                        elif days_idle >= min_idle_days_attached:
+                            confidence = "medium"
+                            reason = f"Attached to {attached_instance_id} but idle for {days_idle} days"
+                        else:
+                            confidence = "low"
+                            reason = f"Attached to {attached_instance_id} but no recent I/O activity"
+
+                    else:
+                        # Fallback
+                        confidence = "low"
+                        reason = "Detected as potentially orphaned"
+
+                    # Build metadata
+                    metadata = {
+                        "size_gb": size_gb,
+                        "volume_type": volume_type,
+                        "created_at": created_at.isoformat(),
+                        "availability_zone": volume["AvailabilityZone"],
+                        "encrypted": volume.get("Encrypted", False),
+                        "age_days": age_days,
+                        "confidence": confidence,
+                        "orphan_reason": reason,
+                        "orphan_type": orphan_type,  # 'unattached', 'attached_never_used', 'attached_idle'
+                        "usage_history": usage_history,
+                        "volume_state": volume_state,
+                        "is_attached": is_attached,
+                    }
+
+                    # Add attachment info if volume is attached
+                    if is_attached and attached_instance_id:
+                        metadata["attached_instance_id"] = attached_instance_id
+                        metadata["attachment_device"] = attachments[0].get("Device", "Unknown")
+                        metadata["attachment_time"] = attachments[0].get("AttachTime").isoformat() if attachments[0].get("AttachTime") else None
 
                     orphans.append(
                         OrphanResourceData(
@@ -315,17 +403,7 @@ class AWSProvider(CloudProviderBase):
                             resource_name=name,
                             region=region,
                             estimated_monthly_cost=round(monthly_cost, 2),
-                            resource_metadata={
-                                "size_gb": size_gb,
-                                "volume_type": volume_type,
-                                "created_at": created_at.isoformat(),
-                                "availability_zone": volume["AvailabilityZone"],
-                                "encrypted": volume.get("Encrypted", False),
-                                "age_days": age_days,
-                                "confidence": confidence,
-                                "orphan_reason": reason,
-                                "usage_history": usage_history,
-                            },
+                            resource_metadata=metadata,
                         )
                     )
 

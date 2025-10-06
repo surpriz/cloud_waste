@@ -217,12 +217,15 @@ async def _scan_cloud_account_async(
             }
 
 
-@celery_app.task(name="app.workers.tasks.scheduled_scan_all_accounts")
-def scheduled_scan_all_accounts() -> dict[str, Any]:
+@celery_app.task(name="app.workers.tasks.scan_cloud_account_scheduled")
+def scan_cloud_account_scheduled(cloud_account_id: str) -> dict[str, Any]:
     """
-    Scheduled task to scan all active cloud accounts.
+    Scheduled task to scan a specific cloud account.
 
-    Runs daily via Celery Beat scheduler.
+    This task is triggered by Celery Beat based on account-specific schedule settings.
+
+    Args:
+        cloud_account_id: UUID of the cloud account to scan
 
     Returns:
         Dict with task results
@@ -237,45 +240,151 @@ def scheduled_scan_all_accounts() -> dict[str, Any]:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
 
-    return loop.run_until_complete(_scheduled_scan_all_accounts_async())
+    return loop.run_until_complete(_scan_cloud_account_scheduled_async(cloud_account_id))
 
 
-async def _scheduled_scan_all_accounts_async() -> dict[str, Any]:
+async def _scan_cloud_account_scheduled_async(cloud_account_id: str) -> dict[str, Any]:
     """
-    Async implementation of scheduled scan for all accounts.
+    Async implementation of scheduled scan for a specific account.
+
+    Args:
+        cloud_account_id: UUID of the cloud account to scan
 
     Returns:
         Dict with task results
     """
     async with AsyncSessionLocal() as db:
         try:
-            # Get all active cloud accounts
+            # Get cloud account
             result = await db.execute(
-                select(CloudAccount).where(CloudAccount.is_active == True)  # noqa: E712
+                select(CloudAccount).where(CloudAccount.id == cloud_account_id)
             )
-            accounts = result.scalars().all()
+            account = result.scalar_one_or_none()
 
-            scans_created = []
+            if not account:
+                return {
+                    "status": "error",
+                    "error": f"Cloud account {cloud_account_id} not found",
+                }
 
-            for account in accounts:
-                # Create scan record
-                scan = Scan(
-                    cloud_account_id=account.id,
-                    scan_type="scheduled",
-                    status=ScanStatus.PENDING.value,
-                )
-                db.add(scan)
-                await db.commit()
-                await db.refresh(scan)
+            # Check if account is active and has scheduled scans enabled
+            if not account.is_active or not account.scheduled_scan_enabled:
+                return {
+                    "status": "skipped",
+                    "message": f"Account {account.account_name} is inactive or scheduled scans disabled",
+                }
 
-                # Queue scan task
-                scan_cloud_account.delay(str(scan.id), str(account.id))
-                scans_created.append(str(scan.id))
+            # Create scan record
+            scan = Scan(
+                cloud_account_id=account.id,
+                scan_type="scheduled",
+                status=ScanStatus.PENDING.value,
+            )
+            db.add(scan)
+            await db.commit()
+            await db.refresh(scan)
+
+            # Queue scan task
+            scan_cloud_account.delay(str(scan.id), str(account.id))
 
             return {
                 "status": "success",
-                "accounts_scanned": len(accounts),
-                "scans_created": scans_created,
+                "account_name": account.account_name,
+                "scan_id": str(scan.id),
+            }
+
+        except Exception as e:
+            return {
+                "status": "error",
+                "error": str(e),
+            }
+
+
+@celery_app.task(name="app.workers.tasks.check_and_trigger_scheduled_scans")
+def check_and_trigger_scheduled_scans() -> dict[str, Any]:
+    """
+    Check all accounts and trigger scans for those that need it based on their schedule.
+
+    This task runs every hour and checks if any account's scheduled scan should be triggered.
+
+    Returns:
+        Dict with task results
+    """
+    # Get or create event loop for Celery solo pool
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_closed():
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
+    return loop.run_until_complete(_check_and_trigger_scheduled_scans_async())
+
+
+async def _check_and_trigger_scheduled_scans_async() -> dict[str, Any]:
+    """
+    Async implementation to check and trigger scheduled scans.
+
+    Returns:
+        Dict with task results
+    """
+    from datetime import datetime
+
+    async with AsyncSessionLocal() as db:
+        try:
+            current_hour = datetime.utcnow().hour
+            current_day_of_week = datetime.utcnow().weekday()  # 0 = Monday
+            current_day_of_month = datetime.utcnow().day
+
+            # Get all active accounts with scheduled scans enabled
+            result = await db.execute(
+                select(CloudAccount).where(
+                    CloudAccount.is_active == True,  # noqa: E712
+                    CloudAccount.scheduled_scan_enabled == True,  # noqa: E712
+                )
+            )
+            accounts = result.scalars().all()
+
+            scans_triggered = []
+
+            for account in accounts:
+                should_scan = False
+
+                # Check if this account should be scanned now
+                if account.scheduled_scan_hour != current_hour:
+                    continue  # Not the right hour
+
+                if account.scheduled_scan_frequency == "daily":
+                    should_scan = True
+                elif account.scheduled_scan_frequency == "weekly":
+                    if account.scheduled_scan_day_of_week == current_day_of_week:
+                        should_scan = True
+                elif account.scheduled_scan_frequency == "monthly":
+                    if account.scheduled_scan_day_of_month == current_day_of_month:
+                        should_scan = True
+
+                if should_scan:
+                    # Create scan record
+                    scan = Scan(
+                        cloud_account_id=account.id,
+                        scan_type="scheduled",
+                        status=ScanStatus.PENDING.value,
+                    )
+                    db.add(scan)
+                    await db.commit()
+                    await db.refresh(scan)
+
+                    # Queue scan task
+                    scan_cloud_account.delay(str(scan.id), str(account.id))
+                    scans_triggered.append(str(scan.id))
+
+            return {
+                "status": "success",
+                "accounts_checked": len(accounts),
+                "scans_triggered": len(scans_triggered),
+                "scan_ids": scans_triggered,
             }
 
         except Exception as e:

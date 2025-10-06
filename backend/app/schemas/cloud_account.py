@@ -66,6 +66,15 @@ class CloudAccountUpdate(BaseModel):
     aws_access_key_id: str | None = Field(default=None, min_length=16, max_length=128)
     aws_secret_access_key: str | None = Field(default=None, min_length=16, max_length=128)
 
+    # Scheduled scan settings
+    scheduled_scan_enabled: bool | None = None
+    scheduled_scan_frequency: str | None = Field(
+        default=None, pattern="^(daily|weekly|monthly)$"
+    )
+    scheduled_scan_hour: int | None = Field(default=None, ge=0, le=23)
+    scheduled_scan_day_of_week: int | None = Field(default=None, ge=0, le=6)
+    scheduled_scan_day_of_month: int | None = Field(default=None, ge=1, le=31)
+
 
 # Schema returned by API
 class CloudAccount(CloudAccountBase):
@@ -74,6 +83,11 @@ class CloudAccount(CloudAccountBase):
     id: uuid.UUID
     user_id: uuid.UUID
     last_scan_at: datetime | None = None
+    scheduled_scan_enabled: bool
+    scheduled_scan_frequency: str
+    scheduled_scan_hour: int
+    scheduled_scan_day_of_week: int | None = None
+    scheduled_scan_day_of_month: int | None = None
     created_at: datetime
     updated_at: datetime
 

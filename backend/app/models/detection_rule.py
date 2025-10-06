@@ -17,7 +17,9 @@ DEFAULT_DETECTION_RULES = {
         "enabled": True,
         "min_age_days": 7,  # Ignore volumes created in last 7 days
         "confidence_threshold_days": 30,  # High confidence after 30 days
-        "description": "Unattached EBS volumes",
+        "detect_attached_unused": True,  # Also detect attached volumes with no I/O activity
+        "min_idle_days_attached": 30,  # Min days of no I/O for attached volumes
+        "description": "Unattached EBS volumes and attached volumes with no I/O activity",
     },
     "elastic_ip": {
         "enabled": True,

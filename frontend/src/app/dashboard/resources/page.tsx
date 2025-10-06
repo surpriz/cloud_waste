@@ -381,20 +381,220 @@ function ResourceCard({ resource, onIgnore, onMarkForDeletion, onDelete }: any) 
 
               {/* Orphan reason - why is this resource orphaned? */}
               {resource.resource_metadata?.orphan_reason && (
-                <div className="flex items-center gap-2 text-sm">
-                  <span className="text-gray-600">🔍 Reason:</span>
-                  <span className="text-gray-700">{resource.resource_metadata.orphan_reason}</span>
-                  {resource.resource_metadata?.confidence && (
-                    <span className={`px-2 py-0.5 rounded text-xs font-medium ${
-                      resource.resource_metadata.confidence === 'high'
-                        ? 'bg-red-100 text-red-700'
-                        : resource.resource_metadata.confidence === 'medium'
-                        ? 'bg-orange-100 text-orange-700'
-                        : 'bg-yellow-100 text-yellow-700'
-                    }`}>
-                      {resource.resource_metadata.confidence} confidence
-                    </span>
+                <div className="rounded-lg bg-amber-50 border border-amber-200 p-3 space-y-2">
+                  <div className="flex items-start gap-2">
+                    <span className="text-amber-700 font-medium text-sm">⚠️ Why is this orphaned?</span>
+                    {resource.resource_metadata?.confidence && (
+                      <span className={`ml-auto px-2 py-0.5 rounded text-xs font-semibold ${
+                        resource.resource_metadata.confidence === 'high'
+                          ? 'bg-red-100 text-red-700'
+                          : resource.resource_metadata.confidence === 'medium'
+                          ? 'bg-orange-100 text-orange-700'
+                          : 'bg-yellow-100 text-yellow-700'
+                      }`}>
+                        {resource.resource_metadata.confidence} confidence
+                      </span>
+                    )}
+                  </div>
+
+                  {/* EBS Volume specific criteria */}
+                  {resource.resource_type === 'ebs_volume' && (
+                    <div className="space-y-1 text-sm">
+                      {/* Check if volume is attached or unattached */}
+                      {resource.resource_metadata?.is_attached ? (
+                        <>
+                          {/* ATTACHED but unused volume */}
+                          <div className="flex items-center gap-2 text-orange-700">
+                            <span className="font-semibold">⚠️</span>
+                            <span>
+                              Attached to EC2 instance{' '}
+                              <code className="bg-orange-100 px-1 rounded text-xs">
+                                {resource.resource_metadata?.attached_instance_id}
+                              </code>
+                            </span>
+                          </div>
+                          {resource.resource_metadata?.orphan_type === 'attached_never_used' && (
+                            <div className="flex items-center gap-2 text-red-700">
+                              <span className="font-semibold">✗</span>
+                              <span>Never used since creation ({resource.resource_metadata?.age_days} days ago)</span>
+                            </div>
+                          )}
+                          {resource.resource_metadata?.orphan_type === 'attached_idle' && (
+                            <>
+                              <div className="flex items-center gap-2 text-red-700">
+                                <span className="font-semibold">✗</span>
+                                <span>
+                                  No I/O activity for {resource.resource_metadata?.usage_history?.days_since_last_use} days
+                                </span>
+                              </div>
+                              <div className="flex items-center gap-2 text-red-700">
+                                <span className="font-semibold">✗</span>
+                                <span>Volume is idle (likely unused secondary storage)</span>
+                              </div>
+                            </>
+                          )}
+                          {resource.resource_metadata?.usage_history?.total_read_ops === 0 &&
+                           resource.resource_metadata?.usage_history?.total_write_ops === 0 && (
+                            <div className="flex items-center gap-2 text-red-700">
+                              <span className="font-semibold">✗</span>
+                              <span>0 read/write operations detected</span>
+                            </div>
+                          )}
+                        </>
+                      ) : (
+                        <>
+                          {/* UNATTACHED volume */}
+                          <div className="flex items-center gap-2 text-red-700">
+                            <span className="font-semibold">✗</span>
+                            <span>Not attached to any EC2 instance (status: available)</span>
+                          </div>
+                          {resource.resource_metadata?.usage_history?.total_read_ops === 0 &&
+                           resource.resource_metadata?.usage_history?.total_write_ops === 0 && (
+                            <div className="flex items-center gap-2 text-red-700">
+                              <span className="font-semibold">✗</span>
+                              <span>No I/O activity detected (0 read/write operations)</span>
+                            </div>
+                          )}
+                          {resource.resource_metadata?.usage_history?.usage_category === 'never_used' && (
+                            <div className="flex items-center gap-2 text-red-700">
+                              <span className="font-semibold">✗</span>
+                              <span>Never used since creation</span>
+                            </div>
+                          )}
+                          {resource.resource_metadata?.usage_history?.usage_category === 'long_abandoned' && (
+                            <div className="flex items-center gap-2 text-red-700">
+                              <span className="font-semibold">✗</span>
+                              <span>
+                                Abandoned {resource.resource_metadata?.usage_history?.days_since_last_use} days ago
+                              </span>
+                            </div>
+                          )}
+                        </>
+                      )}
+                      <div className="flex items-center gap-2 text-gray-600 mt-1">
+                        <span className="font-semibold">ℹ️</span>
+                        <span className="italic">{resource.resource_metadata.orphan_reason}</span>
+                      </div>
+                    </div>
                   )}
+
+                  {/* Elastic IP specific criteria */}
+                  {resource.resource_type === 'elastic_ip' && (
+                    <div className="space-y-1 text-sm">
+                      <div className="flex items-center gap-2 text-red-700">
+                        <span className="font-semibold">✗</span>
+                        <span>Not associated with any instance or network interface</span>
+                      </div>
+                      <div className="flex items-center gap-2 text-gray-600 mt-1">
+                        <span className="font-semibold">ℹ️</span>
+                        <span className="italic">{resource.resource_metadata.orphan_reason}</span>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* RDS Instance specific criteria */}
+                  {resource.resource_type === 'rds_instance' && (
+                    <div className="space-y-1 text-sm">
+                      <div className="flex items-center gap-2 text-red-700">
+                        <span className="font-semibold">✗</span>
+                        <span>Database is in stopped state</span>
+                      </div>
+                      <div className="flex items-center gap-2 text-gray-600 mt-1">
+                        <span className="font-semibold">ℹ️</span>
+                        <span className="italic">{resource.resource_metadata.orphan_reason}</span>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* EC2 Instance specific criteria */}
+                  {resource.resource_type === 'ec2_instance' && (
+                    <div className="space-y-1 text-sm">
+                      <div className="flex items-center gap-2 text-red-700">
+                        <span className="font-semibold">✗</span>
+                        <span>Instance is stopped</span>
+                      </div>
+                      {resource.resource_metadata?.stopped_days && (
+                        <div className="flex items-center gap-2 text-red-700">
+                          <span className="font-semibold">✗</span>
+                          <span>Stopped for {resource.resource_metadata.stopped_days} days</span>
+                        </div>
+                      )}
+                      <div className="flex items-center gap-2 text-gray-600 mt-1">
+                        <span className="font-semibold">ℹ️</span>
+                        <span className="italic">{resource.resource_metadata.orphan_reason}</span>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Load Balancer specific criteria */}
+                  {resource.resource_type === 'load_balancer' && (
+                    <div className="space-y-1 text-sm">
+                      <div className="flex items-center gap-2 text-red-700">
+                        <span className="font-semibold">✗</span>
+                        <span>No healthy backend targets</span>
+                      </div>
+                      <div className="flex items-center gap-2 text-gray-600 mt-1">
+                        <span className="font-semibold">ℹ️</span>
+                        <span className="italic">{resource.resource_metadata.orphan_reason}</span>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* NAT Gateway specific criteria */}
+                  {resource.resource_type === 'nat_gateway' && (
+                    <div className="space-y-1 text-sm">
+                      <div className="flex items-center gap-2 text-red-700">
+                        <span className="font-semibold">✗</span>
+                        <span>No outbound traffic detected</span>
+                      </div>
+                      {resource.resource_metadata?.bytes_out_30d !== undefined && (
+                        <div className="flex items-center gap-2 text-red-700">
+                          <span className="font-semibold">✗</span>
+                          <span>Only {(resource.resource_metadata.bytes_out_30d / 1024).toFixed(2)} KB transferred in last 30 days</span>
+                        </div>
+                      )}
+                      <div className="flex items-center gap-2 text-gray-600 mt-1">
+                        <span className="font-semibold">ℹ️</span>
+                        <span className="italic">{resource.resource_metadata.orphan_reason}</span>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* EBS Snapshot specific criteria */}
+                  {resource.resource_type === 'ebs_snapshot' && (
+                    <div className="space-y-1 text-sm">
+                      <div className="flex items-center gap-2 text-red-700">
+                        <span className="font-semibold">✗</span>
+                        <span>Source volume no longer exists</span>
+                      </div>
+                      {resource.resource_metadata?.age_days && resource.resource_metadata.age_days >= 90 && (
+                        <div className="flex items-center gap-2 text-red-700">
+                          <span className="font-semibold">✗</span>
+                          <span>Snapshot is {resource.resource_metadata.age_days} days old</span>
+                        </div>
+                      )}
+                      <div className="flex items-center gap-2 text-gray-600 mt-1">
+                        <span className="font-semibold">ℹ️</span>
+                        <span className="italic">{resource.resource_metadata.orphan_reason}</span>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Generic criteria for other resource types */}
+                  {!['ebs_volume', 'elastic_ip', 'rds_instance', 'ec2_instance', 'load_balancer', 'nat_gateway', 'ebs_snapshot'].includes(resource.resource_type) && (
+                    <div className="text-sm">
+                      <div className="flex items-center gap-2 text-gray-700">
+                        <span className="font-semibold">ℹ️</span>
+                        <span className="italic">{resource.resource_metadata.orphan_reason}</span>
+                      </div>
+                    </div>
+                  )}
+
+                  <div className="mt-2 pt-2 border-t border-amber-300">
+                    <p className="text-xs text-amber-800">
+                      💡 <strong>What to do:</strong> Review this resource on your AWS console and delete it if no longer needed to stop wasting money.
+                    </p>
+                  </div>
                 </div>
               )}
 
