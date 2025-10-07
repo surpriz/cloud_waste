@@ -18,6 +18,7 @@ interface ScanState {
   fetchScan: (id: string) => Promise<void>;
   createScan: (data: ScanCreate) => Promise<Scan>;
   deleteScan: (id: string) => Promise<void>;
+  deleteAllScans: () => Promise<void>;
   fetchSummary: (cloudAccountId?: string) => Promise<void>;
   fetchScansByAccount: (accountId: string) => Promise<void>;
   clearError: () => void;
@@ -95,6 +96,20 @@ export const useScanStore = create<ScanState>((set) => ({
       }));
     } catch (error: any) {
       set({ error: error.message || "Failed to delete scan", isLoading: false });
+      throw error;
+    }
+  },
+
+  deleteAllScans: async () => {
+    set({ isLoading: true, error: null });
+    try {
+      await scansAPI.deleteAll();
+      set({
+        scans: [],
+        isLoading: false,
+      });
+    } catch (error: any) {
+      set({ error: error.message || "Failed to delete all scans", isLoading: false });
       throw error;
     }
   },

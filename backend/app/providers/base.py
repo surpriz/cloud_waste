@@ -144,6 +144,22 @@ class CloudProviderBase(ABC):
         pass
 
     @abstractmethod
+    async def scan_idle_running_instances(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scan for running instances with very low utilization (idle).
+
+        Args:
+            region: Region to scan
+            detection_rules: Optional user-defined detection rules
+
+        Returns:
+            List of idle running instance resources
+        """
+        pass
+
+    @abstractmethod
     async def scan_unused_load_balancers(
         self, region: str
     ) -> list[OrphanResourceData]:
@@ -319,6 +335,9 @@ class CloudProviderBase(ABC):
         )
         results.extend(
             await self.scan_stopped_instances(region, rules.get("ec2_instance"))
+        )
+        results.extend(
+            await self.scan_idle_running_instances(region, rules.get("ec2_instance"))
         )
         results.extend(await self.scan_unused_load_balancers(region))
         results.extend(await self.scan_stopped_databases(region))

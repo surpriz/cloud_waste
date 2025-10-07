@@ -348,7 +348,7 @@ export default function SettingsPage() {
                       <div className="mb-4">
                         <div className="flex items-center justify-between mb-2">
                           <h4 className="font-semibold text-gray-900">
-                            Minimum Age: {rule.current_rules.min_age_days || rule.current_rules.min_stopped_days} days
+                            {rule.resource_type === 'ec2_instance' ? 'Minimum Age (Stopped Instances)' : 'Minimum Age'}: {rule.current_rules.min_age_days || rule.current_rules.min_stopped_days} days
                           </h4>
                           <span className="text-sm text-gray-500">
                             Default: {rule.default_rules.min_age_days || rule.default_rules.min_stopped_days} days
@@ -460,6 +460,65 @@ export default function SettingsPage() {
                           <div className="mt-3 p-3 bg-white rounded border border-purple-300">
                             <p className="text-xs text-purple-800">
                               <strong>Why it matters:</strong> High confidence resources are very likely to be true orphans and safe to delete. Low confidence resources might still be in use or recently created for a purpose.
+                            </p>
+                          </div>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Idle Running Instances Threshold (EC2 only) */}
+                    {rule.resource_type === 'ec2_instance' && rule.current_rules.min_idle_days !== undefined && (
+                      <div className="mb-4">
+                        <div className="flex items-center justify-between mb-2">
+                          <h4 className="font-semibold text-gray-900">
+                            Minimum Age (Idle Running Instances): {rule.current_rules.min_idle_days} days
+                          </h4>
+                          <span className="text-sm text-gray-500">
+                            Default: {rule.default_rules.min_idle_days} days
+                          </span>
+                        </div>
+                        <input
+                          type="range"
+                          min="0"
+                          max="30"
+                          step="1"
+                          value={rule.current_rules.min_idle_days || 0}
+                          onChange={(e) =>
+                            handleRuleChange(
+                              rule.resource_type,
+                              "min_idle_days",
+                              parseInt(e.target.value)
+                            )
+                          }
+                          className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-blue-600"
+                        />
+                        <div className="flex justify-between text-xs text-gray-500 mt-1">
+                          <span>0 days (detect immediately)</span>
+                          <span>30 days</span>
+                        </div>
+
+                        {/* Interactive Example for Idle Running */}
+                        <div className="mt-4 rounded-lg bg-gradient-to-r from-cyan-50 to-blue-50 border-2 border-cyan-200 p-4">
+                          <h5 className="font-semibold text-cyan-900 mb-2 flex items-center gap-2">
+                            <span>🔋</span> What will be detected?
+                          </h5>
+                          <div className="space-y-2 text-sm">
+                            <div className="flex items-start gap-2">
+                              <span className="text-green-600 font-bold">✓</span>
+                              <span className="text-gray-700">
+                                <strong>Running</strong> instances with low CPU (&lt;5%) and low network (&lt;1MB) for <strong>{rule.current_rules.min_idle_days}+ days</strong> will be detected as idle
+                              </span>
+                            </div>
+                            <div className="flex items-start gap-2">
+                              <span className="text-red-600 font-bold">✗</span>
+                              <span className="text-gray-700">
+                                Running instances idle for <strong>less than {rule.current_rules.min_idle_days} days</strong> will be ignored
+                              </span>
+                            </div>
+                          </div>
+                          <div className="mt-3 p-3 bg-white rounded border border-cyan-300">
+                            <p className="text-xs text-cyan-800">
+                              <strong>Note:</strong> This setting applies ONLY to running instances with very low utilization. Stopped instances are controlled by the "Minimum Age (Stopped Instances)" setting above.
                             </p>
                           </div>
                         </div>

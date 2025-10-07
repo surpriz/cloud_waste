@@ -545,18 +545,30 @@ function ResourceCard({ resource, onIgnore, onMarkForDeletion, onDelete }: any) 
                   {/* EC2 Instance specific criteria */}
                   {resource.resource_type === 'ec2_instance' && (
                     <div className="space-y-1 text-sm">
-                      <div className="flex items-center gap-2 text-red-700">
-                        <span className="font-semibold">✗</span>
-                        <span>Instance is stopped</span>
-                      </div>
-                      {resource.resource_metadata?.stopped_days && (
-                        <div className="flex items-center gap-2 text-red-700">
-                          <span className="font-semibold">✗</span>
-                          <span>Stopped for {resource.resource_metadata.stopped_days} days</span>
-                        </div>
+                      {resource.resource_metadata?.orphan_type === 'stopped' && (
+                        <>
+                          <div className="flex items-center gap-2 text-red-700">
+                            <span className="font-semibold">✗</span>
+                            <span>Instance is stopped</span>
+                          </div>
+                          {resource.resource_metadata?.stopped_days !== undefined && (
+                            <div className="flex items-center gap-2 text-red-700">
+                              <span className="font-semibold">✗</span>
+                              <span>Stopped for {resource.resource_metadata.stopped_days} days</span>
+                            </div>
+                          )}
+                        </>
+                      )}
+                      {resource.resource_metadata?.orphan_type === 'idle_running' && (
+                        <>
+                          <div className="flex items-center gap-2 text-blue-700">
+                            <span className="font-semibold">ℹ️</span>
+                            <span>Instance running with {resource.resource_metadata.avg_cpu_percent}% avg CPU and {(resource.resource_metadata.total_network_bytes / 1_000_000).toFixed(2)}MB network traffic over {resource.resource_metadata.lookback_hours || 2} hours ({resource.resource_metadata.confidence} confidence)</span>
+                          </div>
+                        </>
                       )}
                       <div className="flex items-center gap-2 text-gray-600 mt-1">
-                        <span className="font-semibold">ℹ️</span>
+                        <span className="font-semibold">💡</span>
                         <span className="italic">{resource.resource_metadata.orphan_reason}</span>
                       </div>
                     </div>

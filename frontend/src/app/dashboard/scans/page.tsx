@@ -18,9 +18,10 @@ import {
 
 export default function ScansPage() {
   const { accounts, fetchAccounts } = useAccountStore();
-  const { scans, fetchScans, createScan, summary, fetchSummary, isLoading } =
+  const { scans, fetchScans, createScan, deleteAllScans, summary, fetchSummary, isLoading } =
     useScanStore();
   const [selectedAccountId, setSelectedAccountId] = useState<string>("");
+  const [isDeletingAll, setIsDeletingAll] = useState(false);
 
   useEffect(() => {
     fetchAccounts();
@@ -60,6 +61,22 @@ export default function ScansPage() {
       setTimeout(() => fetchScans(), 1000);
     } catch (err) {
       // Error handled by store
+    }
+  };
+
+  const handleDeleteAll = async () => {
+    if (!confirm("Êtes-vous sûr de vouloir supprimer tous les scans ? Cette action est irréversible.")) {
+      return;
+    }
+
+    setIsDeletingAll(true);
+    try {
+      await deleteAllScans();
+      await fetchSummary();
+    } catch (err) {
+      console.error("Failed to delete all scans:", err);
+    } finally {
+      setIsDeletingAll(false);
     }
   };
 
@@ -133,7 +150,20 @@ export default function ScansPage() {
       {/* Scans List */}
       <div className="rounded-lg border bg-white shadow-sm">
         <div className="border-b p-6">
-          <h2 className="text-xl font-semibold text-gray-900">Recent Scans</h2>
+          <div className="flex items-center justify-between">
+            <h2 className="text-xl font-semibold text-gray-900">Recent Scans</h2>
+            {scans.length > 0 && (
+              <button
+                onClick={handleDeleteAll}
+                disabled={isDeletingAll}
+                className="flex items-center gap-2 rounded-lg bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700 disabled:bg-red-300 transition-colors"
+                title="Supprimer tous les scans"
+              >
+                <Trash2 className={`h-4 w-4 ${isDeletingAll ? "animate-spin" : ""}`} />
+                Supprimer tous les scans
+              </button>
+            )}
+          </div>
         </div>
         <div className="divide-y">
           {scans.length === 0 ? (

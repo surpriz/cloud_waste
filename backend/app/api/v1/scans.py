@@ -151,6 +151,18 @@ async def list_scans_by_account(
     return scans
 
 
+@router.delete("/", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_all_scans(
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_active_user)],
+) -> None:
+    """
+    Delete all scans for the current user's cloud accounts.
+    """
+    # Delete all scans for the user
+    await scan_crud.delete_all_scans_by_user(db, current_user.id)
+
+
 @router.delete("/{scan_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_scan(
     scan_id: uuid.UUID,

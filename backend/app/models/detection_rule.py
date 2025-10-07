@@ -43,7 +43,13 @@ DEFAULT_DETECTION_RULES = {
         "enabled": True,
         "min_stopped_days": 30,  # Stopped for > 30 days
         "confidence_threshold_days": 60,
-        "description": "EC2 instances stopped for extended periods",
+        # Idle running instances detection
+        "detect_idle_running": True,  # Also detect running instances with low utilization
+        "cpu_threshold_percent": 5.0,  # Average CPU < 5% = idle
+        "network_threshold_bytes": 1_000_000,  # < 1MB network traffic in lookback period = idle
+        "min_idle_days": 7,  # Running instances must be idle for at least 7 days to be detected
+        "idle_confidence_threshold_days": 30,  # High confidence after 30 days idle
+        "description": "EC2 instances stopped for extended periods or running with very low utilization",
     },
     "nat_gateway": {
         "enabled": True,

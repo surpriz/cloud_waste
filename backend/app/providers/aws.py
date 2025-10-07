@@ -969,11 +969,13 @@ class AWSProvider(CloudProviderBase):
                                     estimated_monthly_cost=round(volume_cost, 2),
                                     resource_metadata={
                                         "instance_type": instance_type,
+                                        "state": "stopped",
                                         "stopped_date": stopped_date.isoformat(),
                                         "stopped_days": stopped_days,
                                         "state_transition_reason": state_transition_reason,
                                         "confidence": confidence,
                                         "orphan_reason": reason,
+                                        "orphan_type": "stopped",
                                     },
                                 )
                             )
@@ -982,6 +984,285 @@ class AWSProvider(CloudProviderBase):
             print(f"Error scanning stopped instances in {region}: {e}")
 
         return orphans
+
+    async def scan_idle_running_instances(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scan for EC2 instances that are running but have very low utilization.
+
+        Detects instances in 'running' state with:
+        - Average CPU utilization < threshold (default 5%)
+        - Network traffic < threshold (default 1MB over 30 days)
+
+        Uses CloudWatch metrics to assess actual resource usage.
+
+        Args:
+            region: AWS region to scan
+            detection_rules: Optional user-defined detection rules
+
+        Returns:
+            List of idle running instance resources
+        """
+        orphans: list[OrphanResourceData] = []
+
+        # Get detection rules or use defaults
+        from app.models.detection_rule import DEFAULT_DETECTION_RULES
+
+        rules = detection_rules or DEFAULT_DETECTION_RULES.get("ec2_instance", {})
+        detect_idle_running = rules.get("detect_idle_running", True)
+        cpu_threshold = rules.get("cpu_threshold_percent", 5.0)
+        network_threshold = rules.get("network_threshold_bytes", 1_000_000)
+        min_idle_days = rules.get("min_idle_days", 7)
+        idle_confidence_threshold = rules.get("idle_confidence_threshold_days", 30)
+        enabled = rules.get("enabled", True)
+
+        print(f"🔍 [DEBUG] scan_idle_running_instances called for region: {region}")
+        print(f"🔍 [DEBUG] Rules: enabled={enabled}, detect_idle_running={detect_idle_running}, min_idle_days={min_idle_days}")
+
+        if not enabled or not detect_idle_running:
+            print(f"🔍 [DEBUG] Skipping idle running detection (enabled={enabled}, detect_idle_running={detect_idle_running})")
+            return orphans
+
+        try:
+            async with self.session.client("ec2", region_name=region) as ec2:
+                async with self.session.client("cloudwatch", region_name=region) as cw:
+                    # Get all running instances
+                    response = await ec2.describe_instances(
+                        Filters=[{"Name": "instance-state-name", "Values": ["running"]}]
+                    )
+
+                    print(f"🔍 [DEBUG] EC2 API response received for region {region}")
+                    total_instances = sum(len(r.get("Instances", [])) for r in response.get("Reservations", []))
+                    print(f"🔍 [DEBUG] Found {total_instances} running instances in {region}")
+
+                    now = datetime.now(timezone.utc)
+                    # Lookback period: max(min_idle_days, 30) to ensure enough data
+                    # TEST MODE: If min_idle_days = 0, use shorter lookback (2 hours)
+                    if min_idle_days == 0:
+                        lookback_days = 0
+                        start_time = now - timedelta(hours=2)  # 2 hours for immediate testing
+                    else:
+                        lookback_days = max(min_idle_days, 30)
+                        start_time = now - timedelta(days=lookback_days)
+
+                    for reservation in response.get("Reservations", []):
+                        for instance in reservation.get("Instances", []):
+                            instance_id = instance["InstanceId"]
+                            instance_type = instance["InstanceType"]
+                            launch_time = instance["LaunchTime"]
+
+                            # Calculate instance age
+                            instance_age_days = (now - launch_time).days
+
+                            # Skip instances younger than min_idle_days
+                            if instance_age_days < min_idle_days:
+                                continue
+
+                            # Extract name from tags
+                            name = None
+                            for tag in instance.get("Tags", []):
+                                if tag["Key"] == "Name":
+                                    name = tag["Value"]
+                                    break
+
+                            # Query CloudWatch for CPU utilization (average over lookback period)
+                            try:
+                                # TEST MODE: Use shorter period (5 min) if min_idle_days = 0
+                                period = 300 if min_idle_days == 0 else 86400  # 5 min or 1 day
+
+                                cpu_response = await cw.get_metric_statistics(
+                                    Namespace="AWS/EC2",
+                                    MetricName="CPUUtilization",
+                                    Dimensions=[{"Name": "InstanceId", "Value": instance_id}],
+                                    StartTime=start_time,
+                                    EndTime=now,
+                                    Period=period,
+                                    Statistics=["Average"],
+                                )
+
+                                # Calculate average CPU over entire period
+                                cpu_datapoints = cpu_response.get("Datapoints", [])
+                                if not cpu_datapoints:
+                                    # TEST MODE: If min_idle_days = 0, accept instances without metrics (assume idle)
+                                    if min_idle_days == 0:
+                                        avg_cpu = 0.0  # Assume idle for testing
+                                    else:
+                                        # No CPU data available - skip
+                                        continue
+                                else:
+                                    avg_cpu = sum(dp["Average"] for dp in cpu_datapoints) / len(cpu_datapoints)
+
+                            except Exception as e:
+                                print(f"Error fetching CPU metrics for {instance_id}: {e}")
+                                continue
+
+                            # Query CloudWatch for Network traffic
+                            try:
+                                network_in_response = await cw.get_metric_statistics(
+                                    Namespace="AWS/EC2",
+                                    MetricName="NetworkIn",
+                                    Dimensions=[{"Name": "InstanceId", "Value": instance_id}],
+                                    StartTime=start_time,
+                                    EndTime=now,
+                                    Period=period,
+                                    Statistics=["Sum"],
+                                )
+
+                                network_out_response = await cw.get_metric_statistics(
+                                    Namespace="AWS/EC2",
+                                    MetricName="NetworkOut",
+                                    Dimensions=[{"Name": "InstanceId", "Value": instance_id}],
+                                    StartTime=start_time,
+                                    EndTime=now,
+                                    Period=period,
+                                    Statistics=["Sum"],
+                                )
+
+                                # Sum all network traffic
+                                network_in = sum(
+                                    dp["Sum"] for dp in network_in_response.get("Datapoints", [])
+                                )
+                                network_out = sum(
+                                    dp["Sum"] for dp in network_out_response.get("Datapoints", [])
+                                )
+                                total_network = network_in + network_out
+
+                                # TEST MODE: If no network data and min_idle_days = 0, assume idle
+                                if total_network == 0 and min_idle_days == 0 and not network_in_response.get("Datapoints"):
+                                    total_network = 0  # Assume idle for testing
+
+                            except Exception as e:
+                                print(f"Error fetching network metrics for {instance_id}: {e}")
+                                # TEST MODE: If min_idle_days = 0, assume idle (no network)
+                                if min_idle_days == 0:
+                                    total_network = 0  # Assume idle for testing
+                                else:
+                                    # If we can't get network data, exclude from detection
+                                    total_network = network_threshold + 1
+
+                            # Determine if instance is idle based on thresholds
+                            is_cpu_idle = avg_cpu < cpu_threshold
+                            is_network_idle = total_network < network_threshold
+
+                            if is_cpu_idle and is_network_idle:
+                                # Instance is idle - determine confidence based on age
+                                # Format lookback period message
+                                if min_idle_days == 0:
+                                    lookback_msg = "2 hours"
+                                else:
+                                    lookback_msg = f"{lookback_days} days"
+
+                                if instance_age_days >= idle_confidence_threshold:
+                                    confidence = "high"
+                                    reason = f"Instance running with {avg_cpu:.1f}% avg CPU and {total_network / 1_000_000:.2f}MB network traffic over {lookback_msg} (high confidence)"
+                                elif min_idle_days > 0 and instance_age_days >= min_idle_days * 2:
+                                    confidence = "medium"
+                                    reason = f"Instance running with {avg_cpu:.1f}% avg CPU and {total_network / 1_000_000:.2f}MB network traffic over {lookback_msg} (medium confidence)"
+                                else:
+                                    confidence = "low"
+                                    reason = f"Instance running with {avg_cpu:.1f}% avg CPU and {total_network / 1_000_000:.2f}MB network traffic over {lookback_msg} (low confidence)"
+
+                                # Calculate estimated monthly cost based on instance type
+                                # Simplified pricing - you can enhance this with actual pricing data
+                                estimated_cost = self._estimate_ec2_instance_cost(instance_type)
+
+                                print(f"✅ [DEBUG] Found idle running instance: {instance_id} ({name or 'unnamed'}) - CPU: {avg_cpu:.1f}%, Network: {total_network}B, Cost: ${estimated_cost}")
+
+                                orphans.append(
+                                    OrphanResourceData(
+                                        resource_type="ec2_instance",
+                                        resource_id=instance_id,
+                                        resource_name=name,
+                                        region=region,
+                                        estimated_monthly_cost=estimated_cost,
+                                        resource_metadata={
+                                            "instance_type": instance_type,
+                                            "state": "running",
+                                            "launch_time": launch_time.isoformat(),
+                                            "instance_age_days": instance_age_days,
+                                            "avg_cpu_percent": round(avg_cpu, 2),
+                                            "total_network_bytes": int(total_network),
+                                            "lookback_days": lookback_days,
+                                            "confidence": confidence,
+                                            "orphan_reason": reason,
+                                            "orphan_type": "idle_running",
+                                        },
+                                    )
+                                )
+
+        except ClientError as e:
+            print(f"❌ [ERROR] Error scanning idle running instances in {region}: {e}")
+        except Exception as e:
+            print(f"❌ [ERROR] Unexpected error in scan_idle_running_instances for {region}: {type(e).__name__}: {e}")
+
+        print(f"🔍 [DEBUG] scan_idle_running_instances completed for {region}: Found {len(orphans)} idle instances")
+        return orphans
+
+    def _estimate_ec2_instance_cost(self, instance_type: str) -> float:
+        """
+        Estimate monthly cost for EC2 instance type.
+
+        Simplified pricing estimation. For production, use AWS Pricing API.
+
+        Args:
+            instance_type: EC2 instance type (e.g., "t2.micro", "m5.large")
+
+        Returns:
+            Estimated monthly cost in USD
+        """
+        # Simplified pricing map (us-east-1, on-demand, Linux)
+        # Format: instance_type -> hourly_cost
+        pricing_map = {
+            # T2 instances (burstable)
+            "t2.nano": 0.0058,
+            "t2.micro": 0.0116,
+            "t2.small": 0.023,
+            "t2.medium": 0.0464,
+            "t2.large": 0.0928,
+            "t2.xlarge": 0.1856,
+            "t2.2xlarge": 0.3712,
+            # T3 instances (burstable)
+            "t3.nano": 0.0052,
+            "t3.micro": 0.0104,
+            "t3.small": 0.0208,
+            "t3.medium": 0.0416,
+            "t3.large": 0.0832,
+            "t3.xlarge": 0.1664,
+            "t3.2xlarge": 0.3328,
+            # M5 instances (general purpose)
+            "m5.large": 0.096,
+            "m5.xlarge": 0.192,
+            "m5.2xlarge": 0.384,
+            "m5.4xlarge": 0.768,
+            "m5.8xlarge": 1.536,
+            "m5.12xlarge": 2.304,
+            "m5.16xlarge": 3.072,
+            "m5.24xlarge": 4.608,
+            # C5 instances (compute optimized)
+            "c5.large": 0.085,
+            "c5.xlarge": 0.17,
+            "c5.2xlarge": 0.34,
+            "c5.4xlarge": 0.68,
+            "c5.9xlarge": 1.53,
+            "c5.12xlarge": 2.04,
+            "c5.18xlarge": 3.06,
+            "c5.24xlarge": 4.08,
+            # R5 instances (memory optimized)
+            "r5.large": 0.126,
+            "r5.xlarge": 0.252,
+            "r5.2xlarge": 0.504,
+            "r5.4xlarge": 1.008,
+            "r5.8xlarge": 2.016,
+            "r5.12xlarge": 3.024,
+            "r5.16xlarge": 4.032,
+            "r5.24xlarge": 6.048,
+        }
+
+        hourly_cost = pricing_map.get(instance_type, 0.05)  # Default fallback
+        monthly_cost = hourly_cost * 730  # 730 hours per month average
+
+        return round(monthly_cost, 2)
 
     async def scan_unused_load_balancers(
         self, region: str

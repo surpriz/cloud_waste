@@ -207,3 +207,32 @@ async def delete_scan(db: AsyncSession, scan_id: uuid.UUID) -> bool:
     await db.delete(scan)
     await db.commit()
     return True
+
+
+async def delete_all_scans_by_user(db: AsyncSession, user_id: uuid.UUID) -> int:
+    """
+    Delete all scans for a user's cloud accounts.
+
+    Args:
+        db: Database session
+        user_id: User UUID
+
+    Returns:
+        Number of scans deleted
+    """
+    from app.models.cloud_account import CloudAccount
+
+    # Get all scans for the user's accounts
+    result = await db.execute(
+        select(Scan)
+        .join(CloudAccount)
+        .where(CloudAccount.user_id == user_id)
+    )
+    scans = result.scalars().all()
+
+    # Delete all scans
+    for scan in scans:
+        await db.delete(scan)
+
+    await db.commit()
+    return len(scans)
