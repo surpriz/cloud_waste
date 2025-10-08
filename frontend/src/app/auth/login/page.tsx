@@ -16,6 +16,7 @@ export default function LoginPage() {
   const [formData, setFormData] = useState({
     username: "",
     password: "",
+    remember_me: false,
   });
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -99,6 +100,24 @@ export default function LoginPage() {
                 placeholder="••••••••"
               />
             </div>
+          </div>
+
+          <div className="flex items-center">
+            <input
+              id="remember_me"
+              type="checkbox"
+              checked={formData.remember_me}
+              onChange={(e) =>
+                setFormData({ ...formData, remember_me: e.target.checked })
+              }
+              className="h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-2 focus:ring-blue-500/20 transition-all cursor-pointer"
+            />
+            <label
+              htmlFor="remember_me"
+              className="ml-2 text-sm text-gray-600 cursor-pointer select-none"
+            >
+              Remember me for 30 days
+            </label>
           </div>
 
           <button

@@ -286,6 +286,19 @@ function DetectionStrategySection() {
               "4 orphan scenarios detected"
             ]}
           />
+          <DetectionCard
+            title="For Load Balancers"
+            metrics={["RequestCount (ALB/CLB)", "ActiveFlowCount (NLB)"]}
+            logic={[
+              "Supports ALB, NLB, CLB, and GWLB",
+              "Checks healthy backend targets & target groups",
+              "Validates listener configuration",
+              "Analyzes CloudWatch traffic (30 days)",
+              "Validates security group ingress rules",
+              "Detects never-used LBs (>30 days, 0 traffic)",
+              "7 comprehensive orphan scenarios"
+            ]}
+          />
         </div>
       </div>
 
@@ -381,9 +394,9 @@ function SupportedResourcesSection() {
     {
       name: "Load Balancers",
       icon: "⚖️",
-      detection: "Load balancers with 0 healthy targets",
-      cost: "~$16-22/month",
-      confidence: "High - No active backends",
+      detection: "7 scenarios: No healthy targets, No listeners, No target groups, Never used (0 traffic >30d), Unhealthy long-term (>90d), Low traffic, Security group blocks traffic. Supports ALB, NLB, CLB, and GWLB",
+      cost: "~$7.50-22/month (GWLB $7.50, CLB $18, ALB/NLB $22)",
+      confidence: "High to Critical - Comprehensive multi-factor validation with CloudWatch metrics and security analysis",
     },
     {
       name: "RDS Instances (Stopped)",

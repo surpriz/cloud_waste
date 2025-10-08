@@ -161,13 +161,14 @@ class CloudProviderBase(ABC):
 
     @abstractmethod
     async def scan_unused_load_balancers(
-        self, region: str
+        self, region: str, detection_rules: dict | None = None
     ) -> list[OrphanResourceData]:
         """
         Scan for load balancers with no healthy backends.
 
         Args:
             region: Region to scan
+            detection_rules: Optional user-defined detection rules
 
         Returns:
             List of unused load balancer resources
@@ -342,7 +343,9 @@ class CloudProviderBase(ABC):
         results.extend(
             await self.scan_idle_running_instances(region, rules.get("ec2_instance"))
         )
-        results.extend(await self.scan_unused_load_balancers(region))
+        results.extend(
+            await self.scan_unused_load_balancers(region, rules.get("load_balancer"))
+        )
         results.extend(await self.scan_stopped_databases(region))
         results.extend(
             await self.scan_unused_nat_gateways(region, rules.get("nat_gateway"))

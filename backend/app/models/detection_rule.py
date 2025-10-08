@@ -65,8 +65,18 @@ DEFAULT_DETECTION_RULES = {
         "enabled": True,
         "require_zero_healthy_targets": True,
         "min_age_days": 7,
-        "confidence_threshold_days": 14,
-        "description": "Load balancers with no healthy backends",
+        "confidence_threshold_days": 30,
+        "critical_age_days": 90,  # Critical alert after 90 days with no backends
+        "detect_no_listeners": True,  # Detect LB without listeners
+        "detect_zero_requests": True,  # Detect LB with no requests (CloudWatch)
+        "min_requests_30d": 100,  # Minimum requests in 30 days (ALB/CLB)
+        "detect_no_target_groups": True,  # Detect LB without any target groups
+        "detect_never_used": True,  # Detect LB never used since creation
+        "never_used_min_age_days": 30,  # Min age to consider "never used"
+        "detect_unhealthy_long_term": True,  # Detect LB with all unhealthy targets >90d
+        "unhealthy_long_term_days": 90,  # Days to consider long-term unhealthy
+        "detect_sg_blocks_traffic": True,  # Detect LB with SG blocking all traffic
+        "description": "Load balancers with no healthy backends, no listeners, no traffic, no target groups, security group issues, or never used",
     },
     "rds_instance": {
         "enabled": True,

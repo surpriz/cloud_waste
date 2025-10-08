@@ -3,7 +3,7 @@
 from datetime import timedelta
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, Form, HTTPException, status
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -54,6 +54,7 @@ async def register(
 async def login(
     db: Annotated[AsyncSession, Depends(get_db)],
     form_data: Annotated[OAuth2PasswordRequestForm, Depends()],
+    remember_me: Annotated[bool, Form()] = False,
 ) -> dict[str, str]:
     """
     OAuth2 compatible token login.
@@ -61,6 +62,7 @@ async def login(
     Args:
         db: Database session
         form_data: OAuth2 form with username (email) and password
+        remember_me: If True, refresh token expires after 30 days instead of 7
 
     Returns:
         Access and refresh tokens
@@ -82,12 +84,22 @@ async def login(
             detail="Inactive user",
         )
 
-    # Create access and refresh tokens
+    # Create access token
     access_token = create_access_token(
         data={"sub": str(user.id)},
         expires_delta=timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES),
     )
-    refresh_token = create_refresh_token(data={"sub": str(user.id)})
+
+    # Create refresh token with appropriate expiration
+    if remember_me:
+        refresh_token_expires = timedelta(days=settings.REFRESH_TOKEN_REMEMBER_ME_EXPIRE_DAYS)
+    else:
+        refresh_token_expires = timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS)
+
+    refresh_token = create_refresh_token(
+        data={"sub": str(user.id)},
+        expires_delta=refresh_token_expires
+    )
 
     return {
         "access_token": access_token,

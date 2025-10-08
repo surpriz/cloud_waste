@@ -15,6 +15,7 @@ export interface User {
 export interface LoginRequest {
   username: string;
   password: string;
+  remember_me?: boolean;
 }
 
 export interface RegisterRequest {

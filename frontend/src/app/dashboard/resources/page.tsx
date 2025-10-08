@@ -576,15 +576,117 @@ function ResourceCard({ resource, onIgnore, onMarkForDeletion, onDelete }: any) 
 
                   {/* Load Balancer specific criteria */}
                   {resource.resource_type === 'load_balancer' && (
-                    <div className="space-y-1 text-sm">
-                      <div className="flex items-center gap-2 text-red-700">
-                        <span className="font-semibold">✗</span>
-                        <span>No healthy backend targets</span>
-                      </div>
-                      <div className="flex items-center gap-2 text-gray-600 mt-1">
-                        <span className="font-semibold">ℹ️</span>
-                        <span className="italic">{resource.resource_metadata.orphan_reason}</span>
-                      </div>
+                    <div className="space-y-2 text-sm">
+                      {/* Load Balancer Type Badge */}
+                      {resource.resource_metadata?.type && (
+                        <div className="flex items-center gap-2">
+                          <span className={`px-2 py-1 rounded text-xs font-semibold ${
+                            resource.resource_metadata.type === 'application' ? 'bg-blue-100 text-blue-700' :
+                            resource.resource_metadata.type === 'network' ? 'bg-green-100 text-green-700' :
+                            resource.resource_metadata.type === 'gateway' ? 'bg-purple-100 text-purple-700' :
+                            'bg-gray-100 text-gray-700'
+                          }`}>
+                            {resource.resource_metadata.type.toUpperCase()}
+                          </span>
+                          <span className="text-gray-600">{resource.resource_metadata.type_full}</span>
+                        </div>
+                      )}
+
+                      {/* Orphan type specific messages */}
+                      {resource.resource_metadata?.orphan_type === 'no_listeners' && (
+                        <div className="flex items-center gap-2 text-red-700">
+                          <span className="font-semibold">🚫</span>
+                          <span className="font-semibold">No listeners configured (unusable)</span>
+                        </div>
+                      )}
+
+                      {resource.resource_metadata?.orphan_type === 'no_target_groups' && (
+                        <div className="flex items-center gap-2 text-red-700">
+                          <span className="font-semibold">📦</span>
+                          <span className="font-semibold">No target groups attached</span>
+                        </div>
+                      )}
+
+                      {resource.resource_metadata?.orphan_type === 'no_healthy_targets' && (
+                        <div className="flex items-center gap-2 text-red-700">
+                          <span className="font-semibold">✗</span>
+                          <span className="font-semibold">No healthy backend targets</span>
+                        </div>
+                      )}
+
+                      {resource.resource_metadata?.orphan_type === 'never_used' && (
+                        <div className="flex items-center gap-2 text-orange-700">
+                          <span className="font-semibold">🆕</span>
+                          <span className="font-semibold">Never received traffic since creation</span>
+                        </div>
+                      )}
+
+                      {resource.resource_metadata?.orphan_type === 'unhealthy_long_term' && (
+                        <div className="flex items-center gap-2 text-red-700">
+                          <span className="font-semibold">⏰</span>
+                          <span className="font-semibold">All targets unhealthy for 90+ days</span>
+                        </div>
+                      )}
+
+                      {resource.resource_metadata?.orphan_type === 'sg_blocks_traffic' && (
+                        <div className="flex items-center gap-2 text-red-700">
+                          <span className="font-semibold">🔒</span>
+                          <span className="font-semibold">Security group blocks all inbound traffic</span>
+                        </div>
+                      )}
+
+                      {/* Listener count */}
+                      {resource.resource_metadata?.listener_count !== undefined && (
+                        <div className={`flex items-center gap-2 ${resource.resource_metadata.listener_count > 0 ? 'text-green-700' : 'text-red-700'}`}>
+                          <span className="font-semibold">{resource.resource_metadata.listener_count > 0 ? '✓' : '✗'}</span>
+                          <span>{resource.resource_metadata.listener_count} listener(s)</span>
+                        </div>
+                      )}
+
+                      {/* Target health status */}
+                      {resource.resource_metadata?.healthy_target_count !== undefined && (
+                        <div className={`flex items-center gap-2 ${
+                          resource.resource_metadata.healthy_target_count > 0 ? 'text-green-700' : 'text-red-700'
+                        }`}>
+                          <span className="font-semibold">{resource.resource_metadata.healthy_target_count > 0 ? '✓' : '✗'}</span>
+                          <span>
+                            {resource.resource_metadata.healthy_target_count} / {resource.resource_metadata.total_target_count} healthy targets
+                          </span>
+                        </div>
+                      )}
+
+                      {/* Additional orphan reasons */}
+                      {resource.resource_metadata?.orphan_reasons && resource.resource_metadata.orphan_reasons.length > 1 && (
+                        <div className="space-y-1 ml-6">
+                          {resource.resource_metadata.orphan_reasons.slice(1).map((reason: string, idx: number) => (
+                            <div key={idx} className="flex items-center gap-2 text-orange-600 text-xs">
+                              <span>⚠️</span>
+                              <span>{reason}</span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+
+                      {/* Age and confidence */}
+                      {resource.resource_metadata?.age_days !== undefined && (
+                        <div className="flex items-center gap-2 text-gray-600">
+                          <span>⏱️</span>
+                          <span>Age: {resource.resource_metadata.age_days} days</span>
+                          {resource.resource_metadata.confidence && (
+                            <span className={`ml-2 px-2 py-0.5 rounded text-xs font-semibold ${
+                              resource.resource_metadata.confidence === 'critical' ? 'bg-red-600 text-white' :
+                              resource.resource_metadata.confidence === 'high' ? 'bg-red-100 text-red-700' :
+                              resource.resource_metadata.confidence === 'medium' ? 'bg-orange-100 text-orange-700' :
+                              'bg-yellow-100 text-yellow-700'
+                            }`}>
+                              {resource.resource_metadata.confidence === 'critical' ? '🚨 CRITICAL' :
+                               resource.resource_metadata.confidence === 'high' ? 'High confidence' :
+                               resource.resource_metadata.confidence === 'medium' ? 'Medium confidence' :
+                               'Low confidence'}
+                            </span>
+                          )}
+                        </div>
+                      )}
                     </div>
                   )}
 

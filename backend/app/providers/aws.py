@@ -34,6 +34,7 @@ class AWSProvider(CloudProviderBase):
         "alb": 22.00,  # Application Load Balancer
         "nlb": 22.00,  # Network Load Balancer
         "clb": 18.00,  # Classic Load Balancer
+        "gwlb": 7.50,  # Gateway Load Balancer
         # TOP 15 high-cost idle resources
         "fsx_lustre_per_gb": 0.145,  # FSx for Lustre
         "fsx_windows_per_gb": 0.13,  # FSx for Windows
@@ -1265,112 +1266,396 @@ class AWSProvider(CloudProviderBase):
         return round(monthly_cost, 2)
 
     async def scan_unused_load_balancers(
-        self, region: str
+        self, region: str, detection_rules: dict | None = None
     ) -> list[OrphanResourceData]:
         """
-        Scan for load balancers with no healthy backends.
+        Scan for load balancers with no healthy backends, no listeners, or no traffic.
 
-        Detects ALB/NLB/CLB with zero healthy target instances.
+        Detects ALB/NLB/CLB/GWLB with multiple orphan scenarios:
+        1. Zero healthy target instances
+        2. No listeners configured (unusable LB)
+        3. Zero requests/traffic (CloudWatch metrics)
+        4. Critical: Abandoned for 90+ days with zero backends
 
         Args:
             region: AWS region to scan
+            detection_rules: Optional user-defined detection rules
 
         Returns:
             List of unused load balancer resources
         """
         orphans: list[OrphanResourceData] = []
 
+        # Get configuration from detection_rules or use defaults
+        from app.models.detection_rule import DEFAULT_DETECTION_RULES
+        rules = detection_rules or DEFAULT_DETECTION_RULES.get("load_balancer", {})
+
+        min_age_days = rules.get("min_age_days", 7)
+        confidence_threshold_days = rules.get("confidence_threshold_days", 30)
+        critical_age_days = rules.get("critical_age_days", 90)
+        detect_no_listeners = rules.get("detect_no_listeners", True)
+        detect_zero_requests = rules.get("detect_zero_requests", True)
+        min_requests_30d = rules.get("min_requests_30d", 100)
+        detect_no_target_groups = rules.get("detect_no_target_groups", True)
+        detect_never_used = rules.get("detect_never_used", True)
+        never_used_min_age_days = rules.get("never_used_min_age_days", 30)
+        detect_unhealthy_long_term = rules.get("detect_unhealthy_long_term", True)
+        unhealthy_long_term_days = rules.get("unhealthy_long_term_days", 90)
+        detect_sg_blocks_traffic = rules.get("detect_sg_blocks_traffic", True)
+
         try:
-            # Scan Application/Network Load Balancers (ALBv2)
+            # Scan Application/Network/Gateway Load Balancers (ELBv2)
             async with self.session.client("elbv2", region_name=region) as elbv2:
                 response = await elbv2.describe_load_balancers()
 
-                for lb in response.get("LoadBalancers", []):
-                    lb_arn = lb["LoadBalancerArn"]
-                    lb_name = lb["LoadBalancerName"]
-                    lb_type = lb["Type"]  # 'application' or 'network'
+                async with self.session.client("cloudwatch", region_name=region) as cloudwatch:
+                    for lb in response.get("LoadBalancers", []):
+                        lb_arn = lb["LoadBalancerArn"]
+                        lb_name = lb["LoadBalancerName"]
+                        lb_type = lb["Type"]  # 'application', 'network', or 'gateway'
+                        created_at = lb["CreatedTime"]
+                        age_days = (datetime.now(created_at.tzinfo) - created_at).days
 
-                    # Get target groups for this LB
-                    tg_response = await elbv2.describe_target_groups(
-                        LoadBalancerArn=lb_arn
-                    )
+                        # Skip resources younger than min_age_days
+                        if age_days < min_age_days:
+                            continue
 
-                    has_healthy_targets = False
-                    for tg in tg_response.get("TargetGroups", []):
-                        tg_arn = tg["TargetGroupArn"]
-                        health_response = await elbv2.describe_target_health(
-                            TargetGroupArn=tg_arn
+                        # Get listeners count
+                        listeners_response = await elbv2.describe_listeners(
+                            LoadBalancerArn=lb_arn
+                        )
+                        listener_count = len(listeners_response.get("Listeners", []))
+
+                        # Get target groups for this LB
+                        tg_response = await elbv2.describe_target_groups(
+                            LoadBalancerArn=lb_arn
                         )
 
-                        # Check if any target is healthy
-                        for target in health_response.get(
-                            "TargetHealthDescriptions", []
-                        ):
-                            if target["TargetHealth"]["State"] == "healthy":
-                                has_healthy_targets = True
-                                break
+                        target_groups = tg_response.get("TargetGroups", [])
+                        target_group_count = len(target_groups)
 
-                        if has_healthy_targets:
-                            break
+                        healthy_target_count = 0
+                        total_target_count = 0
+                        unhealthy_since_days = None  # Track how long unhealthy
 
-                    # If no healthy targets, mark as orphan
-                    if not has_healthy_targets:
-                        cost = (
-                            self.PRICING["alb"]
-                            if lb_type == "application"
-                            else self.PRICING["nlb"]
-                        )
-
-                        orphans.append(
-                            OrphanResourceData(
-                                resource_type="load_balancer",
-                                resource_id=lb_arn,
-                                resource_name=lb_name,
-                                region=region,
-                                estimated_monthly_cost=cost,
-                                resource_metadata={
-                                    "type": lb_type,
-                                    "dns_name": lb["DNSName"],
-                                    "created_at": lb["CreatedTime"].isoformat(),
-                                    "scheme": lb["Scheme"],
-                                },
+                        for tg in target_groups:
+                            tg_arn = tg["TargetGroupArn"]
+                            health_response = await elbv2.describe_target_health(
+                                TargetGroupArn=tg_arn
                             )
-                        )
 
-            # Scan Classic Load Balancers
+                            targets = health_response.get("TargetHealthDescriptions", [])
+                            total_target_count += len(targets)
+
+                            for target in targets:
+                                if target["TargetHealth"]["State"] == "healthy":
+                                    healthy_target_count += 1
+
+                        # Get security groups to check if traffic is blocked
+                        security_groups = lb.get("SecurityGroups", [])
+                        sg_blocks_traffic = False
+
+                        if detect_sg_blocks_traffic and security_groups:
+                            async with self.session.client("ec2", region_name=region) as ec2:
+                                try:
+                                    sg_response = await ec2.describe_security_groups(
+                                        GroupIds=security_groups
+                                    )
+                                    # Check if ANY security group has ingress rules
+                                    has_ingress = False
+                                    for sg in sg_response.get("SecurityGroups", []):
+                                        if sg.get("IpPermissions"):
+                                            has_ingress = True
+                                            break
+                                    sg_blocks_traffic = not has_ingress
+                                except Exception as e:
+                                    print(f"Warning: Could not check security groups for {lb_name}: {e}")
+
+                        # Determine if orphaned and why
+                        is_orphaned = False
+                        orphan_type = None
+                        orphan_reasons = []
+
+                        # Scenario 1: No listeners configured (LB is unusable)
+                        if detect_no_listeners and listener_count == 0:
+                            is_orphaned = True
+                            orphan_type = "no_listeners"
+                            orphan_reasons.append("No listeners configured")
+
+                        # Scenario 4: No target groups (LB has no backends configured)
+                        elif detect_no_target_groups and target_group_count == 0:
+                            is_orphaned = True
+                            orphan_type = "no_target_groups"
+                            orphan_reasons.append("No target groups attached")
+
+                        # Scenario 2: Zero healthy targets
+                        elif healthy_target_count == 0 and total_target_count == 0:
+                            is_orphaned = True
+                            orphan_type = "no_healthy_targets"
+                            orphan_reasons.append("No healthy backend targets")
+
+                        # Scenario 6: Unhealthy long-term (all targets unhealthy for 90+ days)
+                        elif detect_unhealthy_long_term and healthy_target_count == 0 and total_target_count > 0 and age_days >= unhealthy_long_term_days:
+                            is_orphaned = True
+                            orphan_type = "unhealthy_long_term"
+                            orphan_reasons.append(f"All {total_target_count} targets unhealthy for {age_days}+ days")
+
+                        # Scenario 3 & 5: Check CloudWatch metrics for traffic (ALB/NLB)
+                        total_requests = None
+                        metric_name = None
+
+                        if lb_type == "application":
+                            metric_name = "RequestCount"
+                        elif lb_type == "network":
+                            metric_name = "ActiveFlowCount"
+
+                        if metric_name and (detect_zero_requests or detect_never_used):
+                            try:
+                                end_time = datetime.now(timezone.utc)
+                                start_time = end_time - timedelta(days=30)
+
+                                metrics_response = await cloudwatch.get_metric_statistics(
+                                    Namespace="AWS/ApplicationELB" if lb_type == "application" else "AWS/NetworkELB",
+                                    MetricName=metric_name,
+                                    Dimensions=[
+                                        {"Name": "LoadBalancer", "Value": lb_arn.split(":")[-1]}
+                                    ],
+                                    StartTime=start_time,
+                                    EndTime=end_time,
+                                    Period=2592000,  # 30 days in seconds
+                                    Statistics=["Sum"],
+                                )
+
+                                datapoints = metrics_response.get("Datapoints", [])
+                                total_requests = sum(dp.get("Sum", 0) for dp in datapoints)
+
+                                # Scenario 3: Low traffic on already orphaned LB
+                                if detect_zero_requests and is_orphaned and total_requests < min_requests_30d:
+                                    orphan_reasons.append(f"Very low traffic: {int(total_requests)} {metric_name} in 30 days")
+
+                                # Scenario 5: Never used since creation (>30 days)
+                                if detect_never_used and not is_orphaned and total_requests == 0 and age_days >= never_used_min_age_days:
+                                    is_orphaned = True
+                                    orphan_type = "never_used"
+                                    orphan_reasons.append(f"Never received any traffic since creation ({age_days} days ago)")
+
+                            except Exception as e:
+                                print(f"Warning: Could not fetch CloudWatch metrics for {lb_name}: {e}")
+
+                        # Scenario 7: Security group blocks all traffic
+                        if sg_blocks_traffic:
+                            if not is_orphaned:
+                                is_orphaned = True
+                                orphan_type = "sg_blocks_traffic"
+                                orphan_reasons.append("Security group blocks all inbound traffic (0 ingress rules)")
+                            else:
+                                orphan_reasons.append("Security group blocks all inbound traffic")
+
+                        if is_orphaned:
+                            # Calculate confidence level
+                            if age_days >= critical_age_days and healthy_target_count == 0:
+                                confidence = "critical"
+                            elif age_days >= confidence_threshold_days:
+                                confidence = "high"
+                            elif age_days >= min_age_days:
+                                confidence = "medium"
+                            else:
+                                confidence = "low"
+
+                            # Calculate cost
+                            if lb_type == "application":
+                                cost = self.PRICING["alb"]
+                            elif lb_type == "network":
+                                cost = self.PRICING["nlb"]
+                            else:  # gateway
+                                cost = self.PRICING["gwlb"]
+
+                            # Calculate wasted amount
+                            wasted_amount = round((age_days / 30) * cost, 2)
+
+                            orphans.append(
+                                OrphanResourceData(
+                                    resource_type="load_balancer",
+                                    resource_id=lb_arn,
+                                    resource_name=lb_name,
+                                    region=region,
+                                    estimated_monthly_cost=cost,
+                                    resource_metadata={
+                                        "type": lb_type,
+                                        "type_full": {
+                                            "application": "Application Load Balancer (ALB)",
+                                            "network": "Network Load Balancer (NLB)",
+                                            "gateway": "Gateway Load Balancer (GWLB)"
+                                        }.get(lb_type, lb_type.upper()),
+                                        "dns_name": lb.get("DNSName", "N/A"),
+                                        "created_at": created_at.isoformat(),
+                                        "scheme": lb.get("Scheme", "N/A"),
+                                        "age_days": age_days,
+                                        "confidence": confidence,
+                                        "orphan_type": orphan_type,
+                                        "orphan_reason": "; ".join(orphan_reasons),
+                                        "orphan_reasons": orphan_reasons,
+                                        "listener_count": listener_count,
+                                        "healthy_target_count": healthy_target_count,
+                                        "total_target_count": total_target_count,
+                                        "wasted_amount": wasted_amount,
+                                    },
+                                )
+                            )
+
+            # Scan Classic Load Balancers (ELB)
             async with self.session.client("elb", region_name=region) as elb:
                 response = await elb.describe_load_balancers()
 
-                for lb in response.get("LoadBalancerDescriptions", []):
-                    lb_name = lb["LoadBalancerName"]
+                async with self.session.client("cloudwatch", region_name=region) as cloudwatch:
+                    for lb in response.get("LoadBalancerDescriptions", []):
+                        lb_name = lb["LoadBalancerName"]
+                        created_at = lb["CreatedTime"]
+                        age_days = (datetime.now(created_at.tzinfo) - created_at).days
 
-                    # Check instance health
-                    health_response = await elb.describe_instance_health(
-                        LoadBalancerName=lb_name
-                    )
+                        # Skip resources younger than min_age_days
+                        if age_days < min_age_days:
+                            continue
 
-                    has_healthy = False
-                    for instance in health_response.get("InstanceStates", []):
-                        if instance["State"] == "InService":
-                            has_healthy = True
-                            break
+                        # Get listener count
+                        listener_count = len(lb.get("ListenerDescriptions", []))
 
-                    if not has_healthy:
-                        orphans.append(
-                            OrphanResourceData(
-                                resource_type="load_balancer",
-                                resource_id=lb_name,
-                                resource_name=lb_name,
-                                region=region,
-                                estimated_monthly_cost=self.PRICING["clb"],
-                                resource_metadata={
-                                    "type": "classic",
-                                    "dns_name": lb["DNSName"],
-                                    "created_at": lb["CreatedTime"].isoformat(),
-                                    "scheme": lb["Scheme"],
-                                },
-                            )
+                        # Check instance health
+                        health_response = await elb.describe_instance_health(
+                            LoadBalancerName=lb_name
                         )
+
+                        instances = health_response.get("InstanceStates", [])
+                        total_target_count = len(instances)
+                        healthy_target_count = sum(1 for inst in instances if inst["State"] == "InService")
+
+                        # Get security groups to check if traffic is blocked
+                        security_groups = lb.get("SecurityGroups", [])
+                        sg_blocks_traffic = False
+
+                        if detect_sg_blocks_traffic and security_groups:
+                            async with self.session.client("ec2", region_name=region) as ec2:
+                                try:
+                                    sg_response = await ec2.describe_security_groups(
+                                        GroupIds=security_groups
+                                    )
+                                    # Check if ANY security group has ingress rules
+                                    has_ingress = False
+                                    for sg in sg_response.get("SecurityGroups", []):
+                                        if sg.get("IpPermissions"):
+                                            has_ingress = True
+                                            break
+                                    sg_blocks_traffic = not has_ingress
+                                except Exception as e:
+                                    print(f"Warning: Could not check security groups for {lb_name}: {e}")
+
+                        # Determine if orphaned and why
+                        is_orphaned = False
+                        orphan_type = None
+                        orphan_reasons = []
+
+                        # Scenario 1: No listeners configured
+                        if detect_no_listeners and listener_count == 0:
+                            is_orphaned = True
+                            orphan_type = "no_listeners"
+                            orphan_reasons.append("No listeners configured")
+
+                        # Scenario 2: No healthy instances (0 instances)
+                        elif healthy_target_count == 0 and total_target_count == 0:
+                            is_orphaned = True
+                            orphan_type = "no_healthy_targets"
+                            orphan_reasons.append("No healthy backend instances")
+
+                        # Scenario 6: Unhealthy long-term (all instances unhealthy for 90+ days)
+                        elif detect_unhealthy_long_term and healthy_target_count == 0 and total_target_count > 0 and age_days >= unhealthy_long_term_days:
+                            is_orphaned = True
+                            orphan_type = "unhealthy_long_term"
+                            orphan_reasons.append(f"All {total_target_count} instances unhealthy for {age_days}+ days")
+
+                        # Scenario 3 & 5: Check CloudWatch metrics for requests
+                        total_requests = None
+
+                        if detect_zero_requests or detect_never_used:
+                            try:
+                                end_time = datetime.now(timezone.utc)
+                                start_time = end_time - timedelta(days=30)
+
+                                metrics_response = await cloudwatch.get_metric_statistics(
+                                    Namespace="AWS/ELB",
+                                    MetricName="RequestCount",
+                                    Dimensions=[
+                                        {"Name": "LoadBalancerName", "Value": lb_name}
+                                    ],
+                                    StartTime=start_time,
+                                    EndTime=end_time,
+                                    Period=2592000,  # 30 days in seconds
+                                    Statistics=["Sum"],
+                                )
+
+                                datapoints = metrics_response.get("Datapoints", [])
+                                total_requests = sum(dp.get("Sum", 0) for dp in datapoints)
+
+                                # Scenario 3: Low traffic on already orphaned LB
+                                if detect_zero_requests and is_orphaned and total_requests < min_requests_30d:
+                                    orphan_reasons.append(f"Very low traffic: {int(total_requests)} requests in 30 days")
+
+                                # Scenario 5: Never used since creation (>30 days)
+                                if detect_never_used and not is_orphaned and total_requests == 0 and age_days >= never_used_min_age_days:
+                                    is_orphaned = True
+                                    orphan_type = "never_used"
+                                    orphan_reasons.append(f"Never received any traffic since creation ({age_days} days ago)")
+
+                            except Exception as e:
+                                print(f"Warning: Could not fetch CloudWatch metrics for {lb_name}: {e}")
+
+                        # Scenario 7: Security group blocks all traffic
+                        if sg_blocks_traffic:
+                            if not is_orphaned:
+                                is_orphaned = True
+                                orphan_type = "sg_blocks_traffic"
+                                orphan_reasons.append("Security group blocks all inbound traffic (0 ingress rules)")
+                            else:
+                                orphan_reasons.append("Security group blocks all inbound traffic")
+
+                        if is_orphaned:
+                            # Calculate confidence level
+                            if age_days >= critical_age_days and healthy_target_count == 0:
+                                confidence = "critical"
+                            elif age_days >= confidence_threshold_days:
+                                confidence = "high"
+                            elif age_days >= min_age_days:
+                                confidence = "medium"
+                            else:
+                                confidence = "low"
+
+                            cost = self.PRICING["clb"]
+                            wasted_amount = round((age_days / 30) * cost, 2)
+
+                            orphans.append(
+                                OrphanResourceData(
+                                    resource_type="load_balancer",
+                                    resource_id=lb_name,
+                                    resource_name=lb_name,
+                                    region=region,
+                                    estimated_monthly_cost=cost,
+                                    resource_metadata={
+                                        "type": "classic",
+                                        "type_full": "Classic Load Balancer (CLB)",
+                                        "dns_name": lb.get("DNSName", "N/A"),
+                                        "created_at": created_at.isoformat(),
+                                        "scheme": lb.get("Scheme", "N/A"),
+                                        "age_days": age_days,
+                                        "confidence": confidence,
+                                        "orphan_type": orphan_type,
+                                        "orphan_reason": "; ".join(orphan_reasons),
+                                        "orphan_reasons": orphan_reasons,
+                                        "listener_count": listener_count,
+                                        "healthy_target_count": healthy_target_count,
+                                        "total_target_count": total_target_count,
+                                        "wasted_amount": wasted_amount,
+                                    },
+                                )
+                            )
 
         except ClientError as e:
             print(f"Error scanning unused load balancers in {region}: {e}")
