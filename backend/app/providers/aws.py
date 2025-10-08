@@ -1434,34 +1434,100 @@ class AWSProvider(CloudProviderBase):
 
         return orphans
 
-    async def scan_unused_nat_gateways(self, region: str) -> list[OrphanResourceData]:
+    async def scan_unused_nat_gateways(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
         """
-        Scan for NAT gateways with no outbound traffic.
+        Scan for NAT gateways with no outbound traffic or misconfigured routing.
 
-        Uses CloudWatch metrics to detect NAT gateways with zero BytesOutToDestination
-        over the last 30 days.
+        Detection scenarios:
+        1. Zero or very low traffic (BytesOutToDestination < threshold)
+        2. No route table references (orphaned)
+        3. Route tables not associated with any subnet
+        4. VPC without Internet Gateway (broken config)
 
         Args:
             region: AWS region to scan
+            detection_rules: Optional detection configuration
 
         Returns:
             List of unused NAT gateway resources
         """
         orphans: list[OrphanResourceData] = []
 
+        # Use provided rules or defaults
+        if detection_rules is None:
+            from app.models.detection_rule import DEFAULT_DETECTION_RULES
+
+            detection_rules = DEFAULT_DETECTION_RULES.get("nat_gateway", {})
+
+        # Check if detection is enabled
+        if not detection_rules.get("enabled", True):
+            return orphans
+
+        min_age_days = detection_rules.get("min_age_days", 7)
+        max_bytes_30d = detection_rules.get("max_bytes_30d", 1_000_000)
+        confidence_threshold_days = detection_rules.get("confidence_threshold_days", 30)
+        critical_age_days = detection_rules.get("critical_age_days", 90)
+        detect_no_routes = detection_rules.get("detect_no_routes", True)
+        detect_no_igw = detection_rules.get("detect_no_igw", True)
+
         try:
             async with self.session.client("ec2", region_name=region) as ec2:
-                response = await ec2.describe_nat_gateways(
+                # Get all NAT Gateways
+                nat_response = await ec2.describe_nat_gateways(
                     Filters=[{"Name": "state", "Values": ["available"]}]
                 )
+
+                # Get all route tables for routing analysis
+                route_tables_response = await ec2.describe_route_tables()
+                all_route_tables = route_tables_response.get("RouteTables", [])
+
+                # Get all Internet Gateways for VPC validation
+                igw_response = await ec2.describe_internet_gateways()
+                vpcs_with_igw = set()
+                for igw in igw_response.get("InternetGateways", []):
+                    for attachment in igw.get("Attachments", []):
+                        if attachment.get("State") == "available":
+                            vpcs_with_igw.add(attachment.get("VpcId"))
 
                 async with self.session.client("cloudwatch", region_name=region) as cw:
                     end_time = datetime.now(timezone.utc)
                     start_time = end_time - timedelta(days=30)
 
-                    for nat_gw in response.get("NatGateways", []):
+                    for nat_gw in nat_response.get("NatGateways", []):
                         nat_gw_id = nat_gw["NatGatewayId"]
                         vpc_id = nat_gw.get("VpcId", "Unknown")
+                        created_at = nat_gw["CreateTime"]
+                        age_days = (end_time - created_at).days
+
+                        # Skip if NAT Gateway is too young
+                        if age_days < min_age_days:
+                            continue
+
+                        # Analyze routing configuration
+                        route_tables_with_nat = []
+                        associated_subnets_count = 0
+
+                        for rt in all_route_tables:
+                            if rt.get("VpcId") != vpc_id:
+                                continue
+
+                            # Check if this route table references our NAT Gateway
+                            has_nat_route = False
+                            for route in rt.get("Routes", []):
+                                if route.get("NatGatewayId") == nat_gw_id:
+                                    has_nat_route = True
+                                    break
+
+                            if has_nat_route:
+                                route_tables_with_nat.append(rt)
+                                # Count associated subnets
+                                associated_subnets_count += len(rt.get("Associations", []))
+
+                        has_routes = len(route_tables_with_nat) > 0
+                        has_associated_subnets = associated_subnets_count > 0
+                        vpc_has_igw = vpc_id in vpcs_with_igw
 
                         # Query CloudWatch for BytesOutToDestination metric
                         metrics_response = await cw.get_metric_statistics(
@@ -1474,36 +1540,99 @@ class AWSProvider(CloudProviderBase):
                             Statistics=["Sum"],
                         )
 
-                        # Check if total bytes out is zero or very low
                         total_bytes = sum(
                             dp["Sum"]
                             for dp in metrics_response.get("Datapoints", [])
                         )
 
-                        # If less than 1MB over 30 days, consider unused
-                        if total_bytes < 1_000_000:
-                            # Extract name from tags
-                            name = None
-                            for tag in nat_gw.get("Tags", []):
-                                if tag["Key"] == "Name":
-                                    name = tag["Value"]
-                                    break
+                        # Determine if orphaned based on multiple criteria
+                        is_orphaned = False
+                        orphan_reasons = []
+                        orphan_type = None
 
-                            orphans.append(
-                                OrphanResourceData(
-                                    resource_type="nat_gateway",
-                                    resource_id=nat_gw_id,
-                                    resource_name=name,
-                                    region=region,
-                                    estimated_monthly_cost=self.PRICING["nat_gateway"],
-                                    resource_metadata={
-                                        "vpc_id": vpc_id,
-                                        "subnet_id": nat_gw.get("SubnetId", "Unknown"),
-                                        "created_at": nat_gw["CreateTime"].isoformat(),
-                                        "bytes_out_30d": int(total_bytes),
-                                    },
-                                )
+                        # Scenario 1: No route tables reference this NAT Gateway
+                        if detect_no_routes and not has_routes:
+                            is_orphaned = True
+                            orphan_type = "no_routes"
+                            orphan_reasons.append("Not referenced in any route table")
+
+                        # Scenario 2: Has routes but none are associated with subnets
+                        elif has_routes and not has_associated_subnets:
+                            is_orphaned = True
+                            orphan_type = "routes_not_associated"
+                            orphan_reasons.append(
+                                f"Referenced in {len(route_tables_with_nat)} route table(s) but none associated with subnets"
                             )
+
+                        # Scenario 3: VPC has no Internet Gateway (broken config)
+                        if detect_no_igw and not vpc_has_igw:
+                            is_orphaned = True
+                            if not orphan_type:
+                                orphan_type = "no_igw"
+                            orphan_reasons.append(
+                                "VPC has no Internet Gateway (NAT Gateway cannot route to internet)"
+                            )
+
+                        # Scenario 4: Low/zero traffic
+                        if total_bytes < max_bytes_30d:
+                            if not is_orphaned:
+                                orphan_type = "low_traffic"
+                            orphan_reasons.append(
+                                f"Only {(total_bytes / 1024):.2f} KB traffic in 30 days"
+                            )
+                            is_orphaned = True
+
+                        # Skip if not orphaned
+                        if not is_orphaned:
+                            continue
+
+                        # Calculate confidence level (enhanced with critical)
+                        if age_days >= critical_age_days and total_bytes == 0:
+                            confidence = "critical"
+                            wasted_amount = round((age_days / 30) * self.PRICING["nat_gateway"], 2)
+                            orphan_reason = f"CRITICAL: Abandoned for {age_days} days with zero traffic (${wasted_amount} wasted)"
+                        elif age_days >= confidence_threshold_days:
+                            confidence = "high"
+                            orphan_reason = f"Unused for {age_days} days ({'; '.join(orphan_reasons)})"
+                        elif age_days >= min_age_days:
+                            confidence = "medium"
+                            orphan_reason = f"Likely unused for {age_days} days ({'; '.join(orphan_reasons)})"
+                        else:
+                            confidence = "low"
+                            orphan_reason = f"Recently created ({age_days} days) but {'; '.join(orphan_reasons)}"
+
+                        # Extract name from tags
+                        name = None
+                        for tag in nat_gw.get("Tags", []):
+                            if tag["Key"] == "Name":
+                                name = tag["Value"]
+                                break
+
+                        orphans.append(
+                            OrphanResourceData(
+                                resource_type="nat_gateway",
+                                resource_id=nat_gw_id,
+                                resource_name=name,
+                                region=region,
+                                estimated_monthly_cost=self.PRICING["nat_gateway"],
+                                resource_metadata={
+                                    "vpc_id": vpc_id,
+                                    "subnet_id": nat_gw.get("SubnetId", "Unknown"),
+                                    "created_at": created_at.isoformat(),
+                                    "age_days": age_days,
+                                    "bytes_out_30d": int(total_bytes),
+                                    "confidence": confidence,
+                                    "orphan_reason": orphan_reason,
+                                    "orphan_type": orphan_type,
+                                    # Enhanced metadata
+                                    "has_routes": has_routes,
+                                    "route_tables_count": len(route_tables_with_nat),
+                                    "associated_subnets_count": associated_subnets_count,
+                                    "vpc_has_igw": vpc_has_igw,
+                                    "orphan_reasons": orphan_reasons,
+                                },
+                            )
+                        )
 
         except ClientError as e:
             print(f"Error scanning unused NAT gateways in {region}: {e}")

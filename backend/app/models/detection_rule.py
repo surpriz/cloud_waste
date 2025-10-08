@@ -56,7 +56,10 @@ DEFAULT_DETECTION_RULES = {
         "max_bytes_30d": 1_000_000,  # < 1MB traffic in 30 days
         "min_age_days": 7,
         "confidence_threshold_days": 30,
-        "description": "NAT Gateways with no traffic",
+        "critical_age_days": 90,  # Critical alert after 90 days unused
+        "detect_no_routes": True,  # Detect NAT GW not referenced in route tables
+        "detect_no_igw": True,  # Detect NAT GW in VPC without Internet Gateway
+        "description": "NAT Gateways with no traffic, no routing, or misconfigured",
     },
     "load_balancer": {
         "enabled": True,

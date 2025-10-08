@@ -188,12 +188,15 @@ class CloudProviderBase(ABC):
         pass
 
     @abstractmethod
-    async def scan_unused_nat_gateways(self, region: str) -> list[OrphanResourceData]:
+    async def scan_unused_nat_gateways(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
         """
         Scan for NAT gateways with no traffic.
 
         Args:
             region: Region to scan
+            detection_rules: Optional detection configuration
 
         Returns:
             List of unused NAT gateway resources
@@ -341,7 +344,9 @@ class CloudProviderBase(ABC):
         )
         results.extend(await self.scan_unused_load_balancers(region))
         results.extend(await self.scan_stopped_databases(region))
-        results.extend(await self.scan_unused_nat_gateways(region))
+        results.extend(
+            await self.scan_unused_nat_gateways(region, rules.get("nat_gateway"))
+        )
 
         # TOP 15 high-cost idle resources
         results.extend(

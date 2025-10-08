@@ -591,18 +591,112 @@ function ResourceCard({ resource, onIgnore, onMarkForDeletion, onDelete }: any) 
                   {/* NAT Gateway specific criteria */}
                   {resource.resource_type === 'nat_gateway' && (
                     <div className="space-y-1 text-sm">
-                      <div className="flex items-center gap-2 text-red-700">
-                        <span className="font-semibold">✗</span>
-                        <span>No outbound traffic detected</span>
-                      </div>
-                      {resource.resource_metadata?.bytes_out_30d !== undefined && (
+                      {/* Orphan type specific messages */}
+                      {resource.resource_metadata?.orphan_type === 'no_routes' && (
+                        <div className="flex items-center gap-2 text-red-700">
+                          <span className="font-semibold">🚫</span>
+                          <span className="font-semibold">NOT referenced in any route table</span>
+                        </div>
+                      )}
+                      {resource.resource_metadata?.orphan_type === 'routes_not_associated' && (
+                        <>
+                          <div className="flex items-center gap-2 text-orange-700">
+                            <span className="font-semibold">⚠️</span>
+                            <span>Referenced in {resource.resource_metadata?.route_tables_count || 0} route table(s)</span>
+                          </div>
+                          <div className="flex items-center gap-2 text-red-700">
+                            <span className="font-semibold">✗</span>
+                            <span>But route tables NOT associated with any subnet</span>
+                          </div>
+                        </>
+                      )}
+                      {resource.resource_metadata?.orphan_type === 'no_igw' && (
+                        <div className="flex items-center gap-2 text-red-700">
+                          <span className="font-semibold">🌐</span>
+                          <span className="font-semibold">VPC has NO Internet Gateway (broken config)</span>
+                        </div>
+                      )}
+                      {resource.resource_metadata?.orphan_type === 'low_traffic' && (
                         <div className="flex items-center gap-2 text-red-700">
                           <span className="font-semibold">✗</span>
+                          <span>No outbound traffic detected over 30 days</span>
+                        </div>
+                      )}
+
+                      {/* Traffic info */}
+                      {resource.resource_metadata?.bytes_out_30d !== undefined && (
+                        <div className="flex items-center gap-2 text-red-700">
+                          <span className="font-semibold">📊</span>
                           <span>Only {(resource.resource_metadata.bytes_out_30d / 1024).toFixed(2)} KB transferred in last 30 days</span>
                         </div>
                       )}
+
+                      {/* Routing info - only show if not already displayed via orphan_type */}
+                      {resource.resource_metadata?.has_routes !== undefined &&
+                       resource.resource_metadata?.orphan_type !== 'no_routes' && (
+                        <div className={`flex items-center gap-2 ${resource.resource_metadata.has_routes ? 'text-green-700' : 'text-red-700'}`}>
+                          <span className="font-semibold">{resource.resource_metadata.has_routes ? '✓' : '✗'}</span>
+                          <span>
+                            {resource.resource_metadata.has_routes
+                              ? `Referenced in ${resource.resource_metadata.route_tables_count || 0} route table(s)`
+                              : 'Not referenced in any route table'}
+                          </span>
+                        </div>
+                      )}
+
+                      {/* Subnet associations */}
+                      {resource.resource_metadata?.associated_subnets_count !== undefined && resource.resource_metadata.has_routes && (
+                        <div className={`flex items-center gap-2 ${resource.resource_metadata.associated_subnets_count > 0 ? 'text-green-700' : 'text-red-700'}`}>
+                          <span className="font-semibold">{resource.resource_metadata.associated_subnets_count > 0 ? '✓' : '✗'}</span>
+                          <span>
+                            {resource.resource_metadata.associated_subnets_count > 0
+                              ? `Associated with ${resource.resource_metadata.associated_subnets_count} subnet(s)`
+                              : 'Route tables NOT associated with any subnet'}
+                          </span>
+                        </div>
+                      )}
+
+                      {/* Internet Gateway check */}
+                      {resource.resource_metadata?.vpc_has_igw !== undefined && (
+                        <div className={`flex items-center gap-2 ${resource.resource_metadata.vpc_has_igw ? 'text-green-700' : 'text-red-700'}`}>
+                          <span className="font-semibold">{resource.resource_metadata.vpc_has_igw ? '✓' : '✗'}</span>
+                          <span>
+                            {resource.resource_metadata.vpc_has_igw
+                              ? 'VPC has Internet Gateway'
+                              : 'VPC has NO Internet Gateway (cannot route to internet)'}
+                          </span>
+                        </div>
+                      )}
+
+                      {/* Age info */}
+                      {resource.resource_metadata?.age_days !== undefined && (
+                        <div className="flex items-center gap-2 text-orange-700">
+                          <span className="font-semibold">⏱</span>
+                          <span>NAT Gateway age: {resource.resource_metadata.age_days} days</span>
+                        </div>
+                      )}
+
+                      {/* Confidence level with critical support */}
+                      {resource.resource_metadata?.confidence && (
+                        <div className={`flex items-center gap-2 ${
+                          resource.resource_metadata.confidence === 'critical' ? 'text-red-900 font-bold' :
+                          resource.resource_metadata.confidence === 'high' ? 'text-green-700' :
+                          resource.resource_metadata.confidence === 'medium' ? 'text-yellow-700' :
+                          'text-gray-700'
+                        }`}>
+                          <span className="font-semibold">
+                            {resource.resource_metadata.confidence === 'critical' ? '🚨' :
+                             resource.resource_metadata.confidence === 'high' ? '✓' :
+                             resource.resource_metadata.confidence === 'medium' ? '◐' : '○'}
+                          </span>
+                          <span className="capitalize">
+                            {resource.resource_metadata.confidence === 'critical' ? '🔥 CRITICAL' : resource.resource_metadata.confidence} confidence level
+                          </span>
+                        </div>
+                      )}
+
                       <div className="flex items-center gap-2 text-gray-600 mt-1">
-                        <span className="font-semibold">ℹ️</span>
+                        <span className="font-semibold">💡</span>
                         <span className="italic">{resource.resource_metadata.orphan_reason}</span>
                       </div>
                     </div>

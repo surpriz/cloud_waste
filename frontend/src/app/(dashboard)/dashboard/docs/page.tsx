@@ -275,12 +275,34 @@ function DetectionStrategySection() {
               "No CloudWatch metrics available (AWS limitation)"
             ]}
           />
+          <DetectionCard
+            title="For NAT Gateways"
+            metrics={["BytesOutToDestination", "BytesOutToSource"]}
+            logic={[
+              "Checks CloudWatch traffic metrics (30 days)",
+              "Validates route table references",
+              "Checks subnet associations",
+              "Verifies VPC has Internet Gateway",
+              "4 orphan scenarios detected"
+            ]}
+          />
         </div>
       </div>
 
       <div className="space-y-4">
         <h3 className="text-2xl font-bold text-gray-900">Confidence Levels Explained</h3>
         <div className="space-y-3">
+          <ConfidenceBadge
+            level="critical"
+            color="red"
+            criteria={[
+              "Abandoned for 90+ days with zero activity",
+              "Misconfigured with no routing or connectivity",
+              "Multiple failure criteria met simultaneously",
+              "Extremely high probability of waste"
+            ]}
+            recommendation="Immediate action recommended - critical waste"
+          />
           <ConfidenceBadge
             level="high"
             color="red"
@@ -373,9 +395,9 @@ function SupportedResourcesSection() {
     {
       name: "NAT Gateways",
       icon: "🚪",
-      detection: "NAT Gateways with <1MB traffic in 30 days",
-      cost: "~$32/month",
-      confidence: "High - No traffic usage",
+      detection: "4 scenarios: No traffic (<1MB/30d), No routing configuration, VPC without Internet Gateway, Route tables not associated with subnets",
+      cost: "~$32.40/month + data processing",
+      confidence: "High to Critical - Multi-factor validation including CloudWatch metrics and configuration analysis",
     },
     {
       name: "FSx File Systems",
@@ -623,7 +645,7 @@ function FAQSection() {
     },
     {
       q: "Can I customize detection rules per resource type?",
-      a: "Yes! Go to Settings → Detection Rules to configure minimum age and confidence thresholds for each of the 7 supported resource types."
+      a: "Yes! Go to Settings → Detection Rules to configure minimum age and confidence thresholds for each of the 22 supported resource types (5 core + 17 advanced high-cost resources)."
     },
     {
       q: "What if CloudWatch metrics are unavailable?",
