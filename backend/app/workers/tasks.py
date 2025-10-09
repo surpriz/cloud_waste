@@ -148,7 +148,10 @@ async def _scan_cloud_account_async(
 
                     # Scan all resource types in this region
                     # Pass user's detection rules
-                    orphans = await provider.scan_all_resources(region, user_detection_rules)
+                    # Scan global resources (S3, etc.) only in the first region (i == 0)
+                    orphans = await provider.scan_all_resources(
+                        region, user_detection_rules, scan_global_resources=(i == 0)
+                    )
                     all_orphans.extend(orphans)
                     total_resources += len(orphans)
 

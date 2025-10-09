@@ -305,8 +305,26 @@ class CloudProviderBase(ABC):
         """Scan for idle DocumentDB clusters."""
         pass
 
+    @abstractmethod
+    async def scan_idle_s3_buckets(
+        self, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scan for idle S3 buckets (called once per account, not per region).
+
+        Note: S3 buckets are global resources, so this method should be called
+        only once per account scan, not for each region.
+
+        Args:
+            detection_rules: Optional detection configuration
+
+        Returns:
+            List of idle S3 bucket resources
+        """
+        pass
+
     async def scan_all_resources(
-        self, region: str, detection_rules: dict[str, dict] | None = None
+        self, region: str, detection_rules: dict[str, dict] | None = None, scan_global_resources: bool = False
     ) -> list[OrphanResourceData]:
         """
         Scan all resource types in a specific region.
@@ -314,6 +332,8 @@ class CloudProviderBase(ABC):
         Args:
             region: Region to scan
             detection_rules: Optional user-defined detection rules per resource type
+            scan_global_resources: If True, also scan global resources (e.g., S3 buckets).
+                                   Should only be True for the first region in a multi-region scan.
 
         Returns:
             Combined list of all orphan resources found
@@ -405,5 +425,9 @@ class CloudProviderBase(ABC):
                 region, rules.get("documentdb_cluster")
             )
         )
+
+        # Global resources (scanned only once, not per region)
+        if scan_global_resources:
+            results.extend(await self.scan_idle_s3_buckets(rules.get("s3_bucket")))
 
         return results

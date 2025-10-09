@@ -199,6 +199,23 @@ DEFAULT_DETECTION_RULES = {
         "confidence_threshold_days": 7,
         "description": "DocumentDB clusters with no database connections",
     },
+    "s3_bucket": {
+        "enabled": True,
+        "min_bucket_age_days": 1,  # TEMPORAIRE: Minimum bucket age before flagging (ORIGINAL: 90)
+        "confidence_threshold_days": 180,
+        # Empty bucket detection
+        "detect_empty": True,  # Detect buckets with 0 objects
+        # Old objects detection
+        "detect_old_objects": True,  # Detect buckets where ALL objects are very old
+        "object_age_threshold_days": 1,  # TEMPORAIRE: All objects > 1 days old (ORIGINAL: 365)
+        # Incomplete multipart uploads detection
+        "detect_multipart_uploads": True,  # Detect incomplete multipart uploads
+        "multipart_age_days": 1,  # TEMPORAIRE: Incomplete uploads > 1 days old (ORIGINAL: 30)
+        # No lifecycle policy detection
+        "detect_no_lifecycle": True,  # Detect buckets without lifecycle policies + old objects
+        "lifecycle_age_threshold_days": 1,  # TEMPORAIRE: Buckets with objects > 1 days + no lifecycle (ORIGINAL: 180)
+        "description": "S3 buckets: empty, old objects, incomplete multipart uploads, no lifecycle policy",
+    },
 }
 
 

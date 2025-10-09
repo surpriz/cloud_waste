@@ -259,8 +259,11 @@ export function OrphanResourceCard({
     "Action": [
       "ec2:Describe*",
       "rds:Describe*",
-      "s3:List*",
-      "s3:Get*",
+      "s3:ListAllMyBuckets",
+      "s3:ListBucket",
+      "s3:GetBucketLocation",
+      "s3:ListBucketMultipartUploads",
+      "s3:GetBucketLifecycleConfiguration",
       "elasticloadbalancing:Describe*",
       "ce:GetCostAndUsage",
       "ce:GetCostForecast",

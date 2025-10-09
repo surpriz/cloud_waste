@@ -574,12 +574,19 @@ function SupportedResourcesSection() {
       cost: "~$199/month",
       confidence: "High - No active connections",
     },
+    {
+      name: "S3 Buckets",
+      icon: "🗄️",
+      detection: "4 scenarios: Empty buckets (0 objects, 90+ days old), All objects very old (365+ days, no recent activity), Incomplete multipart uploads (30+ days old, hidden storage costs), No lifecycle policy with old objects (180+ days, optimization opportunity)",
+      cost: "~$0.023/GB/month (Standard) to $0.004/GB/month (Glacier). Empty buckets cost $0 but waste management overhead",
+      confidence: "Medium to High - Based on bucket age, object age distribution, multipart upload analysis, and lifecycle policy evaluation",
+    },
   ];
 
   return (
     <div className="space-y-6">
       <h1 className="text-4xl font-bold text-gray-900">Supported Resources</h1>
-      <p className="text-xl text-gray-600">Currently supporting 22 AWS resource types with intelligent CloudWatch-based detection</p>
+      <p className="text-xl text-gray-600">Currently supporting 23 AWS resource types with intelligent CloudWatch-based detection</p>
 
       <div className="grid gap-4">
         {resources.map((resource, index) => (

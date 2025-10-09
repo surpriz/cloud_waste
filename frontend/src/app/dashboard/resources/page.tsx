@@ -41,6 +41,7 @@ const resourceIcons: Record<ResourceType, any> = {
   kinesis_stream: Server,
   vpc_endpoint: Network,
   documentdb_cluster: Database,
+  s3_bucket: HardDrive,
 };
 
 export default function ResourcesPage() {
@@ -195,6 +196,7 @@ export default function ResourcesPage() {
                   <option value="ebs_snapshot">EBS Snapshot</option>
                   <option value="ec2_instance">EC2 Instance</option>
                   <option value="fsx_file_system">FSx File System</option>
+                  <option value="s3_bucket">S3 Bucket</option>
                 </optgroup>
                 <optgroup label="Networking">
                   <option value="elastic_ip">Elastic IP</option>
@@ -1142,8 +1144,104 @@ function ResourceCard({ resource, onIgnore, onMarkForDeletion, onDelete }: any) 
                     </div>
                   )}
 
+                  {/* S3 Bucket specific criteria */}
+                  {resource.resource_type === 's3_bucket' && (
+                    <div className="space-y-1 text-sm">
+                      {/* Check orphan type */}
+                      {resource.resource_metadata?.orphan_type === 'empty' && (
+                        <>
+                          <div className="flex items-center gap-2 text-red-700">
+                            <span className="font-semibold">✗</span>
+                            <span>Bucket is empty (0 objects)</span>
+                          </div>
+                          {resource.resource_metadata.bucket_age_days !== undefined && (
+                            <div className="flex items-center gap-2 text-gray-700">
+                              <span className="font-semibold">📅</span>
+                              <span>Bucket age: {resource.resource_metadata.bucket_age_days} days</span>
+                            </div>
+                          )}
+                        </>
+                      )}
+                      {resource.resource_metadata?.orphan_type === 'old_objects' && (
+                        <>
+                          <div className="flex items-center gap-2 text-orange-700">
+                            <span className="font-semibold">⚠️</span>
+                            <span>All {resource.resource_metadata.object_count} objects are very old</span>
+                          </div>
+                          <div className="flex items-center gap-2 text-red-700">
+                            <span className="font-semibold">✗</span>
+                            <span>
+                              Newest object is {resource.resource_metadata.newest_object_days}+ days old (no recent activity)
+                            </span>
+                          </div>
+                          {resource.resource_metadata.bucket_size_gb > 0 && (
+                            <div className="flex items-center gap-2 text-gray-700">
+                              <span className="font-semibold">💾</span>
+                              <span>Size: {resource.resource_metadata.bucket_size_gb} GB</span>
+                            </div>
+                          )}
+                          {resource.resource_metadata.storage_classes && Object.keys(resource.resource_metadata.storage_classes).length > 0 && (
+                            <div className="flex items-center gap-2 text-gray-700">
+                              <span className="font-semibold">🗃️</span>
+                              <span>
+                                Storage classes: {Object.entries(resource.resource_metadata.storage_classes).map(([cls, size]) => `${cls} (${size} GB)`).join(', ')}
+                              </span>
+                            </div>
+                          )}
+                        </>
+                      )}
+                      {resource.resource_metadata?.orphan_type === 'multipart_uploads' && (
+                        <>
+                          <div className="flex items-center gap-2 text-purple-700">
+                            <span className="font-semibold">🔄</span>
+                            <span>Incomplete multipart uploads detected</span>
+                          </div>
+                          <div className="flex items-center gap-2 text-red-700">
+                            <span className="font-semibold">✗</span>
+                            <span>Abandoned uploads still consuming storage (hidden costs)</span>
+                          </div>
+                          {resource.resource_metadata.bucket_size_gb > 0 && (
+                            <div className="flex items-center gap-2 text-gray-700">
+                              <span className="font-semibold">💾</span>
+                              <span>Total size (including multiparts): {resource.resource_metadata.bucket_size_gb} GB</span>
+                            </div>
+                          )}
+                        </>
+                      )}
+                      {resource.resource_metadata?.orphan_type === 'no_lifecycle' && (
+                        <>
+                          <div className="flex items-center gap-2 text-indigo-700">
+                            <span className="font-semibold">📋</span>
+                            <span>No lifecycle policy configured</span>
+                          </div>
+                          <div className="flex items-center gap-2 text-orange-700">
+                            <span className="font-semibold">⚠️</span>
+                            <span>
+                              Old objects ({resource.resource_metadata.oldest_object_days}+ days) could be transitioned to cheaper storage
+                            </span>
+                          </div>
+                          {resource.resource_metadata.bucket_size_gb > 0 && (
+                            <div className="flex items-center gap-2 text-gray-700">
+                              <span className="font-semibold">💾</span>
+                              <span>Size: {resource.resource_metadata.bucket_size_gb} GB ({resource.resource_metadata.object_count} objects)</span>
+                            </div>
+                          )}
+                          <div className="flex items-center gap-2 text-green-700 mt-1 bg-green-50 p-2 rounded">
+                            <span className="font-semibold">💡</span>
+                            <span className="text-xs">Consider archiving to S3 Glacier or Glacier Deep Archive to reduce costs by 70-90%</span>
+                          </div>
+                        </>
+                      )}
+                      {/* Don't show region here, it's already displayed at the top in "S3 BUCKET · region" */}
+                      <div className="flex items-center gap-2 text-gray-600 mt-1">
+                        <span className="font-semibold">ℹ️</span>
+                        <span className="italic">{resource.resource_metadata.orphan_reason}</span>
+                      </div>
+                    </div>
+                  )}
+
                   {/* Generic criteria for other resource types */}
-                  {!['ebs_volume', 'elastic_ip', 'rds_instance', 'ec2_instance', 'load_balancer', 'nat_gateway', 'ebs_snapshot'].includes(resource.resource_type) && (
+                  {!['ebs_volume', 'elastic_ip', 'rds_instance', 'ec2_instance', 'load_balancer', 'nat_gateway', 'ebs_snapshot', 'eks_cluster', 's3_bucket'].includes(resource.resource_type) && (
                     <div className="text-sm">
                       <div className="flex items-center gap-2 text-gray-700">
                         <span className="font-semibold">ℹ️</span>

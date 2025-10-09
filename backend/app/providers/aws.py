@@ -81,6 +81,11 @@ class AWSProvider(CloudProviderBase):
         "kinesis_shard": 15.00,  # Kinesis shard (per month)
         "vpc_endpoint": 7.20,  # VPC Endpoint (per month)
         "documentdb_r5_large": 0.277,  # DocumentDB db.r5.large (per hour) = ~$199/month
+        # S3 pricing per GB/month (storage only, not including requests/transfer)
+        "s3_standard_per_gb": 0.023,  # S3 Standard storage
+        "s3_standard_ia_per_gb": 0.0125,  # S3 Standard-IA (Infrequent Access)
+        "s3_glacier_per_gb": 0.004,  # S3 Glacier Flexible Retrieval
+        "s3_glacier_deep_per_gb": 0.00099,  # S3 Glacier Deep Archive
     }
 
     def __init__(
@@ -3940,4 +3945,227 @@ class AWSProvider(CloudProviderBase):
         except ClientError as e:
             print(f"Error scanning DocumentDB clusters in {region}: {e}")
 
+        return orphans
+
+    async def scan_idle_s3_buckets(
+        self, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scan for idle S3 buckets (global resources).
+
+        Note: S3 buckets are global, so this should be called once per account, not per region.
+
+        Detection scenarios:
+        1. Empty bucket (0 objects, age > 90 days)
+        2. All objects very old (all objects LastModified > 365 days)
+        3. Incomplete multipart uploads (> 30 days old)
+        4. No lifecycle policy + old objects (objects > 180 days, no lifecycle)
+
+        Args:
+            detection_rules: Optional detection configuration
+
+        Returns:
+            List of idle S3 buckets
+        """
+        print("🗄️ [DEBUG] scan_idle_s3_buckets called")
+        orphans = []
+
+        # Default detection rules
+        min_bucket_age_days = detection_rules.get("min_bucket_age_days", 90) if detection_rules else 90
+        detect_empty = detection_rules.get("detect_empty", True) if detection_rules else True
+        detect_old_objects = detection_rules.get("detect_old_objects", True) if detection_rules else True
+        object_age_threshold_days = detection_rules.get("object_age_threshold_days", 365) if detection_rules else 365
+        detect_multipart_uploads = detection_rules.get("detect_multipart_uploads", True) if detection_rules else True
+        multipart_age_days = detection_rules.get("multipart_age_days", 30) if detection_rules else 30
+        detect_no_lifecycle = detection_rules.get("detect_no_lifecycle", True) if detection_rules else True
+        lifecycle_age_threshold_days = detection_rules.get("lifecycle_age_threshold_days", 180) if detection_rules else 180
+
+        try:
+            async with self.session.client("s3") as s3:
+                # List all buckets (global)
+                response = await s3.list_buckets()
+                buckets = response.get("Buckets", [])
+                print(f"🗄️ [DEBUG] Found {len(buckets)} S3 buckets in account")
+
+                for bucket_info in buckets:
+                    bucket_name = bucket_info["Name"]
+                    bucket_creation_date = bucket_info.get("CreationDate")
+
+                    print(f"🗄️ [DEBUG] Analyzing bucket: {bucket_name}")
+
+                    if not bucket_creation_date:
+                        print(f"🗄️ [DEBUG] Skipping {bucket_name}: no creation date")
+                        continue
+
+                    # Calculate bucket age
+                    bucket_age_days = (datetime.now(timezone.utc) - bucket_creation_date).days
+                    print(f"🗄️ [DEBUG] Bucket {bucket_name}: age={bucket_age_days} days, min_required={min_bucket_age_days} days")
+
+                    # Skip young buckets
+                    if bucket_age_days < min_bucket_age_days:
+                        print(f"🗄️ [DEBUG] Skipping {bucket_name}: too young ({bucket_age_days} < {min_bucket_age_days} days)")
+                        continue
+
+                    try:
+                        # Get bucket location (region)
+                        location_response = await s3.get_bucket_location(Bucket=bucket_name)
+                        bucket_region = location_response.get("LocationConstraint") or "us-east-1"
+
+                        # List objects (limit to first 1000 to avoid timeout)
+                        objects_response = await s3.list_objects_v2(
+                            Bucket=bucket_name,
+                            MaxKeys=1000
+                        )
+
+                        object_count = objects_response.get("KeyCount", 0)
+                        objects = objects_response.get("Contents", [])
+
+                        # Calculate bucket size (GB) and storage class distribution
+                        total_size_bytes = 0
+                        storage_classes = {}
+                        oldest_object_date = None
+                        newest_object_date = None
+
+                        for obj in objects:
+                            total_size_bytes += obj.get("Size", 0)
+                            storage_class = obj.get("StorageClass", "STANDARD")
+                            storage_classes[storage_class] = storage_classes.get(storage_class, 0) + obj.get("Size", 0)
+
+                            # Track oldest and newest objects
+                            last_modified = obj.get("LastModified")
+                            if last_modified:
+                                if not oldest_object_date or last_modified < oldest_object_date:
+                                    oldest_object_date = last_modified
+                                if not newest_object_date or last_modified > newest_object_date:
+                                    newest_object_date = last_modified
+
+                        bucket_size_gb = total_size_bytes / (1024 ** 3)
+
+                        # Scenario detection
+                        orphan_type = None
+                        orphan_reason = None
+                        confidence = "medium"
+                        monthly_cost = 0.0
+
+                        # PRIORITY 1: Incomplete multipart uploads (HIGHEST PRIORITY - hidden costs)
+                        # Check this FIRST because a bucket can be empty AND have multipart uploads
+                        if detect_multipart_uploads:
+                            try:
+                                multipart_response = await s3.list_multipart_uploads(Bucket=bucket_name)
+                                multipart_uploads = multipart_response.get("Uploads", [])
+
+                                old_multiparts = []
+                                multipart_size_bytes = 0
+
+                                for upload in multipart_uploads:
+                                    initiated = upload.get("Initiated")
+                                    if initiated:
+                                        days_since_upload = (datetime.now(timezone.utc) - initiated).days
+                                        if days_since_upload >= multipart_age_days:
+                                            old_multiparts.append(upload)
+                                            # Estimate size (multipart uploads can be large, estimate 100MB each)
+                                            multipart_size_bytes += 100 * 1024 * 1024
+
+                                if old_multiparts:
+                                    orphan_type = "multipart_uploads"
+                                    orphan_reason = f"{len(old_multiparts)} incomplete multipart uploads (>{multipart_age_days} days old)"
+                                    confidence = "high" if len(old_multiparts) > 5 else "medium"
+
+                                    # Add multipart cost to existing storage
+                                    multipart_size_gb = multipart_size_bytes / (1024 ** 3)
+                                    total_storage_gb = bucket_size_gb + multipart_size_gb
+                                    monthly_cost = total_storage_gb * self.PRICING.get("s3_standard_per_gb", 0.023)
+
+                            except ClientError as e:
+                                # Some buckets may not allow listing multipart uploads
+                                if "AccessDenied" not in str(e):
+                                    print(f"Warning: Could not list multipart uploads for {bucket_name}: {e}")
+
+                        # PRIORITY 2: No lifecycle policy + old objects (optimization opportunity)
+                        if orphan_type is None and detect_no_lifecycle and object_count > 0 and oldest_object_date:
+                            try:
+                                # Check if bucket has a lifecycle configuration
+                                await s3.get_bucket_lifecycle_configuration(Bucket=bucket_name)
+                                has_lifecycle = True
+                            except ClientError as e:
+                                if "NoSuchLifecycleConfiguration" in str(e):
+                                    has_lifecycle = False
+                                else:
+                                    has_lifecycle = False  # Treat errors as no lifecycle
+
+                            if not has_lifecycle:
+                                days_since_oldest = (datetime.now(timezone.utc) - oldest_object_date).days
+                                if days_since_oldest >= lifecycle_age_threshold_days:
+                                    orphan_type = "no_lifecycle"
+                                    orphan_reason = f"No lifecycle policy, objects are {days_since_oldest}+ days old ({object_count} objects, {bucket_size_gb:.2f} GB)"
+                                    confidence = "medium"
+
+                                    # Calculate cost
+                                    dominant_class = max(storage_classes.items(), key=lambda x: x[1])[0] if storage_classes else "STANDARD"
+                                    if "STANDARD_IA" in dominant_class:
+                                        monthly_cost = bucket_size_gb * self.PRICING.get("s3_standard_ia_per_gb", 0.0125)
+                                    else:
+                                        monthly_cost = bucket_size_gb * self.PRICING.get("s3_standard_per_gb", 0.023)
+
+                        # PRIORITY 3: All objects very old (fallback)
+                        if orphan_type is None and detect_old_objects and object_count > 0 and oldest_object_date and newest_object_date:
+                            days_since_newest = (datetime.now(timezone.utc) - newest_object_date).days
+                            if days_since_newest >= object_age_threshold_days:
+                                orphan_type = "old_objects"
+                                orphan_reason = f"All {object_count} objects are {days_since_newest}+ days old (no recent activity)"
+                                confidence = "high" if days_since_newest >= 730 else "medium"  # 2 years = high confidence
+
+                                # Calculate cost based on dominant storage class
+                                dominant_class = max(storage_classes.items(), key=lambda x: x[1])[0] if storage_classes else "STANDARD"
+                                if "GLACIER" in dominant_class or "DEEP_ARCHIVE" in dominant_class:
+                                    monthly_cost = bucket_size_gb * self.PRICING.get("s3_glacier_per_gb", 0.004)
+                                elif "INTELLIGENT_TIERING" in dominant_class or "STANDARD_IA" in dominant_class:
+                                    monthly_cost = bucket_size_gb * self.PRICING.get("s3_standard_ia_per_gb", 0.0125)
+                                else:
+                                    monthly_cost = bucket_size_gb * self.PRICING.get("s3_standard_per_gb", 0.023)
+
+                        # PRIORITY 4: Empty bucket (last resort - lowest priority)
+                        if orphan_type is None and detect_empty and object_count == 0:
+                            orphan_type = "empty"
+                            orphan_reason = f"Bucket is empty ({bucket_age_days} days old)"
+                            confidence = "high" if bucket_age_days >= 180 else "medium"
+                            # Empty buckets still cost $0 for storage, but minimal cost for having the bucket
+                            monthly_cost = 0.0
+
+                        # Add to orphans if detected
+                        if orphan_type:
+                            print(f"🗄️ [DEBUG] ✅ Bucket {bucket_name} detected as ORPHAN: type={orphan_type}, reason={orphan_reason}")
+                            orphans.append(
+                                OrphanResourceData(
+                                    resource_type="s3_bucket",
+                                    resource_id=bucket_name,
+                                    resource_name=bucket_name,
+                                    region=bucket_region,
+                                    estimated_monthly_cost=round(monthly_cost, 2),
+                                    resource_metadata={
+                                        "bucket_region": bucket_region,
+                                        "object_count": object_count,
+                                        "bucket_size_gb": round(bucket_size_gb, 2),
+                                        "creation_date": bucket_creation_date.isoformat(),
+                                        "bucket_age_days": bucket_age_days,
+                                        "oldest_object_days": (datetime.now(timezone.utc) - oldest_object_date).days if oldest_object_date else None,
+                                        "newest_object_days": (datetime.now(timezone.utc) - newest_object_date).days if newest_object_date else None,
+                                        "storage_classes": {k: round(v / (1024 ** 3), 2) for k, v in storage_classes.items()},
+                                        "orphan_type": orphan_type,
+                                        "orphan_reason": orphan_reason,
+                                        "confidence": confidence,
+                                    },
+                                )
+                            )
+
+                    except ClientError as e:
+                        # Handle bucket-specific errors (e.g., access denied, bucket in different region)
+                        error_code = e.response.get("Error", {}).get("Code", "Unknown")
+                        if error_code not in ["AccessDenied", "NoSuchBucket"]:
+                            print(f"Error scanning S3 bucket {bucket_name}: {e}")
+
+        except ClientError as e:
+            print(f"Error listing S3 buckets: {e}")
+
+        print(f"🗄️ [DEBUG] scan_idle_s3_buckets completed: Found {len(orphans)} idle S3 buckets")
         return orphans
