@@ -16,6 +16,7 @@ import {
   Server,
   Network,
   Database,
+  Zap,
 } from "lucide-react";
 import type { ResourceStatus, ResourceType } from "@/types";
 
@@ -42,6 +43,7 @@ const resourceIcons: Record<ResourceType, any> = {
   vpc_endpoint: Network,
   documentdb_cluster: Database,
   s3_bucket: HardDrive,
+  lambda_function: Zap,
 };
 
 export default function ResourcesPage() {
@@ -196,6 +198,7 @@ export default function ResourcesPage() {
                   <option value="ebs_snapshot">EBS Snapshot</option>
                   <option value="ec2_instance">EC2 Instance</option>
                   <option value="fsx_file_system">FSx File System</option>
+                  <option value="lambda_function">Lambda Function</option>
                   <option value="s3_bucket">S3 Bucket</option>
                 </optgroup>
                 <optgroup label="Networking">
@@ -1240,8 +1243,126 @@ function ResourceCard({ resource, onIgnore, onMarkForDeletion, onDelete }: any) 
                     </div>
                   )}
 
+                  {/* Lambda Function specific criteria */}
+                  {resource.resource_type === 'lambda_function' && (
+                    <div className="space-y-1 text-sm">
+                      {/* Unused provisioned concurrency (HIGHEST PRIORITY) */}
+                      {resource.resource_metadata?.orphan_type === 'unused_provisioned_concurrency' && (
+                        <>
+                          <div className="flex items-center gap-2 text-red-700">
+                            <span className="font-semibold">🚨</span>
+                            <span className="font-bold">CRITICAL: Unused Provisioned Concurrency</span>
+                          </div>
+                          <div className="flex items-center gap-2 text-red-700">
+                            <span className="font-semibold">💸</span>
+                            <span>Paying 24/7 for pre-warmed capacity that's not being used</span>
+                          </div>
+                          {resource.resource_metadata.memory_size_mb && (
+                            <div className="flex items-center gap-2 text-gray-700">
+                              <span className="font-semibold">🧠</span>
+                              <span>Memory: {resource.resource_metadata.memory_size_mb} MB</span>
+                            </div>
+                          )}
+                          {resource.resource_metadata.runtime && (
+                            <div className="flex items-center gap-2 text-gray-700">
+                              <span className="font-semibold">⚙️</span>
+                              <span>Runtime: {resource.resource_metadata.runtime}</span>
+                            </div>
+                          )}
+                          <div className="flex items-center gap-2 text-red-600 mt-1 bg-red-50 p-2 rounded">
+                            <span className="font-semibold">💡</span>
+                            <span className="text-xs font-semibold">Remove provisioned concurrency immediately to stop wasting $10-100/month</span>
+                          </div>
+                        </>
+                      )}
+                      {/* Never invoked */}
+                      {resource.resource_metadata?.orphan_type === 'never_invoked' && (
+                        <>
+                          <div className="flex items-center gap-2 text-orange-700">
+                            <span className="font-semibold">⚠️</span>
+                            <span className="font-semibold">Never invoked since creation</span>
+                          </div>
+                          <div className="flex items-center gap-2 text-red-700">
+                            <span className="font-semibold">✗</span>
+                            <span>Function created {resource.resource_metadata.age_days} days ago but never executed</span>
+                          </div>
+                          {resource.resource_metadata.memory_size_mb && (
+                            <div className="flex items-center gap-2 text-gray-700">
+                              <span className="font-semibold">🧠</span>
+                              <span>Memory: {resource.resource_metadata.memory_size_mb} MB</span>
+                            </div>
+                          )}
+                          {resource.resource_metadata.runtime && (
+                            <div className="flex items-center gap-2 text-gray-700">
+                              <span className="font-semibold">⚙️</span>
+                              <span>Runtime: {resource.resource_metadata.runtime}</span>
+                            </div>
+                          )}
+                        </>
+                      )}
+                      {/* Zero invocations */}
+                      {resource.resource_metadata?.orphan_type === 'zero_invocations' && (
+                        <>
+                          <div className="flex items-center gap-2 text-yellow-700">
+                            <span className="font-semibold">⏰</span>
+                            <span className="font-semibold">Zero invocations recently</span>
+                          </div>
+                          <div className="flex items-center gap-2 text-red-700">
+                            <span className="font-semibold">✗</span>
+                            <span>Not invoked in last 90 days - likely abandoned</span>
+                          </div>
+                          {resource.resource_metadata.memory_size_mb && (
+                            <div className="flex items-center gap-2 text-gray-700">
+                              <span className="font-semibold">🧠</span>
+                              <span>Memory: {resource.resource_metadata.memory_size_mb} MB</span>
+                            </div>
+                          )}
+                          {resource.resource_metadata.runtime && (
+                            <div className="flex items-center gap-2 text-gray-700">
+                              <span className="font-semibold">⚙️</span>
+                              <span>Runtime: {resource.resource_metadata.runtime}</span>
+                            </div>
+                          )}
+                        </>
+                      )}
+                      {/* All failures */}
+                      {resource.resource_metadata?.orphan_type === 'all_failures' && (
+                        <>
+                          <div className="flex items-center gap-2 text-red-700">
+                            <span className="font-semibold">❌</span>
+                            <span className="font-bold">100% Failure Rate - Dead Function</span>
+                          </div>
+                          <div className="flex items-center gap-2 text-red-700">
+                            <span className="font-semibold">💥</span>
+                            <span>All invocations are failing - function is broken</span>
+                          </div>
+                          {resource.resource_metadata.memory_size_mb && (
+                            <div className="flex items-center gap-2 text-gray-700">
+                              <span className="font-semibold">🧠</span>
+                              <span>Memory: {resource.resource_metadata.memory_size_mb} MB</span>
+                            </div>
+                          )}
+                          {resource.resource_metadata.runtime && (
+                            <div className="flex items-center gap-2 text-gray-700">
+                              <span className="font-semibold">⚙️</span>
+                              <span>Runtime: {resource.resource_metadata.runtime}</span>
+                            </div>
+                          )}
+                          <div className="flex items-center gap-2 text-red-600 mt-1 bg-red-50 p-2 rounded">
+                            <span className="font-semibold">💡</span>
+                            <span className="text-xs">Still charged for failed invocations - fix or delete to stop waste</span>
+                          </div>
+                        </>
+                      )}
+                      <div className="flex items-center gap-2 text-gray-600 mt-1">
+                        <span className="font-semibold">ℹ️</span>
+                        <span className="italic">{resource.resource_metadata.orphan_reason}</span>
+                      </div>
+                    </div>
+                  )}
+
                   {/* Generic criteria for other resource types */}
-                  {!['ebs_volume', 'elastic_ip', 'rds_instance', 'ec2_instance', 'load_balancer', 'nat_gateway', 'ebs_snapshot', 'eks_cluster', 's3_bucket'].includes(resource.resource_type) && (
+                  {!['ebs_volume', 'elastic_ip', 'rds_instance', 'ec2_instance', 'load_balancer', 'nat_gateway', 'ebs_snapshot', 'eks_cluster', 's3_bucket', 'lambda_function'].includes(resource.resource_type) && (
                     <div className="text-sm">
                       <div className="flex items-center gap-2 text-gray-700">
                         <span className="font-semibold">ℹ️</span>

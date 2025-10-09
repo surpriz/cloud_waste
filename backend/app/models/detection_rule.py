@@ -216,6 +216,31 @@ DEFAULT_DETECTION_RULES = {
         "lifecycle_age_threshold_days": 1,  # TEMPORAIRE: Buckets with objects > 1 days + no lifecycle (ORIGINAL: 180)
         "description": "S3 buckets: empty, old objects, incomplete multipart uploads, no lifecycle policy",
     },
+    "lambda_function": {
+        "enabled": True,
+        "min_age_days": 30,  # Minimum age before flagging as orphan
+        "confidence_threshold_days": 60,  # High confidence after 60 days
+        "critical_age_days": 180,  # Critical alert after 180 days
+        # Provisioned concurrency detection (HIGHEST PRIORITY - very expensive)
+        "detect_unused_provisioned_concurrency": True,  # Detect provisioned concurrency with 0 usage
+        "provisioned_min_age_days": 30,  # Min days with provisioned concurrency unused
+        "provisioned_critical_days": 90,  # Critical after 90 days unused
+        "provisioned_utilization_threshold": 1.0,  # < 1% utilization = unused (0.01 = 1%)
+        # Never invoked detection
+        "detect_never_invoked": True,  # Detect functions never invoked since creation
+        "never_invoked_min_age_days": 30,  # Min age to consider "never invoked"
+        "never_invoked_confidence_days": 60,  # High confidence after 60 days
+        # Zero invocations detection
+        "detect_zero_invocations": True,  # Detect functions with 0 invocations in lookback period
+        "zero_invocations_lookback_days": 90,  # Check last 90 days
+        "zero_invocations_confidence_days": 180,  # High confidence after 180 days
+        # Failed invocations detection (100% errors = dead function)
+        "detect_all_failures": True,  # Detect functions with 100% error rate
+        "failure_rate_threshold": 95.0,  # > 95% errors = dead function
+        "min_invocations_for_failure_check": 10,  # Minimum invocations to avoid false positives
+        "failure_lookback_days": 30,  # Check last 30 days
+        "description": "Lambda functions: unused provisioned concurrency, never invoked, zero invocations, or 100% failures",
+    },
 }
 
 

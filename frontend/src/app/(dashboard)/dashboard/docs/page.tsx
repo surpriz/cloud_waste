@@ -581,12 +581,19 @@ function SupportedResourcesSection() {
       cost: "~$0.023/GB/month (Standard) to $0.004/GB/month (Glacier). Empty buckets cost $0 but waste management overhead",
       confidence: "Medium to High - Based on bucket age, object age distribution, multipart upload analysis, and lifecycle policy evaluation",
     },
+    {
+      name: "Lambda Functions",
+      icon: "⚡",
+      detection: "4 scenarios (priority): Unused provisioned concurrency (<1% utilization over 30 days - VERY EXPENSIVE), Never invoked (30+ days since creation, 0 invocations), Zero invocations (90+ days without invocations), 100% failures (>95% error rate over 30 days)",
+      cost: "Provisioned concurrency: $0.0000041667/GB-second (~$10-100/month for unused). Regular: $0.20/1M requests + $0.0000166667/GB-second compute. Never invoked: ~$0.50/month (storage only)",
+      confidence: "Critical (provisioned concurrency) to High - Based on CloudWatch Invocations, ProvisionedConcurrencyInvocations, and Errors metrics",
+    },
   ];
 
   return (
     <div className="space-y-6">
       <h1 className="text-4xl font-bold text-gray-900">Supported Resources</h1>
-      <p className="text-xl text-gray-600">Currently supporting 23 AWS resource types with intelligent CloudWatch-based detection</p>
+      <p className="text-xl text-gray-600">Currently supporting 24 AWS resource types with intelligent CloudWatch-based detection</p>
 
       <div className="grid gap-4">
         {resources.map((resource, index) => (
@@ -607,8 +614,8 @@ function SupportedResourcesSection() {
       <div className="rounded-lg bg-gray-100 border p-6">
         <h3 className="text-lg font-semibold text-gray-900 mb-2">🚀 Coming Soon</h3>
         <p className="text-gray-700">
-          We're actively working on support for: S3 buckets, Lambda functions, CloudFormation stacks,
-          and multi-cloud providers (Azure, GCP).
+          We're actively working on support for: CloudFormation stacks,
+          DynamoDB tables, and multi-cloud providers (Azure, GCP).
         </p>
       </div>
     </div>

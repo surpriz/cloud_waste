@@ -323,6 +323,28 @@ class CloudProviderBase(ABC):
         """
         pass
 
+    @abstractmethod
+    async def scan_idle_lambda_functions(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scan for idle Lambda functions in a specific region.
+
+        Detects 4 scenarios (by priority):
+        1. Unused provisioned concurrency (VERY EXPENSIVE - highest priority)
+        2. Never invoked (function created but never executed)
+        3. Zero invocations (not invoked in last X days)
+        4. 100% failures (all invocations fail = dead function)
+
+        Args:
+            region: Region to scan
+            detection_rules: Optional detection configuration
+
+        Returns:
+            List of idle Lambda function resources
+        """
+        pass
+
     async def scan_all_resources(
         self, region: str, detection_rules: dict[str, dict] | None = None, scan_global_resources: bool = False
     ) -> list[OrphanResourceData]:
@@ -424,6 +446,9 @@ class CloudProviderBase(ABC):
             await self.scan_idle_documentdb_clusters(
                 region, rules.get("documentdb_cluster")
             )
+        )
+        results.extend(
+            await self.scan_idle_lambda_functions(region, rules.get("lambda_function"))
         )
 
         # Global resources (scanned only once, not per region)

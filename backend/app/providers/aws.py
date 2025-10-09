@@ -86,6 +86,11 @@ class AWSProvider(CloudProviderBase):
         "s3_standard_ia_per_gb": 0.0125,  # S3 Standard-IA (Infrequent Access)
         "s3_glacier_per_gb": 0.004,  # S3 Glacier Flexible Retrieval
         "s3_glacier_deep_per_gb": 0.00099,  # S3 Glacier Deep Archive
+        # Lambda pricing (us-east-1)
+        "lambda_invocation_per_million": 0.20,  # Per 1M requests
+        "lambda_gb_second": 0.0000166667,  # Per GB-second compute
+        "lambda_provisioned_concurrency_gb_second": 0.0000041667,  # Per GB-second (24/7 charge!)
+        "lambda_storage_per_gb": 0.0,  # Free up to 512MB, then $0.00008 per GB-month
     }
 
     def __init__(
@@ -4168,4 +4173,293 @@ class AWSProvider(CloudProviderBase):
             print(f"Error listing S3 buckets: {e}")
 
         print(f"🗄️ [DEBUG] scan_idle_s3_buckets completed: Found {len(orphans)} idle S3 buckets")
+        return orphans
+
+    async def scan_idle_lambda_functions(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scan for idle Lambda functions in a specific region.
+
+        Detects 4 scenarios (by priority):
+        1. Unused provisioned concurrency (VERY EXPENSIVE - highest priority)
+        2. Never invoked (function created but never executed)
+        3. Zero invocations (not invoked in last X days)
+        4. 100% failures (all invocations fail = dead function)
+
+        Args:
+            region: AWS region to scan
+            detection_rules: Custom detection rules configuration
+
+        Returns:
+            List of orphaned Lambda functions
+        """
+        orphans = []
+
+        # Extract detection rules
+        min_age_days = detection_rules.get("min_age_days", 30) if detection_rules else 30
+        confidence_threshold_days = detection_rules.get("confidence_threshold_days", 60) if detection_rules else 60
+        critical_age_days = detection_rules.get("critical_age_days", 180) if detection_rules else 180
+
+        # Provisioned concurrency rules
+        detect_unused_provisioned = detection_rules.get("detect_unused_provisioned_concurrency", True) if detection_rules else True
+        provisioned_min_age_days = detection_rules.get("provisioned_min_age_days", 30) if detection_rules else 30
+        provisioned_critical_days = detection_rules.get("provisioned_critical_days", 90) if detection_rules else 90
+        provisioned_utilization_threshold = detection_rules.get("provisioned_utilization_threshold", 1.0) if detection_rules else 1.0
+
+        # Never invoked rules
+        detect_never_invoked = detection_rules.get("detect_never_invoked", True) if detection_rules else True
+        never_invoked_min_age_days = detection_rules.get("never_invoked_min_age_days", 30) if detection_rules else 30
+        never_invoked_confidence_days = detection_rules.get("never_invoked_confidence_days", 60) if detection_rules else 60
+
+        # Zero invocations rules
+        detect_zero_invocations = detection_rules.get("detect_zero_invocations", True) if detection_rules else True
+        zero_invocations_lookback_days = detection_rules.get("zero_invocations_lookback_days", 90) if detection_rules else 90
+        zero_invocations_confidence_days = detection_rules.get("zero_invocations_confidence_days", 180) if detection_rules else 180
+
+        # Failure detection rules
+        detect_all_failures = detection_rules.get("detect_all_failures", True) if detection_rules else True
+        failure_rate_threshold = detection_rules.get("failure_rate_threshold", 95.0) if detection_rules else 95.0
+        min_invocations_for_failure_check = detection_rules.get("min_invocations_for_failure_check", 10) if detection_rules else 10
+        failure_lookback_days = detection_rules.get("failure_lookback_days", 30) if detection_rules else 30
+
+        print(f"⚡ [DEBUG] scan_idle_lambda_functions called for region: {region}")
+
+        try:
+            async with self.session.client("lambda", region_name=region) as lambda_client:
+                async with self.session.client("cloudwatch", region_name=region) as cloudwatch_client:
+                    # List all Lambda functions
+                    paginator = lambda_client.get_paginator("list_functions")
+                    async for page in paginator.paginate():
+                        for function in page.get("Functions", []):
+                            function_name = function.get("FunctionName")
+                            function_arn = function.get("FunctionArn")
+                            memory_size_mb = function.get("MemorySize", 128)
+                            memory_size_gb = memory_size_mb / 1024
+                            last_modified = function.get("LastModified")  # ISO 8601 string
+
+                            # Parse creation date
+                            try:
+                                creation_date = datetime.fromisoformat(last_modified.replace("Z", "+00:00"))
+                                age_days = (datetime.now(timezone.utc) - creation_date).days
+                            except Exception:
+                                age_days = 0
+
+                            print(f"⚡ [DEBUG] Analyzing Lambda: {function_name} (age={age_days} days, memory={memory_size_mb}MB)")
+
+                            # Skip very young functions
+                            if age_days < min_age_days:
+                                print(f"⚡ [DEBUG] Skipping {function_name}: too young ({age_days} < {min_age_days} days)")
+                                continue
+
+                            orphan_type = None
+                            orphan_reason = None
+                            confidence = "medium"
+                            monthly_cost = 0.0
+
+                            # PRIORITY 1: Check provisioned concurrency (VERY EXPENSIVE)
+                            if detect_unused_provisioned:
+                                try:
+                                    provisioned_configs = await lambda_client.list_provisioned_concurrency_configs(
+                                        FunctionName=function_name
+                                    )
+                                    for config in provisioned_configs.get("ProvisionedConcurrencyConfigs", []):
+                                        allocated_concurrency = config.get("AllocatedProvisionedConcurrentExecutions", 0)
+                                        if allocated_concurrency > 0:
+                                            # Check CloudWatch: ProvisionedConcurrencyInvocations
+                                            end_time = datetime.now(timezone.utc)
+                                            start_time = end_time - timedelta(days=provisioned_min_age_days)
+
+                                            metrics_response = await cloudwatch_client.get_metric_statistics(
+                                                Namespace="AWS/Lambda",
+                                                MetricName="ProvisionedConcurrencyInvocations",
+                                                Dimensions=[
+                                                    {"Name": "FunctionName", "Value": function_name},
+                                                    {"Name": "Resource", "Value": f"{function_name}:{config.get('FunctionVersion', '$LATEST')}"},
+                                                ],
+                                                StartTime=start_time,
+                                                EndTime=end_time,
+                                                Period=86400,  # 1 day
+                                                Statistics=["Sum"],
+                                            )
+
+                                            provisioned_invocations = sum(
+                                                dp.get("Sum", 0) for dp in metrics_response.get("Datapoints", [])
+                                            )
+
+                                            # Check total invocations for comparison
+                                            total_metrics = await cloudwatch_client.get_metric_statistics(
+                                                Namespace="AWS/Lambda",
+                                                MetricName="Invocations",
+                                                Dimensions=[{"Name": "FunctionName", "Value": function_name}],
+                                                StartTime=start_time,
+                                                EndTime=end_time,
+                                                Period=86400,
+                                                Statistics=["Sum"],
+                                            )
+
+                                            total_invocations = sum(
+                                                dp.get("Sum", 0) for dp in total_metrics.get("Datapoints", [])
+                                            )
+
+                                            utilization_pct = (
+                                                (provisioned_invocations / total_invocations * 100)
+                                                if total_invocations > 0
+                                                else 0.0
+                                            )
+
+                                            if utilization_pct < provisioned_utilization_threshold:
+                                                orphan_type = "unused_provisioned_concurrency"
+                                                orphan_reason = f"Provisioned concurrency ({allocated_concurrency} units) unused: {utilization_pct:.1f}% utilization over {provisioned_min_age_days} days"
+                                                confidence = "critical" if provisioned_min_age_days >= provisioned_critical_days else "high"
+
+                                                # Calculate cost: provisioned concurrency is charged 24/7
+                                                seconds_per_month = 30 * 24 * 60 * 60
+                                                monthly_cost = (
+                                                    allocated_concurrency
+                                                    * memory_size_gb
+                                                    * seconds_per_month
+                                                    * self.PRICING.get("lambda_provisioned_concurrency_gb_second", 0.0000041667)
+                                                )
+                                                print(
+                                                    f"⚡ [DEBUG] ✅ {function_name} detected as ORPHAN: type={orphan_type}, utilization={utilization_pct:.1f}%, cost=${monthly_cost:.2f}/month"
+                                                )
+                                                break  # Don't check other scenarios if provisioned concurrency detected
+
+                                except ClientError as e:
+                                    # No provisioned concurrency configured or access denied
+                                    if "ResourceNotFoundException" not in str(e):
+                                        print(f"Warning: Could not check provisioned concurrency for {function_name}: {e}")
+
+                            # PRIORITY 2: Check if never invoked
+                            if orphan_type is None and detect_never_invoked:
+                                try:
+                                    end_time = datetime.now(timezone.utc)
+                                    start_time = creation_date  # Check since creation
+
+                                    metrics_response = await cloudwatch_client.get_metric_statistics(
+                                        Namespace="AWS/Lambda",
+                                        MetricName="Invocations",
+                                        Dimensions=[{"Name": "FunctionName", "Value": function_name}],
+                                        StartTime=start_time,
+                                        EndTime=end_time,
+                                        Period=86400,  # 1 day
+                                        Statistics=["Sum"],
+                                    )
+
+                                    total_invocations = sum(dp.get("Sum", 0) for dp in metrics_response.get("Datapoints", []))
+
+                                    if total_invocations == 0 and age_days >= never_invoked_min_age_days:
+                                        orphan_type = "never_invoked"
+                                        orphan_reason = f"Never invoked since creation ({age_days} days ago)"
+                                        confidence = "critical" if age_days >= critical_age_days else (
+                                            "high" if age_days >= never_invoked_confidence_days else "medium"
+                                        )
+                                        # Cost: minimal (just storage, no compute)
+                                        monthly_cost = 0.5  # Estimate: minimal storage cost
+                                        print(f"⚡ [DEBUG] ✅ {function_name} detected as ORPHAN: type={orphan_type}, age={age_days} days")
+
+                                except ClientError as e:
+                                    print(f"Warning: Could not check invocations for {function_name}: {e}")
+
+                            # PRIORITY 3: Check zero invocations (last X days)
+                            if orphan_type is None and detect_zero_invocations:
+                                try:
+                                    end_time = datetime.now(timezone.utc)
+                                    start_time = end_time - timedelta(days=zero_invocations_lookback_days)
+
+                                    metrics_response = await cloudwatch_client.get_metric_statistics(
+                                        Namespace="AWS/Lambda",
+                                        MetricName="Invocations",
+                                        Dimensions=[{"Name": "FunctionName", "Value": function_name}],
+                                        StartTime=start_time,
+                                        EndTime=end_time,
+                                        Period=86400,
+                                        Statistics=["Sum"],
+                                    )
+
+                                    recent_invocations = sum(dp.get("Sum", 0) for dp in metrics_response.get("Datapoints", []))
+
+                                    if recent_invocations == 0:
+                                        orphan_type = "zero_invocations"
+                                        orphan_reason = f"No invocations in last {zero_invocations_lookback_days} days"
+                                        confidence = "high" if age_days >= zero_invocations_confidence_days else "medium"
+                                        monthly_cost = 0.5  # Estimate
+                                        print(f"⚡ [DEBUG] ✅ {function_name} detected as ORPHAN: type={orphan_type}, lookback={zero_invocations_lookback_days} days")
+
+                                except ClientError as e:
+                                    print(f"Warning: Could not check recent invocations for {function_name}: {e}")
+
+                            # PRIORITY 4: Check 100% failures (dead function)
+                            if orphan_type is None and detect_all_failures:
+                                try:
+                                    end_time = datetime.now(timezone.utc)
+                                    start_time = end_time - timedelta(days=failure_lookback_days)
+
+                                    # Get invocations
+                                    invocations_response = await cloudwatch_client.get_metric_statistics(
+                                        Namespace="AWS/Lambda",
+                                        MetricName="Invocations",
+                                        Dimensions=[{"Name": "FunctionName", "Value": function_name}],
+                                        StartTime=start_time,
+                                        EndTime=end_time,
+                                        Period=86400,
+                                        Statistics=["Sum"],
+                                    )
+
+                                    total_invocations = sum(dp.get("Sum", 0) for dp in invocations_response.get("Datapoints", []))
+
+                                    # Get errors
+                                    errors_response = await cloudwatch_client.get_metric_statistics(
+                                        Namespace="AWS/Lambda",
+                                        MetricName="Errors",
+                                        Dimensions=[{"Name": "FunctionName", "Value": function_name}],
+                                        StartTime=start_time,
+                                        EndTime=end_time,
+                                        Period=86400,
+                                        Statistics=["Sum"],
+                                    )
+
+                                    total_errors = sum(dp.get("Sum", 0) for dp in errors_response.get("Datapoints", []))
+
+                                    if total_invocations >= min_invocations_for_failure_check:
+                                        failure_rate = (total_errors / total_invocations) * 100 if total_invocations > 0 else 0
+
+                                        if failure_rate >= failure_rate_threshold:
+                                            orphan_type = "all_failures"
+                                            orphan_reason = f"{failure_rate:.1f}% failure rate ({int(total_errors)}/{int(total_invocations)} errors) over {failure_lookback_days} days"
+                                            confidence = "high"
+                                            # Cost: charged even for failures
+                                            monthly_cost = 1.0  # Estimate
+                                            print(f"⚡ [DEBUG] ✅ {function_name} detected as ORPHAN: type={orphan_type}, failure_rate={failure_rate:.1f}%")
+
+                                except ClientError as e:
+                                    print(f"Warning: Could not check failures for {function_name}: {e}")
+
+                            # Add to orphans if detected
+                            if orphan_type:
+                                orphans.append(
+                                    OrphanResourceData(
+                                        resource_type="lambda_function",
+                                        resource_id=function_arn,
+                                        resource_name=function_name,
+                                        region=region,
+                                        estimated_monthly_cost=round(monthly_cost, 2),
+                                        resource_metadata={
+                                            "function_arn": function_arn,
+                                            "memory_size_mb": memory_size_mb,
+                                            "runtime": function.get("Runtime"),
+                                            "age_days": age_days,
+                                            "last_modified": last_modified,
+                                            "orphan_type": orphan_type,
+                                            "orphan_reason": orphan_reason,
+                                            "confidence": confidence,
+                                        },
+                                    )
+                                )
+
+        except ClientError as e:
+            print(f"Error scanning Lambda functions in {region}: {e}")
+
+        print(f"⚡ [DEBUG] scan_idle_lambda_functions completed for {region}: Found {len(orphans)} idle functions")
         return orphans
