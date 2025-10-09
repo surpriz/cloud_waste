@@ -176,25 +176,26 @@ export default function SettingsPage() {
   };
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-gray-50 to-blue-50 p-8">
+    <div className="min-h-screen bg-gradient-to-br from-gray-50 to-blue-50 p-4 md:p-8">
       <div className="mx-auto max-w-6xl">
         {/* Back to Dashboard Button */}
         <Link
           href="/dashboard"
-          className="mb-6 inline-flex items-center gap-2 rounded-lg bg-white px-4 py-2 text-sm font-medium text-gray-700 shadow-sm hover:bg-gray-50 transition-colors border border-gray-200"
+          className="mb-4 md:mb-6 inline-flex items-center gap-2 rounded-lg bg-white px-3 md:px-4 py-2 text-sm font-medium text-gray-700 shadow-sm hover:bg-gray-50 transition-colors border border-gray-200"
         >
           <ArrowLeft className="h-4 w-4" />
-          Back to Dashboard
+          <span className="hidden sm:inline">Back to Dashboard</span>
+          <span className="sm:hidden">Back</span>
         </Link>
 
         {/* Header */}
-        <div className="mb-8">
-          <h1 className="text-4xl font-bold text-gray-900">Settings</h1>
-          <p className="mt-2 text-gray-600">Manage your account preferences and detection rules</p>
+        <div className="mb-6 md:mb-8">
+          <h1 className="text-3xl md:text-4xl font-bold text-gray-900">Settings</h1>
+          <p className="mt-2 text-sm md:text-base text-gray-600">Manage your account preferences and detection rules</p>
         </div>
 
         {/* Tabs */}
-        <div className="mb-6 flex gap-4 border-b border-gray-200 overflow-x-auto">
+        <div className="mb-6 flex gap-2 md:gap-4 border-b border-gray-200 overflow-x-auto pb-0 scrollbar-hide">
           <button
             onClick={() => setActiveTab("detection")}
             className={`flex items-center gap-2 border-b-2 px-4 py-3 font-semibold transition-colors whitespace-nowrap ${
@@ -251,22 +252,23 @@ export default function SettingsPage() {
         {/* Detection Rules Tab */}
         {activeTab === "detection" && (
           <div className="space-y-6">
-            <div className="rounded-2xl bg-gradient-to-br from-blue-50 to-indigo-50 border-2 border-blue-200 p-6">
-              <div className="flex items-start justify-between">
+            <div className="rounded-2xl bg-gradient-to-br from-blue-50 to-indigo-50 border-2 border-blue-200 p-4 md:p-6">
+              <div className="flex flex-col sm:flex-row items-start justify-between gap-4">
                 <div className="flex-1">
-                  <h2 className="text-xl font-bold text-blue-900 mb-2">🎯 Configure Detection Criteria</h2>
-                  <p className="text-blue-700">
+                  <h2 className="text-lg md:text-xl font-bold text-blue-900 mb-2">🎯 Configure Detection Criteria</h2>
+                  <p className="text-sm md:text-base text-blue-700">
                     Customize how CloudWaste identifies orphaned resources in your AWS infrastructure.
                     Adjust age thresholds and confidence levels to match your workflow.
                   </p>
                 </div>
                 <button
                   onClick={resetAllRules}
-                  className="ml-4 flex items-center gap-2 rounded-lg border-2 border-orange-400 bg-orange-50 px-4 py-2 text-sm font-semibold text-orange-700 hover:bg-orange-100 transition-colors whitespace-nowrap"
+                  className="w-full sm:w-auto flex items-center justify-center gap-2 rounded-lg border-2 border-orange-400 bg-orange-50 px-4 py-2 text-sm font-semibold text-orange-700 hover:bg-orange-100 transition-colors whitespace-nowrap"
                   title="Reset all detection rules to default values"
                 >
                   <RotateCcw className="h-4 w-4" />
-                  Reset All to Defaults
+                  <span className="hidden md:inline">Reset All to Defaults</span>
+                  <span className="md:hidden">Reset All</span>
                 </button>
               </div>
             </div>
@@ -282,18 +284,18 @@ export default function SettingsPage() {
                 return (
                   <div
                     key={rule.resource_type}
-                    className={`rounded-2xl bg-white p-6 shadow-lg border-2 transition-all ${
+                    className={`rounded-2xl bg-white p-4 md:p-6 shadow-lg border-2 transition-all ${
                       isCustomized ? "border-orange-300 bg-orange-50/30" : "border-gray-200"
                     }`}
                   >
-                    <div className="flex items-start justify-between mb-6">
-                      <div className="flex items-center gap-4">
-                        <div className="rounded-xl bg-gradient-to-br from-blue-500 to-purple-600 p-3">
-                          <Icon className="h-6 w-6 text-white" />
+                    <div className="flex flex-col lg:flex-row items-start justify-between gap-4 mb-6">
+                      <div className="flex items-start gap-3 md:gap-4 flex-1">
+                        <div className="rounded-xl bg-gradient-to-br from-blue-500 to-purple-600 p-2 md:p-3 flex-shrink-0">
+                          <Icon className="h-5 w-5 md:h-6 md:w-6 text-white" />
                         </div>
-                        <div>
-                          <h3 className="text-xl font-bold text-gray-900 flex items-center gap-2">
-                            {label}
+                        <div className="min-w-0">
+                          <h3 className="text-lg md:text-xl font-bold text-gray-900 flex flex-wrap items-center gap-2">
+                            <span>{label}</span>
                             {isCustomized && (
                               <span className="text-xs bg-orange-200 text-orange-800 px-2 py-1 rounded-full font-semibold">
                                 CUSTOM
@@ -304,21 +306,22 @@ export default function SettingsPage() {
                         </div>
                       </div>
 
-                      <div className="flex gap-2">
+                      <div className="flex w-full lg:w-auto gap-2">
                         <button
                           onClick={() => updateRule(rule.resource_type)}
-                          className="flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-700 transition-colors"
+                          className="flex-1 lg:flex-none flex items-center justify-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-700 transition-colors"
                         >
                           <Save className="h-4 w-4" />
-                          Save
+                          <span>Save</span>
                         </button>
                         {isCustomized && (
                           <button
                             onClick={() => resetRule(rule.resource_type)}
-                            className="flex items-center gap-2 rounded-lg border-2 border-gray-300 px-4 py-2 text-sm font-semibold text-gray-700 hover:bg-gray-100 transition-colors"
+                            className="flex items-center justify-center gap-2 rounded-lg border-2 border-gray-300 px-3 md:px-4 py-2 text-sm font-semibold text-gray-700 hover:bg-gray-100 transition-colors"
                             title="Reset to defaults"
                           >
                             <RotateCcw className="h-4 w-4" />
+                            <span className="sr-only">Reset</span>
                           </button>
                         )}
                       </div>

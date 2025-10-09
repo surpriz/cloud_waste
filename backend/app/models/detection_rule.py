@@ -82,7 +82,21 @@ DEFAULT_DETECTION_RULES = {
         "enabled": True,
         "min_stopped_days": 7,  # RDS auto-starts after 7 days
         "confidence_threshold_days": 14,
-        "description": "RDS instances in stopped state",
+        "critical_age_days": 30,  # Critical after 30+ days stopped
+        # Idle running instances detection
+        "detect_idle_running": True,  # Detect running instances with 0 connections
+        "min_idle_days": 7,  # Running with 0 connections for 7+ days
+        "idle_confidence_threshold_days": 14,  # High confidence after 14 days
+        # Zero I/O detection
+        "detect_zero_io": True,  # Detect instances with no read/write operations
+        "min_zero_io_days": 7,  # No I/O for 7+ days
+        # Never connected detection
+        "detect_never_connected": True,  # Detect instances never connected since creation
+        "never_connected_min_age_days": 7,  # Min age to consider "never connected"
+        # No backups detection
+        "detect_no_backups": True,  # Detect instances without automated backups
+        "no_backups_min_age_days": 30,  # Min age for no-backup detection
+        "description": "RDS instances stopped long-term, idle running (0 connections), zero I/O, never connected, or without backups",
     },
     # TOP 15 high-cost idle resources
     "fsx_file_system": {
@@ -107,7 +121,23 @@ DEFAULT_DETECTION_RULES = {
         "enabled": True,
         "min_age_days": 3,
         "confidence_threshold_days": 7,
-        "description": "EKS clusters with no worker nodes",
+        "critical_age_days": 30,  # Critical after 30+ days unused
+        # No worker nodes detection
+        "detect_no_nodes": True,  # Detect clusters with 0 nodes
+        # Unhealthy nodes detection
+        "detect_unhealthy_nodes": True,  # Detect clusters with all nodes unhealthy
+        "min_unhealthy_days": 7,  # Nodes unhealthy for 7+ days
+        # Low utilization detection
+        "detect_low_utilization": True,  # Detect clusters with low CPU on all nodes
+        "cpu_threshold_percent": 5.0,  # Average CPU < 5% = idle
+        "min_idle_days": 7,  # Low utilization for 7+ days
+        "idle_lookback_days": 7,  # CloudWatch lookback period
+        # Fargate detection
+        "detect_fargate_no_profiles": True,  # Detect Fargate-only clusters with no profiles
+        # Version detection
+        "detect_outdated_version": True,  # Detect outdated Kubernetes versions
+        "min_supported_minor_versions": 3,  # Min 3 versions behind latest (e.g., 1.25 if latest is 1.28)
+        "description": "EKS clusters: no nodes, unhealthy nodes, low CPU utilization, Fargate misconfigured, or outdated K8s version",
     },
     "sagemaker_endpoint": {
         "enabled": True,

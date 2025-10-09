@@ -35,6 +35,18 @@ class AWSProvider(CloudProviderBase):
         "nlb": 22.00,  # Network Load Balancer
         "clb": 18.00,  # Classic Load Balancer
         "gwlb": 7.50,  # Gateway Load Balancer
+        # RDS Instance pricing (common types, per hour converted to monthly)
+        "rds_storage_gp2_per_gb": 0.115,  # General Purpose SSD (gp2)
+        "rds_storage_gp3_per_gb": 0.092,  # General Purpose SSD (gp3) - newer, cheaper
+        "rds_db_t3_micro": 12.24,  # db.t3.micro (~$0.017/hour * 730 hours)
+        "rds_db_t3_small": 24.82,  # db.t3.small (~$0.034/hour * 730 hours)
+        "rds_db_t3_medium": 49.64,  # db.t3.medium (~$0.068/hour * 730 hours)
+        "rds_db_t3_large": 99.28,  # db.t3.large (~$0.136/hour * 730 hours)
+        "rds_db_t4g_micro": 11.68,  # db.t4g.micro (~$0.016/hour * 730 hours) - ARM-based
+        "rds_db_t4g_small": 23.36,  # db.t4g.small (~$0.032/hour * 730 hours)
+        "rds_db_m5_large": 140.16,  # db.m5.large (~$0.192/hour * 730 hours)
+        "rds_db_m5_xlarge": 280.32,  # db.m5.xlarge (~$0.384/hour * 730 hours)
+        "rds_db_m5_2xlarge": 560.64,  # db.m5.2xlarge (~$0.768/hour * 730 hours)
         # TOP 15 high-cost idle resources
         "fsx_lustre_per_gb": 0.145,  # FSx for Lustre
         "fsx_windows_per_gb": 0.13,  # FSx for Windows
@@ -44,7 +56,17 @@ class AWSProvider(CloudProviderBase):
         "neptune_db_r5_xlarge": 0.696,  # Neptune db.r5.xlarge = ~$500/month
         "msk_kafka_m5_large": 0.21,  # MSK kafka.m5.large (per broker/hour) = ~$150/month
         "msk_kafka_m5_xlarge": 0.42,  # MSK kafka.m5.xlarge = ~$300/month
-        "eks_cluster": 73.00,  # EKS Control Plane
+        # EKS pricing (Control Plane + Worker Nodes)
+        "eks_control_plane": 73.00,  # EKS Control Plane ($0.10/hour * 730 hours)
+        "eks_t3_small": 15.18,  # t3.small node (~$0.0208/hour * 730)
+        "eks_t3_medium": 30.37,  # t3.medium node (~$0.0416/hour * 730)
+        "eks_t3_large": 60.74,  # t3.large node (~$0.0832/hour * 730)
+        "eks_t3_xlarge": 121.47,  # t3.xlarge node (~$0.1664/hour * 730)
+        "eks_m5_large": 69.35,  # m5.large node (~$0.095/hour * 730)
+        "eks_m5_xlarge": 138.70,  # m5.xlarge node (~$0.19/hour * 730)
+        "eks_m5_2xlarge": 277.40,  # m5.2xlarge node (~$0.38/hour * 730)
+        "eks_c5_large": 62.78,  # c5.large node (~$0.086/hour * 730)
+        "eks_r5_large": 91.98,  # r5.large node (~$0.126/hour * 730)
         "sagemaker_ml_m5_large": 0.115,  # SageMaker ml.m5.large (per hour) = ~$83/month
         "sagemaker_ml_m5_xlarge": 0.23,  # SageMaker ml.m5.xlarge = ~$165/month
         "redshift_dc2_large": 0.25,  # Redshift dc2.large (per hour) = ~$180/month
@@ -1662,38 +1684,247 @@ class AWSProvider(CloudProviderBase):
 
         return orphans
 
-    async def scan_stopped_databases(self, region: str) -> list[OrphanResourceData]:
+    async def scan_stopped_databases(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
         """
-        Scan for RDS instances stopped for more than 7 days.
+        Scan for RDS instances with comprehensive orphan detection.
 
-        AWS automatically starts stopped RDS instances after 7 days,
-        but repeated stopping indicates potential waste.
+        Detection scenarios:
+        1. Stopped long-term - RDS stopped > min_stopped_days
+        2. Idle running - Running with 0 database connections
+        3. Zero I/O - Running with 0 read/write operations
+        4. Never connected - Created but never connected since creation
+        5. No backups - Automated backups disabled (BackupRetentionPeriod = 0)
 
         Args:
             region: AWS region to scan
+            detection_rules: Optional user-defined detection rules
 
         Returns:
-            List of stopped RDS instance resources
+            List of stopped/idle RDS instance resources
         """
         orphans: list[OrphanResourceData] = []
 
+        # Use provided rules or defaults
+        if detection_rules is None:
+            from app.models.detection_rule import DEFAULT_DETECTION_RULES
+
+            detection_rules = DEFAULT_DETECTION_RULES.get("rds_instance", {})
+
+        # Check if detection is enabled
+        if not detection_rules.get("enabled", True):
+            return orphans
+
+        # Load configuration
+        min_stopped_days = detection_rules.get("min_stopped_days", 7)
+        confidence_threshold_days = detection_rules.get("confidence_threshold_days", 14)
+        critical_age_days = detection_rules.get("critical_age_days", 30)
+        detect_idle_running = detection_rules.get("detect_idle_running", True)
+        min_idle_days = detection_rules.get("min_idle_days", 7)
+        idle_confidence_threshold_days = detection_rules.get("idle_confidence_threshold_days", 14)
+        detect_zero_io = detection_rules.get("detect_zero_io", True)
+        min_zero_io_days = detection_rules.get("min_zero_io_days", 7)
+        detect_never_connected = detection_rules.get("detect_never_connected", True)
+        never_connected_min_age_days = detection_rules.get("never_connected_min_age_days", 7)
+        detect_no_backups = detection_rules.get("detect_no_backups", True)
+        no_backups_min_age_days = detection_rules.get("no_backups_min_age_days", 30)
+
         try:
-            async with self.session.client("rds", region_name=region) as rds:
+            async with self.session.client("rds", region_name=region) as rds, self.session.client(
+                "cloudwatch", region_name=region
+            ) as cloudwatch:
                 response = await rds.describe_db_instances()
 
                 for db in response.get("DBInstances", []):
+                    db_id = db["DBInstanceIdentifier"]
                     status = db["DBInstanceStatus"]
+                    db_class = db["DBInstanceClass"]
+                    engine = db["Engine"]
+                    storage_gb = db["AllocatedStorage"]
+                    storage_type = db.get("StorageType", "gp2")
+                    multi_az = db.get("MultiAZ", False)
+                    backup_retention_period = db.get("BackupRetentionPeriod", 0)
+                    created_time = db.get("InstanceCreateTime")
 
-                    # RDS stopped state
+                    # Calculate age
+                    now = datetime.now(timezone.utc)
+                    age_days = (now - created_time).days if created_time else 0
+
+                    # Calculate monthly cost
+                    # Storage cost
+                    storage_cost_per_gb = self.PRICING.get(f"rds_storage_{storage_type}_per_gb", 0.115)
+                    storage_cost = storage_gb * storage_cost_per_gb
+
+                    # Compute cost (only when running)
+                    compute_cost = 0.0
+                    if status == "available":
+                        # Try to map db_class to pricing key
+                        # Format: db.t3.micro -> rds_db_t3_micro
+                        db_class_key = f"rds_{db_class.replace('.', '_')}"
+                        compute_cost = self.PRICING.get(db_class_key, 0.0)
+
+                        # If not in pricing dict, estimate based on common patterns
+                        if compute_cost == 0.0:
+                            if "t3.micro" in db_class:
+                                compute_cost = self.PRICING["rds_db_t3_micro"]
+                            elif "t3.small" in db_class:
+                                compute_cost = self.PRICING["rds_db_t3_small"]
+                            elif "t3.medium" in db_class:
+                                compute_cost = self.PRICING["rds_db_t3_medium"]
+                            elif "t3.large" in db_class:
+                                compute_cost = self.PRICING["rds_db_t3_large"]
+                            elif "t4g.micro" in db_class:
+                                compute_cost = self.PRICING["rds_db_t4g_micro"]
+                            elif "t4g.small" in db_class:
+                                compute_cost = self.PRICING["rds_db_t4g_small"]
+                            elif "m5.large" in db_class:
+                                compute_cost = self.PRICING["rds_db_m5_large"]
+                            elif "m5.xlarge" in db_class:
+                                compute_cost = self.PRICING["rds_db_m5_xlarge"]
+                            elif "m5.2xlarge" in db_class:
+                                compute_cost = self.PRICING["rds_db_m5_2xlarge"]
+                            else:
+                                # Fallback: assume t3.small equivalent
+                                compute_cost = self.PRICING["rds_db_t3_small"]
+
+                        # Multi-AZ doubles the compute cost
+                        if multi_az:
+                            compute_cost *= 2
+
+                    # Total cost
                     if status == "stopped":
-                        db_id = db["DBInstanceIdentifier"]
-                        db_class = db["DBInstanceClass"]
-                        engine = db["Engine"]
-                        storage_gb = db["AllocatedStorage"]
+                        monthly_cost = storage_cost  # Only storage when stopped
+                    else:
+                        monthly_cost = compute_cost + storage_cost
 
-                        # Simplified cost: storage only (compute is free when stopped)
-                        # RDS storage is ~$0.115/GB/month for gp2
-                        monthly_cost = storage_gb * 0.115
+                    # Initialize detection variables
+                    is_orphaned = False
+                    orphan_type = None
+                    orphan_reasons = []
+                    confidence_level = "low"
+
+                    # CloudWatch metrics (only for running instances)
+                    avg_connections = 0
+                    avg_read_iops = 0
+                    avg_write_iops = 0
+
+                    if status == "available" and (detect_idle_running or detect_zero_io or detect_never_connected):
+                        # Get CloudWatch metrics for last 30 days
+                        end_time = now
+                        start_time = now - timedelta(days=30)
+
+                        # DatabaseConnections metric
+                        try:
+                            connections_response = await cloudwatch.get_metric_statistics(
+                                Namespace="AWS/RDS",
+                                MetricName="DatabaseConnections",
+                                Dimensions=[{"Name": "DBInstanceIdentifier", "Value": db_id}],
+                                StartTime=start_time,
+                                EndTime=end_time,
+                                Period=86400,  # 1 day
+                                Statistics=["Average"],
+                            )
+                            datapoints = connections_response.get("Datapoints", [])
+                            if datapoints:
+                                avg_connections = sum(dp["Average"] for dp in datapoints) / len(datapoints)
+                        except Exception as e:
+                            print(f"Warning: Could not get DatabaseConnections for {db_id}: {e}")
+
+                        # ReadIOPS metric
+                        try:
+                            read_iops_response = await cloudwatch.get_metric_statistics(
+                                Namespace="AWS/RDS",
+                                MetricName="ReadIOPS",
+                                Dimensions=[{"Name": "DBInstanceIdentifier", "Value": db_id}],
+                                StartTime=start_time,
+                                EndTime=end_time,
+                                Period=86400,
+                                Statistics=["Average"],
+                            )
+                            datapoints = read_iops_response.get("Datapoints", [])
+                            if datapoints:
+                                avg_read_iops = sum(dp["Average"] for dp in datapoints) / len(datapoints)
+                        except Exception as e:
+                            print(f"Warning: Could not get ReadIOPS for {db_id}: {e}")
+
+                        # WriteIOPS metric
+                        try:
+                            write_iops_response = await cloudwatch.get_metric_statistics(
+                                Namespace="AWS/RDS",
+                                MetricName="WriteIOPS",
+                                Dimensions=[{"Name": "DBInstanceIdentifier", "Value": db_id}],
+                                StartTime=start_time,
+                                EndTime=end_time,
+                                Period=86400,
+                                Statistics=["Average"],
+                            )
+                            datapoints = write_iops_response.get("Datapoints", [])
+                            if datapoints:
+                                avg_write_iops = sum(dp["Average"] for dp in datapoints) / len(datapoints)
+                        except Exception as e:
+                            print(f"Warning: Could not get WriteIOPS for {db_id}: {e}")
+
+                    # Scenario #1: Stopped long-term
+                    if status == "stopped":
+                        if age_days >= min_stopped_days:
+                            is_orphaned = True
+                            orphan_type = "stopped"
+                            orphan_reasons.append(f"Database stopped for {age_days} days")
+
+                            if age_days >= critical_age_days:
+                                confidence_level = "critical"
+                                orphan_reasons.append(f"CRITICAL: Stopped for {age_days}+ days (threshold: {critical_age_days})")
+                            elif age_days >= confidence_threshold_days:
+                                confidence_level = "high"
+                                orphan_reasons.append(f"Stopped longer than {confidence_threshold_days} days")
+                            else:
+                                confidence_level = "medium"
+
+                    # Scenario #4: Never connected (check first as it's a special case of idle)
+                    elif detect_never_connected and status == "available" and age_days >= never_connected_min_age_days:
+                        if avg_connections == 0:
+                            is_orphaned = True
+                            orphan_type = "never_connected"
+                            orphan_reasons.append(f"Created {age_days} days ago but never connected")
+                            orphan_reasons.append("0 database connections since creation")
+                            confidence_level = "high" if age_days >= 14 else "medium"
+
+                    # Scenario #2: Idle running (0 connections, but exclude never_connected)
+                    elif detect_idle_running and status == "available" and orphan_type != "never_connected":
+                        if avg_connections == 0 and age_days >= min_idle_days:
+                            is_orphaned = True
+                            orphan_type = "idle_running"
+                            orphan_reasons.append(f"Running with 0 connections for {age_days}+ days")
+                            orphan_reasons.append("Paying full compute cost for unused database")
+
+                            if age_days >= idle_confidence_threshold_days:
+                                confidence_level = "high"
+                            else:
+                                confidence_level = "medium"
+
+                    # Scenario #3: Zero I/O (no read/write operations)
+                    elif detect_zero_io and status == "available" and orphan_type is None:
+                        if avg_read_iops == 0 and avg_write_iops == 0 and age_days >= min_zero_io_days:
+                            is_orphaned = True
+                            orphan_type = "zero_io"
+                            orphan_reasons.append(f"No read/write operations in 30 days")
+                            orphan_reasons.append(f"ReadIOPS: {avg_read_iops:.2f}, WriteIOPS: {avg_write_iops:.2f}")
+                            confidence_level = "medium"
+
+                    # Scenario #5: No backups (can combine with other scenarios)
+                    if detect_no_backups and backup_retention_period == 0 and age_days >= no_backups_min_age_days:
+                        if not is_orphaned:
+                            is_orphaned = True
+                            orphan_type = "no_backups"
+                            confidence_level = "medium"
+                        orphan_reasons.append("No automated backups configured (BackupRetentionPeriod = 0)")
+                        orphan_reasons.append("Indicates abandoned or non-production database")
+
+                    # Add to orphans list if detected
+                    if is_orphaned:
+                        # Calculate wasted amount (how much already spent)
+                        wasted_amount = round(monthly_cost * (age_days / 30), 2) if age_days > 0 else 0
 
                         orphans.append(
                             OrphanResourceData(
@@ -1708,14 +1939,28 @@ class AWSProvider(CloudProviderBase):
                                     "engine": engine,
                                     "engine_version": db.get("EngineVersion", ""),
                                     "storage_gb": storage_gb,
-                                    "storage_type": db.get("StorageType", "gp2"),
-                                    "multi_az": db.get("MultiAZ", False),
+                                    "storage_type": storage_type,
+                                    "multi_az": multi_az,
+                                    "backup_retention_period": backup_retention_period,
+                                    "age_days": age_days,
+                                    "orphan_type": orphan_type,
+                                    "orphan_reason": " | ".join(orphan_reasons),
+                                    "orphan_reasons": orphan_reasons,
+                                    "confidence_level": confidence_level,
+                                    "compute_cost_monthly": round(compute_cost, 2),
+                                    "storage_cost_monthly": round(storage_cost, 2),
+                                    "cloudwatch_stats": {
+                                        "avg_connections": round(avg_connections, 2),
+                                        "avg_read_iops": round(avg_read_iops, 2),
+                                        "avg_write_iops": round(avg_write_iops, 2),
+                                    },
+                                    "wasted_amount": wasted_amount,
                                 },
                             )
                         )
 
         except ClientError as e:
-            print(f"Error scanning stopped databases in {region}: {e}")
+            print(f"Error scanning RDS instances in {region}: {e}")
 
         return orphans
 
@@ -2284,87 +2529,410 @@ class AWSProvider(CloudProviderBase):
         self, region: str, detection_rules: dict | None = None
     ) -> list[OrphanResourceData]:
         """
-        Scan for idle EKS clusters (no worker nodes or no activity).
+        Scan for idle/orphaned EKS clusters with comprehensive detection scenarios.
 
-        Detection: EKS clusters with 0 nodes or no API activity for 7+ days.
+        Scenarios:
+        1. No worker nodes - Cluster with 0 nodes (paying control plane only)
+        2. All nodes unhealthy - All nodes in degraded/failed state
+        3. Low CPU utilization - All nodes with <5% CPU average
+        4. Fargate no profiles - Fargate-only cluster with no profiles configured
+        5. Outdated K8s version - Very old Kubernetes version (abandoned)
 
         Args:
             region: AWS region to scan
-            detection_rules: Optional detection configuration
+            detection_rules: Optional user-defined detection rules
 
         Returns:
-            List of orphaned EKS clusters
+            List of orphaned EKS cluster resources
         """
-        orphans = []
-        min_age_days = detection_rules.get("min_age_days", 3) if detection_rules else 3
+        orphans: list[OrphanResourceData] = []
+
+        # Use provided rules or defaults
+        if detection_rules is None:
+            from app.models.detection_rule import DEFAULT_DETECTION_RULES
+
+            detection_rules = DEFAULT_DETECTION_RULES.get("eks_cluster", {})
+
+        # Check if detection is enabled
+        if not detection_rules.get("enabled", True):
+            return orphans
+
+        # Load configuration
+        min_age_days = detection_rules.get("min_age_days", 3)
+        confidence_threshold_days = detection_rules.get("confidence_threshold_days", 7)
+        critical_age_days = detection_rules.get("critical_age_days", 30)
+        detect_no_nodes = detection_rules.get("detect_no_nodes", True)
+        detect_unhealthy_nodes = detection_rules.get("detect_unhealthy_nodes", True)
+        min_unhealthy_days = detection_rules.get("min_unhealthy_days", 7)
+        detect_low_utilization = detection_rules.get("detect_low_utilization", True)
+        cpu_threshold_percent = detection_rules.get("cpu_threshold_percent", 5.0)
+        min_idle_days = detection_rules.get("min_idle_days", 7)
+        idle_lookback_days = detection_rules.get("idle_lookback_days", 7)
+        detect_fargate_no_profiles = detection_rules.get(
+            "detect_fargate_no_profiles", True
+        )
+        detect_outdated_version = detection_rules.get("detect_outdated_version", True)
+        min_supported_minor_versions = detection_rules.get(
+            "min_supported_minor_versions", 3
+        )
+
+        # AWS supports last 3-4 minor versions (adjust as AWS updates support)
+        # As of 2025, latest is 1.28, so minimum supported would be 1.25
+        LATEST_K8S_VERSION = "1.28"
 
         try:
             async with self.session.client("eks", region_name=region) as eks:
-                async with self.session.client("cloudwatch", region_name=region) as cw:
-                    response = await eks.list_clusters()
+                async with self.session.client("ec2", region_name=region) as ec2:
+                    async with self.session.client(
+                        "cloudwatch", region_name=region
+                    ) as cloudwatch:
+                        response = await eks.list_clusters()
 
-                    for cluster_name in response.get("clusters", []):
-                        cluster_info = await eks.describe_cluster(name=cluster_name)
-                        cluster = cluster_info["cluster"]
+                        for cluster_name in response.get("clusters", []):
+                            cluster_info = await eks.describe_cluster(name=cluster_name)
+                            cluster = cluster_info["cluster"]
 
-                        created_at = cluster["createdAt"]
-                        age_days = (datetime.now(timezone.utc) - created_at).days
+                            # Basic metadata
+                            created_at = cluster["createdAt"]
+                            age_days = (datetime.now(timezone.utc) - created_at).days
+                            k8s_version = cluster.get("version", "Unknown")
+                            cluster_status = cluster.get("status", "Unknown")
 
-                        if age_days < min_age_days:
-                            continue
+                            # Skip if too young
+                            if age_days < min_age_days:
+                                continue
 
-                        # Check node groups
-                        nodegroups_response = await eks.list_nodegroups(
-                            clusterName=cluster_name
-                        )
-                        nodegroups = nodegroups_response.get("nodegroups", [])
-
-                        total_nodes = 0
-                        for ng_name in nodegroups:
-                            ng_info = await eks.describe_nodegroup(
-                                clusterName=cluster_name, nodegroupName=ng_name
+                            # Get node groups
+                            nodegroups_response = await eks.list_nodegroups(
+                                clusterName=cluster_name
                             )
-                            ng = ng_info["nodegroup"]
-                            total_nodes += ng.get("scalingConfig", {}).get("desiredSize", 0)
+                            nodegroups = nodegroups_response.get("nodegroups", [])
 
-                        # Query CloudWatch for cluster API calls (7-day lookback)
-                        now = datetime.now(timezone.utc)
-                        start_time = now - timedelta(days=7)
-
-                        # Note: EKS doesn't have direct API call metrics, so we check if nodes = 0
-                        is_orphaned = False
-                        reason = ""
-                        confidence = "medium"
-
-                        if total_nodes == 0:
-                            if age_days >= 7:
-                                confidence = "high"
-                                reason = f"No worker nodes for 7+ days (cluster age: {age_days} days)"
-                            else:
-                                confidence = "medium"
-                                reason = f"No worker nodes (cluster age: {age_days} days)"
-                            is_orphaned = True
-
-                        if is_orphaned:
-                            orphans.append(
-                                OrphanResourceData(
-                                    resource_type="eks_cluster",
-                                    resource_id=cluster_name,
-                                    resource_name=cluster_name,
-                                    region=region,
-                                    estimated_monthly_cost=self.PRICING["eks_cluster"],
-                                    resource_metadata={
-                                        "version": cluster.get("version", "Unknown"),
-                                        "status": cluster.get("status", "Unknown"),
-                                        "nodegroup_count": len(nodegroups),
-                                        "total_nodes": total_nodes,
-                                        "created_at": created_at.isoformat(),
-                                        "age_days": age_days,
-                                        "confidence": confidence,
-                                        "orphan_reason": reason,
-                                    },
+                            # Get Fargate profiles (graceful failure if permission denied)
+                            fargate_profiles = []
+                            try:
+                                fargate_response = await eks.list_fargate_profiles(
+                                    clusterName=cluster_name
                                 )
-                            )
+                                fargate_profiles = fargate_response.get(
+                                    "fargateProfileNames", []
+                                )
+                            except ClientError as fargate_error:
+                                # Silently continue if Fargate permissions are missing
+                                # This allows detection to work even without Fargate access
+                                if fargate_error.response.get("Error", {}).get(
+                                    "Code"
+                                ) != "AccessDeniedException":
+                                    # Log only non-permission errors
+                                    print(
+                                        f"Error listing Fargate profiles for {cluster_name}: {fargate_error}"
+                                    )
+
+                            # Collect node information
+                            total_nodes = 0
+                            unhealthy_nodes = 0
+                            node_instance_ids = []
+                            node_details = []
+
+                            for ng_name in nodegroups:
+                                ng_info = await eks.describe_nodegroup(
+                                    clusterName=cluster_name, nodegroupName=ng_name
+                                )
+                                ng = ng_info["nodegroup"]
+
+                                desired_size = (
+                                    ng.get("scalingConfig", {}).get("desiredSize", 0)
+                                )
+                                total_nodes += desired_size
+
+                                # Check health
+                                ng_status = ng.get("status", "UNKNOWN")
+                                ng_health = ng.get("health", {})
+                                health_issues = ng_health.get("issues", [])
+
+                                if (
+                                    ng_status
+                                    not in ["ACTIVE", "CREATING", "UPDATING"]
+                                    or health_issues
+                                ):
+                                    unhealthy_nodes += desired_size
+
+                                node_details.append(
+                                    {
+                                        "name": ng_name,
+                                        "status": ng_status,
+                                        "desired_size": desired_size,
+                                        "instance_type": ng.get("instanceTypes", [
+                                            "unknown"
+                                        ])[0],
+                                        "health_issues": len(health_issues),
+                                    }
+                                )
+
+                            # Try to find EC2 instances by EKS cluster tag for CPU metrics
+                            try:
+                                instances_response = await ec2.describe_instances(
+                                    Filters=[
+                                        {
+                                            "Name": "tag:eks:cluster-name",
+                                            "Values": [cluster_name],
+                                        },
+                                        {
+                                            "Name": "instance-state-name",
+                                            "Values": ["running"],
+                                        },
+                                    ]
+                                )
+                                for reservation in instances_response.get(
+                                    "Reservations", []
+                                ):
+                                    for instance in reservation.get("Instances", []):
+                                        node_instance_ids.append(instance["InstanceId"])
+                            except Exception:
+                                pass
+
+                            # Detection logic
+                            is_orphaned = False
+                            orphan_type = None
+                            orphan_reasons = []
+                            confidence_level = "medium"
+
+                            # Scenario #1: No worker nodes
+                            if (
+                                detect_no_nodes
+                                and total_nodes == 0
+                                and len(fargate_profiles) == 0
+                            ):
+                                is_orphaned = True
+                                orphan_type = "no_worker_nodes"
+                                orphan_reasons.append(
+                                    f"No worker nodes and no Fargate profiles (age: {age_days} days)"
+                                )
+                                orphan_reasons.append(
+                                    "Paying $73/month for unused control plane"
+                                )
+
+                                if age_days >= critical_age_days:
+                                    confidence_level = "critical"
+                                    orphan_reasons.append(
+                                        f"CRITICAL: Unused for {age_days}+ days"
+                                    )
+                                elif age_days >= confidence_threshold_days:
+                                    confidence_level = "high"
+                                else:
+                                    confidence_level = "medium"
+
+                            # Scenario #4: Fargate no profiles
+                            elif (
+                                detect_fargate_no_profiles
+                                and total_nodes == 0
+                                and len(nodegroups) == 0
+                                and len(fargate_profiles) == 0
+                            ):
+                                is_orphaned = True
+                                orphan_type = "fargate_no_profiles"
+                                orphan_reasons.append(
+                                    "Fargate-configured but no profiles created"
+                                )
+                                orphan_reasons.append(
+                                    "Cannot deploy pods without Fargate profiles or node groups"
+                                )
+                                confidence_level = (
+                                    "high"
+                                    if age_days >= confidence_threshold_days
+                                    else "medium"
+                                )
+
+                            # Scenario #2: All nodes unhealthy
+                            elif (
+                                detect_unhealthy_nodes
+                                and total_nodes > 0
+                                and unhealthy_nodes == total_nodes
+                                and age_days >= min_unhealthy_days
+                            ):
+                                is_orphaned = True
+                                orphan_type = "all_nodes_unhealthy"
+                                orphan_reasons.append(
+                                    f"All {total_nodes} nodes are unhealthy/degraded"
+                                )
+                                orphan_reasons.append("Cluster unable to run workloads")
+                                confidence_level = (
+                                    "high"
+                                    if age_days >= confidence_threshold_days
+                                    else "medium"
+                                )
+
+                            # Scenario #3: Low CPU utilization on all nodes
+                            elif (
+                                detect_low_utilization
+                                and total_nodes > 0
+                                and len(node_instance_ids) > 0
+                                and age_days >= min_idle_days
+                            ):
+                                # Check CloudWatch CPU for nodes
+                                low_cpu_nodes = 0
+                                total_checked_nodes = 0
+                                avg_cpu_overall = 0.0
+
+                                now = datetime.now(timezone.utc)
+                                start_time = now - timedelta(days=idle_lookback_days)
+
+                                # Limit to 10 instances to avoid API throttling
+                                for instance_id in node_instance_ids[:10]:
+                                    try:
+                                        cpu_response = (
+                                            await cloudwatch.get_metric_statistics(
+                                                Namespace="AWS/EC2",
+                                                MetricName="CPUUtilization",
+                                                Dimensions=[
+                                                    {
+                                                        "Name": "InstanceId",
+                                                        "Value": instance_id,
+                                                    }
+                                                ],
+                                                StartTime=start_time,
+                                                EndTime=now,
+                                                Period=86400,  # 1 day
+                                                Statistics=["Average"],
+                                            )
+                                        )
+                                        datapoints = cpu_response.get("Datapoints", [])
+                                        if datapoints:
+                                            avg_cpu = sum(
+                                                dp["Average"] for dp in datapoints
+                                            ) / len(datapoints)
+                                            avg_cpu_overall += avg_cpu
+                                            total_checked_nodes += 1
+                                            if avg_cpu < cpu_threshold_percent:
+                                                low_cpu_nodes += 1
+                                    except Exception:
+                                        pass
+
+                                if total_checked_nodes > 0:
+                                    avg_cpu_overall /= total_checked_nodes
+
+                                    # If all checked nodes have low CPU
+                                    if (
+                                        low_cpu_nodes == total_checked_nodes
+                                        and avg_cpu_overall < cpu_threshold_percent
+                                    ):
+                                        is_orphaned = True
+                                        orphan_type = "low_utilization"
+                                        orphan_reasons.append(
+                                            f"All nodes have <{cpu_threshold_percent}% CPU utilization (avg: {avg_cpu_overall:.2f}%)"
+                                        )
+                                        orphan_reasons.append(
+                                            "Over-provisioned or abandoned cluster"
+                                        )
+                                        confidence_level = (
+                                            "high"
+                                            if age_days >= critical_age_days
+                                            else "medium"
+                                        )
+
+                            # Scenario #5: Outdated Kubernetes version
+                            if detect_outdated_version and k8s_version != "Unknown":
+                                try:
+                                    latest_major, latest_minor = map(
+                                        int, LATEST_K8S_VERSION.split(".")[:2]
+                                    )
+                                    current_major, current_minor = map(
+                                        int, k8s_version.split(".")[:2]
+                                    )
+
+                                    version_diff = (
+                                        latest_major - current_major
+                                    ) * 100 + (latest_minor - current_minor)
+
+                                    if version_diff >= min_supported_minor_versions:
+                                        if not is_orphaned:
+                                            is_orphaned = True
+                                            orphan_type = "outdated_version"
+                                            confidence_level = "medium"
+
+                                        orphan_reasons.append(
+                                            f"Kubernetes version {k8s_version} is {version_diff} versions behind latest ({LATEST_K8S_VERSION})"
+                                        )
+                                        orphan_reasons.append(
+                                            "Likely abandoned cluster (security risk)"
+                                        )
+                                except Exception:
+                                    pass
+
+                            if is_orphaned:
+                                # Calculate costs
+                                control_plane_cost = self.PRICING["eks_control_plane"]
+                                node_cost = 0.0
+
+                                for node in node_details:
+                                    instance_type = node["instance_type"]
+                                    desired_size = node["desired_size"]
+
+                                    # Map instance type to pricing
+                                    instance_type_lower = instance_type.lower()
+                                    price_key = (
+                                        f"eks_{instance_type_lower.replace('.', '_')}"
+                                    )
+
+                                    if price_key in self.PRICING:
+                                        node_cost += (
+                                            self.PRICING[price_key] * desired_size
+                                        )
+                                    elif "t3.small" in instance_type_lower:
+                                        node_cost += (
+                                            self.PRICING["eks_t3_small"] * desired_size
+                                        )
+                                    elif "t3.medium" in instance_type_lower:
+                                        node_cost += (
+                                            self.PRICING["eks_t3_medium"] * desired_size
+                                        )
+                                    elif "t3.large" in instance_type_lower:
+                                        node_cost += (
+                                            self.PRICING["eks_t3_large"] * desired_size
+                                        )
+                                    elif "m5.large" in instance_type_lower:
+                                        node_cost += (
+                                            self.PRICING["eks_m5_large"] * desired_size
+                                        )
+                                    else:
+                                        # Default fallback to t3.medium
+                                        node_cost += (
+                                            self.PRICING["eks_t3_medium"] * desired_size
+                                        )
+
+                                total_cost = control_plane_cost + node_cost
+
+                                orphans.append(
+                                    OrphanResourceData(
+                                        resource_type="eks_cluster",
+                                        resource_id=cluster_name,
+                                        resource_name=cluster_name,
+                                        region=region,
+                                        estimated_monthly_cost=round(total_cost, 2),
+                                        resource_metadata={
+                                            "version": k8s_version,
+                                            "status": cluster_status,
+                                            "nodegroup_count": len(nodegroups),
+                                            "total_nodes": total_nodes,
+                                            "unhealthy_nodes": unhealthy_nodes,
+                                            "fargate_profile_count": len(
+                                                fargate_profiles
+                                            ),
+                                            "node_details": node_details,
+                                            "created_at": created_at.isoformat(),
+                                            "age_days": age_days,
+                                            "orphan_type": orphan_type,
+                                            "orphan_reason": " | ".join(orphan_reasons),
+                                            "orphan_reasons": orphan_reasons,
+                                            "confidence_level": confidence_level,
+                                            "control_plane_cost_monthly": round(
+                                                control_plane_cost, 2
+                                            ),
+                                            "node_cost_monthly": round(node_cost, 2),
+                                            "wasted_amount": round(total_cost, 2),
+                                        },
+                                    )
+                                )
 
         except ClientError as e:
             print(f"Error scanning EKS clusters in {region}: {e}")

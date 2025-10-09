@@ -9,7 +9,8 @@ import {
   FolderOpen,
   Settings,
   BookOpen,
-  LogOut
+  LogOut,
+  X
 } from "lucide-react";
 import { useAuthStore } from "@/stores/useAuthStore";
 
@@ -22,15 +23,30 @@ const navigation = [
   { name: "Documentation", href: "/dashboard/docs", icon: BookOpen },
 ];
 
-export function Sidebar() {
+interface SidebarProps {
+  isMobileMenuOpen?: boolean;
+  onCloseMobileMenu?: () => void;
+}
+
+export function Sidebar({ isMobileMenuOpen = false, onCloseMobileMenu }: SidebarProps) {
   const pathname = usePathname();
   const logout = useAuthStore((state) => state.logout);
 
-  return (
-    <div className="flex h-screen w-64 flex-col bg-gray-900">
+  const SidebarContent = () => (
+    <>
       {/* Logo */}
-      <div className="flex h-16 items-center justify-center border-b border-gray-800">
+      <div className="flex h-16 items-center justify-between px-4 border-b border-gray-800">
         <h1 className="text-2xl font-bold text-white">CloudWaste</h1>
+        {/* Close button (mobile only) */}
+        {onCloseMobileMenu && (
+          <button
+            onClick={onCloseMobileMenu}
+            className="lg:hidden rounded-lg p-2 text-gray-400 hover:bg-gray-800 hover:text-white transition-colors"
+            aria-label="Close menu"
+          >
+            <X className="h-6 w-6" />
+          </button>
+        )}
       </div>
 
       {/* Navigation */}
@@ -43,6 +59,7 @@ export function Sidebar() {
             <Link
               key={item.name}
               href={item.href}
+              onClick={onCloseMobileMenu}
               className={`
                 flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition-colors
                 ${
@@ -69,6 +86,33 @@ export function Sidebar() {
           Logout
         </button>
       </div>
-    </div>
+    </>
+  );
+
+  return (
+    <>
+      {/* Desktop Sidebar - Always visible on large screens */}
+      <div className="hidden lg:flex h-screen w-64 flex-col bg-gray-900">
+        <SidebarContent />
+      </div>
+
+      {/* Mobile Sidebar - Overlay */}
+      {isMobileMenuOpen && (
+        <div className="fixed inset-0 z-50 lg:hidden">
+          {/* Backdrop */}
+          <div
+            className="fixed inset-0 bg-black/50 backdrop-blur-sm"
+            onClick={onCloseMobileMenu}
+            aria-hidden="true"
+          />
+          {/* Sidebar */}
+          <div className="fixed inset-y-0 left-0 w-64 bg-gray-900 shadow-xl">
+            <div className="flex h-full flex-col">
+              <SidebarContent />
+            </div>
+          </div>
+        </div>
+      )}
+    </>
   );
 }

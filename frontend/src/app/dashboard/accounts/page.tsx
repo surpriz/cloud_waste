@@ -14,18 +14,18 @@ export default function AccountsPage() {
   }, [fetchAccounts]);
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-4 md:space-y-6">
       {/* Header */}
-      <div className="flex items-center justify-between">
+      <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
         <div>
-          <h1 className="text-3xl font-bold text-gray-900">Cloud Accounts</h1>
-          <p className="mt-2 text-gray-600">
+          <h1 className="text-2xl md:text-3xl font-bold text-gray-900">Cloud Accounts</h1>
+          <p className="mt-1 md:mt-2 text-sm md:text-base text-gray-600">
             Manage your cloud provider accounts for resource scanning
           </p>
         </div>
         <button
           onClick={() => setShowAddForm(true)}
-          className="flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2 font-medium text-white transition-colors hover:bg-blue-700"
+          className="w-full sm:w-auto flex items-center justify-center gap-2 rounded-lg bg-blue-600 px-4 py-2 font-medium text-white transition-colors hover:bg-blue-700"
         >
           <Plus className="h-5 w-5" />
           Add Account

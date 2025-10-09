@@ -21,6 +21,7 @@ import Link from "next/link";
 
 export default function DocsPage() {
   const [activeSection, setActiveSection] = useState<string>("introduction");
+  const [isSidebarOpen, setIsSidebarOpen] = useState(false);
 
   const sections = [
     { id: "introduction", label: "Introduction", icon: BookOpen },
@@ -32,10 +33,15 @@ export default function DocsPage() {
     { id: "faq", label: "FAQ", icon: HelpCircle },
   ];
 
+  const handleSectionChange = (sectionId: string) => {
+    setActiveSection(sectionId);
+    setIsSidebarOpen(false); // Close sidebar on mobile after selection
+  };
+
   return (
     <div className="flex min-h-screen bg-gray-50">
-      {/* Sidebar */}
-      <div className="w-64 border-r bg-white p-6">
+      {/* Sidebar - Desktop */}
+      <div className="hidden lg:block w-64 border-r bg-white p-6">
         <Link
           href="/dashboard"
           className="mb-6 inline-flex items-center gap-2 rounded-lg bg-gray-100 px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-200 transition-colors"
@@ -65,8 +71,66 @@ export default function DocsPage() {
         </nav>
       </div>
 
+      {/* Mobile Sidebar Overlay */}
+      {isSidebarOpen && (
+        <div className="fixed inset-0 z-50 lg:hidden">
+          {/* Backdrop */}
+          <div
+            className="fixed inset-0 bg-black/50 backdrop-blur-sm"
+            onClick={() => setIsSidebarOpen(false)}
+          />
+          {/* Sidebar */}
+          <div className="fixed inset-y-0 left-0 w-64 bg-white shadow-xl p-6">
+            <button
+              onClick={() => setIsSidebarOpen(false)}
+              className="mb-6 flex items-center gap-2 text-gray-600 hover:text-gray-900"
+            >
+              <ArrowLeft className="h-4 w-4" />
+              Close
+            </button>
+            <h2 className="mb-6 text-xl font-bold text-gray-900">Documentation</h2>
+            <nav className="space-y-2">
+              {sections.map((section) => {
+                const Icon = section.icon;
+                return (
+                  <button
+                    key={section.id}
+                    onClick={() => handleSectionChange(section.id)}
+                    className={`flex w-full items-center gap-3 rounded-lg px-3 py-2 text-left text-sm transition-colors ${
+                      activeSection === section.id
+                        ? "bg-blue-50 text-blue-700 font-semibold"
+                        : "text-gray-600 hover:bg-gray-50"
+                    }`}
+                  >
+                    <Icon className="h-5 w-5" />
+                    {section.label}
+                  </button>
+                );
+              })}
+            </nav>
+          </div>
+        </div>
+      )}
+
       {/* Main Content */}
-      <div className="flex-1 overflow-y-auto p-8">
+      <div className="flex-1 overflow-y-auto p-4 md:p-8">
+        {/* Mobile Header */}
+        <div className="lg:hidden mb-6 flex items-center justify-between">
+          <Link
+            href="/dashboard"
+            className="inline-flex items-center gap-2 rounded-lg bg-white px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-100 transition-colors border border-gray-200"
+          >
+            <ArrowLeft className="h-4 w-4" />
+            Back
+          </Link>
+          <button
+            onClick={() => setIsSidebarOpen(true)}
+            className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-700 transition-colors"
+          >
+            <BookOpen className="h-4 w-4" />
+            Menu
+          </button>
+        </div>
         <div className="mx-auto max-w-4xl">
           {activeSection === "introduction" && <IntroductionSection />}
           {activeSection === "getting-started" && <GettingStartedSection />}
@@ -399,11 +463,11 @@ function SupportedResourcesSection() {
       confidence: "High to Critical - Comprehensive multi-factor validation with CloudWatch metrics and security analysis",
     },
     {
-      name: "RDS Instances (Stopped)",
+      name: "RDS Instances",
       icon: "🗄️",
-      detection: "Database instances stopped for >7 days",
-      cost: "Storage costs only",
-      confidence: "Medium - May be intentional",
+      detection: "5 scenarios: Stopped long-term (>7d), Idle running (0 connections), Zero I/O (no read/write), Never connected (>7d), No backups. Comprehensive CloudWatch analysis",
+      cost: "~$12-560/month (compute varies by instance type) + $0.092-0.115/GB (storage). Multi-AZ doubles compute cost",
+      confidence: "Medium to Critical - Multi-scenario validation with CloudWatch metrics (DatabaseConnections, ReadIOPS, WriteIOPS)",
     },
     {
       name: "NAT Gateways",
@@ -436,9 +500,9 @@ function SupportedResourcesSection() {
     {
       name: "EKS Clusters",
       icon: "☸️",
-      detection: "Clusters with 0 worker nodes for 7+ days",
-      cost: "~$73/month (control plane)",
-      confidence: "High - No worker nodes",
+      detection: "5 scenarios: No worker nodes (0 nodes/Fargate profiles), All nodes unhealthy (degraded state), Low CPU utilization (<5% avg), Fargate misconfigured (no profiles), Outdated K8s version (>3 versions behind)",
+      cost: "~$73/month (control plane) + $15-277/month per node (t3.small to m5.2xlarge). Full cluster cost calculated based on node types",
+      confidence: "Medium to Critical - Multi-scenario validation with CloudWatch CPU metrics and health checks",
     },
     {
       name: "SageMaker Endpoints",

@@ -105,18 +105,18 @@ export default function ResourcesPage() {
   };
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-4 md:space-y-6">
       {/* Header */}
-      <div className="flex items-center justify-between">
+      <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
         <div>
-          <h1 className="text-3xl font-bold text-gray-900">Orphan Resources</h1>
-          <p className="mt-2 text-gray-600">
+          <h1 className="text-2xl md:text-3xl font-bold text-gray-900">Orphan Resources</h1>
+          <p className="mt-1 md:mt-2 text-sm md:text-base text-gray-600">
             Review and manage detected orphaned cloud resources
           </p>
         </div>
         <button
           onClick={() => setShowFilters(!showFilters)}
-          className="flex items-center gap-2 rounded-lg border border-gray-300 px-4 py-2 font-medium text-gray-700 hover:bg-gray-50"
+          className="w-full sm:w-auto flex items-center justify-center gap-2 rounded-lg border border-gray-300 px-4 py-2 font-medium text-gray-700 hover:bg-gray-50"
         >
           <Filter className="h-5 w-5" />
           Filters
@@ -530,15 +530,96 @@ function ResourceCard({ resource, onIgnore, onMarkForDeletion, onDelete }: any) 
 
                   {/* RDS Instance specific criteria */}
                   {resource.resource_type === 'rds_instance' && (
-                    <div className="space-y-1 text-sm">
-                      <div className="flex items-center gap-2 text-red-700">
-                        <span className="font-semibold">✗</span>
-                        <span>Database is in stopped state</span>
+                    <div className="space-y-2 text-sm">
+                      {/* Database engine info */}
+                      <div className="flex items-center gap-2">
+                        <span className="px-2 py-0.5 bg-gray-200 rounded text-xs font-semibold">
+                          {resource.resource_metadata.engine?.toUpperCase()}
+                        </span>
+                        <span className="text-gray-600 text-xs">
+                          {resource.resource_metadata.db_class} | {resource.resource_metadata.storage_gb} GB
+                          {resource.resource_metadata.multi_az && ' | Multi-AZ'}
+                        </span>
                       </div>
-                      <div className="flex items-center gap-2 text-gray-600 mt-1">
-                        <span className="font-semibold">ℹ️</span>
-                        <span className="italic">{resource.resource_metadata.orphan_reason}</span>
-                      </div>
+
+                      {/* Orphan type specific messages */}
+                      {resource.resource_metadata?.orphan_type === 'stopped' && (
+                        <div className="flex items-center gap-2 text-red-700">
+                          <span className="font-semibold">⏸️</span>
+                          <span className="font-semibold">Database stopped for {resource.resource_metadata.age_days}+ days</span>
+                        </div>
+                      )}
+
+                      {resource.resource_metadata?.orphan_type === 'idle_running' && (
+                        <>
+                          <div className="flex items-center gap-2 text-red-700">
+                            <span className="font-semibold">💤</span>
+                            <span className="font-semibold">Running with 0 connections for {resource.resource_metadata.age_days}+ days</span>
+                          </div>
+                          <div className="flex items-center gap-2 text-orange-600">
+                            <span className="font-semibold">⚠️</span>
+                            <span>Paying ${resource.resource_metadata.compute_cost_monthly}/month compute cost for unused database</span>
+                          </div>
+                        </>
+                      )}
+
+                      {resource.resource_metadata?.orphan_type === 'never_connected' && (
+                        <>
+                          <div className="flex items-center gap-2 text-red-700">
+                            <span className="font-semibold">🆕</span>
+                            <span className="font-semibold">Created {resource.resource_metadata.age_days} days ago, never connected</span>
+                          </div>
+                          <div className="flex items-center gap-2 text-gray-600">
+                            <span className="font-semibold">📊</span>
+                            <span>0 database connections since creation</span>
+                          </div>
+                        </>
+                      )}
+
+                      {resource.resource_metadata?.orphan_type === 'zero_io' && (
+                        <>
+                          <div className="flex items-center gap-2 text-orange-700">
+                            <span className="font-semibold">📊</span>
+                            <span className="font-semibold">No read/write operations in 30 days</span>
+                          </div>
+                          <div className="flex items-center gap-2 text-gray-600 text-xs">
+                            <span>Read IOPS: {resource.resource_metadata.cloudwatch_stats?.avg_read_iops || 0} | Write IOPS: {resource.resource_metadata.cloudwatch_stats?.avg_write_iops || 0}</span>
+                          </div>
+                        </>
+                      )}
+
+                      {resource.resource_metadata?.orphan_type === 'no_backups' && (
+                        <div className="flex items-center gap-2 text-orange-700">
+                          <span className="font-semibold">🚫</span>
+                          <span className="font-semibold">No automated backups configured</span>
+                        </div>
+                      )}
+
+                      {/* CloudWatch stats for running instances */}
+                      {resource.resource_metadata.status === 'available' && resource.resource_metadata.cloudwatch_stats && (
+                        <div className="mt-2 p-2 bg-gray-50 rounded text-xs space-y-1">
+                          <div className="font-semibold text-gray-700">CloudWatch Metrics (30 days avg)</div>
+                          <div className="flex gap-4">
+                            <span>Connections: {resource.resource_metadata.cloudwatch_stats.avg_connections}</span>
+                            <span>Read IOPS: {resource.resource_metadata.cloudwatch_stats.avg_read_iops}</span>
+                            <span>Write IOPS: {resource.resource_metadata.cloudwatch_stats.avg_write_iops}</span>
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Cost breakdown */}
+                      {resource.resource_metadata.compute_cost_monthly > 0 && (
+                        <div className="text-xs text-gray-600">
+                          💰 Compute: ${resource.resource_metadata.compute_cost_monthly}/mo + Storage: ${resource.resource_metadata.storage_cost_monthly}/mo
+                        </div>
+                      )}
+
+                      {/* Backup status */}
+                      {resource.resource_metadata.backup_retention_period === 0 && (
+                        <div className="text-xs text-orange-600">
+                          ⚠️ Backup retention: {resource.resource_metadata.backup_retention_period} days (backups disabled)
+                        </div>
+                      )}
                     </div>
                   )}
 
@@ -801,6 +882,142 @@ function ResourceCard({ resource, onIgnore, onMarkForDeletion, onDelete }: any) 
                         <span className="font-semibold">💡</span>
                         <span className="italic">{resource.resource_metadata.orphan_reason}</span>
                       </div>
+                    </div>
+                  )}
+
+                  {/* EKS Cluster specific criteria */}
+                  {resource.resource_type === 'eks_cluster' && (
+                    <div className="space-y-2 text-sm">
+                      {/* Kubernetes version badge */}
+                      <div className="flex items-center gap-2">
+                        <span className="px-2 py-0.5 bg-blue-200 rounded text-xs font-semibold">
+                          K8s {resource.resource_metadata.version}
+                        </span>
+                        <span className="text-gray-600 text-xs">
+                          {resource.resource_metadata.nodegroup_count} node group(s) | {resource.resource_metadata.total_nodes} node(s)
+                          {resource.resource_metadata.fargate_profile_count > 0 && ` | ${resource.resource_metadata.fargate_profile_count} Fargate profile(s)`}
+                        </span>
+                      </div>
+
+                      {/* Orphan type specific messages */}
+                      {resource.resource_metadata?.orphan_type === 'no_worker_nodes' && (
+                        <>
+                          <div className="flex items-center gap-2 text-red-700">
+                            <span className="font-semibold">🚫</span>
+                            <span className="font-semibold">No worker nodes and no Fargate profiles</span>
+                          </div>
+                          <div className="flex items-center gap-2 text-red-700">
+                            <span className="font-semibold">💰</span>
+                            <span>Paying ${resource.resource_metadata.control_plane_cost_monthly}/month for unused control plane</span>
+                          </div>
+                        </>
+                      )}
+
+                      {resource.resource_metadata?.orphan_type === 'all_nodes_unhealthy' && (
+                        <>
+                          <div className="flex items-center gap-2 text-red-700">
+                            <span className="font-semibold">⚠️</span>
+                            <span className="font-semibold">All {resource.resource_metadata.total_nodes} nodes are unhealthy/degraded</span>
+                          </div>
+                          <div className="flex items-center gap-2 text-orange-600">
+                            <span className="font-semibold">❌</span>
+                            <span>Cluster unable to run workloads</span>
+                          </div>
+                        </>
+                      )}
+
+                      {resource.resource_metadata?.orphan_type === 'low_utilization' && (
+                        <>
+                          <div className="flex items-center gap-2 text-orange-700">
+                            <span className="font-semibold">💤</span>
+                            <span className="font-semibold">All nodes have very low CPU utilization</span>
+                          </div>
+                          <div className="flex items-center gap-2 text-gray-600">
+                            <span className="font-semibold">📊</span>
+                            <span>Over-provisioned or abandoned cluster</span>
+                          </div>
+                        </>
+                      )}
+
+                      {resource.resource_metadata?.orphan_type === 'fargate_no_profiles' && (
+                        <>
+                          <div className="flex items-center gap-2 text-red-700">
+                            <span className="font-semibold">🔧</span>
+                            <span className="font-semibold">Fargate-configured but no profiles created</span>
+                          </div>
+                          <div className="flex items-center gap-2 text-orange-600">
+                            <span className="font-semibold">⚠️</span>
+                            <span>Cannot deploy pods without Fargate profiles or node groups</span>
+                          </div>
+                        </>
+                      )}
+
+                      {resource.resource_metadata?.orphan_type === 'outdated_version' && (
+                        <>
+                          <div className="flex items-center gap-2 text-orange-700">
+                            <span className="font-semibold">📅</span>
+                            <span className="font-semibold">Outdated Kubernetes version (security risk)</span>
+                          </div>
+                          <div className="flex items-center gap-2 text-red-600">
+                            <span className="font-semibold">⚠️</span>
+                            <span>Likely abandoned cluster</span>
+                          </div>
+                        </>
+                      )}
+
+                      {/* Node details */}
+                      {resource.resource_metadata?.node_details && resource.resource_metadata.node_details.length > 0 && (
+                        <div className="mt-2 p-2 bg-gray-50 rounded text-xs space-y-1">
+                          <div className="font-semibold text-gray-700">Node Groups:</div>
+                          {resource.resource_metadata.node_details.map((node: any, idx: number) => (
+                            <div key={idx} className="flex gap-2">
+                              <span className="font-semibold">{node.name}:</span>
+                              <span>{node.instance_type} × {node.desired_size} nodes</span>
+                              <span className={node.status === 'ACTIVE' ? 'text-green-700' : 'text-red-700'}>
+                                ({node.status})
+                              </span>
+                              {node.health_issues > 0 && (
+                                <span className="text-red-700">⚠️ {node.health_issues} issue(s)</span>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      )}
+
+                      {/* Cost breakdown */}
+                      {resource.resource_metadata.control_plane_cost_monthly !== undefined && (
+                        <div className="text-xs text-gray-600">
+                          💰 Control Plane: ${resource.resource_metadata.control_plane_cost_monthly}/mo
+                          {resource.resource_metadata.node_cost_monthly > 0 && (
+                            <> + Worker Nodes: ${resource.resource_metadata.node_cost_monthly}/mo</>
+                          )}
+                        </div>
+                      )}
+
+                      {/* Age and cluster status */}
+                      <div className="flex items-center gap-4 text-xs text-gray-600">
+                        <span>Status: <span className={`font-semibold ${resource.resource_metadata.status === 'ACTIVE' ? 'text-green-700' : 'text-orange-700'}`}>{resource.resource_metadata.status}</span></span>
+                        <span>Age: {resource.resource_metadata.age_days} days</span>
+                      </div>
+
+                      {/* Confidence level */}
+                      {resource.resource_metadata?.confidence_level && (
+                        <div className={`flex items-center gap-2 ${
+                          resource.resource_metadata.confidence_level === 'critical' ? 'text-red-900 font-bold' :
+                          resource.resource_metadata.confidence_level === 'high' ? 'text-green-700' :
+                          resource.resource_metadata.confidence_level === 'medium' ? 'text-yellow-700' :
+                          'text-gray-700'
+                        }`}>
+                          <span className="font-semibold">
+                            {resource.resource_metadata.confidence_level === 'critical' ? '🚨' :
+                             resource.resource_metadata.confidence_level === 'high' ? '✓' :
+                             resource.resource_metadata.confidence_level === 'medium' ? '◐' : '○'}
+                          </span>
+                          <span className="capitalize">
+                            {resource.resource_metadata.confidence_level === 'critical' ? '🔥 CRITICAL' : resource.resource_metadata.confidence_level} confidence level
+                          </span>
+                        </div>
+                      )}
                     </div>
                   )}
 

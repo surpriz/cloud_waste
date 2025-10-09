@@ -49,18 +49,18 @@ export default function DashboardPage() {
   ];
 
   return (
-    <div className="space-y-8">
+    <div className="space-y-6 md:space-y-8">
       {/* Page header */}
       <div className="relative">
         <div className="flex items-center gap-3">
-          <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-gradient-to-br from-blue-600 to-purple-600 shadow-lg">
-            <Sparkles className="h-6 w-6 text-white" />
+          <div className="flex h-10 w-10 md:h-12 md:w-12 items-center justify-center rounded-xl bg-gradient-to-br from-blue-600 to-purple-600 shadow-lg">
+            <Sparkles className="h-5 w-5 md:h-6 md:w-6 text-white" />
           </div>
           <div>
-            <h1 className="text-4xl font-extrabold bg-gradient-to-r from-blue-600 to-purple-600 bg-clip-text text-transparent">
+            <h1 className="text-2xl md:text-4xl font-extrabold bg-gradient-to-r from-blue-600 to-purple-600 bg-clip-text text-transparent">
               Dashboard
             </h1>
-            <p className="mt-1 text-gray-600 text-lg">
+            <p className="mt-1 text-gray-600 text-sm md:text-lg">
               Overview of your cloud waste detection
             </p>
           </div>

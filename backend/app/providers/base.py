@@ -176,15 +176,18 @@ class CloudProviderBase(ABC):
         pass
 
     @abstractmethod
-    async def scan_stopped_databases(self, region: str) -> list[OrphanResourceData]:
+    async def scan_stopped_databases(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
         """
-        Scan for database instances stopped for extended period.
+        Scan for database instances stopped for extended period or idle.
 
         Args:
             region: Region to scan
+            detection_rules: Optional user-defined detection rules
 
         Returns:
-            List of stopped database resources
+            List of stopped/idle database resources
         """
         pass
 
@@ -346,7 +349,9 @@ class CloudProviderBase(ABC):
         results.extend(
             await self.scan_unused_load_balancers(region, rules.get("load_balancer"))
         )
-        results.extend(await self.scan_stopped_databases(region))
+        results.extend(
+            await self.scan_stopped_databases(region, rules.get("rds_instance"))
+        )
         results.extend(
             await self.scan_unused_nat_gateways(region, rules.get("nat_gateway"))
         )

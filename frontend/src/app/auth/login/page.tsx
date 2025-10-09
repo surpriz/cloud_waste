@@ -32,20 +32,20 @@ export default function LoginPage() {
   };
 
   return (
-    <div className="relative rounded-2xl bg-white p-10 shadow-2xl border border-gray-100 max-w-md w-full">
+    <div className="relative rounded-2xl bg-white p-6 md:p-10 shadow-2xl border border-gray-100 max-w-md w-full">
       {/* Decorative gradient */}
       <div className="absolute -top-2 -right-2 h-20 w-20 bg-gradient-to-br from-blue-500 to-purple-600 rounded-2xl opacity-20 blur-2xl"></div>
       <div className="absolute -bottom-2 -left-2 h-20 w-20 bg-gradient-to-br from-green-500 to-blue-600 rounded-2xl opacity-20 blur-2xl"></div>
 
       <div className="relative z-10">
-        <div className="mb-8 text-center">
-          <div className="inline-flex items-center justify-center h-16 w-16 rounded-2xl bg-gradient-to-br from-blue-600 to-purple-600 shadow-lg mb-4">
-            <LogIn className="h-8 w-8 text-white" />
+        <div className="mb-6 md:mb-8 text-center">
+          <div className="inline-flex items-center justify-center h-14 w-14 md:h-16 md:w-16 rounded-2xl bg-gradient-to-br from-blue-600 to-purple-600 shadow-lg mb-3 md:mb-4">
+            <LogIn className="h-7 w-7 md:h-8 md:w-8 text-white" />
           </div>
-          <h1 className="text-4xl font-extrabold bg-gradient-to-r from-blue-600 to-purple-600 bg-clip-text text-transparent">
+          <h1 className="text-3xl md:text-4xl font-extrabold bg-gradient-to-r from-blue-600 to-purple-600 bg-clip-text text-transparent">
             CloudWaste
           </h1>
-          <p className="mt-3 text-gray-600 text-lg">Welcome back! Sign in to continue</p>
+          <p className="mt-2 md:mt-3 text-gray-600 text-base md:text-lg">Welcome back! Sign in to continue</p>
         </div>
 
         {error && (
