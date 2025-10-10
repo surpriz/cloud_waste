@@ -48,10 +48,13 @@ class AWSProvider(CloudProviderBase):
         "rds_db_m5_xlarge": 280.32,  # db.m5.xlarge (~$0.384/hour * 730 hours)
         "rds_db_m5_2xlarge": 560.64,  # db.m5.2xlarge (~$0.768/hour * 730 hours)
         # TOP 15 high-cost idle resources
-        "fsx_lustre_per_gb": 0.145,  # FSx for Lustre
-        "fsx_windows_per_gb": 0.13,  # FSx for Windows
-        "fsx_ontap_per_gb": 0.144,  # FSx for NetApp ONTAP
-        "fsx_openzfs_per_gb": 0.14,  # FSx for OpenZFS
+        "fsx_lustre_per_gb": 0.145,  # FSx for Lustre (SSD storage)
+        "fsx_windows_per_gb": 0.13,  # FSx for Windows (SSD storage)
+        "fsx_windows_hdd_per_gb": 0.013,  # FSx for Windows (HDD storage - 90% cheaper)
+        "fsx_ontap_per_gb": 0.144,  # FSx for NetApp ONTAP (SSD storage)
+        "fsx_openzfs_per_gb": 0.14,  # FSx for OpenZFS (SSD storage)
+        "fsx_backup_per_gb": 0.050,  # FSx backup storage (incremental, more expensive than HDD)
+        "fsx_throughput_per_mbps": 2.20,  # FSx throughput capacity ($2.20 per MB/s/month for Windows/ONTAP)
         "neptune_db_r5_large": 0.348,  # Neptune db.r5.large (per hour) = ~$250/month
         "neptune_db_r5_xlarge": 0.696,  # Neptune db.r5.xlarge = ~$500/month
         "msk_kafka_m5_large": 0.21,  # MSK kafka.m5.large (per broker/hour) = ~$150/month
@@ -2207,9 +2210,17 @@ class AWSProvider(CloudProviderBase):
         self, region: str, detection_rules: dict | None = None
     ) -> list[OrphanResourceData]:
         """
-        Scan for unused FSx file systems using CloudWatch metrics.
+        Scan for unused FSx file systems using CloudWatch metrics and advanced detection.
 
-        Detection: File systems with no data read/write activity for 30+ days.
+        Detects 8 scenarios (by priority):
+        1. Completely inactive (0 read/write transfers for 30+ days)
+        2. Over-provisioned storage (<10% storage used)
+        3. Over-provisioned throughput (<10% throughput utilized)
+        4. Excessive backup retention (orphaned backups)
+        5. Unused file shares (Windows: 0 SMB connections for 7+ days)
+        6. Low IOPS utilization (<10% IOPS used)
+        7. Multi-AZ overkill (Multi-AZ in dev/test environments)
+        8. Wrong storage type (SSD for archive workloads)
 
         Args:
             region: AWS region to scan
@@ -2219,16 +2230,52 @@ class AWSProvider(CloudProviderBase):
             List of orphaned FSx file systems
         """
         orphans = []
+
+        # Extract detection rules
         min_age_days = detection_rules.get("min_age_days", 3) if detection_rules else 3
-        confidence_threshold_days = (
-            detection_rules.get("confidence_threshold_days", 30)
-            if detection_rules
-            else 30
-        )
+        confidence_threshold_days = detection_rules.get("confidence_threshold_days", 30) if detection_rules else 30
+
+        # Scenario 1: Completely inactive
+        detect_inactive = detection_rules.get("detect_inactive", True) if detection_rules else True
+        inactive_lookback_days = detection_rules.get("inactive_lookback_days", 30) if detection_rules else 30
+
+        # Scenario 2: Over-provisioned storage
+        detect_over_provisioned_storage = detection_rules.get("detect_over_provisioned_storage", True) if detection_rules else True
+        storage_usage_threshold = detection_rules.get("storage_usage_threshold_percent", 10.0) if detection_rules else 10.0
+        storage_lookback_days = detection_rules.get("storage_lookback_days", 7) if detection_rules else 7
+
+        # Scenario 3: Over-provisioned throughput
+        detect_over_provisioned_throughput = detection_rules.get("detect_over_provisioned_throughput", True) if detection_rules else True
+        throughput_utilization_threshold = detection_rules.get("throughput_utilization_threshold_percent", 10.0) if detection_rules else 10.0
+        throughput_lookback_days = detection_rules.get("throughput_lookback_days", 7) if detection_rules else 7
+
+        # Scenario 4: Excessive backups
+        detect_excessive_backups = detection_rules.get("detect_excessive_backups", True) if detection_rules else True
+        max_backup_retention_days = detection_rules.get("max_backup_retention_days", 30) if detection_rules else 30
+        detect_orphaned_backups = detection_rules.get("detect_orphaned_backups", True) if detection_rules else True
+
+        # Scenario 5: Unused file shares (Windows)
+        detect_unused_file_shares = detection_rules.get("detect_unused_file_shares", True) if detection_rules else True
+        min_zero_connections_days = detection_rules.get("min_zero_connections_days", 7) if detection_rules else 7
+
+        # Scenario 6: Low IOPS utilization
+        detect_low_iops_utilization = detection_rules.get("detect_low_iops_utilization", True) if detection_rules else True
+        iops_utilization_threshold = detection_rules.get("iops_utilization_threshold_percent", 10.0) if detection_rules else 10.0
+        iops_lookback_days = detection_rules.get("iops_lookback_days", 7) if detection_rules else 7
+
+        # Scenario 7: Multi-AZ overkill
+        detect_multi_az_overkill = detection_rules.get("detect_multi_az_overkill", True) if detection_rules else True
+        multi_az_tag_key = detection_rules.get("multi_az_tag_key", "Environment") if detection_rules else "Environment"
+        multi_az_tag_values = detection_rules.get("multi_az_tag_values", ["dev", "test", "development", "testing"]) if detection_rules else ["dev", "test", "development", "testing"]
+
+        # Scenario 8: Wrong storage type
+        detect_ssd_for_archive = detection_rules.get("detect_ssd_for_archive", True) if detection_rules else True
+        archive_throughput_threshold = detection_rules.get("archive_throughput_threshold_mbps", 8.0) if detection_rules else 8.0
 
         try:
             async with self.session.client("fsx", region_name=region) as fsx:
                 async with self.session.client("cloudwatch", region_name=region) as cw:
+                    # Describe all file systems
                     response = await fsx.describe_file_systems()
 
                     for fs in response.get("FileSystems", []):
@@ -2240,113 +2287,518 @@ class AWSProvider(CloudProviderBase):
                         if age_days < min_age_days:
                             continue
 
-                        # Query CloudWatch for data transfer metrics (30-day lookback)
-                        now = datetime.now(timezone.utc)
-                        start_time = now - timedelta(days=30)
+                        # Extract common metadata
+                        storage_capacity = fs["StorageCapacity"]  # in GB
+                        deployment_type = fs.get("WindowsConfiguration", {}).get("DeploymentType") if fs_type == "WINDOWS" else None
+                        is_multi_az = deployment_type == "MULTI_AZ_1" if deployment_type else False
 
-                        # Different metrics based on file system type
-                        metric_name = "DataReadBytes" if fs_type == "LUSTRE" else "DataWriteBytes"
+                        # Extract tags
+                        tags = {tag["Key"]: tag["Value"] for tag in fs.get("Tags", [])}
+                        name = tags.get("Name")
+                        environment_tag = tags.get(multi_az_tag_key, "").lower()
 
-                        metrics_response = await cw.get_metric_statistics(
-                            Namespace="AWS/FSx",
-                            MetricName=metric_name,
-                            Dimensions=[
-                                {"Name": "FileSystemId", "Value": fs_id},
-                            ],
-                            StartTime=start_time,
-                            EndTime=now,
-                            Period=86400,  # 1 day
-                            Statistics=["Sum"],
-                        )
+                        # Storage type (Windows only: SSD or HDD)
+                        storage_type = None
+                        if fs_type == "WINDOWS":
+                            storage_type = fs.get("WindowsConfiguration", {}).get("StorageType", "SSD")
 
-                        datapoints = metrics_response.get("Datapoints", [])
-                        total_bytes = sum(dp["Sum"] for dp in datapoints)
+                        # Throughput capacity (Windows/ONTAP only)
+                        throughput_capacity = None
+                        if fs_type == "WINDOWS":
+                            throughput_capacity = fs.get("WindowsConfiguration", {}).get("ThroughputCapacity")
+                        elif fs_type == "ONTAP":
+                            throughput_capacity = fs.get("OntapConfiguration", {}).get("ThroughputCapacity")
 
-                        # Determine usage category
-                        ever_used = total_bytes > 1_000_000  # > 1MB = used
-                        last_active_date = None
+                        # ========================================
+                        # PRIORITY 1: Completely Inactive
+                        # ========================================
+                        if detect_inactive:
+                            now = datetime.now(timezone.utc)
+                            start_time = now - timedelta(days=inactive_lookback_days)
 
-                        if datapoints:
-                            sorted_points = sorted(
-                                datapoints, key=lambda x: x["Timestamp"], reverse=True
+                            # Check both read and write metrics
+                            read_response = await cw.get_metric_statistics(
+                                Namespace="AWS/FSx",
+                                MetricName="DataReadBytes",
+                                Dimensions=[{"Name": "FileSystemId", "Value": fs_id}],
+                                StartTime=start_time,
+                                EndTime=now,
+                                Period=86400,  # 1 day
+                                Statistics=["Sum"],
                             )
-                            for dp in sorted_points:
-                                if dp["Sum"] > 1_000_000:
-                                    last_active_date = dp["Timestamp"]
-                                    break
 
-                        # Categorize usage
-                        if not ever_used:
-                            usage_category = "never_used"
-                        elif last_active_date:
-                            days_since_last_use = (now - last_active_date).days
-                            if days_since_last_use < 7:
-                                usage_category = "recently_active"
-                            elif days_since_last_use < 30:
-                                usage_category = "recently_abandoned"
-                            else:
-                                usage_category = "long_abandoned"
-                        else:
-                            usage_category = "never_used"
+                            write_response = await cw.get_metric_statistics(
+                                Namespace="AWS/FSx",
+                                MetricName="DataWriteBytes",
+                                Dimensions=[{"Name": "FileSystemId", "Value": fs_id}],
+                                StartTime=start_time,
+                                EndTime=now,
+                                Period=86400,
+                                Statistics=["Sum"],
+                            )
 
-                        # Skip recently active resources
-                        if usage_category == "recently_active":
+                            total_read_bytes = sum(dp["Sum"] for dp in read_response.get("Datapoints", []))
+                            total_write_bytes = sum(dp["Sum"] for dp in write_response.get("Datapoints", []))
+
+                            if total_read_bytes == 0 and total_write_bytes == 0:
+                                orphan_type = "inactive"
+                                confidence = "critical" if age_days >= confidence_threshold_days else "high"
+
+                                # Calculate cost
+                                pricing_key = f"fsx_{fs_type.lower()}_per_gb"
+                                monthly_cost = storage_capacity * self.PRICING.get(pricing_key, 0.14)
+
+                                # Add throughput cost for Windows/ONTAP
+                                if throughput_capacity and fs_type in ["WINDOWS", "ONTAP"]:
+                                    monthly_cost += throughput_capacity * self.PRICING["fsx_throughput_per_mbps"]
+
+                                # Multi-AZ doubles cost
+                                if is_multi_az:
+                                    monthly_cost *= 2
+
+                                reason = f"No read/write activity detected over {inactive_lookback_days} days (file system age: {age_days} days)"
+
+                                orphans.append(
+                                    OrphanResourceData(
+                                        resource_type="fsx_file_system",
+                                        resource_id=fs_id,
+                                        resource_name=name,
+                                        region=region,
+                                        estimated_monthly_cost=monthly_cost,
+                                        resource_metadata={
+                                            "file_system_type": fs_type,
+                                            "orphan_type": orphan_type,
+                                            "storage_capacity_gb": storage_capacity,
+                                            "deployment_type": deployment_type,
+                                            "is_multi_az": is_multi_az,
+                                            "storage_type": storage_type,
+                                            "throughput_capacity_mbps": throughput_capacity,
+                                            "lifecycle_status": fs.get("Lifecycle", "Unknown"),
+                                            "created_at": created_at.isoformat(),
+                                            "age_days": age_days,
+                                            "confidence": confidence,
+                                            "orphan_reason": reason,
+                                            "total_read_bytes": int(total_read_bytes),
+                                            "total_write_bytes": int(total_write_bytes),
+                                            "lookback_days": inactive_lookback_days,
+                                        },
+                                    )
+                                )
+                                continue  # Move to next file system (priority detection)
+
+                        # ========================================
+                        # PRIORITY 2: Over-Provisioned Storage
+                        # ========================================
+                        if detect_over_provisioned_storage:
+                            now = datetime.now(timezone.utc)
+                            start_time = now - timedelta(days=storage_lookback_days)
+
+                            # Query StorageUsed metric
+                            storage_used_response = await cw.get_metric_statistics(
+                                Namespace="AWS/FSx",
+                                MetricName="StorageUsed",
+                                Dimensions=[{"Name": "FileSystemId", "Value": fs_id}],
+                                StartTime=start_time,
+                                EndTime=now,
+                                Period=86400,
+                                Statistics=["Average"],
+                            )
+
+                            datapoints = storage_used_response.get("Datapoints", [])
+                            if datapoints:
+                                # Get average storage used (in bytes, convert to GB)
+                                avg_storage_used_bytes = sum(dp["Average"] for dp in datapoints) / len(datapoints)
+                                avg_storage_used_gb = avg_storage_used_bytes / (1024**3)
+                                usage_percent = (avg_storage_used_gb / storage_capacity) * 100 if storage_capacity > 0 else 0
+
+                                if usage_percent < storage_usage_threshold:
+                                    orphan_type = "over_provisioned_storage"
+                                    confidence = "high" if age_days >= confidence_threshold_days else "medium"
+
+                                    # Calculate wasted storage cost
+                                    wasted_storage_gb = storage_capacity - avg_storage_used_gb
+                                    pricing_key = f"fsx_{fs_type.lower()}_per_gb"
+                                    wasted_cost = wasted_storage_gb * self.PRICING.get(pricing_key, 0.14)
+
+                                    # Multi-AZ doubles cost
+                                    if is_multi_az:
+                                        wasted_cost *= 2
+
+                                    reason = f"Storage over-provisioned: {storage_capacity} GB provisioned but only {avg_storage_used_gb:.1f} GB used ({usage_percent:.1f}% utilization) - {wasted_storage_gb:.1f} GB wasted"
+
+                                    orphans.append(
+                                        OrphanResourceData(
+                                            resource_type="fsx_file_system",
+                                            resource_id=fs_id,
+                                            resource_name=name,
+                                            region=region,
+                                            estimated_monthly_cost=wasted_cost,
+                                            resource_metadata={
+                                                "file_system_type": fs_type,
+                                                "orphan_type": orphan_type,
+                                                "storage_capacity_gb": storage_capacity,
+                                                "storage_used_gb": round(avg_storage_used_gb, 2),
+                                                "storage_utilization_percent": round(usage_percent, 2),
+                                                "wasted_storage_gb": round(wasted_storage_gb, 2),
+                                                "deployment_type": deployment_type,
+                                                "is_multi_az": is_multi_az,
+                                                "age_days": age_days,
+                                                "confidence": confidence,
+                                                "orphan_reason": reason,
+                                                "lookback_days": storage_lookback_days,
+                                            },
+                                        )
+                                    )
+                                    continue
+
+                        # ========================================
+                        # PRIORITY 3: Over-Provisioned Throughput
+                        # ========================================
+                        if detect_over_provisioned_throughput and throughput_capacity and fs_type in ["WINDOWS", "ONTAP"]:
+                            now = datetime.now(timezone.utc)
+                            start_time = now - timedelta(days=throughput_lookback_days)
+
+                            # Query ThroughputUtilization metric (percentage)
+                            throughput_response = await cw.get_metric_statistics(
+                                Namespace="AWS/FSx",
+                                MetricName="ThroughputUtilization",
+                                Dimensions=[{"Name": "FileSystemId", "Value": fs_id}],
+                                StartTime=start_time,
+                                EndTime=now,
+                                Period=3600,  # 1 hour
+                                Statistics=["Average"],
+                            )
+
+                            datapoints = throughput_response.get("Datapoints", [])
+                            if datapoints:
+                                avg_throughput_utilization = sum(dp["Average"] for dp in datapoints) / len(datapoints)
+
+                                if avg_throughput_utilization < throughput_utilization_threshold:
+                                    orphan_type = "over_provisioned_throughput"
+                                    confidence = "medium" if age_days >= confidence_threshold_days else "low"
+
+                                    # Calculate wasted throughput cost
+                                    wasted_cost = throughput_capacity * self.PRICING["fsx_throughput_per_mbps"] * (1 - avg_throughput_utilization / 100)
+
+                                    # Multi-AZ doubles cost
+                                    if is_multi_az:
+                                        wasted_cost *= 2
+
+                                    reason = f"Throughput over-provisioned: {throughput_capacity} MB/s provisioned but only {avg_throughput_utilization:.1f}% utilized (avg over {throughput_lookback_days} days)"
+
+                                    orphans.append(
+                                        OrphanResourceData(
+                                            resource_type="fsx_file_system",
+                                            resource_id=fs_id,
+                                            resource_name=name,
+                                            region=region,
+                                            estimated_monthly_cost=wasted_cost,
+                                            resource_metadata={
+                                                "file_system_type": fs_type,
+                                                "orphan_type": orphan_type,
+                                                "throughput_capacity_mbps": throughput_capacity,
+                                                "throughput_utilization_percent": round(avg_throughput_utilization, 2),
+                                                "deployment_type": deployment_type,
+                                                "is_multi_az": is_multi_az,
+                                                "age_days": age_days,
+                                                "confidence": confidence,
+                                                "orphan_reason": reason,
+                                                "lookback_days": throughput_lookback_days,
+                                            },
+                                        )
+                                    )
+                                    continue
+
+                        # ========================================
+                        # PRIORITY 4: Excessive Backup Retention
+                        # ========================================
+                        if detect_excessive_backups or detect_orphaned_backups:
+                            try:
+                                backups_response = await fsx.describe_backups(
+                                    Filters=[{"Name": "file-system-id", "Values": [fs_id]}]
+                                )
+
+                                backups = backups_response.get("Backups", [])
+                                old_backups = []
+                                orphaned_backups = []
+                                total_backup_size_gb = 0
+
+                                for backup in backups:
+                                    backup_age_days = (datetime.now(timezone.utc) - backup["CreationTime"]).days
+                                    backup_size_gb = backup.get("Volume", {}).get("VolumeSize", 0) if "Volume" in backup else 0
+                                    total_backup_size_gb += backup_size_gb
+
+                                    # Detect excessive retention
+                                    if detect_excessive_backups and backup_age_days > max_backup_retention_days:
+                                        old_backups.append({"id": backup["BackupId"], "age_days": backup_age_days, "size_gb": backup_size_gb})
+
+                                    # Detect orphaned backups (source file system deleted)
+                                    if detect_orphaned_backups and backup.get("Lifecycle") == "DELETED":
+                                        orphaned_backups.append({"id": backup["BackupId"], "age_days": backup_age_days, "size_gb": backup_size_gb})
+
+                                if old_backups or orphaned_backups:
+                                    orphan_type = "excessive_backups" if old_backups else "orphaned_backups"
+                                    confidence = "medium" if old_backups else "high"
+
+                                    # Calculate backup costs
+                                    wasted_backup_cost = total_backup_size_gb * self.PRICING["fsx_backup_per_gb"]
+
+                                    if old_backups:
+                                        reason = f"{len(old_backups)} backups older than {max_backup_retention_days} days (total {total_backup_size_gb:.1f} GB) - excessive retention"
+                                    else:
+                                        reason = f"{len(orphaned_backups)} orphaned backups (source file system deleted) - {total_backup_size_gb:.1f} GB wasted"
+
+                                    orphans.append(
+                                        OrphanResourceData(
+                                            resource_type="fsx_file_system",
+                                            resource_id=fs_id,
+                                            resource_name=name,
+                                            region=region,
+                                            estimated_monthly_cost=wasted_backup_cost,
+                                            resource_metadata={
+                                                "file_system_type": fs_type,
+                                                "orphan_type": orphan_type,
+                                                "backup_count": len(backups),
+                                                "old_backup_count": len(old_backups),
+                                                "orphaned_backup_count": len(orphaned_backups),
+                                                "total_backup_size_gb": round(total_backup_size_gb, 2),
+                                                "max_backup_age_days": max(b["age_days"] for b in old_backups) if old_backups else 0,
+                                                "age_days": age_days,
+                                                "confidence": confidence,
+                                                "orphan_reason": reason,
+                                            },
+                                        )
+                                    )
+                                    continue
+                            except ClientError:
+                                pass  # Backups API not available for this file system
+
+                        # ========================================
+                        # PRIORITY 5: Unused File Shares (Windows)
+                        # ========================================
+                        if detect_unused_file_shares and fs_type == "WINDOWS":
+                            now = datetime.now(timezone.utc)
+                            start_time = now - timedelta(days=min_zero_connections_days)
+
+                            # Query ClientConnections metric
+                            connections_response = await cw.get_metric_statistics(
+                                Namespace="AWS/FSx",
+                                MetricName="ClientConnections",
+                                Dimensions=[{"Name": "FileSystemId", "Value": fs_id}],
+                                StartTime=start_time,
+                                EndTime=now,
+                                Period=3600,  # 1 hour
+                                Statistics=["Average"],
+                            )
+
+                            datapoints = connections_response.get("Datapoints", [])
+                            if datapoints:
+                                max_connections = max(dp["Average"] for dp in datapoints)
+
+                                if max_connections == 0:
+                                    orphan_type = "unused_file_shares"
+                                    confidence = "high" if age_days >= confidence_threshold_days else "medium"
+
+                                    # Calculate full cost (no SMB connections = completely unused)
+                                    monthly_cost = storage_capacity * self.PRICING["fsx_windows_per_gb"]
+                                    if throughput_capacity:
+                                        monthly_cost += throughput_capacity * self.PRICING["fsx_throughput_per_mbps"]
+                                    if is_multi_az:
+                                        monthly_cost *= 2
+
+                                    reason = f"No SMB client connections detected over {min_zero_connections_days} days - file shares unused"
+
+                                    orphans.append(
+                                        OrphanResourceData(
+                                            resource_type="fsx_file_system",
+                                            resource_id=fs_id,
+                                            resource_name=name,
+                                            region=region,
+                                            estimated_monthly_cost=monthly_cost,
+                                            resource_metadata={
+                                                "file_system_type": fs_type,
+                                                "orphan_type": orphan_type,
+                                                "storage_capacity_gb": storage_capacity,
+                                                "max_client_connections": 0,
+                                                "deployment_type": deployment_type,
+                                                "is_multi_az": is_multi_az,
+                                                "age_days": age_days,
+                                                "confidence": confidence,
+                                                "orphan_reason": reason,
+                                                "lookback_days": min_zero_connections_days,
+                                            },
+                                        )
+                                    )
+                                    continue
+
+                        # ========================================
+                        # PRIORITY 6: Low IOPS Utilization
+                        # ========================================
+                        if detect_low_iops_utilization and fs_type in ["WINDOWS", "ONTAP"]:
+                            now = datetime.now(timezone.utc)
+                            start_time = now - timedelta(days=iops_lookback_days)
+
+                            # Query DiskIopsUtilization metric (percentage)
+                            iops_response = await cw.get_metric_statistics(
+                                Namespace="AWS/FSx",
+                                MetricName="DiskIopsUtilization",
+                                Dimensions=[{"Name": "FileSystemId", "Value": fs_id}],
+                                StartTime=start_time,
+                                EndTime=now,
+                                Period=3600,
+                                Statistics=["Average"],
+                            )
+
+                            datapoints = iops_response.get("Datapoints", [])
+                            if datapoints:
+                                avg_iops_utilization = sum(dp["Average"] for dp in datapoints) / len(datapoints)
+
+                                if avg_iops_utilization < iops_utilization_threshold:
+                                    orphan_type = "low_iops_utilization"
+                                    confidence = "low"  # Low confidence (IOPS may spike)
+
+                                    # Estimate potential savings (not precise without provisioned IOPS data)
+                                    monthly_cost = storage_capacity * self.PRICING.get(f"fsx_{fs_type.lower()}_per_gb", 0.14) * 0.3  # 30% waste estimate
+                                    if is_multi_az:
+                                        monthly_cost *= 2
+
+                                    reason = f"Low IOPS utilization: {avg_iops_utilization:.1f}% average over {iops_lookback_days} days - over-provisioned IOPS"
+
+                                    orphans.append(
+                                        OrphanResourceData(
+                                            resource_type="fsx_file_system",
+                                            resource_id=fs_id,
+                                            resource_name=name,
+                                            region=region,
+                                            estimated_monthly_cost=monthly_cost,
+                                            resource_metadata={
+                                                "file_system_type": fs_type,
+                                                "orphan_type": orphan_type,
+                                                "iops_utilization_percent": round(avg_iops_utilization, 2),
+                                                "deployment_type": deployment_type,
+                                                "is_multi_az": is_multi_az,
+                                                "age_days": age_days,
+                                                "confidence": confidence,
+                                                "orphan_reason": reason,
+                                                "lookback_days": iops_lookback_days,
+                                            },
+                                        )
+                                    )
+                                    continue
+
+                        # ========================================
+                        # PRIORITY 7: Multi-AZ Overkill
+                        # ========================================
+                        if detect_multi_az_overkill and is_multi_az and environment_tag in multi_az_tag_values:
+                            orphan_type = "multi_az_overkill"
+                            confidence = "medium"
+
+                            # Calculate cost difference (Multi-AZ = 2× Single-AZ)
+                            pricing_key = f"fsx_{fs_type.lower()}_per_gb"
+                            single_az_cost = storage_capacity * self.PRICING.get(pricing_key, 0.14)
+                            if throughput_capacity and fs_type in ["WINDOWS", "ONTAP"]:
+                                single_az_cost += throughput_capacity * self.PRICING["fsx_throughput_per_mbps"]
+
+                            wasted_cost = single_az_cost  # Wasted = difference between Multi-AZ and Single-AZ
+
+                            reason = f"Multi-AZ deployment in {environment_tag} environment (tag: {multi_az_tag_key}={environment_tag}) - Single-AZ sufficient for non-production"
+
+                            orphans.append(
+                                OrphanResourceData(
+                                    resource_type="fsx_file_system",
+                                    resource_id=fs_id,
+                                    resource_name=name,
+                                    region=region,
+                                    estimated_monthly_cost=wasted_cost,
+                                    resource_metadata={
+                                        "file_system_type": fs_type,
+                                        "orphan_type": orphan_type,
+                                        "storage_capacity_gb": storage_capacity,
+                                        "deployment_type": deployment_type,
+                                        "is_multi_az": is_multi_az,
+                                        "environment_tag": environment_tag,
+                                        "age_days": age_days,
+                                        "confidence": confidence,
+                                        "orphan_reason": reason,
+                                    },
+                                )
+                            )
                             continue
 
-                        # Determine confidence and orphan reason
-                        if usage_category == "never_used" and age_days >= 30:
-                            confidence = "high"
-                            reason = f"Never used since creation {age_days} days ago"
-                        elif usage_category == "long_abandoned":
-                            confidence = "high"
-                            days_abandoned = (
-                                (now - last_active_date).days if last_active_date else 0
-                            )
-                            reason = f"No activity for {days_abandoned} days (was active before)"
-                        elif usage_category == "recently_abandoned":
-                            confidence = "medium"
-                            days_abandoned = (
-                                (now - last_active_date).days if last_active_date else 0
-                            )
-                            reason = f"No activity for {days_abandoned} days"
-                        else:
-                            confidence = "low"
-                            reason = f"Created {age_days} days ago, usage pattern unclear"
+                        # ========================================
+                        # PRIORITY 8: Wrong Storage Type (SSD for Archive)
+                        # ========================================
+                        if detect_ssd_for_archive and fs_type == "WINDOWS" and storage_type == "SSD":
+                            now = datetime.now(timezone.utc)
+                            start_time = now - timedelta(days=7)
 
-                        # Calculate cost based on storage capacity and type
-                        storage_capacity = fs["StorageCapacity"]  # in GB
-                        pricing_key = f"fsx_{fs_type.lower()}_per_gb"
-                        if pricing_key in self.PRICING:
-                            monthly_cost = storage_capacity * self.PRICING[pricing_key]
-                        else:
-                            monthly_cost = storage_capacity * 0.14  # Default FSx pricing
-
-                        # Extract name from tags
-                        name = None
-                        for tag in fs.get("Tags", []):
-                            if tag["Key"] == "Name":
-                                name = tag["Value"]
-                                break
-
-                        orphans.append(
-                            OrphanResourceData(
-                                resource_type="fsx_file_system",
-                                resource_id=fs_id,
-                                resource_name=name,
-                                region=region,
-                                estimated_monthly_cost=monthly_cost,
-                                resource_metadata={
-                                    "file_system_type": fs_type,
-                                    "storage_capacity_gb": storage_capacity,
-                                    "lifecycle_status": fs.get("Lifecycle", "Unknown"),
-                                    "created_at": created_at.isoformat(),
-                                    "age_days": age_days,
-                                    "confidence": confidence,
-                                    "orphan_reason": reason,
-                                    "total_bytes_transferred_30d": int(total_bytes),
-                                },
+                            # Calculate average throughput (read + write)
+                            read_response = await cw.get_metric_statistics(
+                                Namespace="AWS/FSx",
+                                MetricName="DataReadBytes",
+                                Dimensions=[{"Name": "FileSystemId", "Value": fs_id}],
+                                StartTime=start_time,
+                                EndTime=now,
+                                Period=86400,
+                                Statistics=["Average"],
                             )
-                        )
+
+                            write_response = await cw.get_metric_statistics(
+                                Namespace="AWS/FSx",
+                                MetricName="DataWriteBytes",
+                                Dimensions=[{"Name": "FileSystemId", "Value": fs_id}],
+                                StartTime=start_time,
+                                EndTime=now,
+                                Period=86400,
+                                Statistics=["Average"],
+                            )
+
+                            read_datapoints = read_response.get("Datapoints", [])
+                            write_datapoints = write_response.get("Datapoints", [])
+
+                            if read_datapoints or write_datapoints:
+                                avg_read_mbps = (sum(dp["Average"] for dp in read_datapoints) / len(read_datapoints) / 1_000_000) if read_datapoints else 0
+                                avg_write_mbps = (sum(dp["Average"] for dp in write_datapoints) / len(write_datapoints) / 1_000_000) if write_datapoints else 0
+                                avg_total_mbps = avg_read_mbps + avg_write_mbps
+
+                                if avg_total_mbps < archive_throughput_threshold:
+                                    orphan_type = "wrong_storage_type"
+                                    confidence = "low"  # Low confidence (workload may change)
+
+                                    # Calculate savings: SSD → HDD (90% cheaper)
+                                    ssd_cost = storage_capacity * self.PRICING["fsx_windows_per_gb"]
+                                    hdd_cost = storage_capacity * self.PRICING["fsx_windows_hdd_per_gb"]
+                                    wasted_cost = ssd_cost - hdd_cost
+
+                                    if is_multi_az:
+                                        wasted_cost *= 2
+
+                                    reason = f"SSD storage type for archive workload: avg {avg_total_mbps:.2f} MB/s throughput (< {archive_throughput_threshold} MB/s) - HDD recommended (90% cheaper)"
+
+                                    orphans.append(
+                                        OrphanResourceData(
+                                            resource_type="fsx_file_system",
+                                            resource_id=fs_id,
+                                            resource_name=name,
+                                            region=region,
+                                            estimated_monthly_cost=wasted_cost,
+                                            resource_metadata={
+                                                "file_system_type": fs_type,
+                                                "orphan_type": orphan_type,
+                                                "storage_type": storage_type,
+                                                "storage_capacity_gb": storage_capacity,
+                                                "avg_throughput_mbps": round(avg_total_mbps, 2),
+                                                "recommended_storage_type": "HDD",
+                                                "potential_savings_percent": 90,
+                                                "deployment_type": deployment_type,
+                                                "is_multi_az": is_multi_az,
+                                                "age_days": age_days,
+                                                "confidence": confidence,
+                                                "orphan_reason": reason,
+                                            },
+                                        )
+                                    )
+                                    continue
 
         except ClientError as e:
             print(f"Error scanning FSx file systems in {region}: {e}")

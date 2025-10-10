@@ -479,9 +479,9 @@ function SupportedResourcesSection() {
     {
       name: "FSx File Systems",
       icon: "📁",
-      detection: "File systems with no data transfer for 30+ days",
-      cost: "~$0.13-0.145/GB/month",
-      confidence: "High - CloudWatch data transfer metrics",
+      detection: "8 scenarios: Completely inactive (0 transfers 30+d), Over-provisioned storage (<10% used), Over-provisioned throughput (<10% utilized), Excessive backup retention (orphaned backups), Unused file shares (Windows: 0 SMB connections 7+d), Low IOPS utilization (<10%), Multi-AZ overkill (dev/test environments), Wrong storage type (SSD for archive workloads). Supports Lustre, Windows, ONTAP, OpenZFS",
+      cost: "Lustre: $0.145/GB/month, Windows: $0.13/GB (SSD) or $0.013/GB (HDD), ONTAP: $0.144/GB, OpenZFS: $0.14/GB. Backups: $0.050/GB. Throughput (Windows/ONTAP): $2.20/MB/s. Multi-AZ: 2× cost",
+      confidence: "Critical to High - Multi-scenario validation with CloudWatch metrics (DataReadBytes, DataWriteBytes, StorageUsed, ThroughputUtilization, ClientConnections, DiskIopsUtilization) and backup API analysis",
     },
     {
       name: "Neptune Clusters",

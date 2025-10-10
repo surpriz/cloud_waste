@@ -2,6 +2,7 @@
 
 import uuid
 from datetime import datetime
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -13,7 +14,7 @@ class DetectionRuleBase(BaseModel):
         ...,
         pattern="^(ebs_volume|elastic_ip|ebs_snapshot|ec2_instance|nat_gateway|load_balancer|rds_instance|fsx_file_system|neptune_cluster|msk_cluster|eks_cluster|sagemaker_endpoint|redshift_cluster|elasticache_cluster|vpn_connection|transit_gateway_attachment|opensearch_domain|global_accelerator|kinesis_stream|vpc_endpoint|documentdb_cluster|s3_bucket|lambda_function|dynamodb_table)$",
     )
-    rules: dict[str, bool | int | float | str] = Field(
+    rules: dict[str, Any] = Field(
         ...,
         description="Custom detection rules (e.g., {'enabled': true, 'min_age_days': 14})",
     )
@@ -28,7 +29,7 @@ class DetectionRuleCreate(DetectionRuleBase):
 class DetectionRuleUpdate(BaseModel):
     """Schema for updating a detection rule."""
 
-    rules: dict[str, bool | int | float | str] | None = None
+    rules: dict[str, Any] | None = None
 
 
 class DetectionRule(DetectionRuleBase):
@@ -46,6 +47,6 @@ class DetectionRuleWithDefaults(BaseModel):
     """Detection rule with default values shown."""
 
     resource_type: str
-    current_rules: dict[str, bool | int | float | str]
-    default_rules: dict[str, bool | int | float | str]
+    current_rules: dict[str, Any]
+    default_rules: dict[str, Any]
     description: str

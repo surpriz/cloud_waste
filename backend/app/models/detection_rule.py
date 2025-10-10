@@ -101,9 +101,38 @@ DEFAULT_DETECTION_RULES = {
     # TOP 15 high-cost idle resources
     "fsx_file_system": {
         "enabled": True,
-        "min_age_days": 3,
-        "confidence_threshold_days": 30,
-        "description": "FSx file systems with no data transfer activity",
+        "min_age_days": 3,  # Ignore file systems created in last 3 days
+        "confidence_threshold_days": 30,  # High confidence after 30 days
+        # Scenario 1: Completely inactive (0 read/write transfers)
+        "detect_inactive": True,
+        "inactive_lookback_days": 30,  # Check last 30 days for activity
+        # Scenario 2: Over-provisioned storage (<10% storage used)
+        "detect_over_provisioned_storage": True,
+        "storage_usage_threshold_percent": 10.0,  # < 10% storage used = over-provisioned
+        "storage_lookback_days": 7,  # Check last 7 days of storage metrics
+        # Scenario 3: Over-provisioned throughput (<10% throughput utilized)
+        "detect_over_provisioned_throughput": True,
+        "throughput_utilization_threshold_percent": 10.0,  # < 10% throughput = over-provisioned
+        "throughput_lookback_days": 7,  # Check last 7 days of throughput metrics
+        # Scenario 4: Excessive backup retention (orphaned backups)
+        "detect_excessive_backups": True,
+        "max_backup_retention_days": 30,  # Backups > 30 days = excessive
+        "detect_orphaned_backups": True,  # Detect backups with deleted source file system
+        # Scenario 5: Unused file shares (Windows: 0 SMB connections)
+        "detect_unused_file_shares": True,  # FSx Windows only
+        "min_zero_connections_days": 7,  # 0 SMB connections for 7+ days
+        # Scenario 6: Low IOPS utilization (<10% IOPS used)
+        "detect_low_iops_utilization": True,  # Windows/ONTAP only
+        "iops_utilization_threshold_percent": 10.0,  # < 10% IOPS utilized
+        "iops_lookback_days": 7,  # Check last 7 days
+        # Scenario 7: Multi-AZ overkill (Multi-AZ in dev/test environments)
+        "detect_multi_az_overkill": True,  # Detect Multi-AZ when Single-AZ sufficient
+        "multi_az_tag_key": "Environment",  # Tag key to check (e.g., "dev", "test")
+        "multi_az_tag_values": ["dev", "test", "development", "testing"],  # Tag values indicating non-prod
+        # Scenario 8: Wrong storage type (SSD for archive workloads)
+        "detect_ssd_for_archive": True,  # Windows only (HDD available)
+        "archive_throughput_threshold_mbps": 8.0,  # < 8 MB/s avg throughput = archive workload
+        "description": "FSx file systems: inactive, over-provisioned storage/throughput, excessive backups, unused file shares (Windows), low IOPS, Multi-AZ overkill, wrong storage type",
     },
     "neptune_cluster": {
         "enabled": True,
