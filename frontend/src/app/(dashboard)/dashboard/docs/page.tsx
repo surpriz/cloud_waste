@@ -521,9 +521,9 @@ function SupportedResourcesSection() {
     {
       name: "ElastiCache Clusters",
       icon: "⚡",
-      detection: "Clusters with no cache hits for 7+ days",
-      cost: "~$90-135/month",
-      confidence: "High - No cache activity",
+      detection: "Zero cache hits, low hit rate (<50%), no connections, or over-provisioned memory (<20% used)",
+      cost: "~$12-539/month",
+      confidence: "Critical/High - Wasted cache infrastructure",
     },
     {
       name: "VPN Connections",
@@ -588,12 +588,19 @@ function SupportedResourcesSection() {
       cost: "Provisioned concurrency: $0.0000041667/GB-second (~$10-100/month for unused). Regular: $0.20/1M requests + $0.0000166667/GB-second compute. Never invoked: ~$0.50/month (storage only)",
       confidence: "Critical (provisioned concurrency) to High - Based on CloudWatch Invocations, ProvisionedConcurrencyInvocations, and Errors metrics",
     },
+    {
+      name: "DynamoDB Tables",
+      icon: "🗃️",
+      detection: "5 scenarios (priority): Over-provisioned capacity (<10% utilization over 7 days - VERY EXPENSIVE), Unused Global Secondary Indexes (GSI never queried in 14+ days - doubles cost), Never used Provisioned tables (0 usage since creation), Never used On-Demand tables (60+ days without usage), Empty tables (0 items for 90+ days)",
+      cost: "Provisioned: $0.00013/RCU/hour + $0.00013/WCU/hour (~$0.095/unit/month) + $0.25/GB storage. On-Demand: $0.25/1M reads + $1.25/1M writes. GSI costs same as table",
+      confidence: "Critical (over-provisioned <5% util) to High - Based on CloudWatch ConsumedReadCapacityUnits, ConsumedWriteCapacityUnits metrics and table metadata",
+    },
   ];
 
   return (
     <div className="space-y-6">
       <h1 className="text-4xl font-bold text-gray-900">Supported Resources</h1>
-      <p className="text-xl text-gray-600">Currently supporting 24 AWS resource types with intelligent CloudWatch-based detection</p>
+      <p className="text-xl text-gray-600">Currently supporting 25 AWS resource types with intelligent CloudWatch-based detection</p>
 
       <div className="grid gap-4">
         {resources.map((resource, index) => (
@@ -614,8 +621,8 @@ function SupportedResourcesSection() {
       <div className="rounded-lg bg-gray-100 border p-6">
         <h3 className="text-lg font-semibold text-gray-900 mb-2">🚀 Coming Soon</h3>
         <p className="text-gray-700">
-          We're actively working on support for: CloudFormation stacks,
-          DynamoDB tables, and multi-cloud providers (Azure, GCP).
+          We're actively working on support for: CloudFormation stacks, ECS/Fargate tasks,
+          and multi-cloud providers (Azure, GCP).
         </p>
       </div>
     </div>

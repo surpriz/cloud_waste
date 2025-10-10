@@ -155,7 +155,22 @@ DEFAULT_DETECTION_RULES = {
         "enabled": True,
         "min_age_days": 3,
         "confidence_threshold_days": 7,
-        "description": "ElastiCache clusters with no cache hits",
+        # PRIORITY 1: Zero cache hits
+        "detect_zero_cache_hits": True,
+        "zero_hits_lookback_days": 7,
+        # PRIORITY 2: Low hit rate
+        "detect_low_hit_rate": True,
+        "hit_rate_threshold": 50.0,  # < 50% = inefficient cache
+        "critical_hit_rate": 10.0,  # < 10% = useless cache
+        "hit_rate_lookback_days": 7,
+        # PRIORITY 3: No connections
+        "detect_no_connections": True,
+        "no_connections_lookback_days": 7,
+        # PRIORITY 4: Over-provisioned memory
+        "detect_over_provisioned_memory": True,
+        "memory_usage_threshold": 20.0,  # < 20% memory used = over-provisioned
+        "memory_lookback_days": 7,
+        "description": "ElastiCache clusters: zero cache hits, low hit rate, no connections, or over-provisioned memory",
     },
     "vpn_connection": {
         "enabled": True,
@@ -240,6 +255,29 @@ DEFAULT_DETECTION_RULES = {
         "min_invocations_for_failure_check": 10,  # Minimum invocations to avoid false positives
         "failure_lookback_days": 30,  # Check last 30 days
         "description": "Lambda functions: unused provisioned concurrency, never invoked, zero invocations, or 100% failures",
+    },
+    "dynamodb_table": {
+        "enabled": True,
+        "min_age_days": 7,  # Ignore tables created in last 7 days
+        "confidence_threshold_days": 30,  # High confidence after 30 days
+        "critical_age_days": 90,  # Critical alert after 90 days
+        # PRIORITY 1: Over-provisioned capacity (VERY EXPENSIVE)
+        "detect_over_provisioned": True,  # Detect tables with unused provisioned capacity
+        "provisioned_utilization_threshold": 10.0,  # < 10% utilization = waste
+        "provisioned_lookback_days": 7,  # Check last 7 days of usage
+        # PRIORITY 2: Unused Global Secondary Indexes
+        "detect_unused_gsi": True,  # Detect GSI never queried
+        "gsi_lookback_days": 14,  # GSI unused for 14+ days
+        # PRIORITY 3: Never used tables (Provisioned mode)
+        "detect_never_used_provisioned": True,  # Detect provisioned tables with 0 usage
+        "never_used_min_age_days": 30,  # Min age to consider "never used"
+        # PRIORITY 4: Never used tables (On-Demand mode)
+        "detect_never_used_ondemand": True,  # Detect on-demand tables with 0 usage
+        "ondemand_lookback_days": 60,  # Check last 60 days
+        # PRIORITY 5: Empty tables
+        "detect_empty_tables": True,  # Detect tables with 0 items
+        "empty_table_min_age_days": 90,  # Empty for 90+ days
+        "description": "DynamoDB tables: over-provisioned capacity, unused GSI, never used (provisioned/on-demand), or empty tables",
     },
 }
 

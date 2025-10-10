@@ -71,8 +71,23 @@ class AWSProvider(CloudProviderBase):
         "sagemaker_ml_m5_xlarge": 0.23,  # SageMaker ml.m5.xlarge = ~$165/month
         "redshift_dc2_large": 0.25,  # Redshift dc2.large (per hour) = ~$180/month
         "redshift_dc2_xlarge": 1.00,  # Redshift dc2.xlarge = ~$720/month
-        "elasticache_cache_m5_large": 0.126,  # ElastiCache cache.m5.large (per hour) = ~$90/month
-        "elasticache_cache_r5_large": 0.188,  # ElastiCache cache.r5.large = ~$135/month
+        # ElastiCache pricing (us-east-1) - Extended node types
+        "elasticache_t3_micro": 0.017,      # cache.t3.micro = ~$12/month
+        "elasticache_t3_small": 0.034,      # cache.t3.small = ~$24/month
+        "elasticache_t3_medium": 0.068,     # cache.t3.medium = ~$49/month
+        "elasticache_t4g_micro": 0.016,     # cache.t4g.micro (Graviton2) = ~$11/month
+        "elasticache_t4g_small": 0.032,     # cache.t4g.small = ~$23/month
+        "elasticache_t4g_medium": 0.064,    # cache.t4g.medium = ~$46/month
+        "elasticache_m5_large": 0.126,      # cache.m5.large = ~$90/month
+        "elasticache_m5_xlarge": 0.252,     # cache.m5.xlarge = ~$180/month
+        "elasticache_m5_2xlarge": 0.504,    # cache.m5.2xlarge = ~$361/month
+        "elasticache_m6g_large": 0.113,     # cache.m6g.large (Graviton2) = ~$81/month
+        "elasticache_m6g_xlarge": 0.226,    # cache.m6g.xlarge = ~$162/month
+        "elasticache_r5_large": 0.188,      # cache.r5.large (memory-optimized) = ~$135/month
+        "elasticache_r5_xlarge": 0.376,     # cache.r5.xlarge = ~$270/month
+        "elasticache_r5_2xlarge": 0.752,    # cache.r5.2xlarge = ~$539/month
+        "elasticache_r6g_large": 0.169,     # cache.r6g.large (Graviton2) = ~$121/month
+        "elasticache_r6g_xlarge": 0.338,    # cache.r6g.xlarge = ~$242/month
         "vpn_connection": 36.00,  # VPN Connection
         "transit_gateway_attachment": 36.00,  # Transit Gateway Attachment (per month)
         "opensearch_m5_large": 0.161,  # OpenSearch m5.large.search (per hour) = ~$116/month
@@ -90,7 +105,13 @@ class AWSProvider(CloudProviderBase):
         "lambda_invocation_per_million": 0.20,  # Per 1M requests
         "lambda_gb_second": 0.0000166667,  # Per GB-second compute
         "lambda_provisioned_concurrency_gb_second": 0.0000041667,  # Per GB-second (24/7 charge!)
-        "lambda_storage_per_gb": 0.0,  # Free up to 512MB, then $0.00008 per GB-month
+        "lambda_storage_per_gb": 0.0,  # Free up to 512MB
+        # DynamoDB pricing (us-east-1)
+        "dynamodb_wcu_per_hour": 0.00013,  # Per WCU/hour (~$0.095/WCU/month)
+        "dynamodb_rcu_per_hour": 0.00013,  # Per RCU/hour (~$0.095/RCU/month)
+        "dynamodb_storage_per_gb": 0.25,  # Per GB/month
+        "dynamodb_ondemand_write_per_million": 1.25,  # Per 1M write requests
+        "dynamodb_ondemand_read_per_million": 0.25,  # Per 1M read requests, then $0.00008 per GB-month
     }
 
     def __init__(
@@ -3166,9 +3187,13 @@ class AWSProvider(CloudProviderBase):
         self, region: str, detection_rules: dict | None = None
     ) -> list[OrphanResourceData]:
         """
-        Scan for idle ElastiCache clusters using CloudWatch metrics.
+        Scan for idle/orphaned ElastiCache clusters (Redis + Memcached).
 
-        Detection: Clusters with no cache hits/gets for 7+ days.
+        Detects 4 scenarios (by priority):
+        1. Zero cache hits (no activity)
+        2. Low hit rate (< 50% hits, cache inefficient)
+        3. No connections (nobody connects)
+        4. Over-provisioned memory (< 20% memory used)
 
         Args:
             region: AWS region to scan
@@ -3178,66 +3203,239 @@ class AWSProvider(CloudProviderBase):
             List of orphaned ElastiCache clusters
         """
         orphans = []
+
+        # Extract detection rules (with defaults)
         min_age_days = detection_rules.get("min_age_days", 3) if detection_rules else 3
+        confidence_threshold_days = detection_rules.get("confidence_threshold_days", 7) if detection_rules else 7
+
+        # PRIORITY 1: Zero cache hits
+        detect_zero_cache_hits = detection_rules.get("detect_zero_cache_hits", True) if detection_rules else True
+        zero_hits_lookback_days = detection_rules.get("zero_hits_lookback_days", 7) if detection_rules else 7
+
+        # PRIORITY 2: Low hit rate
+        detect_low_hit_rate = detection_rules.get("detect_low_hit_rate", True) if detection_rules else True
+        hit_rate_threshold = detection_rules.get("hit_rate_threshold", 50.0) if detection_rules else 50.0
+        critical_hit_rate = detection_rules.get("critical_hit_rate", 10.0) if detection_rules else 10.0
+        hit_rate_lookback_days = detection_rules.get("hit_rate_lookback_days", 7) if detection_rules else 7
+
+        # PRIORITY 3: No connections
+        detect_no_connections = detection_rules.get("detect_no_connections", True) if detection_rules else True
+        no_connections_lookback_days = detection_rules.get("no_connections_lookback_days", 7) if detection_rules else 7
+
+        # PRIORITY 4: Over-provisioned memory
+        detect_over_provisioned_memory = detection_rules.get("detect_over_provisioned_memory", True) if detection_rules else True
+        memory_usage_threshold = detection_rules.get("memory_usage_threshold", 20.0) if detection_rules else 20.0
+        memory_lookback_days = detection_rules.get("memory_lookback_days", 7) if detection_rules else 7
+
+        print(f"🗄️ [DEBUG] scan_idle_elasticache_clusters called for region: {region}")
 
         try:
             async with self.session.client("elasticache", region_name=region) as elasticache:
                 async with self.session.client("cloudwatch", region_name=region) as cw:
-                    # Check Redis clusters
+                    # List all ElastiCache clusters (Redis + Memcached)
                     response = await elasticache.describe_cache_clusters()
+                    clusters = response.get("CacheClusters", [])
 
-                    for cluster in response.get("CacheClusters", []):
+                    print(f"🗄️ [DEBUG] Found {len(clusters)} ElastiCache clusters in {region}")
+
+                    for cluster in clusters:
                         cluster_id = cluster["CacheClusterId"]
+                        cluster_status = cluster.get("CacheClusterStatus", "unknown")
+
+                        # Skip non-available clusters
+                        if cluster_status != "available":
+                            print(f"🗄️ [DEBUG] Skipping {cluster_id}: status={cluster_status} (not available)")
+                            continue
+
                         created_at = cluster.get("CacheClusterCreateTime")
                         if not created_at:
                             continue
 
                         age_days = (datetime.now(timezone.utc) - created_at).days
 
+                        # Skip very young clusters
                         if age_days < min_age_days:
+                            print(f"🗄️ [DEBUG] Skipping {cluster_id}: too young ({age_days} < {min_age_days} days)")
                             continue
 
-                        # Query CloudWatch for CacheHits metric (7-day lookback)
-                        now = datetime.now(timezone.utc)
-                        start_time = now - timedelta(days=7)
+                        # Extract cluster metadata
+                        node_type = cluster.get("CacheNodeType", "cache.m5.large")
+                        num_nodes = cluster.get("NumCacheNodes", 1)
+                        engine = cluster.get("Engine", "Unknown")
+                        engine_version = cluster.get("EngineVersion", "Unknown")
 
-                        metrics_response = await cw.get_metric_statistics(
-                            Namespace="AWS/ElastiCache",
-                            MetricName="CacheHits",
-                            Dimensions=[
-                                {"Name": "CacheClusterId", "Value": cluster_id},
-                            ],
-                            StartTime=start_time,
-                            EndTime=now,
-                            Period=3600,  # 1 hour
-                            Statistics=["Sum"],
-                        )
+                        print(f"🗄️ [DEBUG] Analyzing cluster: {cluster_id} (age={age_days} days, engine={engine}, nodes={num_nodes}x{node_type})")
 
-                        datapoints = metrics_response.get("Datapoints", [])
-                        total_hits = sum(dp["Sum"] for dp in datapoints)
+                        # Variables for detection
+                        orphan_type = None
+                        orphan_reason = None
+                        confidence = "medium"
+                        monthly_cost = 0.0
 
-                        # If 0 cache hits over 7 days, consider idle
-                        if total_hits == 0:
-                            # Estimate cost based on node type
-                            node_type = cluster.get("CacheNodeType", "cache.m5.large")
-                            num_nodes = cluster.get("NumCacheNodes", 1)
+                        # Additional metadata
+                        cache_hits = 0
+                        cache_misses = 0
+                        hit_rate = None
+                        connections = None
+                        memory_usage_percent = None
 
-                            if "m5.large" in node_type:
-                                cost_per_node = self.PRICING["elasticache_cache_m5_large"] * 730
-                            elif "r5.large" in node_type:
-                                cost_per_node = self.PRICING["elasticache_cache_r5_large"] * 730
-                            else:
-                                cost_per_node = 90.00  # Default
+                        # PRIORITY 1: Check zero cache hits
+                        if orphan_type is None and detect_zero_cache_hits:
+                            try:
+                                now = datetime.now(timezone.utc)
+                                start_time = now - timedelta(days=zero_hits_lookback_days)
 
+                                hits_response = await cw.get_metric_statistics(
+                                    Namespace="AWS/ElastiCache",
+                                    MetricName="CacheHits",
+                                    Dimensions=[{"Name": "CacheClusterId", "Value": cluster_id}],
+                                    StartTime=start_time,
+                                    EndTime=now,
+                                    Period=3600,  # 1 hour
+                                    Statistics=["Sum"],
+                                )
+
+                                datapoints = hits_response.get("Datapoints", [])
+                                cache_hits = sum(dp["Sum"] for dp in datapoints)
+
+                                if cache_hits == 0:
+                                    orphan_type = "zero_cache_hits"
+                                    orphan_reason = f"No cache hits for {zero_hits_lookback_days} days - cluster not used"
+                                    confidence = "critical" if age_days >= confidence_threshold_days else "high"
+                                    print(f"🗄️ [DEBUG] ✅ {cluster_id} detected as ORPHAN: type={orphan_type}, confidence={confidence}")
+
+                            except ClientError as e:
+                                print(f"Warning: Could not check cache hits for {cluster_id}: {e}")
+
+                        # PRIORITY 2: Check low hit rate
+                        if orphan_type is None and detect_low_hit_rate:
+                            try:
+                                now = datetime.now(timezone.utc)
+                                start_time = now - timedelta(days=hit_rate_lookback_days)
+
+                                # Get CacheHits if not already retrieved
+                                if cache_hits == 0:  # Not retrieved in PRIORITY 1
+                                    hits_response = await cw.get_metric_statistics(
+                                        Namespace="AWS/ElastiCache",
+                                        MetricName="CacheHits",
+                                        Dimensions=[{"Name": "CacheClusterId", "Value": cluster_id}],
+                                        StartTime=start_time,
+                                        EndTime=now,
+                                        Period=3600,
+                                        Statistics=["Sum"],
+                                    )
+                                    cache_hits = sum(dp["Sum"] for dp in hits_response.get("Datapoints", []))
+
+                                # Get CacheMisses
+                                misses_response = await cw.get_metric_statistics(
+                                    Namespace="AWS/ElastiCache",
+                                    MetricName="CacheMisses",
+                                    Dimensions=[{"Name": "CacheClusterId", "Value": cluster_id}],
+                                    StartTime=start_time,
+                                    EndTime=now,
+                                    Period=3600,
+                                    Statistics=["Sum"],
+                                )
+                                cache_misses = sum(dp["Sum"] for dp in misses_response.get("Datapoints", []))
+
+                                # Calculate hit rate
+                                total_requests = cache_hits + cache_misses
+                                if total_requests > 0:
+                                    hit_rate = (cache_hits / total_requests) * 100
+
+                                    if hit_rate < hit_rate_threshold:
+                                        orphan_type = "low_hit_rate"
+                                        if hit_rate < critical_hit_rate:
+                                            orphan_reason = f"Very low hit rate ({hit_rate:.1f}%) - cache almost useless"
+                                            confidence = "critical"
+                                        else:
+                                            orphan_reason = f"Low hit rate ({hit_rate:.1f}%) - cache inefficient (threshold: {hit_rate_threshold}%)"
+                                            confidence = "high" if age_days >= confidence_threshold_days else "medium"
+
+                                        print(f"🗄️ [DEBUG] ✅ {cluster_id} detected as ORPHAN: type={orphan_type}, hit_rate={hit_rate:.1f}%, confidence={confidence}")
+
+                            except ClientError as e:
+                                print(f"Warning: Could not check hit rate for {cluster_id}: {e}")
+
+                        # PRIORITY 3: Check no connections
+                        if orphan_type is None and detect_no_connections:
+                            try:
+                                now = datetime.now(timezone.utc)
+                                start_time = now - timedelta(days=no_connections_lookback_days)
+
+                                conn_response = await cw.get_metric_statistics(
+                                    Namespace="AWS/ElastiCache",
+                                    MetricName="CurrConnections",
+                                    Dimensions=[{"Name": "CacheClusterId", "Value": cluster_id}],
+                                    StartTime=start_time,
+                                    EndTime=now,
+                                    Period=3600,
+                                    Statistics=["Average"],
+                                )
+
+                                datapoints = conn_response.get("Datapoints", [])
+                                if len(datapoints) > 0:
+                                    avg_connections = sum(dp["Average"] for dp in datapoints) / len(datapoints)
+                                    connections = int(avg_connections)
+
+                                    if connections == 0:
+                                        orphan_type = "no_connections"
+                                        orphan_reason = f"No active connections for {no_connections_lookback_days} days - nobody uses this cluster"
+                                        confidence = "critical" if age_days >= confidence_threshold_days else "high"
+                                        print(f"🗄️ [DEBUG] ✅ {cluster_id} detected as ORPHAN: type={orphan_type}, confidence={confidence}")
+
+                            except ClientError as e:
+                                print(f"Warning: Could not check connections for {cluster_id}: {e}")
+
+                        # PRIORITY 4: Check over-provisioned memory
+                        if orphan_type is None and detect_over_provisioned_memory:
+                            try:
+                                now = datetime.now(timezone.utc)
+                                start_time = now - timedelta(days=memory_lookback_days)
+
+                                memory_response = await cw.get_metric_statistics(
+                                    Namespace="AWS/ElastiCache",
+                                    MetricName="DatabaseMemoryUsagePercentage",
+                                    Dimensions=[{"Name": "CacheClusterId", "Value": cluster_id}],
+                                    StartTime=start_time,
+                                    EndTime=now,
+                                    Period=3600,
+                                    Statistics=["Average"],
+                                )
+
+                                datapoints = memory_response.get("Datapoints", [])
+                                if len(datapoints) > 0:
+                                    avg_memory = sum(dp["Average"] for dp in datapoints) / len(datapoints)
+                                    memory_usage_percent = avg_memory
+
+                                    if memory_usage_percent < memory_usage_threshold:
+                                        # Also check evictions (should be 0 if over-provisioned)
+                                        evictions_response = await cw.get_metric_statistics(
+                                            Namespace="AWS/ElastiCache",
+                                            MetricName="Evictions",
+                                            Dimensions=[{"Name": "CacheClusterId", "Value": cluster_id}],
+                                            StartTime=start_time,
+                                            EndTime=now,
+                                            Period=3600,
+                                            Statistics=["Sum"],
+                                        )
+
+                                        evictions = sum(dp["Sum"] for dp in evictions_response.get("Datapoints", []))
+
+                                        if evictions == 0:
+                                            orphan_type = "over_provisioned_memory"
+                                            orphan_reason = f"Memory usage only {memory_usage_percent:.1f}% (threshold: {memory_usage_threshold}%) with 0 evictions - cluster too large"
+                                            confidence = "medium"
+                                            print(f"🗄️ [DEBUG] ✅ {cluster_id} detected as ORPHAN: type={orphan_type}, memory={memory_usage_percent:.1f}%, confidence={confidence}")
+
+                            except ClientError as e:
+                                print(f"Warning: Could not check memory usage for {cluster_id}: {e}")
+
+                        # If detected as orphan, calculate cost and add to list
+                        if orphan_type:
+                            # Calculate cost based on node type
+                            cost_per_node = self._get_elasticache_node_cost(node_type)
                             monthly_cost = cost_per_node * num_nodes
-
-                            # Determine confidence
-                            if age_days >= 7:
-                                confidence = "high"
-                                reason = f"No cache hits for 7+ days (cluster age: {age_days} days)"
-                            else:
-                                confidence = "medium"
-                                reason = f"No cache activity detected (cluster age: {age_days} days)"
 
                             orphans.append(
                                 OrphanResourceData(
@@ -3245,18 +3443,25 @@ class AWSProvider(CloudProviderBase):
                                     resource_id=cluster_id,
                                     resource_name=cluster_id,
                                     region=region,
-                                    estimated_monthly_cost=monthly_cost,
+                                    estimated_monthly_cost=round(monthly_cost, 2),
                                     resource_metadata={
+                                        "cluster_id": cluster_id,
                                         "node_type": node_type,
                                         "num_nodes": num_nodes,
-                                        "engine": cluster.get("Engine", "Unknown"),
-                                        "engine_version": cluster.get("EngineVersion", "Unknown"),
-                                        "status": cluster.get("CacheClusterStatus", "Unknown"),
-                                        "created_at": created_at.isoformat(),
+                                        "engine": engine,
+                                        "engine_version": engine_version,
+                                        "status": cluster_status,
                                         "age_days": age_days,
+                                        "created_at": created_at.isoformat() if created_at else None,
+                                        "orphan_type": orphan_type,
+                                        "orphan_reason": orphan_reason,
                                         "confidence": confidence,
-                                        "orphan_reason": reason,
-                                        "cache_hits_7d": int(total_hits),
+                                        # Metrics
+                                        "cache_hits_7d": int(cache_hits) if cache_hits > 0 else 0,
+                                        "cache_misses_7d": int(cache_misses) if cache_misses > 0 else 0,
+                                        "hit_rate": round(hit_rate, 1) if hit_rate is not None else None,
+                                        "avg_connections": connections,
+                                        "memory_usage_percent": round(memory_usage_percent, 1) if memory_usage_percent is not None else None,
                                     },
                                 )
                             )
@@ -3264,7 +3469,40 @@ class AWSProvider(CloudProviderBase):
         except ClientError as e:
             print(f"Error scanning ElastiCache clusters in {region}: {e}")
 
+        print(f"🗄️ [DEBUG] scan_idle_elasticache_clusters completed for {region}: Found {len(orphans)} orphan clusters")
         return orphans
+
+    def _get_elasticache_node_cost(self, node_type: str) -> float:
+        """
+        Get monthly cost for an ElastiCache node type.
+
+        Args:
+            node_type: Node type (e.g., 'cache.t3.micro', 'cache.m5.large')
+
+        Returns:
+            Monthly cost in USD
+        """
+        # Map node type to pricing key
+        node_type_lower = node_type.lower().replace("cache.", "elasticache_")
+
+        # Try exact match
+        if node_type_lower in self.PRICING:
+            return self.PRICING[node_type_lower] * 730
+
+        # Try prefix matching (e.g., cache.m5.large → elasticache_m5_large)
+        for key, price in self.PRICING.items():
+            if key.startswith("elasticache_") and node_type_lower.endswith(key.replace("elasticache_", "")):
+                return price * 730
+
+        # Default fallback based on node family
+        if "t3" in node_type or "t4g" in node_type:
+            return self.PRICING.get("elasticache_t3_micro", 0.017) * 730  # ~$12/month
+        elif "m5" in node_type or "m6g" in node_type:
+            return self.PRICING.get("elasticache_m5_large", 0.126) * 730  # ~$90/month
+        elif "r5" in node_type or "r6g" in node_type:
+            return self.PRICING.get("elasticache_r5_large", 0.188) * 730  # ~$135/month
+        else:
+            return 90.00  # Default $90/month
 
     async def scan_idle_vpn_connections(
         self, region: str, detection_rules: dict | None = None
@@ -4462,4 +4700,365 @@ class AWSProvider(CloudProviderBase):
             print(f"Error scanning Lambda functions in {region}: {e}")
 
         print(f"⚡ [DEBUG] scan_idle_lambda_functions completed for {region}: Found {len(orphans)} idle functions")
+        return orphans
+
+    async def scan_idle_dynamodb_tables(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scan for idle/orphaned DynamoDB tables in a specific region.
+
+        Detects 5 scenarios (by priority):
+        1. Over-provisioned capacity (< 10% utilization - VERY EXPENSIVE)
+        2. Unused Global Secondary Indexes (GSI never queried - doubles cost)
+        3. Never used tables in Provisioned mode (0 usage since creation)
+        4. Never used tables in On-Demand mode (0 usage in 60 days)
+        5. Empty tables (0 items for 90+ days)
+
+        Args:
+            region: AWS region to scan
+            detection_rules: Custom detection rules configuration
+
+        Returns:
+            List of orphaned DynamoDB tables
+        """
+        orphans = []
+
+        # Extract detection rules
+        min_age_days = detection_rules.get("min_age_days", 7) if detection_rules else 7
+        confidence_threshold_days = detection_rules.get("confidence_threshold_days", 30) if detection_rules else 30
+        critical_age_days = detection_rules.get("critical_age_days", 90) if detection_rules else 90
+
+        # PRIORITY 1: Over-provisioned capacity
+        detect_over_provisioned = detection_rules.get("detect_over_provisioned", True) if detection_rules else True
+        provisioned_utilization_threshold = detection_rules.get("provisioned_utilization_threshold", 10.0) if detection_rules else 10.0
+        provisioned_lookback_days = detection_rules.get("provisioned_lookback_days", 7) if detection_rules else 7
+
+        # PRIORITY 2: Unused GSI
+        detect_unused_gsi = detection_rules.get("detect_unused_gsi", True) if detection_rules else True
+        gsi_lookback_days = detection_rules.get("gsi_lookback_days", 14) if detection_rules else 14
+
+        # PRIORITY 3: Never used (Provisioned)
+        detect_never_used_provisioned = detection_rules.get("detect_never_used_provisioned", True) if detection_rules else True
+        never_used_min_age_days = detection_rules.get("never_used_min_age_days", 30) if detection_rules else 30
+
+        # PRIORITY 4: Never used (On-Demand)
+        detect_never_used_ondemand = detection_rules.get("detect_never_used_ondemand", True) if detection_rules else True
+        ondemand_lookback_days = detection_rules.get("ondemand_lookback_days", 60) if detection_rules else 60
+
+        # PRIORITY 5: Empty tables
+        detect_empty_tables = detection_rules.get("detect_empty_tables", True) if detection_rules else True
+        empty_table_min_age_days = detection_rules.get("empty_table_min_age_days", 90) if detection_rules else 90
+
+        print(f"🗃️ [DEBUG] scan_idle_dynamodb_tables called for region: {region}")
+
+        try:
+            async with self.session.client("dynamodb", region_name=region) as dynamodb_client:
+                async with self.session.client("cloudwatch", region_name=region) as cloudwatch_client:
+                    # List all DynamoDB tables
+                    paginator = dynamodb_client.get_paginator("list_tables")
+                    all_table_names = []
+                    async for page in paginator.paginate():
+                        all_table_names.extend(page.get("TableNames", []))
+
+                    print(f"🗃️ [DEBUG] Found {len(all_table_names)} DynamoDB tables in {region}")
+
+                    for table_name in all_table_names:
+                        # Get table details
+                        table_response = await dynamodb_client.describe_table(TableName=table_name)
+                        table = table_response.get("Table", {})
+
+                        # Extract table metadata
+                        table_arn = table.get("TableArn")
+                        table_status = table.get("TableStatus")
+                        creation_date = table.get("CreationDateTime")
+                        item_count = table.get("ItemCount", 0)
+                        table_size_bytes = table.get("TableSizeBytes", 0)
+                        table_size_gb = table_size_bytes / (1024 ** 3) if table_size_bytes > 0 else 0
+
+                        # Billing mode
+                        billing_mode_summary = table.get("BillingModeSummary", {})
+                        billing_mode = billing_mode_summary.get("BillingMode", "PROVISIONED")
+
+                        # Provisioned throughput (if applicable)
+                        provisioned_throughput = table.get("ProvisionedThroughput", {})
+                        provisioned_read_capacity = provisioned_throughput.get("ReadCapacityUnits", 0)
+                        provisioned_write_capacity = provisioned_throughput.get("WriteCapacityUnits", 0)
+
+                        # Global Secondary Indexes
+                        global_secondary_indexes = table.get("GlobalSecondaryIndexes", [])
+
+                        # Calculate age
+                        try:
+                            age_days = (datetime.now(timezone.utc) - creation_date).days
+                        except Exception:
+                            age_days = 0
+
+                        print(f"🗃️ [DEBUG] Analyzing table: {table_name} (age={age_days} days, billing={billing_mode}, items={item_count}, size={table_size_gb:.2f}GB)")
+
+                        # Skip very young tables
+                        if age_days < min_age_days:
+                            print(f"🗃️ [DEBUG] Skipping {table_name}: too young ({age_days} < {min_age_days} days)")
+                            continue
+
+                        # Skip non-ACTIVE tables
+                        if table_status != "ACTIVE":
+                            print(f"🗃️ [DEBUG] Skipping {table_name}: status={table_status} (not ACTIVE)")
+                            continue
+
+                        orphan_type = None
+                        orphan_reason = None
+                        confidence = "medium"
+                        monthly_cost = 0.0
+
+                        # PRIORITY 1: Check over-provisioned capacity (PROVISIONED mode only)
+                        if detect_over_provisioned and billing_mode == "PROVISIONED" and (provisioned_read_capacity > 0 or provisioned_write_capacity > 0):
+                            try:
+                                end_time = datetime.now(timezone.utc)
+                                start_time = end_time - timedelta(days=provisioned_lookback_days)
+
+                                # Get consumed read capacity
+                                read_metrics = await cloudwatch_client.get_metric_statistics(
+                                    Namespace="AWS/DynamoDB",
+                                    MetricName="ConsumedReadCapacityUnits",
+                                    Dimensions=[{"Name": "TableName", "Value": table_name}],
+                                    StartTime=start_time,
+                                    EndTime=end_time,
+                                    Period=86400,  # 1 day
+                                    Statistics=["Sum"],
+                                )
+
+                                # Get consumed write capacity
+                                write_metrics = await cloudwatch_client.get_metric_statistics(
+                                    Namespace="AWS/DynamoDB",
+                                    MetricName="ConsumedWriteCapacityUnits",
+                                    Dimensions=[{"Name": "TableName", "Value": table_name}],
+                                    StartTime=start_time,
+                                    EndTime=end_time,
+                                    Period=86400,
+                                    Statistics=["Sum"],
+                                )
+
+                                read_datapoints = read_metrics.get("Datapoints", [])
+                                write_datapoints = write_metrics.get("Datapoints", [])
+
+                                total_consumed_read = sum(dp.get("Sum", 0) for dp in read_datapoints)
+                                total_consumed_write = sum(dp.get("Sum", 0) for dp in write_datapoints)
+
+                                # Calculate utilization %
+                                # Provisioned capacity is per second, so over lookback days:
+                                total_provisioned_read = provisioned_read_capacity * provisioned_lookback_days * 86400
+                                total_provisioned_write = provisioned_write_capacity * provisioned_lookback_days * 86400
+
+                                read_utilization = (total_consumed_read / total_provisioned_read * 100) if total_provisioned_read > 0 else 0
+                                write_utilization = (total_consumed_write / total_provisioned_write * 100) if total_provisioned_write > 0 else 0
+                                avg_utilization = (read_utilization + write_utilization) / 2
+
+                                if avg_utilization < provisioned_utilization_threshold:
+                                    orphan_type = "over_provisioned"
+                                    orphan_reason = f"Over-provisioned capacity: {avg_utilization:.1f}% avg utilization (Read: {read_utilization:.1f}%, Write: {write_utilization:.1f}%) over {provisioned_lookback_days} days"
+                                    confidence = "critical" if avg_utilization < 5.0 else "high"
+
+                                    # Calculate cost: provisioned capacity charged 24/7
+                                    monthly_cost = (
+                                        (provisioned_read_capacity * self.PRICING["dynamodb_rcu_per_hour"] * 730) +
+                                        (provisioned_write_capacity * self.PRICING["dynamodb_wcu_per_hour"] * 730) +
+                                        (table_size_gb * self.PRICING["dynamodb_storage_per_gb"])
+                                    )
+                                    print(f"🗃️ [DEBUG] ✅ {table_name} detected as ORPHAN: type={orphan_type}, utilization={avg_utilization:.1f}%, cost=${monthly_cost:.2f}/month")
+
+                            except ClientError as e:
+                                print(f"Warning: Could not check capacity utilization for {table_name}: {e}")
+
+                        # PRIORITY 2: Check unused Global Secondary Indexes
+                        if orphan_type is None and detect_unused_gsi and len(global_secondary_indexes) > 0:
+                            for gsi in global_secondary_indexes:
+                                gsi_name = gsi.get("IndexName")
+                                gsi_status = gsi.get("IndexStatus")
+
+                                if gsi_status != "ACTIVE":
+                                    continue
+
+                                try:
+                                    end_time = datetime.now(timezone.utc)
+                                    start_time = end_time - timedelta(days=gsi_lookback_days)
+
+                                    # Check GSI consumed capacity
+                                    gsi_read_metrics = await cloudwatch_client.get_metric_statistics(
+                                        Namespace="AWS/DynamoDB",
+                                        MetricName="ConsumedReadCapacityUnits",
+                                        Dimensions=[
+                                            {"Name": "TableName", "Value": table_name},
+                                            {"Name": "GlobalSecondaryIndexName", "Value": gsi_name},
+                                        ],
+                                        StartTime=start_time,
+                                        EndTime=end_time,
+                                        Period=86400,
+                                        Statistics=["Sum"],
+                                    )
+
+                                    gsi_read_datapoints = gsi_read_metrics.get("Datapoints", [])
+                                    gsi_total_read = sum(dp.get("Sum", 0) for dp in gsi_read_datapoints)
+
+                                    if gsi_total_read == 0:
+                                        orphan_type = "unused_gsi"
+                                        orphan_reason = f"Unused Global Secondary Index '{gsi_name}' - never queried in {gsi_lookback_days} days (doubles table cost)"
+                                        confidence = "high" if age_days >= confidence_threshold_days else "medium"
+
+                                        # GSI cost = same as table cost (provisioned or on-demand)
+                                        gsi_provisioned = gsi.get("ProvisionedThroughput", {})
+                                        gsi_rcu = gsi_provisioned.get("ReadCapacityUnits", 0)
+                                        gsi_wcu = gsi_provisioned.get("WriteCapacityUnits", 0)
+
+                                        if billing_mode == "PROVISIONED":
+                                            monthly_cost = (
+                                                (gsi_rcu * self.PRICING["dynamodb_rcu_per_hour"] * 730) +
+                                                (gsi_wcu * self.PRICING["dynamodb_wcu_per_hour"] * 730) +
+                                                (table_size_gb * self.PRICING["dynamodb_storage_per_gb"])  # Storage duplicated
+                                            )
+                                        else:
+                                            # On-demand: minimal cost if no usage
+                                            monthly_cost = table_size_gb * self.PRICING["dynamodb_storage_per_gb"]
+
+                                        print(f"🗃️ [DEBUG] ✅ {table_name} detected as ORPHAN: type={orphan_type}, GSI={gsi_name}, cost=${monthly_cost:.2f}/month")
+                                        break  # Don't check other GSIs
+
+                                except ClientError as e:
+                                    print(f"Warning: Could not check GSI {gsi_name} for {table_name}: {e}")
+
+                        # PRIORITY 3: Never used (Provisioned mode)
+                        if orphan_type is None and detect_never_used_provisioned and billing_mode == "PROVISIONED":
+                            try:
+                                end_time = datetime.now(timezone.utc)
+                                start_time = creation_date  # Check since creation
+
+                                # Check if ever used
+                                read_metrics = await cloudwatch_client.get_metric_statistics(
+                                    Namespace="AWS/DynamoDB",
+                                    MetricName="ConsumedReadCapacityUnits",
+                                    Dimensions=[{"Name": "TableName", "Value": table_name}],
+                                    StartTime=start_time,
+                                    EndTime=end_time,
+                                    Period=86400,
+                                    Statistics=["Sum"],
+                                )
+
+                                write_metrics = await cloudwatch_client.get_metric_statistics(
+                                    Namespace="AWS/DynamoDB",
+                                    MetricName="ConsumedWriteCapacityUnits",
+                                    Dimensions=[{"Name": "TableName", "Value": table_name}],
+                                    StartTime=start_time,
+                                    EndTime=end_time,
+                                    Period=86400,
+                                    Statistics=["Sum"],
+                                )
+
+                                total_reads = sum(dp.get("Sum", 0) for dp in read_metrics.get("Datapoints", []))
+                                total_writes = sum(dp.get("Sum", 0) for dp in write_metrics.get("Datapoints", []))
+
+                                if total_reads == 0 and total_writes == 0 and age_days >= never_used_min_age_days:
+                                    orphan_type = "never_used_provisioned"
+                                    orphan_reason = f"Never used since creation ({age_days} days ago) - paying for provisioned capacity with 0 usage"
+                                    confidence = "critical" if age_days >= critical_age_days else ("high" if age_days >= confidence_threshold_days else "medium")
+
+                                    # Cost: full provisioned cost + storage
+                                    monthly_cost = (
+                                        (provisioned_read_capacity * self.PRICING["dynamodb_rcu_per_hour"] * 730) +
+                                        (provisioned_write_capacity * self.PRICING["dynamodb_wcu_per_hour"] * 730) +
+                                        (table_size_gb * self.PRICING["dynamodb_storage_per_gb"])
+                                    )
+                                    print(f"🗃️ [DEBUG] ✅ {table_name} detected as ORPHAN: type={orphan_type}, age={age_days} days, cost=${monthly_cost:.2f}/month")
+
+                            except ClientError as e:
+                                print(f"Warning: Could not check usage for {table_name}: {e}")
+
+                        # PRIORITY 4: Never used (On-Demand mode)
+                        if orphan_type is None and detect_never_used_ondemand and billing_mode == "PAY_PER_REQUEST":
+                            try:
+                                end_time = datetime.now(timezone.utc)
+                                start_time = end_time - timedelta(days=ondemand_lookback_days)
+
+                                # Check recent usage
+                                read_metrics = await cloudwatch_client.get_metric_statistics(
+                                    Namespace="AWS/DynamoDB",
+                                    MetricName="ConsumedReadCapacityUnits",
+                                    Dimensions=[{"Name": "TableName", "Value": table_name}],
+                                    StartTime=start_time,
+                                    EndTime=end_time,
+                                    Period=86400,
+                                    Statistics=["Sum"],
+                                )
+
+                                write_metrics = await cloudwatch_client.get_metric_statistics(
+                                    Namespace="AWS/DynamoDB",
+                                    MetricName="ConsumedWriteCapacityUnits",
+                                    Dimensions=[{"Name": "TableName", "Value": table_name}],
+                                    StartTime=start_time,
+                                    EndTime=end_time,
+                                    Period=86400,
+                                    Statistics=["Sum"],
+                                )
+
+                                recent_reads = sum(dp.get("Sum", 0) for dp in read_metrics.get("Datapoints", []))
+                                recent_writes = sum(dp.get("Sum", 0) for dp in write_metrics.get("Datapoints", []))
+
+                                if recent_reads == 0 and recent_writes == 0:
+                                    orphan_type = "never_used_ondemand"
+                                    orphan_reason = f"On-Demand table with no usage in last {ondemand_lookback_days} days (only storage cost)"
+                                    confidence = "high" if age_days >= confidence_threshold_days else "medium"
+
+                                    # Cost: storage only (no requests)
+                                    monthly_cost = table_size_gb * self.PRICING["dynamodb_storage_per_gb"]
+                                    print(f"🗃️ [DEBUG] ✅ {table_name} detected as ORPHAN: type={orphan_type}, lookback={ondemand_lookback_days} days, cost=${monthly_cost:.2f}/month")
+
+                            except ClientError as e:
+                                print(f"Warning: Could not check on-demand usage for {table_name}: {e}")
+
+                        # PRIORITY 5: Empty tables
+                        if orphan_type is None and detect_empty_tables and item_count == 0 and age_days >= empty_table_min_age_days:
+                            orphan_type = "empty_table"
+                            orphan_reason = f"Table is empty (0 items) since creation {age_days} days ago"
+                            confidence = "high" if age_days >= critical_age_days else "medium"
+
+                            # Cost depends on billing mode
+                            if billing_mode == "PROVISIONED":
+                                monthly_cost = (
+                                    (provisioned_read_capacity * self.PRICING["dynamodb_rcu_per_hour"] * 730) +
+                                    (provisioned_write_capacity * self.PRICING["dynamodb_wcu_per_hour"] * 730)
+                                )
+                            else:
+                                monthly_cost = 0.5  # Minimal cost for empty on-demand table
+
+                            print(f"🗃️ [DEBUG] ✅ {table_name} detected as ORPHAN: type={orphan_type}, age={age_days} days, cost=${monthly_cost:.2f}/month")
+
+                        # Add to orphans if detected
+                        if orphan_type:
+                            orphans.append(
+                                OrphanResourceData(
+                                    resource_type="dynamodb_table",
+                                    resource_id=table_arn,
+                                    resource_name=table_name,
+                                    region=region,
+                                    estimated_monthly_cost=round(monthly_cost, 2),
+                                    resource_metadata={
+                                        "table_arn": table_arn,
+                                        "billing_mode": billing_mode,
+                                        "item_count": item_count,
+                                        "table_size_gb": round(table_size_gb, 2),
+                                        "provisioned_read_capacity": provisioned_read_capacity,
+                                        "provisioned_write_capacity": provisioned_write_capacity,
+                                        "global_secondary_indexes_count": len(global_secondary_indexes),
+                                        "age_days": age_days,
+                                        "created_at": creation_date.isoformat() if creation_date else None,
+                                        "orphan_type": orphan_type,
+                                        "orphan_reason": orphan_reason,
+                                        "confidence": confidence,
+                                    },
+                                )
+                            )
+
+        except ClientError as e:
+            print(f"Error scanning DynamoDB tables in {region}: {e}")
+
+        print(f"🗃️ [DEBUG] scan_idle_dynamodb_tables completed for {region}: Found {len(orphans)} idle tables")
         return orphans

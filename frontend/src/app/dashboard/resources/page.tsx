@@ -44,6 +44,7 @@ const resourceIcons: Record<ResourceType, any> = {
   documentdb_cluster: Database,
   s3_bucket: HardDrive,
   lambda_function: Zap,
+  dynamodb_table: Database,
 };
 
 export default function ResourcesPage() {
@@ -200,6 +201,10 @@ export default function ResourcesPage() {
                   <option value="fsx_file_system">FSx File System</option>
                   <option value="lambda_function">Lambda Function</option>
                   <option value="s3_bucket">S3 Bucket</option>
+                </optgroup>
+                <optgroup label="Database">
+                  <option value="dynamodb_table">DynamoDB Table</option>
+                  <option value="rds_instance">RDS Instance</option>
                 </optgroup>
                 <optgroup label="Networking">
                   <option value="elastic_ip">Elastic IP</option>
@@ -1361,8 +1366,279 @@ function ResourceCard({ resource, onIgnore, onMarkForDeletion, onDelete }: any) 
                     </div>
                   )}
 
+                  {/* DynamoDB Table specific criteria */}
+                  {resource.resource_type === 'dynamodb_table' && (
+                    <div className="space-y-1 text-sm">
+                      {/* Over-provisioned capacity (HIGHEST PRIORITY) */}
+                      {resource.resource_metadata?.orphan_type === 'over_provisioned' && (
+                        <>
+                          <div className="flex items-center gap-2 text-red-700">
+                            <span className="font-semibold">🚨</span>
+                            <span className="font-bold">CRITICAL: Over-Provisioned Capacity</span>
+                          </div>
+                          <div className="flex items-center gap-2 text-red-700">
+                            <span className="font-semibold">💸</span>
+                            <span>Paying 24/7 for capacity barely used - major waste!</span>
+                          </div>
+                          {resource.resource_metadata.billing_mode && (
+                            <div className="flex items-center gap-2 text-gray-700">
+                              <span className="font-semibold">💳</span>
+                              <span>Billing: {resource.resource_metadata.billing_mode}</span>
+                            </div>
+                          )}
+                          {(resource.resource_metadata.provisioned_read_capacity || resource.resource_metadata.provisioned_write_capacity) && (
+                            <div className="flex items-center gap-2 text-gray-700">
+                              <span className="font-semibold">📊</span>
+                              <span>Provisioned: {resource.resource_metadata.provisioned_read_capacity} RCU / {resource.resource_metadata.provisioned_write_capacity} WCU</span>
+                            </div>
+                          )}
+                          <div className="flex items-center gap-2 text-red-600 mt-1 bg-red-50 p-2 rounded">
+                            <span className="font-semibold">💡</span>
+                            <span className="text-xs font-semibold">Switch to On-Demand billing or reduce provisioned capacity immediately</span>
+                          </div>
+                        </>
+                      )}
+                      {/* Unused GSI */}
+                      {resource.resource_metadata?.orphan_type === 'unused_gsi' && (
+                        <>
+                          <div className="flex items-center gap-2 text-orange-700">
+                            <span className="font-semibold">💰</span>
+                            <span className="font-bold">Unused Global Secondary Index</span>
+                          </div>
+                          <div className="flex items-center gap-2 text-red-700">
+                            <span className="font-semibold">✗</span>
+                            <span>GSI never queried - doubles your table cost for no benefit</span>
+                          </div>
+                          {resource.resource_metadata.billing_mode && (
+                            <div className="flex items-center gap-2 text-gray-700">
+                              <span className="font-semibold">💳</span>
+                              <span>Billing: {resource.resource_metadata.billing_mode}</span>
+                            </div>
+                          )}
+                          {resource.resource_metadata.global_secondary_indexes_count && (
+                            <div className="flex items-center gap-2 text-gray-700">
+                              <span className="font-semibold">🔢</span>
+                              <span>Total GSIs: {resource.resource_metadata.global_secondary_indexes_count}</span>
+                            </div>
+                          )}
+                          <div className="flex items-center gap-2 text-orange-600 mt-1 bg-orange-50 p-2 rounded">
+                            <span className="font-semibold">💡</span>
+                            <span className="text-xs">Delete unused GSI or verify if it's actually needed</span>
+                          </div>
+                        </>
+                      )}
+                      {/* Never used (Provisioned) */}
+                      {resource.resource_metadata?.orphan_type === 'never_used_provisioned' && (
+                        <>
+                          <div className="flex items-center gap-2 text-red-700">
+                            <span className="font-semibold">⚠️</span>
+                            <span className="font-semibold">Never Used - Provisioned Mode</span>
+                          </div>
+                          <div className="flex items-center gap-2 text-red-700">
+                            <span className="font-semibold">✗</span>
+                            <span>Table created {resource.resource_metadata.age_days} days ago with 0 reads/writes - wasting provisioned capacity</span>
+                          </div>
+                          {resource.resource_metadata.billing_mode && (
+                            <div className="flex items-center gap-2 text-gray-700">
+                              <span className="font-semibold">💳</span>
+                              <span>Billing: {resource.resource_metadata.billing_mode}</span>
+                            </div>
+                          )}
+                          {resource.resource_metadata.item_count !== undefined && (
+                            <div className="flex items-center gap-2 text-gray-700">
+                              <span className="font-semibold">📦</span>
+                              <span>Items: {resource.resource_metadata.item_count}</span>
+                            </div>
+                          )}
+                        </>
+                      )}
+                      {/* Never used (On-Demand) */}
+                      {resource.resource_metadata?.orphan_type === 'never_used_ondemand' && (
+                        <>
+                          <div className="flex items-center gap-2 text-yellow-700">
+                            <span className="font-semibold">📦</span>
+                            <span className="font-semibold">On-Demand Table - No Usage</span>
+                          </div>
+                          <div className="flex items-center gap-2 text-red-700">
+                            <span className="font-semibold">✗</span>
+                            <span>No reads/writes in last 60 days - likely orphaned</span>
+                          </div>
+                          {resource.resource_metadata.billing_mode && (
+                            <div className="flex items-center gap-2 text-gray-700">
+                              <span className="font-semibold">💳</span>
+                              <span>Billing: {resource.resource_metadata.billing_mode}</span>
+                            </div>
+                          )}
+                          {resource.resource_metadata.table_size_gb && (
+                            <div className="flex items-center gap-2 text-gray-700">
+                              <span className="font-semibold">💾</span>
+                              <span>Size: {resource.resource_metadata.table_size_gb} GB (storage cost only)</span>
+                            </div>
+                          )}
+                        </>
+                      )}
+                      {/* Empty table */}
+                      {resource.resource_metadata?.orphan_type === 'empty_table' && (
+                        <>
+                          <div className="flex items-center gap-2 text-gray-700">
+                            <span className="font-semibold">📭</span>
+                            <span className="font-semibold">Empty Table</span>
+                          </div>
+                          <div className="flex items-center gap-2 text-red-700">
+                            <span className="font-semibold">✗</span>
+                            <span>0 items since creation ({resource.resource_metadata.age_days} days ago)</span>
+                          </div>
+                          {resource.resource_metadata.billing_mode && (
+                            <div className="flex items-center gap-2 text-gray-700">
+                              <span className="font-semibold">💳</span>
+                              <span>Billing: {resource.resource_metadata.billing_mode}</span>
+                            </div>
+                          )}
+                        </>
+                      )}
+                      <div className="flex items-center gap-2 text-gray-600 mt-1">
+                        <span className="font-semibold">ℹ️</span>
+                        <span className="italic">{resource.resource_metadata.orphan_reason}</span>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* ElastiCache Cluster specific criteria */}
+                  {resource.resource_type === 'elasticache_cluster' && (
+                    <div className="space-y-1 text-sm">
+                      {/* Zero cache hits (HIGHEST PRIORITY) */}
+                      {resource.resource_metadata?.orphan_type === 'zero_cache_hits' && (
+                        <>
+                          <div className="flex items-center gap-2 text-red-700">
+                            <span className="font-semibold">🚨</span>
+                            <span className="font-bold">CRITICAL: Zero Cache Hits</span>
+                          </div>
+                          <div className="flex items-center gap-2 text-red-700">
+                            <span className="font-semibold">✗</span>
+                            <span>No cache activity for {resource.resource_metadata.age_days} days - cluster completely unused</span>
+                          </div>
+                          {resource.resource_metadata.engine && (
+                            <div className="flex items-center gap-2 text-gray-700">
+                              <span className="font-semibold">⚙️</span>
+                              <span>Engine: {resource.resource_metadata.engine} {resource.resource_metadata.engine_version}</span>
+                            </div>
+                          )}
+                          {resource.resource_metadata.node_type && (
+                            <div className="flex items-center gap-2 text-gray-700">
+                              <span className="font-semibold">🖥️</span>
+                              <span>{resource.resource_metadata.num_nodes}x {resource.resource_metadata.node_type}</span>
+                            </div>
+                          )}
+                          <div className="flex items-center gap-2 text-red-600 mt-1 bg-red-50 p-2 rounded">
+                            <span className="font-semibold">💡</span>
+                            <span className="text-xs font-semibold">Delete this cluster immediately - zero activity detected</span>
+                          </div>
+                        </>
+                      )}
+                      {/* Low hit rate */}
+                      {resource.resource_metadata?.orphan_type === 'low_hit_rate' && (
+                        <>
+                          <div className="flex items-center gap-2 text-orange-700">
+                            <span className="font-semibold">⚠️</span>
+                            <span className="font-bold">{resource.resource_metadata.hit_rate < 10 ? 'CRITICAL: Very Low' : 'WARNING: Low'} Hit Rate</span>
+                          </div>
+                          <div className="flex items-center gap-2 text-red-700">
+                            <span className="font-semibold">📉</span>
+                            <span>Hit rate: {resource.resource_metadata.hit_rate}% (misses outnumber hits)</span>
+                          </div>
+                          <div className="flex items-center gap-2 text-gray-700">
+                            <span className="font-semibold">📊</span>
+                            <span>Hits: {resource.resource_metadata.cache_hits_7d?.toLocaleString() || 0} | Misses: {resource.resource_metadata.cache_misses_7d?.toLocaleString() || 0}</span>
+                          </div>
+                          {resource.resource_metadata.engine && (
+                            <div className="flex items-center gap-2 text-gray-700">
+                              <span className="font-semibold">⚙️</span>
+                              <span>Engine: {resource.resource_metadata.engine} {resource.resource_metadata.engine_version}</span>
+                            </div>
+                          )}
+                          {resource.resource_metadata.node_type && (
+                            <div className="flex items-center gap-2 text-gray-700">
+                              <span className="font-semibold">🖥️</span>
+                              <span>{resource.resource_metadata.num_nodes}x {resource.resource_metadata.node_type}</span>
+                            </div>
+                          )}
+                          <div className="flex items-center gap-2 text-orange-600 mt-1 bg-orange-50 p-2 rounded">
+                            <span className="font-semibold">💡</span>
+                            <span className="text-xs font-semibold">Review caching strategy - data rarely reused ({resource.resource_metadata.hit_rate < 10 ? 'consider deleting' : 'optimize TTL/keys'})</span>
+                          </div>
+                        </>
+                      )}
+                      {/* No connections */}
+                      {resource.resource_metadata?.orphan_type === 'no_connections' && (
+                        <>
+                          <div className="flex items-center gap-2 text-red-700">
+                            <span className="font-semibold">🚨</span>
+                            <span className="font-bold">CRITICAL: No Connections</span>
+                          </div>
+                          <div className="flex items-center gap-2 text-red-700">
+                            <span className="font-semibold">🔌</span>
+                            <span>Zero active connections for {resource.resource_metadata.age_days} days - nobody connects</span>
+                          </div>
+                          {resource.resource_metadata.engine && (
+                            <div className="flex items-center gap-2 text-gray-700">
+                              <span className="font-semibold">⚙️</span>
+                              <span>Engine: {resource.resource_metadata.engine} {resource.resource_metadata.engine_version}</span>
+                            </div>
+                          )}
+                          {resource.resource_metadata.node_type && (
+                            <div className="flex items-center gap-2 text-gray-700">
+                              <span className="font-semibold">🖥️</span>
+                              <span>{resource.resource_metadata.num_nodes}x {resource.resource_metadata.node_type}</span>
+                            </div>
+                          )}
+                          <div className="flex items-center gap-2 text-red-600 mt-1 bg-red-50 p-2 rounded">
+                            <span className="font-semibold">💡</span>
+                            <span className="text-xs font-semibold">Delete cluster - no applications using it</span>
+                          </div>
+                        </>
+                      )}
+                      {/* Over-provisioned memory */}
+                      {resource.resource_metadata?.orphan_type === 'over_provisioned_memory' && (
+                        <>
+                          <div className="flex items-center gap-2 text-yellow-700">
+                            <span className="font-semibold">💰</span>
+                            <span className="font-bold">WARNING: Over-Provisioned Memory</span>
+                          </div>
+                          <div className="flex items-center gap-2 text-orange-700">
+                            <span className="font-semibold">📏</span>
+                            <span>Memory usage: {resource.resource_metadata.memory_usage_percent}% (very low utilization)</span>
+                          </div>
+                          <div className="flex items-center gap-2 text-gray-700">
+                            <span className="font-semibold">✓</span>
+                            <span>0 evictions detected - cluster is too large for workload</span>
+                          </div>
+                          {resource.resource_metadata.engine && (
+                            <div className="flex items-center gap-2 text-gray-700">
+                              <span className="font-semibold">⚙️</span>
+                              <span>Engine: {resource.resource_metadata.engine} {resource.resource_metadata.engine_version}</span>
+                            </div>
+                          )}
+                          {resource.resource_metadata.node_type && (
+                            <div className="flex items-center gap-2 text-gray-700">
+                              <span className="font-semibold">🖥️</span>
+                              <span>{resource.resource_metadata.num_nodes}x {resource.resource_metadata.node_type}</span>
+                            </div>
+                          )}
+                          <div className="flex items-center gap-2 text-yellow-600 mt-1 bg-yellow-50 p-2 rounded">
+                            <span className="font-semibold">💡</span>
+                            <span className="text-xs font-semibold">Downgrade to smaller node type to save costs</span>
+                          </div>
+                        </>
+                      )}
+                      <div className="flex items-center gap-2 text-gray-600 mt-1">
+                        <span className="font-semibold">ℹ️</span>
+                        <span className="italic">{resource.resource_metadata.orphan_reason}</span>
+                      </div>
+                    </div>
+                  )}
+
                   {/* Generic criteria for other resource types */}
-                  {!['ebs_volume', 'elastic_ip', 'rds_instance', 'ec2_instance', 'load_balancer', 'nat_gateway', 'ebs_snapshot', 'eks_cluster', 's3_bucket', 'lambda_function'].includes(resource.resource_type) && (
+                  {!['ebs_volume', 'elastic_ip', 'rds_instance', 'ec2_instance', 'load_balancer', 'nat_gateway', 'ebs_snapshot', 'eks_cluster', 's3_bucket', 'lambda_function', 'dynamodb_table', 'elasticache_cluster'].includes(resource.resource_type) && (
                     <div className="text-sm">
                       <div className="flex items-center gap-2 text-gray-700">
                         <span className="font-semibold">ℹ️</span>

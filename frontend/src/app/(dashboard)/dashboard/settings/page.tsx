@@ -242,9 +242,15 @@ export default function SettingsPage() {
           </button>
         </div>
 
-        {/* Save Message */}
+        {/* Save Message - Fixed Toast */}
         {saveMessage && (
-          <div className="mb-4 rounded-xl border-2 border-green-200 bg-green-50 p-4 text-center font-semibold text-green-700">
+          <div
+            className={`fixed top-4 right-4 z-50 rounded-xl border-2 px-6 py-4 font-semibold shadow-2xl animate-in slide-in-from-top-5 duration-300 ${
+              saveMessage.includes('❌')
+                ? 'border-red-300 bg-red-50 text-red-700'
+                : 'border-green-300 bg-green-50 text-green-700'
+            }`}
+          >
             {saveMessage}
           </div>
         )}
