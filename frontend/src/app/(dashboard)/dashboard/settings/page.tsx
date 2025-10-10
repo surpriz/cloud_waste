@@ -3,6 +3,9 @@
 import { useEffect, useState } from "react";
 import { User, Bell, Shield, Trash2, Save, Key, Sliders, RotateCcw, HardDrive, Globe, Camera, Server, Activity, Zap, Database, ArrowLeft } from "lucide-react";
 import Link from "next/link";
+import { useNotifications } from "@/hooks/useNotifications";
+import { Toast } from "@/components/ui/Toast";
+import { NotificationHistory } from "@/components/ui/NotificationHistory";
 
 interface DetectionRule {
   resource_type: string;
@@ -48,7 +51,9 @@ export default function SettingsPage() {
   const [activeTab, setActiveTab] = useState<"profile" | "notifications" | "security" | "detection">("detection");
   const [detectionRules, setDetectionRules] = useState<DetectionRule[]>([]);
   const [isLoading, setIsLoading] = useState(false);
-  const [saveMessage, setSaveMessage] = useState<string | null>(null);
+
+  // Use advanced notification system
+  const { currentNotification, history, showSuccess, showError, dismiss, clearHistory } = useNotifications();
 
   useEffect(() => {
     if (activeTab === "detection") {
@@ -103,13 +108,11 @@ export default function SettingsPage() {
 
       if (response.ok) {
         await fetchDetectionRules();
-        setSaveMessage("✅ Rules saved successfully!");
-        setTimeout(() => setSaveMessage(null), 3000);
+        showSuccess("Rules saved successfully!");
       }
     } catch (error) {
       console.error("Failed to update rule:", error);
-      setSaveMessage("❌ Failed to save rules");
-      setTimeout(() => setSaveMessage(null), 3000);
+      showError("Failed to save rules");
     }
   };
 
@@ -127,8 +130,7 @@ export default function SettingsPage() {
 
       if (response.ok) {
         await fetchDetectionRules();
-        setSaveMessage("✅ Rule reset to defaults!");
-        setTimeout(() => setSaveMessage(null), 3000);
+        showSuccess("Rule reset to defaults!");
       }
     } catch (error) {
       console.error("Failed to reset rule:", error);
@@ -149,13 +151,11 @@ export default function SettingsPage() {
 
       if (response.ok) {
         await fetchDetectionRules();
-        setSaveMessage("✅ All rules reset to defaults!");
-        setTimeout(() => setSaveMessage(null), 3000);
+        showSuccess("All rules reset to defaults!");
       }
     } catch (error) {
       console.error("Failed to reset all rules:", error);
-      setSaveMessage("❌ Failed to reset all rules");
-      setTimeout(() => setSaveMessage(null), 3000);
+      showError("Failed to reset all rules");
     }
   };
 
@@ -189,9 +189,12 @@ export default function SettingsPage() {
         </Link>
 
         {/* Header */}
-        <div className="mb-6 md:mb-8">
-          <h1 className="text-3xl md:text-4xl font-bold text-gray-900">Settings</h1>
-          <p className="mt-2 text-sm md:text-base text-gray-600">Manage your account preferences and detection rules</p>
+        <div className="mb-6 md:mb-8 flex items-start justify-between gap-4">
+          <div>
+            <h1 className="text-3xl md:text-4xl font-bold text-gray-900">Settings</h1>
+            <p className="mt-2 text-sm md:text-base text-gray-600">Manage your account preferences and detection rules</p>
+          </div>
+          <NotificationHistory notifications={history} onClearHistory={clearHistory} />
         </div>
 
         {/* Tabs */}
@@ -242,17 +245,9 @@ export default function SettingsPage() {
           </button>
         </div>
 
-        {/* Save Message - Fixed Toast */}
-        {saveMessage && (
-          <div
-            className={`fixed top-4 right-4 z-50 rounded-xl border-2 px-6 py-4 font-semibold shadow-2xl animate-in slide-in-from-top-5 duration-300 ${
-              saveMessage.includes('❌')
-                ? 'border-red-300 bg-red-50 text-red-700'
-                : 'border-green-300 bg-green-50 text-green-700'
-            }`}
-          >
-            {saveMessage}
-          </div>
+        {/* Advanced Notification Toast */}
+        {currentNotification && (
+          <Toast notification={currentNotification} onClose={dismiss} />
         )}
 
         {/* Detection Rules Tab */}
