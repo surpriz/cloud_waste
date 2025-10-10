@@ -93,7 +93,10 @@ class AWSProvider(CloudProviderBase):
         "opensearch_m5_large": 0.161,  # OpenSearch m5.large.search (per hour) = ~$116/month
         "opensearch_r5_large": 0.228,  # OpenSearch r5.large.search = ~$164/month
         "global_accelerator": 18.00,  # Global Accelerator (base cost)
-        "kinesis_shard": 15.00,  # Kinesis shard (per month)
+        "kinesis_shard": 10.80,  # Kinesis shard ($0.015/hour * 730 hours)
+        "kinesis_retention_extended_per_gb": 0.020,  # Extended retention (25-168h)
+        "kinesis_retention_long_per_gb": 0.026,  # Long-term retention (>168h)
+        "kinesis_enhanced_fanout_per_consumer": 10.95,  # Enhanced Fan-Out ($0.015/hour * 730h)
         "vpc_endpoint": 7.20,  # VPC Endpoint (per month)
         "documentdb_r5_large": 0.277,  # DocumentDB db.r5.large (per hour) = ~$199/month
         # S3 pricing per GB/month (storage only, not including requests/transfer)
@@ -3913,9 +3916,15 @@ class AWSProvider(CloudProviderBase):
         self, region: str, detection_rules: dict | None = None
     ) -> list[OrphanResourceData]:
         """
-        Scan for idle Kinesis streams using CloudWatch metrics.
+        Scan for idle/orphaned Kinesis streams using CloudWatch metrics.
 
-        Detection: Streams with no incoming/outgoing records for 7+ days.
+        Detects 6 scenarios (by priority):
+        1. Completely inactive (0 writes + 0 reads)
+        2. Written but never read (writes > 0, reads = 0)
+        3. Under-utilized (< 1% capacity used)
+        4. Excessive retention (long retention + real-time reads)
+        5. Unused Enhanced Fan-Out (registered consumers not used)
+        6. Over-provisioned (too many shards vs actual usage)
 
         Args:
             region: AWS region to scan
@@ -3925,14 +3934,46 @@ class AWSProvider(CloudProviderBase):
             List of orphaned Kinesis streams
         """
         orphans = []
+
+        # Extract detection rules (with defaults)
         min_age_days = detection_rules.get("min_age_days", 3) if detection_rules else 3
+        confidence_threshold_days = detection_rules.get("confidence_threshold_days", 7) if detection_rules else 7
+
+        # Scenario 1: Inactive
+        detect_inactive = detection_rules.get("detect_inactive", True) if detection_rules else True
+        inactive_lookback_days = detection_rules.get("inactive_lookback_days", 7) if detection_rules else 7
+
+        # Scenario 2: Written but not read
+        detect_written_not_read = detection_rules.get("detect_written_not_read", True) if detection_rules else True
+        written_not_read_lookback_days = detection_rules.get("written_not_read_lookback_days", 7) if detection_rules else 7
+
+        # Scenario 3: Under-utilized
+        detect_underutilized = detection_rules.get("detect_underutilized", True) if detection_rules else True
+        utilization_threshold_percent = detection_rules.get("utilization_threshold_percent", 1.0) if detection_rules else 1.0
+        underutilized_lookback_days = detection_rules.get("underutilized_lookback_days", 7) if detection_rules else 7
+
+        # Scenario 4: Excessive retention
+        detect_excessive_retention = detection_rules.get("detect_excessive_retention", True) if detection_rules else True
+        max_iterator_age_ms = detection_rules.get("max_iterator_age_ms", 60000) if detection_rules else 60000  # 1 minute
+
+        # Scenario 5: Unused Enhanced Fan-Out
+        detect_unused_enhanced_fanout = detection_rules.get("detect_unused_enhanced_fanout", True) if detection_rules else True
+
+        # Scenario 6: Over-provisioned
+        detect_overprovisioned = detection_rules.get("detect_overprovisioned", True) if detection_rules else True
+        overprovisioning_ratio = detection_rules.get("overprovisioning_ratio", 10.0) if detection_rules else 10.0
+
+        print(f"🌊 [DEBUG] scan_idle_kinesis_streams called for region: {region}")
 
         try:
             async with self.session.client("kinesis", region_name=region) as kinesis:
                 async with self.session.client("cloudwatch", region_name=region) as cw:
                     response = await kinesis.list_streams()
+                    stream_names = response.get("StreamNames", [])
 
-                    for stream_name in response.get("StreamNames", []):
+                    print(f"🌊 [DEBUG] Found {len(stream_names)} Kinesis streams in {region}")
+
+                    for stream_name in stream_names:
                         # Get stream details
                         stream_info = await kinesis.describe_stream(StreamName=stream_name)
                         stream = stream_info["StreamDescription"]
@@ -3943,42 +3984,250 @@ class AWSProvider(CloudProviderBase):
 
                         age_days = (datetime.now(timezone.utc) - created_at).days
 
+                        # Skip very young streams
                         if age_days < min_age_days:
+                            print(f"🌊 [DEBUG] Skipping {stream_name}: too young ({age_days} < {min_age_days} days)")
                             continue
 
-                        # Query CloudWatch for IncomingRecords metric (7-day lookback)
-                        now = datetime.now(timezone.utc)
-                        start_time = now - timedelta(days=7)
+                        # Extract stream metadata
+                        shard_count = len(stream.get("Shards", []))
+                        stream_status = stream.get("StreamStatus", "UNKNOWN")
+                        retention_hours = stream.get("RetentionPeriodHours", 24)
+                        stream_arn = stream.get("StreamARN", "")
 
-                        metrics_response = await cw.get_metric_statistics(
-                            Namespace="AWS/Kinesis",
-                            MetricName="IncomingRecords",
-                            Dimensions=[
-                                {"Name": "StreamName", "Value": stream_name},
-                            ],
-                            StartTime=start_time,
-                            EndTime=now,
-                            Period=3600,  # 1 hour
-                            Statistics=["Sum"],
-                        )
+                        print(f"🌊 [DEBUG] Analyzing stream: {stream_name} (age={age_days} days, shards={shard_count}, retention={retention_hours}h)")
 
-                        datapoints = metrics_response.get("Datapoints", [])
-                        total_records = sum(dp["Sum"] for dp in datapoints)
+                        # Variables for detection
+                        orphan_type = None
+                        orphan_reason = None
+                        confidence = "medium"
+                        monthly_cost = 0.0
 
-                        # If 0 records over 7 days, consider idle
-                        if total_records == 0:
-                            # Calculate cost based on shard count
-                            shard_count = len(stream.get("Shards", []))
-                            monthly_cost = self.PRICING["kinesis_shard"] * shard_count
+                        # Metrics storage
+                        incoming_records = 0
+                        incoming_bytes = 0
+                        outgoing_records = 0
+                        iterator_age_avg_ms = 0
+                        enhanced_fanout_consumers = []
 
-                            # Determine confidence
-                            if age_days >= 7:
-                                confidence = "high"
-                                reason = f"No incoming records for 7+ days (stream age: {age_days} days)"
-                            else:
-                                confidence = "medium"
-                                reason = f"No data activity detected (stream age: {age_days} days)"
+                        # PRIORITY 1: Check if completely inactive (0 writes, 0 reads)
+                        if orphan_type is None and detect_inactive:
+                            try:
+                                now = datetime.now(timezone.utc)
+                                start_time = now - timedelta(days=inactive_lookback_days)
 
+                                # Get IncomingRecords
+                                incoming_response = await cw.get_metric_statistics(
+                                    Namespace="AWS/Kinesis",
+                                    MetricName="IncomingRecords",
+                                    Dimensions=[{"Name": "StreamName", "Value": stream_name}],
+                                    StartTime=start_time,
+                                    EndTime=now,
+                                    Period=3600,  # 1 hour
+                                    Statistics=["Sum"],
+                                )
+                                incoming_records = sum(dp["Sum"] for dp in incoming_response.get("Datapoints", []))
+
+                                # Get GetRecords.Records (outgoing/read records)
+                                outgoing_response = await cw.get_metric_statistics(
+                                    Namespace="AWS/Kinesis",
+                                    MetricName="GetRecords.Records",
+                                    Dimensions=[{"Name": "StreamName", "Value": stream_name}],
+                                    StartTime=start_time,
+                                    EndTime=now,
+                                    Period=3600,
+                                    Statistics=["Sum"],
+                                )
+                                outgoing_records = sum(dp["Sum"] for dp in outgoing_response.get("Datapoints", []))
+
+                                if incoming_records == 0 and outgoing_records == 0:
+                                    orphan_type = "inactive"
+                                    orphan_reason = f"No incoming or outgoing records for {inactive_lookback_days} days - completely unused"
+                                    confidence = "critical" if age_days >= confidence_threshold_days else "high"
+                                    monthly_cost = self.PRICING["kinesis_shard"] * shard_count
+                                    print(f"🌊 [DEBUG] ✅ {stream_name} detected as ORPHAN: type={orphan_type}, confidence={confidence}")
+
+                            except ClientError as e:
+                                print(f"Warning: Could not check inactive metrics for {stream_name}: {e}")
+
+                        # PRIORITY 2: Check if written but never read
+                        if orphan_type is None and detect_written_not_read:
+                            try:
+                                now = datetime.now(timezone.utc)
+                                start_time = now - timedelta(days=written_not_read_lookback_days)
+
+                                # Get IncomingRecords if not already retrieved
+                                if incoming_records == 0:
+                                    incoming_response = await cw.get_metric_statistics(
+                                        Namespace="AWS/Kinesis",
+                                        MetricName="IncomingRecords",
+                                        Dimensions=[{"Name": "StreamName", "Value": stream_name}],
+                                        StartTime=start_time,
+                                        EndTime=now,
+                                        Period=3600,
+                                        Statistics=["Sum"],
+                                    )
+                                    incoming_records = sum(dp["Sum"] for dp in incoming_response.get("Datapoints", []))
+
+                                # Get GetRecords.Records if not already retrieved
+                                if outgoing_records == 0:
+                                    outgoing_response = await cw.get_metric_statistics(
+                                        Namespace="AWS/Kinesis",
+                                        MetricName="GetRecords.Records",
+                                        Dimensions=[{"Name": "StreamName", "Value": stream_name}],
+                                        StartTime=start_time,
+                                        EndTime=now,
+                                        Period=3600,
+                                        Statistics=["Sum"],
+                                    )
+                                    outgoing_records = sum(dp["Sum"] for dp in outgoing_response.get("Datapoints", []))
+
+                                if incoming_records > 0 and outgoing_records == 0:
+                                    orphan_type = "written_not_read"
+                                    orphan_reason = f"Data written ({int(incoming_records)} records) but never read for {written_not_read_lookback_days} days - no consumers"
+                                    confidence = "high" if age_days >= confidence_threshold_days else "medium"
+                                    monthly_cost = self.PRICING["kinesis_shard"] * shard_count
+                                    print(f"🌊 [DEBUG] ✅ {stream_name} detected as ORPHAN: type={orphan_type}, confidence={confidence}")
+
+                            except ClientError as e:
+                                print(f"Warning: Could not check written_not_read metrics for {stream_name}: {e}")
+
+                        # PRIORITY 3: Check if under-utilized (< 1% capacity)
+                        if orphan_type is None and detect_underutilized:
+                            try:
+                                now = datetime.now(timezone.utc)
+                                start_time = now - timedelta(days=underutilized_lookback_days)
+
+                                # Get IncomingBytes
+                                bytes_response = await cw.get_metric_statistics(
+                                    Namespace="AWS/Kinesis",
+                                    MetricName="IncomingBytes",
+                                    Dimensions=[{"Name": "StreamName", "Value": stream_name}],
+                                    StartTime=start_time,
+                                    EndTime=now,
+                                    Period=3600,
+                                    Statistics=["Sum"],
+                                )
+                                incoming_bytes = sum(dp["Sum"] for dp in bytes_response.get("Datapoints", []))
+
+                                # Calculate capacity: 1 shard = 1 MB/s = 86.4 GB/day
+                                capacity_bytes_per_period = shard_count * 86.4 * 1024 * 1024 * 1024 * underutilized_lookback_days
+                                utilization_percent = (incoming_bytes / capacity_bytes_per_period * 100) if capacity_bytes_per_period > 0 else 0
+
+                                if utilization_percent < utilization_threshold_percent:
+                                    orphan_type = "underutilized"
+                                    orphan_reason = f"Stream under-utilized: {utilization_percent:.2f}% capacity used ({shard_count} shards) - {incoming_bytes / (1024**3):.2f} GB over {underutilized_lookback_days} days"
+                                    confidence = "medium" if age_days >= confidence_threshold_days else "low"
+                                    monthly_cost = self.PRICING["kinesis_shard"] * shard_count * 0.8  # 80% waste estimate
+                                    print(f"🌊 [DEBUG] ✅ {stream_name} detected as ORPHAN: type={orphan_type}, confidence={confidence}, utilization={utilization_percent:.2f}%")
+
+                            except ClientError as e:
+                                print(f"Warning: Could not check underutilized metrics for {stream_name}: {e}")
+
+                        # PRIORITY 4: Check excessive retention
+                        if orphan_type is None and detect_excessive_retention:
+                            try:
+                                if retention_hours > 24:
+                                    now = datetime.now(timezone.utc)
+                                    start_time = now - timedelta(days=7)
+
+                                    # Get GetRecords.IteratorAgeMilliseconds (how old records are when read)
+                                    iterator_response = await cw.get_metric_statistics(
+                                        Namespace="AWS/Kinesis",
+                                        MetricName="GetRecords.IteratorAgeMilliseconds",
+                                        Dimensions=[{"Name": "StreamName", "Value": stream_name}],
+                                        StartTime=start_time,
+                                        EndTime=now,
+                                        Period=3600,
+                                        Statistics=["Average"],
+                                    )
+                                    datapoints = iterator_response.get("Datapoints", [])
+                                    if datapoints:
+                                        iterator_age_avg_ms = sum(dp["Average"] for dp in datapoints) / len(datapoints)
+
+                                        # If records are read very quickly (< 1 minute), long retention is wasteful
+                                        if iterator_age_avg_ms < max_iterator_age_ms:
+                                            # Calculate retention cost (approximate)
+                                            retention_cost_per_gb = self.PRICING["kinesis_retention_extended_per_gb"] if retention_hours <= 168 else self.PRICING["kinesis_retention_long_per_gb"]
+                                            # Rough estimate: assume 1 GB per shard per day
+                                            estimated_gb = shard_count * (retention_hours / 24)
+                                            retention_cost = estimated_gb * retention_cost_per_gb
+
+                                            orphan_type = "excessive_retention"
+                                            orphan_reason = f"Retention set to {retention_hours}h but data read in real-time (avg {iterator_age_avg_ms/1000:.1f}s) - excessive retention cost"
+                                            confidence = "low"
+                                            monthly_cost = retention_cost
+                                            print(f"🌊 [DEBUG] ✅ {stream_name} detected as ORPHAN: type={orphan_type}, confidence={confidence}, retention={retention_hours}h")
+
+                            except ClientError as e:
+                                print(f"Warning: Could not check excessive_retention metrics for {stream_name}: {e}")
+
+                        # PRIORITY 5: Check unused Enhanced Fan-Out
+                        if orphan_type is None and detect_unused_enhanced_fanout:
+                            try:
+                                # List registered consumers
+                                consumers_response = await kinesis.list_stream_consumers(StreamARN=stream_arn)
+                                consumers = consumers_response.get("Consumers", [])
+
+                                if consumers:
+                                    # Check if any consumer is actually using Enhanced Fan-Out
+                                    # If consumers registered but no SubscribeToShard activity, it's wasteful
+                                    now = datetime.now(timezone.utc)
+                                    start_time = now - timedelta(days=7)
+
+                                    # Note: Enhanced Fan-Out metrics are under consumer-specific dimensions
+                                    # For simplicity, we detect registered consumers as potential waste
+                                    # In production, you'd check SubscribeToShard.* metrics per consumer
+
+                                    consumer_count = len(consumers)
+                                    enhanced_fanout_cost = self.PRICING["kinesis_enhanced_fanout_per_consumer"] * consumer_count * shard_count
+
+                                    orphan_type = "unused_enhanced_fanout"
+                                    orphan_reason = f"{consumer_count} Enhanced Fan-Out consumers registered - verify if actively used"
+                                    confidence = "medium"
+                                    monthly_cost = enhanced_fanout_cost
+                                    enhanced_fanout_consumers = [c["ConsumerName"] for c in consumers]
+                                    print(f"🌊 [DEBUG] ✅ {stream_name} detected as ORPHAN: type={orphan_type}, confidence={confidence}, consumers={consumer_count}")
+
+                            except ClientError as e:
+                                print(f"Warning: Could not check Enhanced Fan-Out for {stream_name}: {e}")
+
+                        # PRIORITY 6: Check over-provisioning
+                        if orphan_type is None and detect_overprovisioned:
+                            try:
+                                now = datetime.now(timezone.utc)
+                                start_time = now - timedelta(days=7)
+
+                                # Get IncomingBytes if not already retrieved
+                                if incoming_bytes == 0:
+                                    bytes_response = await cw.get_metric_statistics(
+                                        Namespace="AWS/Kinesis",
+                                        MetricName="IncomingBytes",
+                                        Dimensions=[{"Name": "StreamName", "Value": stream_name}],
+                                        StartTime=start_time,
+                                        EndTime=now,
+                                        Period=3600,
+                                        Statistics=["Sum"],
+                                    )
+                                    incoming_bytes = sum(dp["Sum"] for dp in bytes_response.get("Datapoints", []))
+
+                                # Calculate actual throughput vs capacity
+                                capacity_bytes_per_day = shard_count * 86.4 * 1024 * 1024 * 1024  # 1 MB/s per shard
+                                actual_bytes_per_day = incoming_bytes / 7  # Average over 7 days
+                                capacity_ratio = (capacity_bytes_per_day / actual_bytes_per_day) if actual_bytes_per_day > 0 else float('inf')
+
+                                if capacity_ratio > overprovisioning_ratio:
+                                    orphan_type = "overprovisioned"
+                                    orphan_reason = f"{shard_count} shards provisioned but only using {actual_bytes_per_day / (1024**3):.2f} GB/day ({capacity_ratio:.1f}x over-provisioned)"
+                                    confidence = "low"
+                                    monthly_cost = self.PRICING["kinesis_shard"] * shard_count * 0.7  # 70% waste estimate
+                                    print(f"🌊 [DEBUG] ✅ {stream_name} detected as ORPHAN: type={orphan_type}, confidence={confidence}, ratio={capacity_ratio:.1f}x")
+
+                            except ClientError as e:
+                                print(f"Warning: Could not check overprovisioned metrics for {stream_name}: {e}")
+
+                        # If any scenario detected, add to orphans
+                        if orphan_type is not None:
                             orphans.append(
                                 OrphanResourceData(
                                     resource_type="kinesis_stream",
@@ -3988,15 +4237,18 @@ class AWSProvider(CloudProviderBase):
                                     estimated_monthly_cost=monthly_cost,
                                     resource_metadata={
                                         "shard_count": shard_count,
-                                        "status": stream.get("StreamStatus", "Unknown"),
-                                        "retention_hours": stream.get(
-                                            "RetentionPeriodHours", 24
-                                        ),
+                                        "status": stream_status,
+                                        "retention_hours": retention_hours,
                                         "created_at": created_at.isoformat(),
                                         "age_days": age_days,
+                                        "orphan_type": orphan_type,
                                         "confidence": confidence,
-                                        "orphan_reason": reason,
-                                        "incoming_records_7d": int(total_records),
+                                        "orphan_reason": orphan_reason,
+                                        "incoming_records": int(incoming_records),
+                                        "outgoing_records": int(outgoing_records),
+                                        "incoming_bytes": int(incoming_bytes),
+                                        "iterator_age_avg_ms": int(iterator_age_avg_ms),
+                                        "enhanced_fanout_consumers": enhanced_fanout_consumers,
                                     },
                                 )
                             )

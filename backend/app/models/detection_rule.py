@@ -200,7 +200,25 @@ DEFAULT_DETECTION_RULES = {
         "enabled": True,
         "min_age_days": 3,
         "confidence_threshold_days": 7,
-        "description": "Kinesis streams with no incoming records",
+        # Scenario 1: Completely inactive (0 writes, 0 reads)
+        "detect_inactive": True,
+        "inactive_lookback_days": 7,
+        # Scenario 2: Written but never read
+        "detect_written_not_read": True,
+        "written_not_read_lookback_days": 7,
+        # Scenario 3: Under-utilized (< 1% capacity)
+        "detect_underutilized": True,
+        "utilization_threshold_percent": 1.0,
+        "underutilized_lookback_days": 7,
+        # Scenario 4: Excessive retention
+        "detect_excessive_retention": True,
+        "max_iterator_age_ms": 60000,  # 1 minute
+        # Scenario 5: Unused Enhanced Fan-Out
+        "detect_unused_enhanced_fanout": True,
+        # Scenario 6: Over-provisioned shards
+        "detect_overprovisioned": True,
+        "overprovisioning_ratio": 10.0,
+        "description": "Kinesis streams: inactive, under-utilized, excessive retention, or orphaned consumers",
     },
     "vpc_endpoint": {
         "enabled": True,
