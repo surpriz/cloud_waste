@@ -321,9 +321,22 @@ class AzureProvider(CloudProviderBase):
         ip_orphans = await self.scan_unassigned_ips(region, rules.get("public_ip_unassociated"))
         results.extend(ip_orphans)
 
-        # TODO: Future Azure resources
-        # results.extend(await self.scan_orphaned_snapshots(region, rules.get("disk_snapshot_orphaned")))
-        # results.extend(await self.scan_stopped_instances(region, rules.get("virtual_machine_deallocated")))
+        # Phase 1 - Quick Wins: Additional waste detection scenarios
+        # Scan Managed Disks attached to stopped VMs
+        disks_on_stopped_vms = await self.scan_disks_on_stopped_vms(region, rules.get("managed_disk_on_stopped_vm"))
+        results.extend(disks_on_stopped_vms)
+
+        # Scan orphaned Disk Snapshots (source disk deleted)
+        orphaned_snapshots = await self.scan_orphaned_snapshots(region, rules.get("disk_snapshot_orphaned"))
+        results.extend(orphaned_snapshots)
+
+        # Scan Public IPs associated to stopped resources (VMs, LBs)
+        ips_on_stopped = await self.scan_ips_on_stopped_resources(region, rules.get("public_ip_on_stopped_resource"))
+        results.extend(ips_on_stopped)
+
+        # TODO: Phase 2 - Advanced metrics scenarios (requires Azure Monitor API)
+        # results.extend(await self.scan_low_io_disks(region, rules.get("managed_disk_low_io")))
+        # results.extend(await self.scan_zero_traffic_ips(region, rules.get("public_ip_no_traffic")))
 
         return results
 
@@ -436,23 +449,405 @@ class AzureProvider(CloudProviderBase):
 
         return orphans
 
+    async def scan_disks_on_stopped_vms(self, region: str, detection_rules: dict | None = None) -> list[OrphanResourceData]:
+        """
+        Scan for Azure Managed Disks attached to stopped/deallocated VMs.
+
+        Detects disks that continue to incur charges while attached to VMs
+        that have been deallocated (stopped) for an extended period.
+
+        Args:
+            region: Azure region to scan
+            detection_rules: Optional detection configuration (min_stopped_days, enabled)
+
+        Returns:
+            List of orphan disk resources on stopped VMs
+        """
+        from datetime import datetime, timezone
+        from azure.identity import ClientSecretCredential
+        from azure.mgmt.compute import ComputeManagementClient
+
+        orphans = []
+        min_stopped_days = detection_rules.get("min_stopped_days", 30) if detection_rules else 30
+
+        try:
+            credential = ClientSecretCredential(
+                tenant_id=self.tenant_id,
+                client_id=self.client_id,
+                client_secret=self.client_secret
+            )
+
+            compute_client = ComputeManagementClient(credential, self.subscription_id)
+
+            # List all VMs in the region
+            vms = compute_client.virtual_machines.list_all()
+
+            for vm in vms:
+                if vm.location != region:
+                    continue
+
+                # Get VM instance view to check power state
+                instance_view = compute_client.virtual_machines.instance_view(
+                    resource_group_name=vm.id.split('/')[4],  # Extract RG from resource ID
+                    vm_name=vm.name
+                )
+
+                # Find power state
+                power_state = None
+                stopped_since = None
+                for status in instance_view.statuses:
+                    if status.code and status.code.startswith('PowerState/'):
+                        power_state = status.code.split('/')[-1]
+                        if hasattr(status, 'time') and status.time:
+                            stopped_since = status.time
+
+                # Only process deallocated (stopped) VMs
+                if power_state != 'deallocated':
+                    continue
+
+                # Calculate how long VM has been stopped
+                stopped_days = 0
+                if stopped_since:
+                    stopped_days = (datetime.now(timezone.utc) - stopped_since).days
+
+                # Skip if not stopped long enough
+                if stopped_days < min_stopped_days:
+                    continue
+
+                # Process all disks attached to this stopped VM
+                if vm.storage_profile and vm.storage_profile.data_disks:
+                    for data_disk in vm.storage_profile.data_disks:
+                        if not data_disk.managed_disk:
+                            continue
+
+                        disk_id = data_disk.managed_disk.id
+                        disk_name = disk_id.split('/')[-1]
+
+                        # Get full disk details
+                        disk_rg = disk_id.split('/')[4]
+                        disk = compute_client.disks.get(disk_rg, disk_name)
+
+                        # Calculate disk cost
+                        monthly_cost = self._calculate_disk_cost(disk)
+
+                        metadata = {
+                            'disk_id': disk.id,
+                            'disk_name': disk.name,
+                            'disk_size_gb': disk.disk_size_gb,
+                            'sku_name': disk.sku.name if disk.sku else 'Standard_LRS',
+                            'vm_id': vm.id,
+                            'vm_name': vm.name,
+                            'vm_power_state': power_state,
+                            'vm_stopped_days': stopped_days,
+                            'orphan_reason': f"Disk attached to VM '{vm.name}' which has been deallocated (stopped) for {stopped_days} days",
+                            'recommendation': f"Consider deleting disk or restarting VM if still needed. Disk continues to cost ${monthly_cost:.2f}/month while VM is stopped.",
+                            'tags': disk.tags if disk.tags else {},
+                        }
+
+                        orphan = OrphanResourceData(
+                            resource_type='managed_disk_on_stopped_vm',
+                            resource_id=disk.id,
+                            resource_name=disk.name,
+                            region=disk.location,
+                            estimated_monthly_cost=monthly_cost,
+                            resource_metadata=metadata
+                        )
+
+                        orphans.append(orphan)
+
+                # Also check OS disk
+                if vm.storage_profile and vm.storage_profile.os_disk and vm.storage_profile.os_disk.managed_disk:
+                    os_disk_id = vm.storage_profile.os_disk.managed_disk.id
+                    os_disk_name = os_disk_id.split('/')[-1]
+                    os_disk_rg = os_disk_id.split('/')[4]
+
+                    os_disk = compute_client.disks.get(os_disk_rg, os_disk_name)
+                    monthly_cost = self._calculate_disk_cost(os_disk)
+
+                    metadata = {
+                        'disk_id': os_disk.id,
+                        'disk_name': os_disk.name,
+                        'disk_size_gb': os_disk.disk_size_gb,
+                        'sku_name': os_disk.sku.name if os_disk.sku else 'Standard_LRS',
+                        'disk_type': 'OS Disk',
+                        'vm_id': vm.id,
+                        'vm_name': vm.name,
+                        'vm_power_state': power_state,
+                        'vm_stopped_days': stopped_days,
+                        'orphan_reason': f"OS Disk attached to VM '{vm.name}' which has been deallocated (stopped) for {stopped_days} days",
+                        'recommendation': f"VM is stopped but OS disk continues to cost ${monthly_cost:.2f}/month. Consider creating snapshot and deleting disk if VM no longer needed.",
+                        'tags': os_disk.tags if os_disk.tags else {},
+                    }
+
+                    orphan = OrphanResourceData(
+                        resource_type='managed_disk_on_stopped_vm',
+                        resource_id=os_disk.id,
+                        resource_name=os_disk.name,
+                        region=os_disk.location,
+                        estimated_monthly_cost=monthly_cost,
+                        resource_metadata=metadata
+                    )
+
+                    orphans.append(orphan)
+
+        except Exception as e:
+            print(f"Error scanning disks on stopped VMs in {region}: {str(e)}")
+
+        return orphans
+
     async def scan_orphaned_snapshots(
         self, region: str, detection_rules: dict | None = None, orphaned_volume_ids: list[str] | None = None
     ) -> list[OrphanResourceData]:
         """
         Scan for orphaned Azure Disk Snapshots.
 
+        Detects snapshots whose source disks have been deleted,
+        rendering the snapshots potentially obsolete and wasteful.
+
         Args:
             region: Azure region to scan
-            detection_rules: Optional detection configuration
-            orphaned_volume_ids: List of orphaned disk IDs
+            detection_rules: Optional detection configuration (min_age_days, enabled)
+            orphaned_volume_ids: List of orphaned disk IDs (not used for Azure)
 
         Returns:
             List of orphan snapshot resources
         """
-        # TODO: Implement using azure.mgmt.compute.SnapshotsOperations
-        # Detect: Snapshots where source disk no longer exists
-        return []
+        from datetime import datetime, timezone
+        from azure.identity import ClientSecretCredential
+        from azure.mgmt.compute import ComputeManagementClient
+        from azure.core.exceptions import ResourceNotFoundError
+
+        orphans = []
+        min_age_days = detection_rules.get("min_age_days", 90) if detection_rules else 90
+
+        try:
+            credential = ClientSecretCredential(
+                tenant_id=self.tenant_id,
+                client_id=self.client_id,
+                client_secret=self.client_secret
+            )
+
+            compute_client = ComputeManagementClient(credential, self.subscription_id)
+
+            # List all snapshots
+            snapshots = compute_client.snapshots.list()
+
+            for snapshot in snapshots:
+                if snapshot.location != region:
+                    continue
+
+                # Calculate snapshot age
+                age_days = 0
+                if snapshot.time_created:
+                    age_days = (datetime.now(timezone.utc) - snapshot.time_created).days
+
+                # Skip recent snapshots
+                if age_days < min_age_days:
+                    continue
+
+                # Check if source disk still exists
+                source_disk_id = None
+                source_disk_exists = True
+
+                if snapshot.creation_data and snapshot.creation_data.source_resource_id:
+                    source_disk_id = snapshot.creation_data.source_resource_id
+
+                    # Try to get the source disk
+                    try:
+                        source_disk_rg = source_disk_id.split('/')[4]
+                        source_disk_name = source_disk_id.split('/')[-1]
+                        compute_client.disks.get(source_disk_rg, source_disk_name)
+                    except ResourceNotFoundError:
+                        source_disk_exists = False
+                    except Exception:
+                        # If we can't determine, assume it exists to be safe
+                        source_disk_exists = True
+
+                # Only report as orphan if source disk doesn't exist
+                if not source_disk_exists:
+                    # Calculate snapshot cost ($0.05/GB/month)
+                    snapshot_size_gb = snapshot.disk_size_gb if snapshot.disk_size_gb else 0
+                    monthly_cost = round(snapshot_size_gb * 0.05, 2)
+
+                    metadata = {
+                        'snapshot_id': snapshot.id,
+                        'snapshot_name': snapshot.name,
+                        'snapshot_size_gb': snapshot_size_gb,
+                        'source_disk_id': source_disk_id,
+                        'source_disk_exists': False,
+                        'age_days': age_days,
+                        'time_created': snapshot.time_created.isoformat() if snapshot.time_created else None,
+                        'orphan_reason': f"Snapshot's source disk (ID: {source_disk_id}) no longer exists. Snapshot has been orphaned for {age_days} days.",
+                        'recommendation': f"Review and delete snapshot if no longer needed. Costs ${monthly_cost:.2f}/month.",
+                        'tags': snapshot.tags if snapshot.tags else {},
+                    }
+
+                    orphan = OrphanResourceData(
+                        resource_type='disk_snapshot_orphaned',
+                        resource_id=snapshot.id,
+                        resource_name=snapshot.name,
+                        region=snapshot.location,
+                        estimated_monthly_cost=monthly_cost,
+                        resource_metadata=metadata
+                    )
+
+                    orphans.append(orphan)
+
+        except Exception as e:
+            print(f"Error scanning orphaned snapshots in {region}: {str(e)}")
+
+        return orphans
+
+    async def scan_ips_on_stopped_resources(self, region: str, detection_rules: dict | None = None) -> list[OrphanResourceData]:
+        """
+        Scan for Azure Public IPs associated to stopped/inactive resources.
+
+        Detects Public IPs that continue to incur charges while associated to:
+        - Deallocated (stopped) VMs
+        - Load Balancers with no healthy backends
+        - Network Interfaces not attached to running VMs
+
+        Args:
+            region: Azure region to scan
+            detection_rules: Optional detection configuration (min_stopped_days, enabled)
+
+        Returns:
+            List of orphan public IP resources on stopped resources
+        """
+        from datetime import datetime, timezone
+        from azure.identity import ClientSecretCredential
+        from azure.mgmt.network import NetworkManagementClient
+        from azure.mgmt.compute import ComputeManagementClient
+
+        orphans = []
+        min_stopped_days = detection_rules.get("min_stopped_days", 30) if detection_rules else 30
+
+        try:
+            credential = ClientSecretCredential(
+                tenant_id=self.tenant_id,
+                client_id=self.client_id,
+                client_secret=self.client_secret
+            )
+
+            network_client = NetworkManagementClient(credential, self.subscription_id)
+            compute_client = ComputeManagementClient(credential, self.subscription_id)
+
+            # List all public IPs in the region
+            public_ips = network_client.public_ip_addresses.list_all()
+
+            for ip in public_ips:
+                if ip.location != region:
+                    continue
+
+                # Only process associated IPs
+                if not ip.ip_configuration:
+                    continue
+
+                # Determine what resource the IP is attached to
+                ip_config_id = ip.ip_configuration.id
+                resource_stopped = False
+                resource_type = None
+                resource_name = None
+                stopped_days = 0
+
+                # Case 1: IP attached to Network Interface → Check if NIC is attached to stopped VM
+                if '/networkInterfaces/' in ip_config_id:
+                    nic_rg = ip_config_id.split('/')[4]
+                    nic_name = ip_config_id.split('/')[8]
+
+                    try:
+                        nic = network_client.network_interfaces.get(nic_rg, nic_name)
+
+                        # Check if NIC is attached to a VM
+                        if nic.virtual_machine:
+                            vm_id = nic.virtual_machine.id
+                            vm_rg = vm_id.split('/')[4]
+                            vm_name = vm_id.split('/')[-1]
+
+                            # Get VM power state
+                            instance_view = compute_client.virtual_machines.instance_view(vm_rg, vm_name)
+
+                            for status in instance_view.statuses:
+                                if status.code and status.code.startswith('PowerState/'):
+                                    power_state = status.code.split('/')[-1]
+
+                                    if power_state == 'deallocated':
+                                        resource_stopped = True
+                                        resource_type = 'VM'
+                                        resource_name = vm_name
+
+                                        # Try to determine when VM was stopped
+                                        if hasattr(status, 'time') and status.time:
+                                            stopped_days = (datetime.now(timezone.utc) - status.time).days
+
+                    except Exception as e:
+                        print(f"Error checking NIC {nic_name}: {str(e)}")
+                        continue
+
+                # Case 2: IP attached to Load Balancer → Check if LB has healthy backends
+                elif '/loadBalancers/' in ip_config_id:
+                    lb_rg = ip_config_id.split('/')[4]
+                    lb_name = ip_config_id.split('/')[8]
+
+                    try:
+                        lb = network_client.load_balancers.get(lb_rg, lb_name)
+
+                        # Check if load balancer has any backend pools with IPs
+                        has_backends = False
+                        if lb.backend_address_pools:
+                            for pool in lb.backend_address_pools:
+                                if pool.backend_ip_configurations and len(pool.backend_ip_configurations) > 0:
+                                    has_backends = True
+                                    break
+
+                        if not has_backends:
+                            resource_stopped = True
+                            resource_type = 'Load Balancer'
+                            resource_name = lb_name
+                            # For LBs without backends, we can't determine exact stopped time
+                            # Assume it's been this way for a while if no backends
+                            stopped_days = 30  # Conservative estimate
+
+                    except Exception as e:
+                        print(f"Error checking Load Balancer {lb_name}: {str(e)}")
+                        continue
+
+                # Skip if resource is not stopped or stopped_days < threshold
+                if not resource_stopped or stopped_days < min_stopped_days:
+                    continue
+
+                # Calculate IP cost
+                monthly_cost = self._calculate_public_ip_cost(ip)
+
+                metadata = {
+                    'ip_id': ip.id,
+                    'ip_address': ip.ip_address if ip.ip_address else 'Not assigned',
+                    'sku_name': ip.sku.name if ip.sku else 'Basic',
+                    'allocation_method': ip.public_ip_allocation_method if ip.public_ip_allocation_method else 'Static',
+                    'attached_resource_type': resource_type,
+                    'attached_resource_name': resource_name,
+                    'resource_stopped': True,
+                    'resource_stopped_days': stopped_days,
+                    'orphan_reason': f"Public IP attached to {resource_type} '{resource_name}' which has been stopped/inactive for {stopped_days} days",
+                    'recommendation': f"Consider dissociating and deleting Public IP. IP continues to cost ${monthly_cost:.2f}/month while resource is stopped.",
+                    'tags': ip.tags if ip.tags else {},
+                }
+
+                orphan = OrphanResourceData(
+                    resource_type='public_ip_on_stopped_resource',
+                    resource_id=ip.id,
+                    resource_name=ip.name if ip.name else ip.id.split('/')[-1],
+                    region=ip.location,
+                    estimated_monthly_cost=monthly_cost,
+                    resource_metadata=metadata
+                )
+
+                orphans.append(orphan)
+
+        except Exception as e:
+            print(f"Error scanning Public IPs on stopped resources in {region}: {str(e)}")
+
+        return orphans
 
     async def scan_stopped_instances(
         self, region: str, detection_rules: dict | None = None

@@ -133,7 +133,10 @@ export type ResourceType =
   | "managed_disk_unattached"
   | "public_ip_unassociated"
   | "disk_snapshot_orphaned"
-  | "virtual_machine_deallocated";
+  | "virtual_machine_deallocated"
+  // Azure Phase 1 - Advanced waste scenarios
+  | "managed_disk_on_stopped_vm"
+  | "public_ip_on_stopped_resource";
 
 export interface OrphanResource {
   id: string;

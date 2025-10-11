@@ -51,6 +51,9 @@ const resourceIcons: Record<ResourceType, any> = {
   public_ip_unassociated: Wifi,
   disk_snapshot_orphaned: Camera,
   virtual_machine_deallocated: Server,
+  // Azure Phase 1 - Advanced waste scenarios
+  managed_disk_on_stopped_vm: HardDrive,
+  public_ip_on_stopped_resource: Wifi,
 };
 
 export default function ResourcesPage() {
@@ -236,11 +239,13 @@ export default function ResourcesPage() {
                 </optgroup>
                 <optgroup label="🔵 Azure - Storage & Compute">
                   <option value="managed_disk_unattached">Managed Disk (Unattached)</option>
+                  <option value="managed_disk_on_stopped_vm">Managed Disk (On Stopped VM)</option>
                   <option value="disk_snapshot_orphaned">Disk Snapshot (Orphaned)</option>
                   <option value="virtual_machine_deallocated">Virtual Machine (Deallocated)</option>
                 </optgroup>
                 <optgroup label="🔵 Azure - Networking">
                   <option value="public_ip_unassociated">Public IP (Unassociated)</option>
+                  <option value="public_ip_on_stopped_resource">Public IP (On Stopped Resource)</option>
                 </optgroup>
               </select>
             </div>
@@ -1878,8 +1883,137 @@ function ResourceCard({ resource, onIgnore, onMarkForDeletion, onDelete }: any) 
                     </div>
                   )}
 
+                  {/* Azure Phase 1: Managed Disk on Stopped VM */}
+                  {resource.resource_type === 'managed_disk_on_stopped_vm' && (
+                    <div className="space-y-2 text-sm">
+                      {/* Disk SKU and Size */}
+                      <div className="flex items-center gap-2">
+                        <span className={`px-2 py-1 rounded text-xs font-semibold ${
+                          resource.resource_metadata?.sku_name?.includes('Premium') ? 'bg-purple-100 text-purple-700' :
+                          resource.resource_metadata?.sku_name?.includes('StandardSSD') ? 'bg-blue-100 text-blue-700' :
+                          resource.resource_metadata?.sku_name?.includes('UltraSSD') ? 'bg-red-100 text-red-700' :
+                          'bg-gray-100 text-gray-700'
+                        }`}>
+                          {resource.resource_metadata?.sku_name || 'Unknown SKU'}
+                        </span>
+                        <span className="text-gray-600">{resource.resource_metadata?.disk_size_gb || 0} GB</span>
+                      </div>
+
+                      {/* Attached VM Info */}
+                      <div className="flex items-center gap-2 text-orange-700">
+                        <span className="font-semibold">💻</span>
+                        <span className="font-semibold">VM: {resource.resource_metadata?.vm_name || 'Unknown'}</span>
+                      </div>
+
+                      {/* VM Power State */}
+                      <div className="flex items-center gap-2 text-red-700">
+                        <span className="font-semibold">⏸️</span>
+                        <span className="font-semibold">VM Status: Deallocated (Stopped)</span>
+                      </div>
+
+                      {/* Stopped Duration */}
+                      {resource.resource_metadata?.stopped_days !== undefined && (
+                        <div className="flex items-center gap-2 text-orange-700">
+                          <span className="font-semibold">⏱</span>
+                          <span>VM stopped for {resource.resource_metadata.stopped_days} days</span>
+                        </div>
+                      )}
+
+                      {/* Disk Type (OS vs Data) */}
+                      {resource.resource_metadata?.disk_type && (
+                        <div className="flex items-center gap-2 text-blue-700">
+                          <span className="font-semibold">📀</span>
+                          <span>{resource.resource_metadata.disk_type === 'os' ? 'OS Disk' : 'Data Disk'}</span>
+                        </div>
+                      )}
+
+                      {/* Orphan reason */}
+                      <div className="flex items-center gap-2 text-gray-600 mt-1">
+                        <span className="font-semibold">ℹ️</span>
+                        <span className="italic">{resource.resource_metadata?.orphan_reason || 'Disk attached to stopped VM incurring charges'}</span>
+                      </div>
+
+                      {/* Warning message */}
+                      <div className="flex items-center gap-2 text-amber-600 mt-1 bg-amber-50 p-2 rounded">
+                        <span className="font-semibold">💡</span>
+                        <span className="text-xs">Consider deleting unused VMs or detaching/deleting unused disks</span>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Azure Phase 1: Public IP on Stopped Resource */}
+                  {resource.resource_type === 'public_ip_on_stopped_resource' && (
+                    <div className="space-y-2 text-sm">
+                      {/* SKU and Allocation Method */}
+                      <div className="flex items-center gap-2">
+                        <span className={`px-2 py-1 rounded text-xs font-semibold ${
+                          resource.resource_metadata?.sku_name === 'Standard' ? 'bg-blue-100 text-blue-700' :
+                          'bg-gray-100 text-gray-700'
+                        }`}>
+                          {resource.resource_metadata?.sku_name || 'Basic'}
+                        </span>
+                        <span className={`px-2 py-1 rounded text-xs font-semibold ${
+                          resource.resource_metadata?.allocation_method === 'Static' ? 'bg-green-100 text-green-700' :
+                          'bg-orange-100 text-orange-700'
+                        }`}>
+                          {resource.resource_metadata?.allocation_method || 'Unknown'}
+                        </span>
+                      </div>
+
+                      {/* IP Address */}
+                      {resource.resource_metadata?.ip_address && (
+                        <div className="flex items-center gap-2 text-gray-700">
+                          <span className="font-semibold">🌐</span>
+                          <span className="font-mono">{resource.resource_metadata.ip_address}</span>
+                        </div>
+                      )}
+
+                      {/* Attached Resource Type */}
+                      {resource.resource_metadata?.attached_resource_type && (
+                        <div className="flex items-center gap-2 text-orange-700">
+                          <span className="font-semibold">🔗</span>
+                          <span>Attached to: {resource.resource_metadata.attached_resource_type}</span>
+                        </div>
+                      )}
+
+                      {/* Attached Resource Name */}
+                      {resource.resource_metadata?.attached_resource_name && (
+                        <div className="flex items-center gap-2 text-gray-700">
+                          <span className="font-semibold">📌</span>
+                          <span>{resource.resource_metadata.attached_resource_name}</span>
+                        </div>
+                      )}
+
+                      {/* Resource Status */}
+                      <div className="flex items-center gap-2 text-red-700">
+                        <span className="font-semibold">⏸️</span>
+                        <span className="font-semibold">Resource Status: Stopped/Inactive</span>
+                      </div>
+
+                      {/* Stopped Duration */}
+                      {resource.resource_metadata?.stopped_days !== undefined && (
+                        <div className="flex items-center gap-2 text-orange-700">
+                          <span className="font-semibold">⏱</span>
+                          <span>Resource stopped for {resource.resource_metadata.stopped_days} days</span>
+                        </div>
+                      )}
+
+                      {/* Orphan reason */}
+                      <div className="flex items-center gap-2 text-gray-600 mt-1">
+                        <span className="font-semibold">ℹ️</span>
+                        <span className="italic">{resource.resource_metadata?.orphan_reason || 'Public IP on stopped resource incurring charges'}</span>
+                      </div>
+
+                      {/* Warning message */}
+                      <div className="flex items-center gap-2 text-amber-600 mt-1 bg-amber-50 p-2 rounded">
+                        <span className="font-semibold">💡</span>
+                        <span className="text-xs">Consider releasing unused public IPs or starting the associated resource</span>
+                      </div>
+                    </div>
+                  )}
+
                   {/* Generic criteria for other resource types */}
-                  {!['ebs_volume', 'elastic_ip', 'rds_instance', 'ec2_instance', 'load_balancer', 'nat_gateway', 'ebs_snapshot', 'eks_cluster', 's3_bucket', 'lambda_function', 'dynamodb_table', 'elasticache_cluster', 'managed_disk_unattached', 'public_ip_unassociated', 'virtual_machine_deallocated', 'disk_snapshot_orphaned'].includes(resource.resource_type) && (
+                  {!['ebs_volume', 'elastic_ip', 'rds_instance', 'ec2_instance', 'load_balancer', 'nat_gateway', 'ebs_snapshot', 'eks_cluster', 's3_bucket', 'lambda_function', 'dynamodb_table', 'elasticache_cluster', 'managed_disk_unattached', 'public_ip_unassociated', 'virtual_machine_deallocated', 'disk_snapshot_orphaned', 'managed_disk_on_stopped_vm', 'public_ip_on_stopped_resource'].includes(resource.resource_type) && (
                     <div className="text-sm">
                       <div className="flex items-center gap-2 text-gray-700">
                         <span className="font-semibold">ℹ️</span>

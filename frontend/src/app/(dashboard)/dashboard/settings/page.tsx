@@ -54,6 +54,9 @@ const AZURE_RESOURCE_ICONS: { [key: string]: any } = {
   public_ip_unassociated: Globe,
   disk_snapshot_orphaned: Camera,
   virtual_machine_deallocated: Server,
+  // Phase 1 - Advanced waste scenarios
+  managed_disk_on_stopped_vm: HardDrive,
+  public_ip_on_stopped_resource: Globe,
 };
 
 const AZURE_RESOURCE_LABELS: { [key: string]: string } = {
@@ -61,6 +64,9 @@ const AZURE_RESOURCE_LABELS: { [key: string]: string } = {
   public_ip_unassociated: "Public IP Addresses (Unassociated)",
   disk_snapshot_orphaned: "Disk Snapshots (Orphaned)",
   virtual_machine_deallocated: "Virtual Machines (Deallocated)",
+  // Phase 1 - Advanced waste scenarios
+  managed_disk_on_stopped_vm: "Managed Disks (On Stopped VMs)",
+  public_ip_on_stopped_resource: "Public IPs (On Stopped Resources)",
 };
 
 // Helper function to get provider from resource type
