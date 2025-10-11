@@ -16,6 +16,7 @@ from app.models.cloud_account import CloudAccount
 from app.models.orphan_resource import OrphanResource
 from app.models.scan import Scan, ScanStatus
 from app.providers.aws import AWSProvider
+from app.providers.azure import AzureProvider
 from app.workers.celery_app import celery_app
 
 # Create async engine for database operations
@@ -149,6 +150,90 @@ async def _scan_cloud_account_async(
                     # Scan all resource types in this region
                     # Pass user's detection rules
                     # Scan global resources (S3, etc.) only in the first region (i == 0)
+                    orphans = await provider.scan_all_resources(
+                        region, user_detection_rules, scan_global_resources=(i == 0)
+                    )
+                    all_orphans.extend(orphans)
+                    total_resources += len(orphans)
+
+                # Save orphan resources to database
+                for orphan in all_orphans:
+                    orphan_resource = OrphanResource(
+                        scan_id=scan.id,
+                        cloud_account_id=account.id,
+                        resource_type=orphan.resource_type,
+                        resource_id=orphan.resource_id,
+                        resource_name=orphan.resource_name,
+                        region=orphan.region,
+                        estimated_monthly_cost=orphan.estimated_monthly_cost,
+                        resource_metadata=orphan.resource_metadata,
+                    )
+                    db.add(orphan_resource)
+
+                # Calculate total waste
+                total_waste = sum(o.estimated_monthly_cost for o in all_orphans)
+
+                # Update scan with results
+                scan.status = ScanStatus.COMPLETED.value
+                scan.total_resources_scanned = total_resources
+                scan.orphan_resources_found = len(all_orphans)
+                scan.estimated_monthly_waste = total_waste
+                scan.completed_at = datetime.now()
+
+                # Update account last_scan_at
+                account.last_scan_at = datetime.now()
+
+                await db.commit()
+
+                return {
+                    "scan_id": str(scan.id),
+                    "status": "completed",
+                    "total_resources_scanned": total_resources,
+                    "orphan_resources_found": len(all_orphans),
+                    "estimated_monthly_waste": total_waste,
+                    "regions_scanned": regions_to_scan,
+                }
+
+            elif account.provider == "azure":
+                provider = AzureProvider(
+                    tenant_id=credentials["tenant_id"],
+                    client_id=credentials["client_id"],
+                    client_secret=credentials["client_secret"],
+                    subscription_id=credentials["subscription_id"],
+                    regions=account.regions if account.regions else None,
+                )
+
+                # Validate credentials
+                await provider.validate_credentials()
+
+                # Get regions to scan
+                regions_to_scan = (
+                    account.regions
+                    if account.regions
+                    else await provider.get_available_regions()
+                )
+
+                # Limit to first 3 regions for faster scanning in MVP
+                regions_to_scan = regions_to_scan[:3]
+
+                # Scan all regions
+                all_orphans = []
+                total_resources = 0
+
+                for i, region in enumerate(regions_to_scan):
+                    # Update task progress
+                    task.update_state(
+                        state="PROGRESS",
+                        meta={
+                            "current": i + 1,
+                            "total": len(regions_to_scan),
+                            "region": region,
+                        },
+                    )
+
+                    # Scan all resource types in this region
+                    # Pass user's detection rules
+                    # Scan global resources (Storage Accounts, etc.) only in the first region (i == 0)
                     orphans = await provider.scan_all_resources(
                         region, user_detection_rules, scan_global_resources=(i == 0)
                     )

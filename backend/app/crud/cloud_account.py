@@ -10,6 +10,7 @@ from app.core.security import credential_encryption
 from app.models.cloud_account import CloudAccount
 from app.schemas.cloud_account import (
     AWSCredentials,
+    AzureCredentials,
     CloudAccountCreate,
     CloudAccountUpdate,
     CloudAccountWithCredentials,
@@ -99,9 +100,24 @@ async def create_cloud_account(
             "access_key_id": account_in.aws_access_key_id,
             "secret_access_key": account_in.aws_secret_access_key,
         }
-    # Future providers: azure, gcp
-    # elif account_in.provider == "azure":
-    #     ...
+    elif account_in.provider == "azure":
+        if (
+            not account_in.azure_tenant_id
+            or not account_in.azure_client_id
+            or not account_in.azure_client_secret
+            or not account_in.azure_subscription_id
+        ):
+            raise ValueError(
+                "Azure credentials (tenant_id, client_id, client_secret, subscription_id) are required"
+            )
+
+        credentials_dict = {
+            "tenant_id": account_in.azure_tenant_id,
+            "client_id": account_in.azure_client_id,
+            "client_secret": account_in.azure_client_secret,
+            "subscription_id": account_in.azure_subscription_id,
+        }
+    # Future providers: gcp
     # elif account_in.provider == "gcp":
     #     ...
 
@@ -145,7 +161,7 @@ async def update_cloud_account(
     """
     update_data = account_in.model_dump(exclude_unset=True)
 
-    # Handle credentials update if provided
+    # Handle AWS credentials update if provided
     if "aws_access_key_id" in update_data and "aws_secret_access_key" in update_data:
         credentials_dict = {
             "access_key_id": update_data.pop("aws_access_key_id"),
@@ -155,9 +171,32 @@ async def update_cloud_account(
         encrypted_credentials = credential_encryption.encrypt(credentials_json)
         update_data["credentials_encrypted"] = encrypted_credentials
     else:
-        # Remove individual credential fields if only one was provided
+        # Remove individual AWS credential fields if only one was provided
         update_data.pop("aws_access_key_id", None)
         update_data.pop("aws_secret_access_key", None)
+
+    # Handle Azure credentials update if all four fields provided
+    if (
+        "azure_tenant_id" in update_data
+        and "azure_client_id" in update_data
+        and "azure_client_secret" in update_data
+        and "azure_subscription_id" in update_data
+    ):
+        credentials_dict = {
+            "tenant_id": update_data.pop("azure_tenant_id"),
+            "client_id": update_data.pop("azure_client_id"),
+            "client_secret": update_data.pop("azure_client_secret"),
+            "subscription_id": update_data.pop("azure_subscription_id"),
+        }
+        credentials_json = json.dumps(credentials_dict)
+        encrypted_credentials = credential_encryption.encrypt(credentials_json)
+        update_data["credentials_encrypted"] = encrypted_credentials
+    else:
+        # Remove individual Azure credential fields if not all provided
+        update_data.pop("azure_tenant_id", None)
+        update_data.pop("azure_client_id", None)
+        update_data.pop("azure_client_secret", None)
+        update_data.pop("azure_subscription_id", None)
 
     # Update fields
     for field, value in update_data.items():
@@ -210,11 +249,20 @@ async def get_decrypted_credentials(
 
     # Parse based on provider
     aws_credentials = None
+    azure_credentials = None
+
     if db_account.provider == "aws":
         aws_credentials = AWSCredentials(
             access_key_id=credentials_dict["access_key_id"],
             secret_access_key=credentials_dict["secret_access_key"],
             region=db_account.regions[0] if db_account.regions else "us-east-1",
+        )
+    elif db_account.provider == "azure":
+        azure_credentials = AzureCredentials(
+            tenant_id=credentials_dict["tenant_id"],
+            client_id=credentials_dict["client_id"],
+            client_secret=credentials_dict["client_secret"],
+            subscription_id=credentials_dict["subscription_id"],
         )
 
     # Create response with decrypted credentials
@@ -236,4 +284,5 @@ async def get_decrypted_credentials(
         created_at=db_account.created_at,
         updated_at=db_account.updated_at,
         aws_credentials=aws_credentials,
+        azure_credentials=azure_credentials,
     )

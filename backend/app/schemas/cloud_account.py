@@ -15,6 +15,16 @@ class AWSCredentials(BaseModel):
     region: str = Field(default="us-east-1", pattern="^[a-z]{2}-[a-z]+-[0-9]{1}$")
 
 
+# Azure credentials schema (not stored directly, used for encryption)
+class AzureCredentials(BaseModel):
+    """Azure credentials schema."""
+
+    tenant_id: str = Field(..., min_length=36, max_length=36, description="Azure AD Tenant ID (GUID)")
+    client_id: str = Field(..., min_length=36, max_length=36, description="Azure Service Principal Application/Client ID (GUID)")
+    client_secret: str = Field(..., min_length=1, max_length=256, description="Azure Service Principal Client Secret")
+    subscription_id: str = Field(..., min_length=36, max_length=36, description="Azure Subscription ID (GUID)")
+
+
 # Base schema
 class CloudAccountBase(BaseModel):
     """Base cloud account schema."""
@@ -48,8 +58,33 @@ class CloudAccountCreate(CloudAccountBase):
         description="AWS Secret Access Key (required for AWS)",
     )
 
-    # Future: Azure and GCP credentials
-    # azure_credentials: dict | None = None
+    # Azure credentials (will be encrypted before storage)
+    azure_tenant_id: str | None = Field(
+        default=None,
+        min_length=36,
+        max_length=36,
+        description="Azure AD Tenant ID (required for Azure)",
+    )
+    azure_client_id: str | None = Field(
+        default=None,
+        min_length=36,
+        max_length=36,
+        description="Azure Service Principal Client ID (required for Azure)",
+    )
+    azure_client_secret: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=256,
+        description="Azure Service Principal Client Secret (required for Azure)",
+    )
+    azure_subscription_id: str | None = Field(
+        default=None,
+        min_length=36,
+        max_length=36,
+        description="Azure Subscription ID (required for Azure)",
+    )
+
+    # Future: GCP credentials
     # gcp_credentials: dict | None = None
 
 
@@ -62,9 +97,15 @@ class CloudAccountUpdate(BaseModel):
     description: str | None = Field(default=None, max_length=1000)
     is_active: bool | None = None
 
-    # Allow updating credentials
+    # Allow updating AWS credentials
     aws_access_key_id: str | None = Field(default=None, min_length=16, max_length=128)
     aws_secret_access_key: str | None = Field(default=None, min_length=16, max_length=128)
+
+    # Allow updating Azure credentials
+    azure_tenant_id: str | None = Field(default=None, min_length=36, max_length=36)
+    azure_client_id: str | None = Field(default=None, min_length=36, max_length=36)
+    azure_client_secret: str | None = Field(default=None, min_length=1, max_length=256)
+    azure_subscription_id: str | None = Field(default=None, min_length=36, max_length=36)
 
     # Scheduled scan settings
     scheduled_scan_enabled: bool | None = None
@@ -100,5 +141,5 @@ class CloudAccountWithCredentials(CloudAccount):
     """Cloud account with decrypted credentials (internal use only)."""
 
     aws_credentials: AWSCredentials | None = None
-    # azure_credentials: dict | None = None
+    azure_credentials: AzureCredentials | None = None
     # gcp_credentials: dict | None = None

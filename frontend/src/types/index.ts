@@ -46,11 +46,20 @@ export interface CloudAccount {
 }
 
 export interface CloudAccountCreate {
-  provider: "aws";
+  provider: "aws" | "azure";
   account_name: string;
   account_identifier: string;
-  aws_access_key_id: string;
-  aws_secret_access_key: string;
+
+  // AWS credentials
+  aws_access_key_id?: string;
+  aws_secret_access_key?: string;
+
+  // Azure credentials
+  azure_tenant_id?: string;
+  azure_client_id?: string;
+  azure_client_secret?: string;
+  azure_subscription_id?: string;
+
   regions?: string[];
   description?: string;
 }

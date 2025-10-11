@@ -11,11 +11,13 @@ from app.crud import cloud_account as cloud_account_crud
 from app.models.user import User
 from app.schemas.cloud_account import (
     AWSCredentials,
+    AzureCredentials,
     CloudAccount,
     CloudAccountCreate,
     CloudAccountUpdate,
 )
 from app.services.aws_validator import AWSValidationError, validate_aws_credentials
+from app.services.azure_validator import AzureValidationError, validate_azure_credentials
 
 router = APIRouter()
 
@@ -70,6 +72,38 @@ async def create_cloud_account(
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"AWS credentials validation failed: {str(e)}",
+            )
+
+    elif account_in.provider == "azure":
+        if (
+            not account_in.azure_tenant_id
+            or not account_in.azure_client_id
+            or not account_in.azure_client_secret
+            or not account_in.azure_subscription_id
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Azure Tenant ID, Client ID, Client Secret, and Subscription ID are required for Azure accounts",
+            )
+
+        # Validate Azure credentials
+        try:
+            credentials = AzureCredentials(
+                tenant_id=account_in.azure_tenant_id,
+                client_id=account_in.azure_client_id,
+                client_secret=account_in.azure_client_secret,
+                subscription_id=account_in.azure_subscription_id,
+            )
+            subscription_info = await validate_azure_credentials(credentials)
+
+            # Optionally update account_identifier with subscription ID
+            if not account_in.account_identifier:
+                account_in.account_identifier = subscription_info["subscription_id"]
+
+        except AzureValidationError as e:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Azure credentials validation failed: {str(e)}",
             )
 
     # Create cloud account with encrypted credentials
@@ -205,6 +239,28 @@ async def update_cloud_account(
                 detail=f"AWS credentials validation failed: {str(e)}",
             )
 
+    # If updating Azure credentials, validate them
+    if (
+        account_in.azure_tenant_id
+        and account_in.azure_client_id
+        and account_in.azure_client_secret
+        and account_in.azure_subscription_id
+    ):
+        try:
+            credentials = AzureCredentials(
+                tenant_id=account_in.azure_tenant_id,
+                client_id=account_in.azure_client_id,
+                client_secret=account_in.azure_client_secret,
+                subscription_id=account_in.azure_subscription_id,
+            )
+            await validate_azure_credentials(credentials)
+
+        except AzureValidationError as e:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Azure credentials validation failed: {str(e)}",
+            )
+
     # Update account
     updated_account = await cloud_account_crud.update_cloud_account(
         db=db,
@@ -306,6 +362,29 @@ async def validate_cloud_account(
             }
 
         except AWSValidationError as e:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Validation failed: {str(e)}",
+            )
+
+    elif account.provider == "azure" and account_with_creds.azure_credentials:
+        try:
+            # Validate credentials
+            subscription_info = await validate_azure_credentials(account_with_creds.azure_credentials)
+
+            # Check permissions
+            from app.services.azure_validator import check_azure_read_permissions
+
+            permissions = await check_azure_read_permissions(account_with_creds.azure_credentials)
+
+            return {
+                "status": "valid",
+                "provider": "azure",
+                "subscription_info": subscription_info,
+                "permissions": permissions,
+            }
+
+        except AzureValidationError as e:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Validation failed: {str(e)}",

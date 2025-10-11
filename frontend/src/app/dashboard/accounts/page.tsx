@@ -6,12 +6,22 @@ import { Plus, Trash2, RefreshCw, CheckCircle, XCircle, HelpCircle, ChevronDown,
 
 export default function AccountsPage() {
   const { accounts, fetchAccounts, deleteAccount, isLoading } = useAccountStore();
-  const [showAddForm, setShowAddForm] = useState(false);
+  const [showProviderSelector, setShowProviderSelector] = useState(false);
+  const [selectedProvider, setSelectedProvider] = useState<"aws" | "azure" | null>(null);
   const [editingAccount, setEditingAccount] = useState<any>(null);
 
   useEffect(() => {
     fetchAccounts();
   }, [fetchAccounts]);
+
+  const handleAddAccount = (provider: "aws" | "azure") => {
+    setSelectedProvider(provider);
+    setShowProviderSelector(false);
+  };
+
+  const closeAddForm = () => {
+    setSelectedProvider(null);
+  };
 
   return (
     <div className="space-y-4 md:space-y-6">
@@ -24,7 +34,7 @@ export default function AccountsPage() {
           </p>
         </div>
         <button
-          onClick={() => setShowAddForm(true)}
+          onClick={() => setShowProviderSelector(true)}
           className="w-full sm:w-auto flex items-center justify-center gap-2 rounded-lg bg-blue-600 px-4 py-2 font-medium text-white transition-colors hover:bg-blue-700"
         >
           <Plus className="h-5 w-5" />
@@ -32,8 +42,19 @@ export default function AccountsPage() {
         </button>
       </div>
 
-      {/* Add Account Form */}
-      {showAddForm && <AddAccountForm onClose={() => setShowAddForm(false)} />}
+      {/* Provider Selector */}
+      {showProviderSelector && (
+        <ProviderSelector
+          onSelectProvider={handleAddAccount}
+          onClose={() => setShowProviderSelector(false)}
+        />
+      )}
+
+      {/* Add AWS Account Form */}
+      {selectedProvider === "aws" && <AddAWSAccountForm onClose={closeAddForm} />}
+
+      {/* Add Azure Account Form */}
+      {selectedProvider === "azure" && <AddAzureAccountForm onClose={closeAddForm} />}
 
       {/* Edit Account Form */}
       {editingAccount && (
@@ -300,7 +321,58 @@ function AWSCredentialsHelp() {
   );
 }
 
-function AddAccountForm({ onClose }: { onClose: () => void }) {
+function ProviderSelector({ onSelectProvider, onClose }: { onSelectProvider: (provider: "aws" | "azure") => void; onClose: () => void }) {
+  return (
+    <div className="rounded-2xl border-2 border-blue-200 bg-white p-8 shadow-xl">
+      <div className="flex items-center justify-between mb-6">
+        <h2 className="text-2xl font-bold bg-gradient-to-r from-blue-600 to-purple-600 bg-clip-text text-transparent">
+          Select Cloud Provider
+        </h2>
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        {/* AWS Card */}
+        <button
+          onClick={() => onSelectProvider("aws")}
+          className="flex flex-col items-center gap-4 rounded-xl border-2 border-orange-200 bg-orange-50 p-6 transition-all hover:border-orange-400 hover:bg-orange-100 hover:shadow-lg"
+        >
+          <div className="flex h-16 w-16 items-center justify-center rounded-full bg-orange-600 text-white shadow-md">
+            <span className="text-2xl font-bold">AWS</span>
+          </div>
+          <div className="text-center">
+            <h3 className="text-lg font-bold text-gray-900">Amazon Web Services</h3>
+            <p className="mt-1 text-sm text-gray-600">Connect your AWS account</p>
+          </div>
+        </button>
+
+        {/* Azure Card */}
+        <button
+          onClick={() => onSelectProvider("azure")}
+          className="flex flex-col items-center gap-4 rounded-xl border-2 border-blue-200 bg-blue-50 p-6 transition-all hover:border-blue-400 hover:bg-blue-100 hover:shadow-lg"
+        >
+          <div className="flex h-16 w-16 items-center justify-center rounded-full bg-blue-600 text-white shadow-md">
+            <span className="text-xl font-bold">Azure</span>
+          </div>
+          <div className="text-center">
+            <h3 className="text-lg font-bold text-gray-900">Microsoft Azure</h3>
+            <p className="mt-1 text-sm text-gray-600">Connect your Azure subscription</p>
+          </div>
+        </button>
+      </div>
+
+      <div className="mt-6 flex justify-end">
+        <button
+          onClick={onClose}
+          className="rounded-xl border-2 border-gray-300 bg-white px-6 py-3 font-semibold text-gray-700 hover:bg-gray-50 transition-all"
+        >
+          Cancel
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function AddAWSAccountForm({ onClose }: { onClose: () => void }) {
   const { createAccount, isLoading, error } = useAccountStore();
   const [showHelp, setShowHelp] = useState(false);
   const [formData, setFormData] = useState({
@@ -760,6 +832,362 @@ function EditAccountForm({ account, onClose }: { account: any; onClose: () => vo
           </div>
         </form>
       </div>
+    </div>
+  );
+}
+
+function AzureCredentialsHelp() {
+  const [copiedPolicy, setCopiedPolicy] = useState(false);
+
+  const azureReaderRole = `{
+  "properties": {
+    "roleName": "Reader",
+    "description": "Read-only access to Azure resources",
+    "assignableScopes": ["/subscriptions/{subscription-id}"],
+    "permissions": [{
+      "actions": ["*/read"],
+      "notActions": [],
+      "dataActions": [],
+      "notDataActions": []
+    }]
+  }
+}`;
+
+  const copyPolicy = () => {
+    navigator.clipboard.writeText(azureReaderRole);
+    setCopiedPolicy(true);
+    setTimeout(() => setCopiedPolicy(false), 2000);
+  };
+
+  return (
+    <div className="mb-6 rounded-xl border-2 border-blue-200 bg-gradient-to-br from-blue-50 to-purple-50 p-6">
+      <div className="flex items-start gap-3 mb-4">
+        <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-blue-600 text-white shadow-md">
+          <HelpCircle className="h-6 w-6" />
+        </div>
+        <div>
+          <h3 className="text-lg font-bold text-gray-900">How to get your Azure credentials</h3>
+          <p className="text-sm text-gray-600 mt-1">Follow these steps to create a Service Principal</p>
+        </div>
+      </div>
+
+      <div className="space-y-4">
+        {/* Step 1 */}
+        <div className="flex gap-3">
+          <div className="flex h-7 w-7 items-center justify-center rounded-full bg-blue-600 text-white font-bold text-sm flex-shrink-0">
+            1
+          </div>
+          <div className="flex-1">
+            <h4 className="font-semibold text-gray-900">Go to Azure Portal</h4>
+            <p className="text-sm text-gray-600 mt-1">
+              Navigate to Azure Active Directory → App registrations → New registration
+            </p>
+            <a
+              href="https://portal.azure.com/#view/Microsoft_AAD_IAM/ActiveDirectoryMenuBlade/~/RegisteredApps"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="mt-2 inline-flex items-center gap-1 text-sm text-blue-600 hover:text-blue-700 font-medium"
+            >
+              <ExternalLink className="h-4 w-4" />
+              Open App Registrations
+            </a>
+          </div>
+        </div>
+
+        {/* Step 2 */}
+        <div className="flex gap-3">
+          <div className="flex h-7 w-7 items-center justify-center rounded-full bg-purple-600 text-white font-bold text-sm flex-shrink-0">
+            2
+          </div>
+          <div className="flex-1">
+            <h4 className="font-semibold text-gray-900">Create Service Principal</h4>
+            <p className="text-sm text-gray-600 mt-1">
+              Name: <code className="bg-gray-200 px-2 py-0.5 rounded">cloudwaste-scanner</code>
+              <br />
+              Supported account types: Single tenant
+              <br />
+              Redirect URI: Leave blank
+            </p>
+          </div>
+        </div>
+
+        {/* Step 3 */}
+        <div className="flex gap-3">
+          <div className="flex h-7 w-7 items-center justify-center rounded-full bg-orange-600 text-white font-bold text-sm flex-shrink-0">
+            3
+          </div>
+          <div className="flex-1">
+            <h4 className="font-semibold text-gray-900">Get Client Secret</h4>
+            <p className="text-sm text-gray-600 mt-1">
+              In your app → Certificates & secrets → New client secret
+              <br />
+              Description: CloudWaste Scanner
+              <br />
+              Expires: 24 months (recommended)
+            </p>
+            <div className="mt-3 rounded-lg bg-amber-50 border border-amber-200 p-3">
+              <p className="text-xs text-amber-800 font-medium">
+                ⚠️ Save the Client Secret VALUE immediately - you won't see it again!
+              </p>
+            </div>
+          </div>
+        </div>
+
+        {/* Step 4 */}
+        <div className="flex gap-3">
+          <div className="flex h-7 w-7 items-center justify-center rounded-full bg-green-600 text-white font-bold text-sm flex-shrink-0">
+            4
+          </div>
+          <div className="flex-1">
+            <h4 className="font-semibold text-gray-900">Assign Reader Role</h4>
+            <p className="text-sm text-gray-600 mt-1">
+              Go to Subscriptions → Select your subscription → Access control (IAM) → Add role assignment
+            </p>
+            <ul className="text-sm text-gray-600 mt-2 space-y-1 list-disc list-inside">
+              <li><strong>Role</strong>: Reader (read-only access)</li>
+              <li><strong>Assign access to</strong>: User, group, or service principal</li>
+              <li><strong>Select</strong>: cloudwaste-scanner</li>
+            </ul>
+          </div>
+        </div>
+
+        {/* Step 5 */}
+        <div className="flex gap-3">
+          <div className="flex h-7 w-7 items-center justify-center rounded-full bg-indigo-600 text-white font-bold text-sm flex-shrink-0">
+            5
+          </div>
+          <div className="flex-1">
+            <h4 className="font-semibold text-gray-900">Get Credentials</h4>
+            <p className="text-sm text-gray-600 mt-1">
+              Go to your App registration → Overview page:
+            </p>
+            <ul className="text-sm text-gray-600 mt-2 space-y-1 list-disc list-inside">
+              <li><strong>Application (client) ID</strong>: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx</li>
+              <li><strong>Directory (tenant) ID</strong>: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx</li>
+            </ul>
+            <p className="text-sm text-gray-600 mt-3">
+              <strong>Subscription ID</strong>: Go to Subscriptions → Copy your subscription ID
+            </p>
+          </div>
+        </div>
+      </div>
+
+      <div className="mt-6 rounded-lg bg-blue-50 border border-blue-200 p-4">
+        <p className="text-sm text-blue-900">
+          <strong>🔒 Security:</strong> CloudWaste only uses READ-ONLY permissions (Reader role). We never modify or delete your Azure resources.
+        </p>
+      </div>
+    </div>
+  );
+}
+
+function AddAzureAccountForm({ onClose }: { onClose: () => void }) {
+  const { createAccount, isLoading, error } = useAccountStore();
+  const [showHelp, setShowHelp] = useState(false);
+  const [formData, setFormData] = useState({
+    account_name: "",
+    azure_tenant_id: "",
+    azure_client_id: "",
+    azure_client_secret: "",
+    azure_subscription_id: "",
+    regions: "eastus,westeurope,northeurope",
+    description: "",
+  });
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    try {
+      await createAccount({
+        provider: "azure",
+        account_name: formData.account_name,
+        account_identifier: formData.azure_subscription_id,
+        azure_tenant_id: formData.azure_tenant_id,
+        azure_client_id: formData.azure_client_id,
+        azure_client_secret: formData.azure_client_secret,
+        azure_subscription_id: formData.azure_subscription_id,
+        regions: formData.regions.split(",").map((r) => r.trim()),
+        description: formData.description || undefined,
+      });
+      onClose();
+    } catch (err) {
+      // Error handled by store
+    }
+  };
+
+  return (
+    <div className="rounded-2xl border-2 border-blue-200 bg-white p-8 shadow-xl">
+      <div className="flex items-center justify-between mb-6">
+        <h2 className="text-2xl font-bold bg-gradient-to-r from-blue-600 to-purple-600 bg-clip-text text-transparent">
+          Add Azure Account
+        </h2>
+        <button
+          type="button"
+          onClick={() => setShowHelp(!showHelp)}
+          className="flex items-center gap-2 rounded-lg bg-blue-50 px-4 py-2 text-sm font-medium text-blue-700 hover:bg-blue-100 transition-colors"
+        >
+          <HelpCircle className="h-4 w-4" />
+          {showHelp ? "Hide" : "How to get credentials?"}
+          {showHelp ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
+        </button>
+      </div>
+
+      {/* Help Section */}
+      {showHelp && <AzureCredentialsHelp />}
+
+      <form onSubmit={handleSubmit} className="mt-6 space-y-5">
+        {error && (
+          <div className="rounded-xl bg-red-50 border border-red-200 p-4 text-sm text-red-700 flex items-start gap-2">
+            <XCircle className="h-5 w-5 flex-shrink-0 mt-0.5" />
+            <span>{error}</span>
+          </div>
+        )}
+
+        <div>
+          <label className="block text-sm font-semibold text-gray-700 mb-2">
+            Account Name *
+          </label>
+          <input
+            required
+            type="text"
+            value={formData.account_name}
+            onChange={(e) =>
+              setFormData({ ...formData, account_name: e.target.value })
+            }
+            className="block w-full rounded-xl border-2 border-gray-300 px-4 py-3 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/20 transition-all"
+            placeholder="Production Azure"
+          />
+        </div>
+
+        <div>
+          <label className="block text-sm font-semibold text-gray-700 mb-2">
+            Azure Subscription ID *
+            <span className="ml-2 text-xs font-normal text-gray-500">(GUID format)</span>
+          </label>
+          <input
+            required
+            type="text"
+            value={formData.azure_subscription_id}
+            onChange={(e) =>
+              setFormData({ ...formData, azure_subscription_id: e.target.value })
+            }
+            className="block w-full rounded-xl border-2 border-gray-300 px-4 py-3 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/20 transition-all font-mono text-sm"
+            placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+          />
+        </div>
+
+        <div>
+          <label className="block text-sm font-semibold text-gray-700 mb-2">
+            Azure Tenant ID *
+            <span className="ml-2 text-xs font-normal text-gray-500">(Directory ID)</span>
+          </label>
+          <input
+            required
+            type="text"
+            value={formData.azure_tenant_id}
+            onChange={(e) =>
+              setFormData({ ...formData, azure_tenant_id: e.target.value })
+            }
+            className="block w-full rounded-xl border-2 border-gray-300 px-4 py-3 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/20 transition-all font-mono text-sm"
+            placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+          />
+        </div>
+
+        <div>
+          <label className="block text-sm font-semibold text-gray-700 mb-2">
+            Azure Client ID *
+            <span className="ml-2 text-xs font-normal text-gray-500">(Application ID)</span>
+          </label>
+          <input
+            required
+            type="text"
+            value={formData.azure_client_id}
+            onChange={(e) =>
+              setFormData({ ...formData, azure_client_id: e.target.value })
+            }
+            className="block w-full rounded-xl border-2 border-gray-300 px-4 py-3 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/20 transition-all font-mono text-sm"
+            placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+          />
+        </div>
+
+        <div>
+          <label className="block text-sm font-semibold text-gray-700 mb-2">
+            Azure Client Secret *
+          </label>
+          <input
+            required
+            type="password"
+            value={formData.azure_client_secret}
+            onChange={(e) =>
+              setFormData({
+                ...formData,
+                azure_client_secret: e.target.value,
+              })
+            }
+            className="block w-full rounded-xl border-2 border-gray-300 px-4 py-3 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/20 transition-all font-mono text-sm"
+            placeholder="Client secret value from step 3"
+          />
+        </div>
+
+        <div>
+          <label className="block text-sm font-semibold text-gray-700 mb-2">
+            Regions (comma-separated, max 3)
+          </label>
+          <input
+            type="text"
+            value={formData.regions}
+            onChange={(e) =>
+              setFormData({ ...formData, regions: e.target.value })
+            }
+            className="block w-full rounded-xl border-2 border-gray-300 px-4 py-3 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/20 transition-all font-mono"
+            placeholder="eastus,westeurope,northeurope"
+          />
+          <p className="mt-2 text-xs text-gray-500">
+            💡 Tip: Common regions - eastus, westeurope, northeurope, westus2
+          </p>
+        </div>
+
+        <div>
+          <label className="block text-sm font-semibold text-gray-700 mb-2">
+            Description (optional)
+          </label>
+          <textarea
+            value={formData.description}
+            onChange={(e) =>
+              setFormData({ ...formData, description: e.target.value })
+            }
+            className="block w-full rounded-xl border-2 border-gray-300 px-4 py-3 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/20 transition-all"
+            rows={3}
+            placeholder="Production environment Azure subscription"
+          />
+        </div>
+
+        <div className="flex gap-4 pt-4">
+          <button
+            type="submit"
+            disabled={isLoading}
+            className="flex-1 rounded-xl bg-gradient-to-r from-blue-600 to-purple-600 px-6 py-3 font-semibold text-white shadow-lg hover:shadow-xl transition-all hover:scale-[1.02] disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+          >
+            {isLoading ? (
+              <>
+                <RefreshCw className="h-5 w-5 animate-spin" />
+                Adding...
+              </>
+            ) : (
+              <>
+                <Plus className="h-5 w-5" />
+                Add Account
+              </>
+            )}
+          </button>
+          <button
+            type="button"
+            onClick={onClose}
+            className="flex-1 rounded-xl border-2 border-gray-300 bg-white px-6 py-3 font-semibold text-gray-700 hover:bg-gray-50 transition-all"
+          >
+            Cancel
+          </button>
+        </div>
+      </form>
     </div>
   );
 }
