@@ -254,6 +254,45 @@ class AzureProvider(CloudProviderBase):
 
         return round(base_cost, 2)
 
+    def _calculate_public_ip_cost(self, public_ip) -> float:
+        """
+        Calculate monthly cost for an Azure Public IP Address based on SKU and configuration.
+
+        Azure Public IP pricing (US East, approximate):
+        - Basic Static IP: $3.00/month
+        - Standard Static IP (zonal): $3.00/month
+        - Standard Static IP (zone-redundant, 3+ zones): $3.65/month (+22%)
+        - Dynamic IPs: Usually $0/month when unassociated (deallocated automatically)
+
+        Args:
+            public_ip: Azure PublicIPAddress object
+
+        Returns:
+            Estimated monthly cost in USD
+        """
+        sku_name = public_ip.sku.name if public_ip.sku else 'Basic'
+        allocation_method = public_ip.public_ip_allocation_method if public_ip.public_ip_allocation_method else 'Static'
+
+        # Dynamic IPs are usually deallocated automatically when unassociated
+        # Cost is $0 for unassociated dynamic IPs
+        if allocation_method == 'Dynamic':
+            return 0.00
+
+        # Base cost for Static IPs
+        base_costs = {
+            'Basic': 3.00,      # Basic Static IP
+            'Standard': 3.00,   # Standard Static IP (zonal)
+        }
+
+        base_cost = base_costs.get(sku_name, 3.00)
+
+        # Add zone redundancy premium for Standard SKU with multiple zones
+        if sku_name == 'Standard' and public_ip.zones and len(public_ip.zones) >= 3:
+            # Zone-redundant (3+ zones) adds ~22% premium
+            base_cost = 3.65  # Standard zone-redundant pricing
+
+        return round(base_cost, 2)
+
     async def scan_all_resources(
         self, region: str, detection_rules: dict[str, dict] | None = None, scan_global_resources: bool = False
     ) -> list[OrphanResourceData]:
@@ -278,8 +317,11 @@ class AzureProvider(CloudProviderBase):
         volume_orphans = await self.scan_unattached_volumes(region, rules.get("managed_disk_unattached"))
         results.extend(volume_orphans)
 
+        # Scan Azure Public IPs (equivalent to AWS Elastic IPs)
+        ip_orphans = await self.scan_unassigned_ips(region, rules.get("public_ip_unassociated"))
+        results.extend(ip_orphans)
+
         # TODO: Future Azure resources
-        # results.extend(await self.scan_unassigned_ips(region, rules.get("public_ip_unassociated")))
         # results.extend(await self.scan_orphaned_snapshots(region, rules.get("disk_snapshot_orphaned")))
         # results.extend(await self.scan_stopped_instances(region, rules.get("virtual_machine_deallocated")))
 
@@ -289,16 +331,110 @@ class AzureProvider(CloudProviderBase):
         """
         Scan for unassociated Azure Public IP Addresses.
 
+        Detects Public IPs that are not associated with any network interface, VM, or load balancer.
+        Unassociated Public IPs continue to incur charges even when not in use.
+
         Args:
             region: Azure region to scan
-            detection_rules: Optional detection configuration
+            detection_rules: Optional detection configuration (min_age_days, enabled)
 
         Returns:
             List of orphan public IP resources
         """
-        # TODO: Implement using azure.mgmt.network.PublicIPAddressesOperations
-        # Detect: Public IPs with ip_configuration == None
-        return []
+        from datetime import datetime, timezone
+        from azure.identity import ClientSecretCredential
+        from azure.mgmt.network import NetworkManagementClient
+
+        orphans = []
+
+        # Extract detection rules
+        min_age_days = detection_rules.get("min_age_days", 7) if detection_rules else 7
+
+        try:
+            # Initialize Azure clients
+            credential = ClientSecretCredential(
+                tenant_id=self.tenant_id,
+                client_id=self.client_id,
+                client_secret=self.client_secret
+            )
+
+            network_client = NetworkManagementClient(credential, self.subscription_id)
+
+            # List all public IPs in the subscription
+            public_ips = network_client.public_ip_addresses.list_all()
+
+            for ip in public_ips:
+                # Filter by region (Azure uses 'location')
+                if ip.location != region:
+                    continue
+
+                # Check if Public IP is unassociated
+                # ip_configuration is None when the IP is not attached to any NIC/LB
+                if ip.ip_configuration is None:
+                    # Check age against min_age_days filter
+                    age_days = 0
+                    if hasattr(ip, 'provisioning_time') and ip.provisioning_time:
+                        age_days = (datetime.now(timezone.utc) - ip.provisioning_time).days
+                        if age_days < min_age_days:
+                            continue  # Skip IP - too young
+
+                    # Calculate monthly cost based on SKU and allocation
+                    monthly_cost = self._calculate_public_ip_cost(ip)
+
+                    # Generate orphan reason message
+                    sku_display = ip.sku.name if ip.sku else 'Basic'
+                    allocation_method = ip.public_ip_allocation_method if ip.public_ip_allocation_method else 'Unknown'
+                    ip_address = ip.ip_address if ip.ip_address else 'Not assigned'
+
+                    orphan_reason = f"Unassociated Azure Public IP ({sku_display}, {allocation_method}) - {ip_address} - not attached to any resource for {age_days} days"
+
+                    # Extract metadata
+                    metadata = {
+                        'ip_id': ip.id,
+                        'ip_address': ip_address,
+                        'sku_name': ip.sku.name if ip.sku else 'Basic',
+                        'sku_tier': ip.sku.tier if ip.sku and hasattr(ip.sku, 'tier') else 'Regional',
+                        'allocation_method': allocation_method,
+                        'ip_version': ip.public_ip_address_version if ip.public_ip_address_version else 'IPv4',
+                        'location': ip.location,
+                        'zones': ip.zones if ip.zones else None,
+                        'dns_label': ip.dns_settings.domain_name_label if ip.dns_settings and ip.dns_settings.domain_name_label else None,
+                        'fqdn': ip.dns_settings.fqdn if ip.dns_settings and ip.dns_settings.fqdn else None,
+                        'idle_timeout_in_minutes': ip.idle_timeout_in_minutes if hasattr(ip, 'idle_timeout_in_minutes') else 4,
+                        'ip_configuration': None,  # Always None for orphaned IPs
+                        'provisioning_time': ip.provisioning_time.isoformat() if hasattr(ip, 'provisioning_time') and ip.provisioning_time else None,
+                        'created_at': ip.provisioning_time.isoformat() if hasattr(ip, 'provisioning_time') and ip.provisioning_time else None,
+                        'age_days': age_days,  # For "Already Wasted" calculation
+                        'orphan_reason': orphan_reason,
+                        'tags': ip.tags if ip.tags else {},
+                    }
+
+                    # Add warning for Dynamic IPs (unusual to be unassociated)
+                    if allocation_method == 'Dynamic':
+                        metadata['warning'] = 'Dynamic IP unassociated - Usually deallocated automatically. Check if stuck in provisioning state.'
+
+                    # Add warning for Standard SKU with zones (more expensive)
+                    if ip.sku and ip.sku.name == 'Standard' and ip.zones and len(ip.zones) >= 3:
+                        metadata['warning_zone'] = f'Zone-redundant Public IP ({len(ip.zones)} zones) - Premium cost: ${monthly_cost:.2f}/month'
+
+                    orphan = OrphanResourceData(
+                        resource_type='public_ip_unassociated',
+                        resource_id=ip.id,
+                        resource_name=ip.name if ip.name else ip.id.split('/')[-1],
+                        region=ip.location,
+                        estimated_monthly_cost=monthly_cost,
+                        resource_metadata=metadata
+                    )
+
+                    orphans.append(orphan)
+
+        except Exception as e:
+            # Log error but don't fail the entire scan
+            print(f"Error scanning unassociated Public IPs in {region}: {str(e)}")
+            # In production, use proper logging
+            # logger.error(f"Error scanning unassociated Public IPs in {region}: {str(e)}", exc_info=True)
+
+        return orphans
 
     async def scan_orphaned_snapshots(
         self, region: str, detection_rules: dict | None = None, orphaned_volume_ids: list[str] | None = None

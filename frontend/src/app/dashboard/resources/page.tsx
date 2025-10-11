@@ -1747,15 +1747,88 @@ function ResourceCard({ resource, onIgnore, onMarkForDeletion, onDelete }: any) 
 
                   {/* Azure Public IP specific criteria */}
                   {resource.resource_type === 'public_ip_unassociated' && (
-                    <div className="space-y-1 text-sm">
+                    <div className="space-y-2 text-sm">
+                      {/* SKU and Allocation Method */}
+                      <div className="flex items-center gap-2">
+                        <span className={`px-2 py-1 rounded text-xs font-semibold ${
+                          resource.resource_metadata?.sku_name === 'Standard' ? 'bg-blue-100 text-blue-700' :
+                          'bg-gray-100 text-gray-700'
+                        }`}>
+                          {resource.resource_metadata?.sku_name || 'Basic'}
+                        </span>
+                        <span className={`px-2 py-1 rounded text-xs font-semibold ${
+                          resource.resource_metadata?.allocation_method === 'Static' ? 'bg-green-100 text-green-700' :
+                          'bg-orange-100 text-orange-700'
+                        }`}>
+                          {resource.resource_metadata?.allocation_method || 'Unknown'}
+                        </span>
+                      </div>
+
+                      {/* IP Address */}
+                      {resource.resource_metadata?.ip_address && resource.resource_metadata.ip_address !== 'Not assigned' && (
+                        <div className="flex items-center gap-2 text-gray-700">
+                          <span className="font-semibold">🌐</span>
+                          <span className="font-mono">{resource.resource_metadata.ip_address}</span>
+                        </div>
+                      )}
+
+                      {/* Status */}
                       <div className="flex items-center gap-2 text-red-700">
                         <span className="font-semibold">✗</span>
-                        <span>Not associated with any virtual machine or network interface</span>
+                        <span className="font-semibold">Status: Unassociated</span>
                       </div>
+
+                      {/* DNS Settings */}
+                      {resource.resource_metadata?.dns_label && (
+                        <div className="flex items-center gap-2 text-purple-700">
+                          <span className="font-semibold">🔗</span>
+                          <span>DNS: {resource.resource_metadata.dns_label}</span>
+                          {resource.resource_metadata?.fqdn && (
+                            <span className="text-xs text-gray-500">({resource.resource_metadata.fqdn})</span>
+                          )}
+                        </div>
+                      )}
+
+                      {/* Availability Zones */}
+                      {resource.resource_metadata?.zones && resource.resource_metadata.zones.length > 0 && (
+                        <div className="flex items-center gap-2 text-gray-700">
+                          <span className="font-semibold">📍</span>
+                          <span>Zone{resource.resource_metadata.zones.length > 1 ? 's' : ''}: {resource.resource_metadata.zones.join(', ')}</span>
+                          {resource.resource_metadata.zones.length >= 3 && (
+                            <span className="text-xs text-blue-600">(Zone-redundant +22%)</span>
+                          )}
+                        </div>
+                      )}
+
+                      {/* Dynamic IP Warning */}
+                      {resource.resource_metadata?.allocation_method === 'Dynamic' && resource.resource_metadata?.warning && (
+                        <div className="flex items-center gap-2 text-orange-600 mt-1 bg-orange-50 p-2 rounded">
+                          <span className="font-semibold">⚠️</span>
+                          <span className="text-xs">{resource.resource_metadata.warning}</span>
+                        </div>
+                      )}
+
+                      {/* Zone-redundant Warning */}
+                      {resource.resource_metadata?.warning_zone && (
+                        <div className="flex items-center gap-2 text-blue-600 mt-1 bg-blue-50 p-2 rounded">
+                          <span className="font-semibold">💡</span>
+                          <span className="text-xs">{resource.resource_metadata.warning_zone}</span>
+                        </div>
+                      )}
+
+                      {/* Orphan reason */}
                       <div className="flex items-center gap-2 text-gray-600 mt-1">
                         <span className="font-semibold">ℹ️</span>
                         <span className="italic">{resource.resource_metadata?.orphan_reason || 'Unassociated Azure Public IP'}</span>
                       </div>
+
+                      {/* Age information */}
+                      {resource.resource_metadata?.age_days !== undefined && (
+                        <div className="flex items-center gap-2 text-orange-700">
+                          <span className="font-semibold">⏱</span>
+                          <span>Unassociated for {resource.resource_metadata.age_days} days</span>
+                        </div>
+                      )}
                     </div>
                   )}
 
