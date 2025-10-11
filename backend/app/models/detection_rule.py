@@ -326,6 +326,33 @@ DEFAULT_DETECTION_RULES = {
         "empty_table_min_age_days": 90,  # Empty for 90+ days
         "description": "DynamoDB tables: over-provisioned capacity, unused GSI, never used (provisioned/on-demand), or empty tables",
     },
+    # ===================================
+    # AZURE RESOURCES (Managed by Azure)
+    # ===================================
+    "managed_disk_unattached": {
+        "enabled": True,
+        "min_age_days": 7,  # Ignore disks created in last 7 days
+        "confidence_threshold_days": 30,  # High confidence after 30 days
+        "description": "Unattached Azure Managed Disks (Standard HDD/SSD, Premium SSD, Ultra SSD)",
+    },
+    "public_ip_unassociated": {
+        "enabled": True,
+        "min_age_days": 3,  # Ignore IPs allocated in last 3 days
+        "confidence_threshold_days": 7,
+        "description": "Unassociated Azure Public IP addresses",
+    },
+    "disk_snapshot_orphaned": {
+        "enabled": True,
+        "min_age_days": 90,  # Snapshots older than 90 days
+        "confidence_threshold_days": 180,
+        "description": "Orphaned Azure Disk Snapshots",
+    },
+    "virtual_machine_deallocated": {
+        "enabled": True,
+        "min_stopped_days": 30,  # Deallocated for > 30 days
+        "confidence_threshold_days": 60,
+        "description": "Azure VMs deallocated for extended periods",
+    },
 }
 
 

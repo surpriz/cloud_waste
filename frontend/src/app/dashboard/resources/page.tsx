@@ -21,6 +21,7 @@ import {
 import type { ResourceStatus, ResourceType } from "@/types";
 
 const resourceIcons: Record<ResourceType, any> = {
+  // AWS Resources
   ebs_volume: HardDrive,
   elastic_ip: Wifi,
   ebs_snapshot: Camera,
@@ -45,6 +46,11 @@ const resourceIcons: Record<ResourceType, any> = {
   s3_bucket: HardDrive,
   lambda_function: Zap,
   dynamodb_table: Database,
+  // Azure Resources
+  managed_disk_unattached: HardDrive,
+  public_ip_unassociated: Wifi,
+  disk_snapshot_orphaned: Camera,
+  virtual_machine_deallocated: Server,
 };
 
 export default function ResourcesPage() {
@@ -194,7 +200,7 @@ export default function ResourcesPage() {
                 className="mt-1 block w-full rounded-lg border border-gray-300 px-3 py-2"
               >
                 <option value="">All Types</option>
-                <optgroup label="Storage & Compute">
+                <optgroup label="🟠 AWS - Storage & Compute">
                   <option value="ebs_volume">EBS Volume</option>
                   <option value="ebs_snapshot">EBS Snapshot</option>
                   <option value="ec2_instance">EC2 Instance</option>
@@ -202,11 +208,16 @@ export default function ResourcesPage() {
                   <option value="lambda_function">Lambda Function</option>
                   <option value="s3_bucket">S3 Bucket</option>
                 </optgroup>
-                <optgroup label="Database">
+                <optgroup label="🟠 AWS - Database">
                   <option value="dynamodb_table">DynamoDB Table</option>
                   <option value="rds_instance">RDS Instance</option>
+                  <option value="neptune_cluster">Neptune Cluster</option>
+                  <option value="redshift_cluster">Redshift Cluster</option>
+                  <option value="documentdb_cluster">DocumentDB Cluster</option>
+                  <option value="elasticache_cluster">ElastiCache Cluster</option>
+                  <option value="opensearch_domain">OpenSearch Domain</option>
                 </optgroup>
-                <optgroup label="Networking">
+                <optgroup label="🟠 AWS - Networking">
                   <option value="elastic_ip">Elastic IP</option>
                   <option value="nat_gateway">NAT Gateway</option>
                   <option value="load_balancer">Load Balancer</option>
@@ -215,21 +226,21 @@ export default function ResourcesPage() {
                   <option value="vpc_endpoint">VPC Endpoint</option>
                   <option value="global_accelerator">Global Accelerator</option>
                 </optgroup>
-                <optgroup label="Databases">
-                  <option value="rds_instance">RDS Instance</option>
-                  <option value="neptune_cluster">Neptune Cluster</option>
-                  <option value="redshift_cluster">Redshift Cluster</option>
-                  <option value="documentdb_cluster">DocumentDB Cluster</option>
-                  <option value="elasticache_cluster">ElastiCache Cluster</option>
-                  <option value="opensearch_domain">OpenSearch Domain</option>
-                </optgroup>
-                <optgroup label="Containers & Streaming">
+                <optgroup label="🟠 AWS - Containers & Streaming">
                   <option value="eks_cluster">EKS Cluster</option>
                   <option value="msk_cluster">MSK Cluster</option>
                   <option value="kinesis_stream">Kinesis Stream</option>
                 </optgroup>
-                <optgroup label="Machine Learning">
+                <optgroup label="🟠 AWS - Machine Learning">
                   <option value="sagemaker_endpoint">SageMaker Endpoint</option>
+                </optgroup>
+                <optgroup label="🔵 Azure - Storage & Compute">
+                  <option value="managed_disk_unattached">Managed Disk (Unattached)</option>
+                  <option value="disk_snapshot_orphaned">Disk Snapshot (Orphaned)</option>
+                  <option value="virtual_machine_deallocated">Virtual Machine (Deallocated)</option>
+                </optgroup>
+                <optgroup label="🔵 Azure - Networking">
+                  <option value="public_ip_unassociated">Public IP (Unassociated)</option>
                 </optgroup>
               </select>
             </div>
@@ -1637,8 +1648,165 @@ function ResourceCard({ resource, onIgnore, onMarkForDeletion, onDelete }: any) 
                     </div>
                   )}
 
+                  {/* Azure Managed Disk specific criteria */}
+                  {resource.resource_type === 'managed_disk_unattached' && (
+                    <div className="space-y-2 text-sm">
+                      {/* Disk SKU and Size */}
+                      <div className="flex items-center gap-2">
+                        <span className={`px-2 py-1 rounded text-xs font-semibold ${
+                          resource.resource_metadata?.sku_name?.includes('Premium') ? 'bg-purple-100 text-purple-700' :
+                          resource.resource_metadata?.sku_name?.includes('StandardSSD') ? 'bg-blue-100 text-blue-700' :
+                          resource.resource_metadata?.sku_name?.includes('UltraSSD') ? 'bg-red-100 text-red-700' :
+                          'bg-gray-100 text-gray-700'
+                        }`}>
+                          {resource.resource_metadata?.sku_name || 'Unknown SKU'}
+                        </span>
+                        <span className="text-gray-600">{resource.resource_metadata?.disk_size_gb || 0} GB</span>
+                        {resource.resource_metadata?.sku_tier && (
+                          <span className="text-xs text-gray-500">({resource.resource_metadata.sku_tier})</span>
+                        )}
+                      </div>
+
+                      {/* Disk State */}
+                      <div className="flex items-center gap-2 text-red-700">
+                        <span className="font-semibold">✗</span>
+                        <span className="font-semibold">Status: {resource.resource_metadata?.disk_state || 'Unknown'}</span>
+                      </div>
+
+                      {/* Reserved state warning */}
+                      {resource.resource_metadata?.disk_state === 'Reserved' && (
+                        <div className="flex items-center gap-2 text-orange-700">
+                          <span className="font-semibold">⚠️</span>
+                          <span>Disk in Reserved state - billing continues even when not attached</span>
+                        </div>
+                      )}
+
+                      {/* Encryption status */}
+                      {resource.resource_metadata?.encryption_type && (
+                        <div className="flex items-center gap-2 text-blue-700">
+                          <span className="font-semibold">🔐</span>
+                          <span>Encryption: {resource.resource_metadata.encryption_type}</span>
+                        </div>
+                      )}
+
+                      {/* Availability Zone */}
+                      {resource.resource_metadata?.zones && resource.resource_metadata.zones.length > 0 && (
+                        <div className="flex items-center gap-2 text-gray-700">
+                          <span className="font-semibold">📍</span>
+                          <span>Zone: {resource.resource_metadata.zones.join(', ')}</span>
+                        </div>
+                      )}
+
+                      {/* Bursting enabled */}
+                      {resource.resource_metadata?.bursting_enabled && (
+                        <div className="flex items-center gap-2 text-purple-700">
+                          <span className="font-semibold">⚡</span>
+                          <span>Bursting enabled (+15% cost)</span>
+                        </div>
+                      )}
+
+                      {/* Ultra SSD details */}
+                      {resource.resource_metadata?.sku_name?.includes('UltraSSD') && (
+                        <>
+                          {resource.resource_metadata?.disk_iops && (
+                            <div className="flex items-center gap-2 text-gray-700">
+                              <span className="font-semibold">📊</span>
+                              <span>IOPS: {resource.resource_metadata.disk_iops.toLocaleString()}</span>
+                            </div>
+                          )}
+                          {resource.resource_metadata?.disk_mbps && (
+                            <div className="flex items-center gap-2 text-gray-700">
+                              <span className="font-semibold">🚀</span>
+                              <span>Throughput: {resource.resource_metadata.disk_mbps} MB/s</span>
+                            </div>
+                          )}
+                          {resource.resource_metadata?.warning && (
+                            <div className="flex items-center gap-2 text-red-600 mt-1 bg-red-50 p-2 rounded">
+                              <span className="font-semibold">💡</span>
+                              <span className="text-xs">{resource.resource_metadata.warning}</span>
+                            </div>
+                          )}
+                        </>
+                      )}
+
+                      {/* Orphan reason */}
+                      <div className="flex items-center gap-2 text-gray-600 mt-1">
+                        <span className="font-semibold">ℹ️</span>
+                        <span className="italic">{resource.resource_metadata?.orphan_reason || 'Unattached Azure Managed Disk'}</span>
+                      </div>
+
+                      {/* Age information */}
+                      {resource.resource_metadata?.age_days !== undefined && (
+                        <div className="flex items-center gap-2 text-orange-700">
+                          <span className="font-semibold">⏱</span>
+                          <span>Unattached for {resource.resource_metadata.age_days} days</span>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Azure Public IP specific criteria */}
+                  {resource.resource_type === 'public_ip_unassociated' && (
+                    <div className="space-y-1 text-sm">
+                      <div className="flex items-center gap-2 text-red-700">
+                        <span className="font-semibold">✗</span>
+                        <span>Not associated with any virtual machine or network interface</span>
+                      </div>
+                      <div className="flex items-center gap-2 text-gray-600 mt-1">
+                        <span className="font-semibold">ℹ️</span>
+                        <span className="italic">{resource.resource_metadata?.orphan_reason || 'Unassociated Azure Public IP'}</span>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Azure VM Deallocated specific criteria */}
+                  {resource.resource_type === 'virtual_machine_deallocated' && (
+                    <div className="space-y-1 text-sm">
+                      <div className="flex items-center gap-2 text-red-700">
+                        <span className="font-semibold">✗</span>
+                        <span>Virtual machine deallocated (stopped)</span>
+                      </div>
+                      {resource.resource_metadata?.stopped_days !== undefined && (
+                        <div className="flex items-center gap-2 text-orange-700">
+                          <span className="font-semibold">⏱</span>
+                          <span>Stopped for {resource.resource_metadata.stopped_days} days</span>
+                        </div>
+                      )}
+                      <div className="flex items-center gap-2 text-gray-600 mt-1">
+                        <span className="font-semibold">💡</span>
+                        <span className="italic">{resource.resource_metadata?.orphan_reason || 'Deallocated Azure VM'}</span>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Azure Snapshot specific criteria */}
+                  {resource.resource_type === 'disk_snapshot_orphaned' && (
+                    <div className="space-y-1 text-sm">
+                      <div className="flex items-center gap-2 text-red-700">
+                        <span className="font-semibold">✗</span>
+                        <span>Orphaned snapshot (source disk deleted or unused)</span>
+                      </div>
+                      {resource.resource_metadata?.age_days !== undefined && (
+                        <div className="flex items-center gap-2 text-gray-700">
+                          <span className="font-semibold">📅</span>
+                          <span>Snapshot age: {resource.resource_metadata.age_days} days</span>
+                        </div>
+                      )}
+                      {resource.resource_metadata?.size_gb && (
+                        <div className="flex items-center gap-2 text-gray-700">
+                          <span className="font-semibold">💾</span>
+                          <span>Size: {resource.resource_metadata.size_gb} GB</span>
+                        </div>
+                      )}
+                      <div className="flex items-center gap-2 text-gray-600 mt-1">
+                        <span className="font-semibold">ℹ️</span>
+                        <span className="italic">{resource.resource_metadata?.orphan_reason || 'Orphaned Azure Disk Snapshot'}</span>
+                      </div>
+                    </div>
+                  )}
+
                   {/* Generic criteria for other resource types */}
-                  {!['ebs_volume', 'elastic_ip', 'rds_instance', 'ec2_instance', 'load_balancer', 'nat_gateway', 'ebs_snapshot', 'eks_cluster', 's3_bucket', 'lambda_function', 'dynamodb_table', 'elasticache_cluster'].includes(resource.resource_type) && (
+                  {!['ebs_volume', 'elastic_ip', 'rds_instance', 'ec2_instance', 'load_balancer', 'nat_gateway', 'ebs_snapshot', 'eks_cluster', 's3_bucket', 'lambda_function', 'dynamodb_table', 'elasticache_cluster', 'managed_disk_unattached', 'public_ip_unassociated', 'virtual_machine_deallocated', 'disk_snapshot_orphaned'].includes(resource.resource_type) && (
                     <div className="text-sm">
                       <div className="flex items-center gap-2 text-gray-700">
                         <span className="font-semibold">ℹ️</span>
@@ -1649,7 +1817,7 @@ function ResourceCard({ resource, onIgnore, onMarkForDeletion, onDelete }: any) 
 
                   <div className="mt-2 pt-2 border-t border-amber-300">
                     <p className="text-xs text-amber-800">
-                      💡 <strong>What to do:</strong> Review this resource on your AWS console and delete it if no longer needed to stop wasting money.
+                      💡 <strong>What to do:</strong> Review this resource on your cloud console and delete it if no longer needed to stop wasting money.
                     </p>
                   </div>
                 </div>

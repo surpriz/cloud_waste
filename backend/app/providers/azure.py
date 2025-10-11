@@ -82,16 +82,208 @@ class AzureProvider(CloudProviderBase):
         """
         Scan for unattached Azure Managed Disks.
 
+        Detects all unattached managed disks including:
+        - Standard HDD (S4-S80)
+        - Standard SSD (E1-E80)
+        - Premium SSD (P1-P80)
+        - Ultra SSD (with IOPS/throughput)
+        - Disks with encryption
+        - Disks in availability zones
+        - Disks with bursting enabled
+
         Args:
             region: Azure region to scan
             detection_rules: Optional detection configuration
 
         Returns:
-            List of orphan disk resources
+            List of orphan disk resources with accurate cost estimates
         """
-        # TODO: Implement using azure.mgmt.compute.DisksOperations
-        # Detect: Disks with disk_state == 'Unattached'
-        return []
+        from datetime import datetime, timezone
+        from azure.identity import ClientSecretCredential
+        from azure.mgmt.compute import ComputeManagementClient
+
+        orphans = []
+
+        # Extract detection rules
+        min_age_days = detection_rules.get("min_age_days", 7) if detection_rules else 7
+
+        try:
+            # Initialize Azure clients
+            credential = ClientSecretCredential(
+                tenant_id=self.tenant_id,
+                client_id=self.client_id,
+                client_secret=self.client_secret
+            )
+
+            compute_client = ComputeManagementClient(credential, self.subscription_id)
+
+            # List all disks in the subscription
+            disks = compute_client.disks.list()
+
+            for disk in disks:
+                # Filter by region (Azure uses 'location')
+                if disk.location != region:
+                    continue
+
+                # Check if disk is unattached
+                # disk_state can be: 'Unattached', 'Attached', 'Reserved', 'ActiveSAS'
+                if disk.disk_state == 'Unattached' or disk.disk_state == 'Reserved':
+                    # Check disk age against min_age_days filter
+                    age_days = 0
+                    if disk.time_created:
+                        age_days = (datetime.now(timezone.utc) - disk.time_created).days
+                        if age_days < min_age_days:
+                            continue  # Skip disk - too young
+
+                    # Calculate monthly cost based on SKU
+                    monthly_cost = self._calculate_disk_cost(disk)
+
+                    # Generate orphan reason message
+                    sku_display = disk.sku.name if disk.sku else 'Unknown SKU'
+                    orphan_reason = f"Unattached Azure Managed Disk ({sku_display}, {disk.disk_size_gb}GB) not attached to any VM for {age_days} days"
+                    if disk.disk_state == 'Reserved':
+                        orphan_reason = f"Reserved Azure Managed Disk ({sku_display}, {disk.disk_size_gb}GB) - billing continues even when not attached"
+
+                    # Extract metadata
+                    metadata = {
+                        'disk_id': disk.id,
+                        'disk_state': disk.disk_state,
+                        'disk_size_gb': disk.disk_size_gb,
+                        'sku_name': disk.sku.name if disk.sku else 'Unknown',
+                        'sku_tier': disk.sku.tier if disk.sku else 'Unknown',
+                        'location': disk.location,
+                        'zones': disk.zones if disk.zones else None,
+                        'encryption_type': disk.encryption.type if disk.encryption else None,
+                        'disk_iops': disk.disk_iops_read_write if hasattr(disk, 'disk_iops_read_write') else None,
+                        'disk_mbps': disk.disk_mbps_read_write if hasattr(disk, 'disk_mbps_read_write') else None,
+                        'created_at': disk.time_created.isoformat() if disk.time_created else None,  # Renamed for consistency with AWS
+                        'age_days': age_days,  # For "Already Wasted" calculation
+                        'orphan_reason': orphan_reason,  # Display reason for frontend
+                        'os_type': disk.os_type.value if disk.os_type else None,
+                        'hyper_v_generation': disk.hyper_v_generation if hasattr(disk, 'hyper_v_generation') else None,
+                        'bursting_enabled': disk.bursting_enabled if hasattr(disk, 'bursting_enabled') else False,
+                        'network_access_policy': disk.network_access_policy if hasattr(disk, 'network_access_policy') else None,
+                        'managed_by': disk.managed_by if disk.managed_by else None,  # VM ID if attached
+                        'managed_by_extended': disk.managed_by_extended if hasattr(disk, 'managed_by_extended') else None,
+                        'tags': disk.tags if disk.tags else {},
+                    }
+
+                    # Add warning for Reserved state (billing continues!)
+                    if disk.disk_state == 'Reserved':
+                        metadata['warning'] = 'Disk in Reserved state - billing continues even though not attached'
+
+                    # Add warning for Ultra SSD (very expensive)
+                    if disk.sku and 'UltraSSD' in disk.sku.name:
+                        metadata['warning'] = f'Ultra SSD detected - Very expensive! Base: ${monthly_cost:.2f}/month + IOPS + throughput costs'
+
+                    orphan = OrphanResourceData(
+                        resource_type='managed_disk_unattached',
+                        resource_id=disk.id,
+                        resource_name=disk.name if disk.name else disk.id.split('/')[-1],
+                        region=disk.location,
+                        estimated_monthly_cost=monthly_cost,
+                        resource_metadata=metadata
+                    )
+
+                    orphans.append(orphan)
+
+        except Exception as e:
+            # Log error but don't fail the entire scan
+            print(f"Error scanning unattached disks in {region}: {str(e)}")
+            # In production, use proper logging
+            # logger.error(f"Error scanning unattached disks in {region}: {str(e)}", exc_info=True)
+
+        return orphans
+
+    def _calculate_disk_cost(self, disk) -> float:
+        """
+        Calculate monthly cost for an Azure Managed Disk based on SKU and size.
+
+        Azure Managed Disk pricing (US East, approximate):
+        - Standard HDD (Standard_LRS): $0.048/GB/month (S4-S80)
+        - Standard SSD (StandardSSD_LRS): $0.096/GB/month (E1-E80)
+        - Premium SSD (Premium_LRS): $0.15-0.23/GB/month (P1-P80)
+        - Ultra SSD (UltraSSD_LRS): $0.30/GB/month + IOPS + throughput
+
+        Args:
+            disk: Azure Disk object
+
+        Returns:
+            Estimated monthly cost in USD
+        """
+        disk_size_gb = disk.disk_size_gb if disk.disk_size_gb else 0
+        sku_name = disk.sku.name if disk.sku else 'Standard_LRS'
+
+        # Base cost per GB based on SKU
+        cost_per_gb = {
+            'Standard_LRS': 0.048,      # Standard HDD
+            'StandardSSD_LRS': 0.096,   # Standard SSD
+            'StandardSSD_ZRS': 0.115,   # Standard SSD Zone-Redundant (+20%)
+            'Premium_LRS': 0.175,       # Premium SSD (average)
+            'Premium_ZRS': 0.21,        # Premium SSD Zone-Redundant (+20%)
+            'UltraSSD_LRS': 0.30,       # Ultra SSD (base only, IOPS/throughput extra)
+        }
+
+        base_cost_per_gb = cost_per_gb.get(sku_name, 0.10)  # Default to Standard SSD if unknown
+        base_cost = disk_size_gb * base_cost_per_gb
+
+        # Add encryption cost if enabled (roughly +5-10%)
+        if disk.encryption and disk.encryption.type and disk.encryption.type != 'EncryptionAtRestWithPlatformKey':
+            base_cost *= 1.08  # +8% for customer-managed keys
+
+        # Add zone redundancy premium if in availability zones
+        if disk.zones and len(disk.zones) > 0:
+            base_cost *= 1.15  # +15% for zone redundancy
+
+        # Add bursting cost for Premium SSD (P20+ only)
+        if disk.sku and 'Premium' in sku_name:
+            if hasattr(disk, 'bursting_enabled') and disk.bursting_enabled:
+                # Bursting adds roughly 10-20% depending on usage
+                base_cost *= 1.15  # +15% average bursting cost
+
+        # Ultra SSD additional costs (IOPS + throughput)
+        if 'UltraSSD' in sku_name:
+            # Base cost already calculated above
+            # Add IOPS cost: $0.013 per IOPS
+            if hasattr(disk, 'disk_iops_read_write') and disk.disk_iops_read_write:
+                base_cost += (disk.disk_iops_read_write * 0.013)
+
+            # Add throughput cost: $0.04 per MBps
+            if hasattr(disk, 'disk_mbps_read_write') and disk.disk_mbps_read_write:
+                base_cost += (disk.disk_mbps_read_write * 0.04)
+
+        return round(base_cost, 2)
+
+    async def scan_all_resources(
+        self, region: str, detection_rules: dict[str, dict] | None = None, scan_global_resources: bool = False
+    ) -> list[OrphanResourceData]:
+        """
+        Scan all Azure resource types in a specific region.
+
+        Override from base class to use Azure-specific resource type names.
+
+        Args:
+            region: Azure region to scan
+            detection_rules: Optional user-defined detection rules per resource type
+            scan_global_resources: If True, also scan global resources (e.g., Storage Accounts).
+                                   Should only be True for the first region in a multi-region scan.
+
+        Returns:
+            Combined list of all orphan resources found
+        """
+        results: list[OrphanResourceData] = []
+        rules = detection_rules or {}
+
+        # Scan Azure Managed Disks (equivalent to AWS EBS Volumes)
+        volume_orphans = await self.scan_unattached_volumes(region, rules.get("managed_disk_unattached"))
+        results.extend(volume_orphans)
+
+        # TODO: Future Azure resources
+        # results.extend(await self.scan_unassigned_ips(region, rules.get("public_ip_unassociated")))
+        # results.extend(await self.scan_orphaned_snapshots(region, rules.get("disk_snapshot_orphaned")))
+        # results.extend(await self.scan_stopped_instances(region, rules.get("virtual_machine_deallocated")))
+
+        return results
 
     async def scan_unassigned_ips(self, region: str, detection_rules: dict | None = None) -> list[OrphanResourceData]:
         """

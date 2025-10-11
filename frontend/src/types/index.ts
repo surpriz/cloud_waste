@@ -104,6 +104,7 @@ export interface ScanSummary {
 export type ResourceStatus = "active" | "ignored" | "marked_for_deletion" | "deleted";
 
 export type ResourceType =
+  // AWS Resources
   | "ebs_volume"
   | "elastic_ip"
   | "ebs_snapshot"
@@ -124,7 +125,15 @@ export type ResourceType =
   | "global_accelerator"
   | "kinesis_stream"
   | "vpc_endpoint"
-  | "documentdb_cluster";
+  | "documentdb_cluster"
+  | "s3_bucket"
+  | "lambda_function"
+  | "dynamodb_table"
+  // Azure Resources
+  | "managed_disk_unattached"
+  | "public_ip_unassociated"
+  | "disk_snapshot_orphaned"
+  | "virtual_machine_deallocated";
 
 export interface OrphanResource {
   id: string;

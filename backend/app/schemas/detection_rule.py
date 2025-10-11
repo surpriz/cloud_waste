@@ -12,7 +12,7 @@ class DetectionRuleBase(BaseModel):
 
     resource_type: str = Field(
         ...,
-        pattern="^(ebs_volume|elastic_ip|ebs_snapshot|ec2_instance|nat_gateway|load_balancer|rds_instance|fsx_file_system|neptune_cluster|msk_cluster|eks_cluster|sagemaker_endpoint|redshift_cluster|elasticache_cluster|vpn_connection|transit_gateway_attachment|opensearch_domain|global_accelerator|kinesis_stream|vpc_endpoint|documentdb_cluster|s3_bucket|lambda_function|dynamodb_table)$",
+        pattern="^(ebs_volume|elastic_ip|ebs_snapshot|ec2_instance|nat_gateway|load_balancer|rds_instance|fsx_file_system|neptune_cluster|msk_cluster|eks_cluster|sagemaker_endpoint|redshift_cluster|elasticache_cluster|vpn_connection|transit_gateway_attachment|opensearch_domain|global_accelerator|kinesis_stream|vpc_endpoint|documentdb_cluster|s3_bucket|lambda_function|dynamodb_table|managed_disk_unattached|public_ip_unassociated|disk_snapshot_orphaned|virtual_machine_deallocated)$",
     )
     rules: dict[str, Any] = Field(
         ...,

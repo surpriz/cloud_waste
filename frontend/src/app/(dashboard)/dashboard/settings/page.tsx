@@ -27,7 +27,8 @@ interface DetectionRule {
   description: string;
 }
 
-const RESOURCE_ICONS: { [key: string]: any } = {
+// AWS Resources
+const AWS_RESOURCE_ICONS: { [key: string]: any } = {
   ebs_volume: HardDrive,
   elastic_ip: Globe,
   ebs_snapshot: Camera,
@@ -37,7 +38,7 @@ const RESOURCE_ICONS: { [key: string]: any } = {
   rds_instance: Database,
 };
 
-const RESOURCE_LABELS: { [key: string]: string } = {
+const AWS_RESOURCE_LABELS: { [key: string]: string } = {
   ebs_volume: "EBS Volumes",
   elastic_ip: "Elastic IPs",
   ebs_snapshot: "EBS Snapshots",
@@ -47,10 +48,52 @@ const RESOURCE_LABELS: { [key: string]: string } = {
   rds_instance: "RDS Instances",
 };
 
+// Azure Resources
+const AZURE_RESOURCE_ICONS: { [key: string]: any } = {
+  managed_disk_unattached: HardDrive,
+  public_ip_unassociated: Globe,
+  disk_snapshot_orphaned: Camera,
+  virtual_machine_deallocated: Server,
+};
+
+const AZURE_RESOURCE_LABELS: { [key: string]: string } = {
+  managed_disk_unattached: "Managed Disks (Unattached)",
+  public_ip_unassociated: "Public IP Addresses (Unassociated)",
+  disk_snapshot_orphaned: "Disk Snapshots (Orphaned)",
+  virtual_machine_deallocated: "Virtual Machines (Deallocated)",
+};
+
+// Helper function to get provider from resource type
+const getResourceProvider = (resourceType: string): "aws" | "azure" => {
+  if (resourceType in AZURE_RESOURCE_ICONS) {
+    return "azure";
+  }
+  return "aws";
+};
+
+// Helper function to get icon for resource type
+const getResourceIcon = (resourceType: string) => {
+  const provider = getResourceProvider(resourceType);
+  if (provider === "azure") {
+    return AZURE_RESOURCE_ICONS[resourceType] || HardDrive;
+  }
+  return AWS_RESOURCE_ICONS[resourceType] || HardDrive;
+};
+
+// Helper function to get label for resource type
+const getResourceLabel = (resourceType: string): string => {
+  const provider = getResourceProvider(resourceType);
+  if (provider === "azure") {
+    return AZURE_RESOURCE_LABELS[resourceType] || resourceType;
+  }
+  return AWS_RESOURCE_LABELS[resourceType] || resourceType;
+};
+
 export default function SettingsPage() {
   const [activeTab, setActiveTab] = useState<"profile" | "notifications" | "security" | "detection">("detection");
   const [detectionRules, setDetectionRules] = useState<DetectionRule[]>([]);
   const [isLoading, setIsLoading] = useState(false);
+  const [selectedProvider, setSelectedProvider] = useState<"aws" | "azure" | "all">("all");
 
   // Use advanced notification system
   const { currentNotification, history, showSuccess, showError, dismiss, clearHistory } = useNotifications();
@@ -254,33 +297,76 @@ export default function SettingsPage() {
         {activeTab === "detection" && (
           <div className="space-y-6">
             <div className="rounded-2xl bg-gradient-to-br from-blue-50 to-indigo-50 border-2 border-blue-200 p-4 md:p-6">
-              <div className="flex flex-col sm:flex-row items-start justify-between gap-4">
-                <div className="flex-1">
-                  <h2 className="text-lg md:text-xl font-bold text-blue-900 mb-2">🎯 Configure Detection Criteria</h2>
-                  <p className="text-sm md:text-base text-blue-700">
-                    Customize how CloudWaste identifies orphaned resources in your AWS infrastructure.
-                    Adjust age thresholds and confidence levels to match your workflow.
-                  </p>
+              <div className="flex flex-col gap-4">
+                <div className="flex flex-col sm:flex-row items-start justify-between gap-4">
+                  <div className="flex-1">
+                    <h2 className="text-lg md:text-xl font-bold text-blue-900 mb-2">🎯 Configure Detection Criteria</h2>
+                    <p className="text-sm md:text-base text-blue-700">
+                      Customize how CloudWaste identifies orphaned resources across AWS and Azure.
+                      Adjust age thresholds and confidence levels to match your workflow.
+                    </p>
+                  </div>
+                  <button
+                    onClick={resetAllRules}
+                    className="w-full sm:w-auto flex items-center justify-center gap-2 rounded-lg border-2 border-orange-400 bg-orange-50 px-4 py-2 text-sm font-semibold text-orange-700 hover:bg-orange-100 transition-colors whitespace-nowrap"
+                    title="Reset all detection rules to default values"
+                  >
+                    <RotateCcw className="h-4 w-4" />
+                    <span className="hidden md:inline">Reset All to Defaults</span>
+                    <span className="md:hidden">Reset All</span>
+                  </button>
                 </div>
-                <button
-                  onClick={resetAllRules}
-                  className="w-full sm:w-auto flex items-center justify-center gap-2 rounded-lg border-2 border-orange-400 bg-orange-50 px-4 py-2 text-sm font-semibold text-orange-700 hover:bg-orange-100 transition-colors whitespace-nowrap"
-                  title="Reset all detection rules to default values"
-                >
-                  <RotateCcw className="h-4 w-4" />
-                  <span className="hidden md:inline">Reset All to Defaults</span>
-                  <span className="md:hidden">Reset All</span>
-                </button>
+
+                {/* Provider Filter */}
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => setSelectedProvider("all")}
+                    className={`px-4 py-2 rounded-lg font-semibold transition-colors ${
+                      selectedProvider === "all"
+                        ? "bg-blue-600 text-white"
+                        : "bg-white text-gray-700 border-2 border-gray-300 hover:bg-gray-50"
+                    }`}
+                  >
+                    All Providers
+                  </button>
+                  <button
+                    onClick={() => setSelectedProvider("aws")}
+                    className={`px-4 py-2 rounded-lg font-semibold transition-colors ${
+                      selectedProvider === "aws"
+                        ? "bg-orange-500 text-white"
+                        : "bg-white text-gray-700 border-2 border-gray-300 hover:bg-gray-50"
+                    }`}
+                  >
+                    🟠 AWS
+                  </button>
+                  <button
+                    onClick={() => setSelectedProvider("azure")}
+                    className={`px-4 py-2 rounded-lg font-semibold transition-colors ${
+                      selectedProvider === "azure"
+                        ? "bg-blue-500 text-white"
+                        : "bg-white text-gray-700 border-2 border-gray-300 hover:bg-gray-50"
+                    }`}
+                  >
+                    🔵 Azure
+                  </button>
+                </div>
               </div>
             </div>
 
             {isLoading ? (
               <div className="text-center py-12 text-gray-600">Loading detection rules...</div>
             ) : (
-              detectionRules.map((rule) => {
-                const Icon = RESOURCE_ICONS[rule.resource_type] || HardDrive;
-                const label = RESOURCE_LABELS[rule.resource_type] || rule.resource_type;
+              detectionRules
+                .filter((rule) => {
+                  if (selectedProvider === "all") return true;
+                  const provider = getResourceProvider(rule.resource_type);
+                  return provider === selectedProvider;
+                })
+                .map((rule) => {
+                const Icon = getResourceIcon(rule.resource_type);
+                const label = getResourceLabel(rule.resource_type);
                 const isCustomized = JSON.stringify(rule.current_rules) !== JSON.stringify(rule.default_rules);
+                const provider = getResourceProvider(rule.resource_type);
 
                 return (
                   <div
@@ -297,8 +383,15 @@ export default function SettingsPage() {
                         <div className="min-w-0">
                           <h3 className="text-lg md:text-xl font-bold text-gray-900 flex flex-wrap items-center gap-2">
                             <span>{label}</span>
+                            <span className={`text-xs px-2 py-1 rounded-full font-semibold ${
+                              provider === "azure"
+                                ? "bg-blue-100 text-blue-800"
+                                : "bg-orange-100 text-orange-800"
+                            }`}>
+                              {provider === "azure" ? "🔵 AZURE" : "🟠 AWS"}
+                            </span>
                             {isCustomized && (
-                              <span className="text-xs bg-orange-200 text-orange-800 px-2 py-1 rounded-full font-semibold">
+                              <span className="text-xs bg-purple-200 text-purple-800 px-2 py-1 rounded-full font-semibold">
                                 CUSTOM
                               </span>
                             )}
