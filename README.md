@@ -8,7 +8,7 @@
 
 **Solution:** Multi-cloud SaaS platform that connects to AWS/Azure/GCP accounts in read-only mode to scan and identify unused resources with cost-saving estimates.
 
-**MVP Focus:** AWS-only, detecting the most common resource types (quick wins).
+**Current Status:** AWS (25 resource types) + Azure (managed disks) fully implemented with intelligent CloudWatch-based detection.
 
 ---
 
@@ -41,6 +41,7 @@
 
 **Cloud SDKs:**
 - boto3 + aioboto3 (AWS async)
+- azure-identity + azure-mgmt-* (Azure)
 
 **Infrastructure:**
 - Docker + Docker Compose
@@ -194,17 +195,46 @@ Now hooks will run automatically on every commit.
 
 ---
 
-## 📋 MVP Scope - AWS Resource Detection
+## 📋 Resource Detection - AWS & Azure
 
-The MVP focuses on detecting 7 types of orphaned AWS resources:
+CloudWaste detects **25 types of orphaned AWS resources** + **Azure managed disks** with intelligent CloudWatch-based detection:
 
-1. **EBS Volumes (unattached)** - state = 'available', ~$0.10/GB/month
-2. **Elastic IPs (unassigned)** - no association, ~$3.60/month
-3. **EBS Snapshots (orphaned)** - snapshot > 90 days + source deleted, ~$0.05/GB/month
-4. **EC2 Instances (stopped > 30 days)** - state = 'stopped'
-5. **Load Balancers (no backends)** - 0 healthy targets, ~$16-22/month
-6. **RDS Instances (stopped > 7 days)** - state = 'stopped'
-7. **NAT Gateways (unused)** - BytesOutToDestination = 0, ~$32/month
+### Core AWS Resources (7 types)
+1. **EBS Volumes** - Unattached + idle volumes with I/O analysis (~$0.08-0.10/GB/month)
+2. **Elastic IPs** - Unassociated IP addresses (~$3.60/month)
+3. **EBS Snapshots** - Orphaned, redundant, and unused AMI snapshots (~$0.05/GB/month)
+4. **EC2 Instances** - Stopped >30 days + idle running instances (<5% CPU)
+5. **Load Balancers** - 7 detection scenarios: no backends, no listeners, never used, etc. (ALB/NLB/CLB/GWLB: $7.50-22/month)
+6. **RDS Instances** - 5 scenarios: stopped, idle, zero I/O, never connected, no backups (~$12-560/month)
+7. **NAT Gateways** - 4 scenarios: no traffic, no routing, misconfigured (~$32.40/month)
+
+### Advanced AWS Resources (18 types)
+8. **FSx File Systems** - 8 scenarios: inactive, over-provisioned, unused shares (Lustre/Windows/ONTAP/OpenZFS)
+9. **Neptune Clusters** - Graph databases with no connections (~$250-500/month)
+10. **MSK Clusters** - Kafka clusters with no data traffic (~$150-300/month per broker)
+11. **EKS Clusters** - 5 scenarios: no nodes, unhealthy, low CPU, misconfigured Fargate (~$73/month + nodes)
+12. **SageMaker Endpoints** - ML endpoints with no invocations (~$83-165/month)
+13. **Redshift Clusters** - Data warehouses with no connections (~$180-720/month)
+14. **ElastiCache** - 4 scenarios: zero hits, low hit rate, no connections, over-provisioned (~$12-539/month)
+15. **VPN Connections** - VPN with no data transfer (~$36/month)
+16. **Transit Gateway Attachments** - Attachments with no traffic (~$36/month)
+17. **OpenSearch Domains** - Domains with no search requests (~$116-164/month)
+18. **Global Accelerator** - Accelerators with no endpoints (~$18/month)
+19. **Kinesis Streams** - 6 scenarios: inactive, under-utilized, excessive retention (~$10.80/month per shard)
+20. **VPC Endpoints** - Endpoints with no network interfaces (~$7/month)
+21. **DocumentDB Clusters** - Document databases with no connections (~$199/month)
+22. **S3 Buckets** - 4 scenarios: empty, old objects, incomplete uploads, no lifecycle policy
+23. **Lambda Functions** - 4 scenarios: unused provisioned concurrency, never invoked, zero invocations, 100% failures
+24. **DynamoDB Tables** - 5 scenarios: over-provisioned, unused GSI, never used, empty tables
+
+### Azure Resources (1 type)
+25. **Managed Disks** - Unattached Azure disks with SKU-based cost calculation (~$0.048-0.30/GB/month)
+
+### Key Detection Features
+- **Intelligent CloudWatch Metrics Analysis** - Not just status checks, but actual usage patterns
+- **Confidence Levels** - Critical (90+ days), High (30+ days), Medium (7-30 days), Low (<7 days)
+- **Cost Calculation** - "Future waste" (monthly) + "Already wasted" (cumulative)
+- **Customizable Detection Rules** - Per-resource type thresholds and criteria
 
 ---
 
@@ -233,6 +263,27 @@ The MVP focuses on detecting 7 types of orphaned AWS resources:
       "s3:List*",
       "s3:Get*",
       "elasticloadbalancing:Describe*",
+      "fsx:Describe*",
+      "neptune:Describe*",
+      "kafka:Describe*",
+      "kafka:List*",
+      "eks:Describe*",
+      "eks:List*",
+      "sagemaker:Describe*",
+      "redshift:Describe*",
+      "elasticache:Describe*",
+      "ec2:DescribeVpnConnections",
+      "ec2:DescribeTransitGatewayAttachments",
+      "es:Describe*",
+      "globalaccelerator:Describe*",
+      "kinesis:Describe*",
+      "kinesis:List*",
+      "ec2:DescribeVpcEndpoints",
+      "docdb:Describe*",
+      "lambda:List*",
+      "lambda:Get*",
+      "dynamodb:Describe*",
+      "dynamodb:List*",
       "ce:GetCostAndUsage",
       "ce:GetCostForecast",
       "cloudwatch:GetMetricStatistics",
@@ -244,6 +295,19 @@ The MVP focuses on detecting 7 types of orphaned AWS resources:
 }
 ```
 
+### Required Azure Permissions (Read-Only)
+
+CloudWaste requires a **Service Principal** with the following permissions:
+- **Reader** role on subscription (for listing resources)
+- **Monitoring Reader** role (for Azure Monitor metrics)
+
+```bash
+# Create Service Principal with Reader role
+az ad sp create-for-rbac --name "CloudWaste-Scanner" \
+  --role "Reader" \
+  --scopes "/subscriptions/{subscription-id}"
+```
+
 ---
 
 ## 📊 Database Schema
@@ -251,9 +315,10 @@ The MVP focuses on detecting 7 types of orphaned AWS resources:
 ### Core Tables
 
 - **users** - User accounts
-- **cloud_accounts** - Cloud provider accounts (credentials encrypted)
+- **cloud_accounts** - Cloud provider accounts (credentials encrypted, supports AWS + Azure)
 - **scans** - Scan jobs and results
-- **orphan_resources** - Detected orphaned resources
+- **orphan_resources** - Detected orphaned resources (25 AWS types + Azure)
+- **detection_rules** - User-customizable detection rules per resource type
 
 See [CLAUDE_CODE_RULES.md](CLAUDE_CODE_RULES.md) for detailed schema.
 
@@ -325,42 +390,65 @@ cloudwaste/
 
 ---
 
-## 🗓️ Development Roadmap
+## 🗓️ Development Progress
 
-### Sprint 1: Infrastructure & Auth (Weeks 1-2)
-- ✅ Project setup (monorepo structure)
-- ✅ Docker Compose (PostgreSQL + Redis)
-- ✅ Backend skeleton (FastAPI + SQLAlchemy)
-- ✅ Frontend skeleton (Next.js + Tailwind)
-- 🔄 Auth system (JWT, registration, login)
+### ✅ Completed Features
 
-### Sprint 2: Cloud Accounts Management (Weeks 3-4)
-- Models: CloudAccount
-- API: CRUD cloud accounts
-- AWS credentials validation
-- Frontend: Account management pages
-- Credentials encryption/decryption
+**Phase 1: Core Infrastructure**
+- ✅ FastAPI + Next.js monorepo setup
+- ✅ Docker Compose (PostgreSQL + Redis + Celery)
+- ✅ JWT Authentication (registration, login)
+- ✅ User management
 
-### Sprint 3: AWS Scanner Core (Weeks 5-7)
-- Provider abstraction
-- AWS implementation (7 resource types)
-- Cost calculator
-- Celery setup + tasks
-- API endpoints: scans & resources
+**Phase 2: Cloud Provider Integration**
+- ✅ AWS provider (25 resource types)
+- ✅ Azure provider (managed disks)
+- ✅ Credentials encryption (Fernet)
+- ✅ Multi-account support
+- ✅ Credentials validation
 
-### Sprint 4: Dashboard & UI (Weeks 8-9)
-- Dashboard with metrics
-- Resource list with filters
-- Actions: ignore/mark for deletion
-- Export CSV/JSON
+**Phase 3: Intelligent Detection**
+- ✅ CloudWatch metrics analysis
+- ✅ Confidence levels (Critical/High/Medium/Low)
+- ✅ Cost calculation (future + already wasted)
+- ✅ Detection Rules system (customizable per resource)
+- ✅ 25 AWS resource types
+- ✅ Azure managed disks
 
-### Sprint 5: Automation & Polish (Week 10)
-- Celery Beat (daily scans)
-- Email notifications
-- Logging + error handling
-- Tests coverage
-- Documentation
-- Beta release
+**Phase 4: UI/UX**
+- ✅ Dashboard with real-time metrics
+- ✅ Scans page with history
+- ✅ Resources page with filtering
+- ✅ Account management
+- ✅ Settings with Detection Rules editor
+- ✅ Comprehensive documentation page
+- ✅ Notifications system with audio alerts
+- ✅ Toast notifications
+
+**Phase 5: Automation**
+- ✅ Celery workers for background scans
+- ✅ Celery Beat for scheduled scans
+- ✅ Manual scan triggering
+
+### 🚀 Upcoming Features
+
+**Phase 6: Advanced Analytics**
+- 📅 Cost trends and forecasting
+- 📅 Resource usage history graphs
+- 📅 Email notifications
+- 📅 Export to CSV/PDF reports
+
+**Phase 7: Multi-Cloud Expansion**
+- 📅 Complete Azure implementation (all resource types)
+- 📅 GCP provider integration
+- 📅 Cross-cloud cost comparison
+
+**Phase 8: Enterprise Features**
+- 📅 SSO (SAML/OIDC)
+- 📅 Role-based access control (RBAC)
+- 📅 Audit logs
+- 📅 Slack/Teams integrations
+- 📅 Automated remediation (with approval workflows)
 
 ---
 
@@ -406,21 +494,44 @@ SELECT COUNT(*) FROM cloud_accounts;
 SELECT COUNT(*) FROM scans WHERE status = 'completed';
 SELECT COUNT(*) FROM orphan_resources;
 
-# Resources by type
-SELECT resource_type, COUNT(*), SUM(estimated_monthly_cost)
+# Resources by type (top 10)
+SELECT resource_type, COUNT(*) as count, SUM(estimated_monthly_cost) as total_cost
 FROM orphan_resources
-GROUP BY resource_type;
+WHERE status = 'active'
+GROUP BY resource_type
+ORDER BY total_cost DESC
+LIMIT 10;
+
+# Resources by cloud provider
+SELECT
+  CASE
+    WHEN resource_type LIKE '%managed_disk%' THEN 'Azure'
+    ELSE 'AWS'
+  END as provider,
+  COUNT(*) as count,
+  SUM(estimated_monthly_cost) as total_monthly_waste
+FROM orphan_resources
+WHERE status = 'active'
+GROUP BY provider;
 
 # Resources by region
-SELECT region, COUNT(*)
+SELECT region, COUNT(*), SUM(estimated_monthly_cost)
 FROM orphan_resources
-GROUP BY region;
+WHERE status = 'active'
+GROUP BY region
+ORDER BY SUM(estimated_monthly_cost) DESC;
 
 # Latest scan
 SELECT id, status, orphan_resources_found, estimated_monthly_waste, completed_at
 FROM scans
 ORDER BY created_at DESC
 LIMIT 1;
+
+# User detection rules
+SELECT resource_type, rules
+FROM detection_rules
+WHERE user_id = 'your-user-id'
+ORDER BY resource_type;
 ```
 
 ### Database Migrations

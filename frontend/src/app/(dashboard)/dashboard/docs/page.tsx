@@ -150,7 +150,7 @@ function IntroductionSection() {
     <div className="space-y-6">
       <h1 className="text-4xl font-bold text-gray-900">Welcome to CloudWaste</h1>
       <p className="text-xl text-gray-600">
-        Automatically detect and eliminate wasted cloud spending on orphaned AWS resources
+        Automatically detect and eliminate wasted cloud spending on orphaned AWS and Azure resources
       </p>
 
       <div className="grid gap-6 md:grid-cols-3">
@@ -175,28 +175,28 @@ function IntroductionSection() {
         <h3 className="text-lg font-semibold text-blue-900 mb-2">What is CloudWaste?</h3>
         <p className="text-blue-800">
           CloudWaste is a SaaS platform that helps businesses reduce cloud costs by automatically
-          detecting <strong>orphaned and unused resources</strong> in their AWS infrastructure.
-          Unlike simple monitoring tools, CloudWaste uses intelligent detection with CloudWatch
-          metrics to identify resources that are truly wasted, not just temporarily idle.
+          detecting <strong>orphaned and unused resources</strong> in their AWS and Azure infrastructure.
+          Unlike simple monitoring tools, CloudWaste uses intelligent detection with CloudWatch (AWS) and
+          Azure Monitor metrics to identify resources that are truly wasted, not just temporarily idle.
         </p>
       </div>
 
       <div className="space-y-4">
         <h3 className="text-2xl font-bold text-gray-900">How It Works</h3>
         <ol className="list-decimal list-inside space-y-3 text-gray-700">
-          <li><strong>Connect your AWS account</strong> with read-only IAM credentials</li>
+          <li><strong>Connect your AWS or Azure account</strong> with read-only credentials</li>
           <li><strong>Run automated scans</strong> across all your regions</li>
           <li><strong>Review detected resources</strong> with detailed explanations and confidence levels</li>
-          <li><strong>Take action</strong> by deleting truly orphaned resources directly in AWS</li>
+          <li><strong>Take action</strong> by deleting truly orphaned resources directly in your cloud console</li>
         </ol>
       </div>
 
       <div className="rounded-lg bg-green-50 border border-green-200 p-6">
         <h3 className="text-lg font-semibold text-green-900 mb-2">🔒 Security First</h3>
         <p className="text-green-800">
-          CloudWaste uses <strong>read-only AWS permissions</strong>. We NEVER delete, modify,
-          or write to your AWS resources. All credentials are encrypted in our database. You
-          maintain full control and delete resources manually in your AWS console.
+          CloudWaste uses <strong>read-only AWS and Azure permissions</strong>. We NEVER delete, modify,
+          or write to your cloud resources. All credentials are encrypted in our database. You
+          maintain full control and delete resources manually in your AWS or Azure console.
         </p>
       </div>
     </div>
@@ -211,24 +211,37 @@ function GettingStartedSection() {
       <div className="space-y-8">
         <StepCard
           number={1}
-          title="Connect Your AWS Account"
-          description="Add your AWS account with read-only IAM credentials"
+          title="Connect Your Cloud Accounts (AWS or Azure)"
+          description="Add your AWS or Azure account with read-only credentials"
         >
-          <div className="space-y-3 text-sm text-gray-700">
-            <p><strong>Required IAM Permissions:</strong></p>
-            <ul className="list-disc list-inside space-y-1 ml-4">
-              <li>ec2:Describe*</li>
-              <li>rds:Describe*</li>
-              <li>s3:List*, s3:Get*</li>
-              <li>elasticloadbalancing:Describe*</li>
-              <li>cloudwatch:GetMetricStatistics</li>
-              <li>cloudwatch:ListMetrics</li>
-              <li>sts:GetCallerIdentity</li>
-            </ul>
-            <p className="mt-3 text-blue-600">
-              💡 <strong>Tip:</strong> Use AWS IAM to create a dedicated user with these permissions
-              and generate access keys for CloudWaste.
-            </p>
+          <div className="space-y-4 text-sm text-gray-700">
+            <div>
+              <p className="font-semibold text-gray-900 mb-2">🔵 AWS - Required IAM Permissions:</p>
+              <ul className="list-disc list-inside space-y-1 ml-4">
+                <li>ec2:Describe*</li>
+                <li>rds:Describe*</li>
+                <li>s3:List*, s3:Get*</li>
+                <li>elasticloadbalancing:Describe*</li>
+                <li>fsx:Describe*, lambda:List*, dynamodb:Describe*</li>
+                <li>cloudwatch:GetMetricStatistics, cloudwatch:ListMetrics</li>
+                <li>sts:GetCallerIdentity</li>
+              </ul>
+              <p className="mt-2 text-blue-600">
+                💡 <strong>Tip:</strong> Use AWS IAM to create a dedicated user with these permissions
+                and generate access keys for CloudWaste.
+              </p>
+            </div>
+
+            <div className="border-t pt-4">
+              <p className="font-semibold text-gray-900 mb-2">🔷 Azure - Required Service Principal Roles:</p>
+              <ul className="list-disc list-inside space-y-1 ml-4">
+                <li><strong>Reader</strong> role on subscription (for listing resources)</li>
+                <li><strong>Monitoring Reader</strong> role (for Azure Monitor metrics)</li>
+              </ul>
+              <p className="mt-2 text-blue-600">
+                💡 <strong>Tip:</strong> Create a Service Principal with <code className="bg-gray-100 px-1">az ad sp create-for-rbac</code>
+              </p>
+            </div>
           </div>
         </StepCard>
 
@@ -313,10 +326,10 @@ function DetectionStrategySection() {
       </div>
 
       <div className="space-y-4">
-        <h3 className="text-2xl font-bold text-gray-900">Intelligent Detection with CloudWatch</h3>
+        <h3 className="text-2xl font-bold text-gray-900">Intelligent Detection with CloudWatch & Azure Monitor</h3>
         <p className="text-gray-700">
           Unlike basic tools that only check resource status (attached/unattached), CloudWaste uses
-          <strong> AWS CloudWatch Metrics</strong> to analyze actual usage patterns.
+          <strong> AWS CloudWatch Metrics and Azure Monitor</strong> to analyze actual usage patterns.
         </p>
 
         <div className="grid gap-4 md:grid-cols-2">
@@ -361,6 +374,18 @@ function DetectionStrategySection() {
               "Validates security group ingress rules",
               "Detects never-used LBs (>30 days, 0 traffic)",
               "7 comprehensive orphan scenarios"
+            ]}
+          />
+          <DetectionCard
+            title="For Azure Managed Disks"
+            metrics={["disk_state", "time_created"]}
+            logic={[
+              "Checks disk state (Unattached/Reserved)",
+              "Calculates age since creation",
+              "SKU-based cost calculation (Standard/Premium/Ultra SSD)",
+              "Accounts for encryption, zone redundancy, bursting",
+              "Detects Reserved state (billing continues)",
+              "7+ days default minimum age threshold"
             ]}
           />
         </div>
@@ -595,12 +620,19 @@ function SupportedResourcesSection() {
       cost: "Provisioned: $0.00013/RCU/hour + $0.00013/WCU/hour (~$0.095/unit/month) + $0.25/GB storage. On-Demand: $0.25/1M reads + $1.25/1M writes. GSI costs same as table",
       confidence: "Critical (over-provisioned <5% util) to High - Based on CloudWatch ConsumedReadCapacityUnits, ConsumedWriteCapacityUnits metrics and table metadata",
     },
+    {
+      name: "Azure Managed Disks",
+      icon: "💿",
+      detection: "Unattached or Reserved disks (Standard HDD, Standard SSD, Premium SSD, Ultra SSD) with SKU-based cost calculation. Accounts for encryption, zone redundancy, and bursting",
+      cost: "~$0.048-0.30/GB/month depending on SKU (Standard HDD: $0.048, Standard SSD: $0.096, Premium SSD: $0.175, Ultra SSD: $0.30)",
+      confidence: "High - Clear unattached or reserved state with age-based filtering (default 7+ days)",
+    },
   ];
 
   return (
     <div className="space-y-6">
       <h1 className="text-4xl font-bold text-gray-900">Supported Resources</h1>
-      <p className="text-xl text-gray-600">Currently supporting 25 AWS resource types with intelligent CloudWatch-based detection</p>
+      <p className="text-xl text-gray-600">Currently supporting <strong>25 AWS + 1 Azure</strong> resource types (26 total) with intelligent CloudWatch and Azure Monitor detection</p>
 
       <div className="grid gap-4">
         {resources.map((resource, index) => (
@@ -621,8 +653,8 @@ function SupportedResourcesSection() {
       <div className="rounded-lg bg-gray-100 border p-6">
         <h3 className="text-lg font-semibold text-gray-900 mb-2">🚀 Coming Soon</h3>
         <p className="text-gray-700">
-          We're actively working on support for: CloudFormation stacks, ECS/Fargate tasks,
-          and multi-cloud providers (Azure, GCP).
+          We're actively working on: Complete Azure resource coverage (VMs, Storage Accounts, Load Balancers, etc.),
+          GCP support, CloudFormation stacks, and ECS/Fargate task detection.
         </p>
       </div>
     </div>
@@ -646,7 +678,7 @@ function DetectionRulesSection() {
             title="Minimum Age"
             description="Resources younger than this threshold are ignored to avoid false positives"
             range="0-90 days"
-            default="7 days (EBS Volumes), 3 days (Elastic IPs)"
+            default="7 days (EBS Volumes, Azure Managed Disks), 3 days (Elastic IPs)"
             example="Set to 0 to detect immediately, or 30 to only flag old resources"
           />
           <RuleCard
@@ -662,7 +694,7 @@ function DetectionRulesSection() {
           <h3 className="text-lg font-semibold text-amber-900 mb-2">⚠️ Important Notes</h3>
           <ul className="list-disc list-inside space-y-2 text-amber-800 ml-4">
             <li>Rules apply to <strong>future scans only</strong> (not retroactive)</li>
-            <li>Each resource type can have different rules</li>
+            <li>Each resource type can have different rules (works for AWS and Azure)</li>
             <li>Lower thresholds may increase false positives</li>
             <li>Higher thresholds may miss short-term waste</li>
           </ul>
@@ -730,8 +762,8 @@ function UnderstandingResultsSection() {
 function FAQSection() {
   const faqs = [
     {
-      q: "Does CloudWaste delete my AWS resources?",
-      a: "No. CloudWaste only detects and reports orphaned resources. You maintain full control and must delete resources manually in your AWS console. We use read-only IAM permissions."
+      q: "Does CloudWaste delete my AWS or Azure resources?",
+      a: "No. CloudWaste only detects and reports orphaned resources. You maintain full control and must delete resources manually in your AWS or Azure console. We use read-only permissions (AWS IAM / Azure Service Principal)."
     },
     {
       q: "Why is my recently created resource flagged as orphaned?",
@@ -739,11 +771,11 @@ function FAQSection() {
     },
     {
       q: "How accurate are the cost estimates?",
-      a: "Cost estimates are based on AWS public pricing and actual resource specifications (size, type). They don't include discounts (Reserved Instances, Savings Plans) or specific pricing agreements."
+      a: "Cost estimates are based on AWS and Azure public pricing and actual resource specifications (size, type, SKU). They don't include discounts (Reserved Instances, Savings Plans, Azure Reservations) or specific pricing agreements."
     },
     {
       q: "Can I customize detection rules per resource type?",
-      a: "Yes! Go to Settings → Detection Rules to configure minimum age and confidence thresholds for each of the 22 supported resource types (5 core + 17 advanced high-cost resources)."
+      a: "Yes! Go to Settings → Detection Rules to configure minimum age and confidence thresholds for each of the 26 supported resource types (25 AWS + 1 Azure)."
     },
     {
       q: "What if CloudWatch metrics are unavailable?",
@@ -754,8 +786,8 @@ function FAQSection() {
       a: "CloudWaste automatically runs daily scans. You can also trigger manual scans anytime. More frequent scans help catch waste early."
     },
     {
-      q: "Is my AWS data secure?",
-      a: "Yes. All credentials are encrypted with Fernet encryption. We use read-only permissions. Your data never leaves our secure infrastructure except for AWS API calls."
+      q: "Is my cloud data secure?",
+      a: "Yes. All credentials are encrypted with Fernet encryption. We use read-only permissions (AWS IAM / Azure Service Principal). Your data never leaves our secure infrastructure except for AWS and Azure API calls."
     },
   ];
 

@@ -22,7 +22,7 @@ export default function Home() {
           </h1>
 
           <p className="mt-6 text-2xl md:text-3xl text-blue-100 max-w-3xl mx-auto font-light">
-            Detect orphaned AWS resources automatically and
+            Detect <span className="font-semibold text-white">25 types</span> of orphaned AWS resources + Azure automatically and
             <span className="font-semibold text-white"> slash your cloud bills</span>
           </p>
 
@@ -91,14 +91,14 @@ export default function Home() {
           <div className="grid gap-8 md:grid-cols-2 lg:grid-cols-4">
             <FeatureCard
               icon={Search}
-              title="Auto Scan"
-              description="Automatically detect 7 types of orphaned AWS resources"
+              title="Intelligent Detection"
+              description="Detect 25 AWS resource types + Azure with CloudWatch analysis"
               gradient="from-blue-500 to-blue-600"
             />
             <FeatureCard
               icon={DollarSign}
-              title="Cost Analysis"
-              description="Calculate exact monthly and annual savings potential"
+              title="Advanced Analytics"
+              description="Future waste + Already wasted with confidence levels"
               gradient="from-green-500 to-emerald-600"
             />
             <FeatureCard
@@ -109,8 +109,8 @@ export default function Home() {
             />
             <FeatureCard
               icon={Cloud}
-              title="Multi-Account"
-              description="Manage multiple AWS accounts from one dashboard"
+              title="Multi-Cloud & Multi-Account"
+              description="AWS (25 types) + Azure with customizable detection rules"
               gradient="from-orange-500 to-red-600"
             />
           </div>
@@ -135,9 +135,9 @@ export default function Home() {
                 1
               </div>
               <div className="mt-4">
-                <h3 className="text-xl font-bold text-gray-900 mb-3">Connect Your AWS Account</h3>
+                <h3 className="text-xl font-bold text-gray-900 mb-3">Connect Your Cloud Accounts</h3>
                 <p className="text-gray-600">
-                  Add your AWS credentials with read-only permissions. We never modify or delete anything.
+                  Add AWS or Azure credentials with read-only permissions. We never modify or delete anything.
                 </p>
               </div>
             </div>
@@ -147,9 +147,9 @@ export default function Home() {
                 2
               </div>
               <div className="mt-4">
-                <h3 className="text-xl font-bold text-gray-900 mb-3">Run Automatic Scan</h3>
+                <h3 className="text-xl font-bold text-gray-900 mb-3">Run Intelligent Scan</h3>
                 <p className="text-gray-600">
-                  Our AI-powered scanner analyzes your infrastructure and identifies orphaned resources.
+                  CloudWatch-powered scanner analyzes 25 AWS resource types + Azure to identify orphaned resources.
                 </p>
               </div>
             </div>
@@ -159,9 +159,9 @@ export default function Home() {
                 3
               </div>
               <div className="mt-4">
-                <h3 className="text-xl font-bold text-gray-900 mb-3">Review & Save Money</h3>
+                <h3 className="text-xl font-bold text-gray-900 mb-3">Review & Take Action</h3>
                 <p className="text-gray-600">
-                  Get detailed cost reports and recommendations to eliminate waste and reduce your bills.
+                  Get confidence-rated detections with "Future waste" and "Already wasted" cost calculations.
                 </p>
               </div>
             </div>

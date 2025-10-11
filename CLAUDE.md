@@ -4,14 +4,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**CloudWaste** is a SaaS platform for detecting orphaned and unused cloud resources (zombies) that generate unnecessary costs for businesses. The MVP focuses on AWS-only detection of the most common resource types (quick wins).
+**CloudWaste** is a SaaS platform for detecting orphaned and unused cloud resources (zombies) that generate unnecessary costs for businesses. Currently supports **25 AWS resource types** + **Azure managed disks** with intelligent CloudWatch-based detection.
 
 **Tech Stack:**
 - **Frontend:** Next.js 14+ (App Router), TypeScript, React 18+, Tailwind CSS + shadcn/ui, Zustand
 - **Backend:** FastAPI 0.110+, Python 3.11+, Pydantic v2, asyncio
 - **Database:** PostgreSQL 15+ (SQLAlchemy 2.0 async), Redis 7+
 - **Background Jobs:** Celery + Celery Beat + Redis
-- **Cloud SDKs:** boto3 + aioboto3 (async)
+- **Cloud SDKs:** boto3 + aioboto3 (AWS async), azure-identity + azure-mgmt-* (Azure)
 
 ## Directory Structure
 
@@ -259,20 +259,30 @@ export function OrphanResourceCard({
     "Action": [
       "ec2:Describe*",
       "rds:Describe*",
-      "s3:ListAllMyBuckets",
-      "s3:ListBucket",
-      "s3:GetBucketLocation",
-      "s3:ListBucketMultipartUploads",
-      "s3:GetBucketLifecycleConfiguration",
-      "lambda:ListFunctions",
-      "lambda:GetFunction",
-      "lambda:GetFunctionConfiguration",
-      "lambda:ListProvisionedConcurrencyConfigs",
-      "lambda:GetProvisionedConcurrencyConfig",
-      "dynamodb:ListTables",
-      "dynamodb:DescribeTable",
-      "dynamodb:DescribeContinuousBackups",
+      "s3:List*",
+      "s3:Get*",
       "elasticloadbalancing:Describe*",
+      "fsx:Describe*",
+      "neptune:Describe*",
+      "kafka:Describe*",
+      "kafka:List*",
+      "eks:Describe*",
+      "eks:List*",
+      "sagemaker:Describe*",
+      "redshift:Describe*",
+      "elasticache:Describe*",
+      "ec2:DescribeVpnConnections",
+      "ec2:DescribeTransitGatewayAttachments",
+      "es:Describe*",
+      "globalaccelerator:Describe*",
+      "kinesis:Describe*",
+      "kinesis:List*",
+      "ec2:DescribeVpcEndpoints",
+      "docdb:Describe*",
+      "lambda:List*",
+      "lambda:Get*",
+      "dynamodb:Describe*",
+      "dynamodb:List*",
       "ce:GetCostAndUsage",
       "ce:GetCostForecast",
       "cloudwatch:GetMetricStatistics",
@@ -282,6 +292,17 @@ export function OrphanResourceCard({
     "Resource": "*"
   }]
 }
+```
+
+### Required Azure Permissions (Read-Only)
+Azure requires a **Service Principal** with:
+- **Reader** role on subscription
+- **Monitoring Reader** role (for metrics)
+
+```bash
+az ad sp create-for-rbac --name "CloudWaste-Scanner" \
+  --role "Reader" \
+  --scopes "/subscriptions/{subscription-id}"
 ```
 
 ### Authentication
@@ -296,21 +317,52 @@ export function OrphanResourceCard({
 
 ### Core Tables
 - **users:** User accounts (id, email, hashed_password, full_name, is_active, created_at)
-- **cloud_accounts:** Cloud provider accounts (id, user_id, provider, account_identifier, credentials_encrypted, regions, last_scan_at)
+- **cloud_accounts:** Cloud provider accounts (id, user_id, provider ['aws'|'azure'], account_identifier, credentials_encrypted, regions, last_scan_at)
 - **scans:** Scan jobs (id, cloud_account_id, status, scan_type, total_resources_scanned, orphan_resources_found, estimated_monthly_waste, started_at, completed_at)
-- **orphan_resources:** Detected resources (id, scan_id, cloud_account_id, resource_type, resource_id, resource_name, region, estimated_monthly_cost, resource_metadata, status)
+- **orphan_resources:** Detected resources (id, scan_id, cloud_account_id, resource_type, resource_id, resource_name, region, estimated_monthly_cost, resource_metadata, status ['active'|'ignored'|'marked_for_deletion'])
+- **detection_rules:** User-specific detection rules (id, user_id, resource_type, rules [JSON], created_at, updated_at)
 
-## MVP Scope - AWS Resource Detections
+## Resource Detection Scope
 
-Focus on detecting the following orphaned resources (quick wins):
+CloudWaste detects **25 AWS resource types** + **Azure managed disks** with intelligent detection:
 
-1. **EBS Volumes (unattached)** - state = 'available', cost: ~$0.10/GB/month
-2. **Elastic IPs (unassigned)** - no association, cost: ~$3.60/month
-3. **EBS Snapshots (orphaned)** - snapshot > 90 days + source volume deleted, cost: ~$0.05/GB/month
-4. **EC2 Instances (stopped > 30 days)** - state = 'stopped', last_state_transition > 30 days
-5. **Load Balancers (no backends)** - 0 healthy targets, cost: ~$16-22/month
-6. **RDS Instances (stopped > 7 days)** - state = 'stopped'
-7. **NAT Gateways (unused)** - BytesOutToDestination = 0 over 30 days, cost: ~$32/month
+### Core AWS Resources (7 types)
+1. **EBS Volumes** - Unattached + idle volumes with CloudWatch I/O analysis
+2. **Elastic IPs** - Unassociated IP addresses (~$3.60/month)
+3. **EBS Snapshots** - Orphaned, redundant, and unused AMI snapshots
+4. **EC2 Instances** - Stopped >30 days + idle running (<5% CPU)
+5. **Load Balancers** - 7 scenarios: no backends, no listeners, never used, etc. (ALB/NLB/CLB/GWLB)
+6. **RDS Instances** - 5 scenarios: stopped, idle, zero I/O, never connected, no backups
+7. **NAT Gateways** - 4 scenarios: no traffic, no routing, misconfigured
+
+### Advanced AWS Resources (18 types)
+8. **FSx File Systems** - 8 scenarios across Lustre/Windows/ONTAP/OpenZFS
+9. **Neptune Clusters** - Graph databases with no connections
+10. **MSK Clusters** - Kafka clusters with no data traffic
+11. **EKS Clusters** - 5 scenarios: no nodes, unhealthy, low CPU, misconfigured
+12. **SageMaker Endpoints** - ML endpoints with no invocations
+13. **Redshift Clusters** - Data warehouses with no connections
+14. **ElastiCache** - 4 scenarios: zero hits, low hit rate, no connections, over-provisioned
+15. **VPN Connections** - VPN with no data transfer
+16. **Transit Gateway Attachments** - Attachments with no traffic
+17. **OpenSearch Domains** - Domains with no search requests
+18. **Global Accelerator** - Accelerators with no endpoints
+19. **Kinesis Streams** - 6 scenarios: inactive, under-utilized, excessive retention
+20. **VPC Endpoints** - Endpoints with no network interfaces
+21. **DocumentDB Clusters** - Document databases with no connections
+22. **S3 Buckets** - 4 scenarios: empty, old objects, incomplete uploads, no lifecycle
+23. **Lambda Functions** - 4 scenarios: unused provisioned concurrency, never invoked, 100% failures
+24. **DynamoDB Tables** - 5 scenarios: over-provisioned, unused GSI, never used, empty
+
+### Azure Resources (1 type)
+25. **Managed Disks** - Unattached Azure disks with SKU-based cost calculation
+
+### Key Detection Features
+- **CloudWatch Metrics Analysis** - Actual usage patterns, not just status checks
+- **Confidence Levels** - Critical (90+ days), High (30+ days), Medium (7-30 days), Low (<7 days)
+- **Cost Calculation** - Future waste (monthly) + Already wasted (cumulative since creation)
+- **Detection Rules System** - User-customizable thresholds per resource type
+- **Multi-Scenario Detection** - Advanced resources have 4-8 detection scenarios each
 
 ## Testing Requirements
 

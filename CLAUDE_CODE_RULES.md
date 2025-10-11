@@ -8,7 +8,7 @@
 
 **Solution :** SaaS multi-cloud permettant de connecter des comptes AWS/Azure/GCP en lecture seule pour scanner et identifier les ressources inutilisées avec estimation des coûts économisables.
 
-**MVP Focus :** AWS uniquement, détection des ressources les plus communes (quick wins).
+**État Actuel :** AWS (25 types de ressources) + Azure (disques managés) entièrement implémentés avec détection intelligente basée sur CloudWatch.
 
 ---
 
@@ -42,7 +42,8 @@ Database:
 
 Cloud SDKs:
   - AWS: boto3 + aioboto3 (async)
-  - Future: azure-sdk-for-python, google-cloud-*
+  - Azure: azure-identity + azure-mgmt-* (compute, network, storage)
+  - Future: google-cloud-*
 
 Infrastructure:
   - Containerization: Docker + Docker Compose
@@ -264,66 +265,178 @@ cloudwaste/
 
 ---
 
-## 📋 MVP - Scope Fonctionnel
+## 📋 Scope Fonctionnel - Ressources Détectées
 
-### Phase 1 : Détections AWS Prioritaires
+CloudWaste détecte **25 types de ressources AWS** + **disques Azure** avec détection intelligente :
 
-**Ressources à détecter (Quick Wins) :**
+### Ressources AWS Core (7 types)
 
-1. **EBS Volumes détachés**
-   - Volume state = 'available' (not attached)
-   - Coût estimé : $0.10/GB/mois (gp3)
+1. **EBS Volumes**
+   - Détachés + volumes attachés inactifs (analyse CloudWatch I/O)
+   - Coût : ~$0.08-0.10/GB/mois (gp3/gp2)
 
-2. **Elastic IPs non assignées**
-   - Association state = empty
-   - Coût : $0.005/heure = ~$3.60/mois
+2. **Elastic IPs**
+   - IPs non associées
+   - Coût : ~$3.60/mois
 
-3. **EBS Snapshots orphelins**
-   - Snapshot > 90 jours + volume source supprimé
-   - Coût : $0.05/GB/mois
+3. **EBS Snapshots**
+   - Orphelins, redondants, snapshots d'AMI non utilisées
+   - Coût : ~$0.05/GB/mois
 
-4. **EC2 Instances arrêtées > 30 jours**
-   - State = 'stopped', last_state_transition > 30 days
-   - Coût économisable : coût instance - coût EBS
+4. **EC2 Instances**
+   - Arrêtées >30 jours + instances actives inactives (<5% CPU)
+   - Coût variable selon le type d'instance
 
-5. **Load Balancers sans backend**
-   - ELB/ALB avec 0 healthy targets
-   - Coût : $16-22/mois par LB
+5. **Load Balancers**
+   - 7 scénarios : no backends, no listeners, jamais utilisé, etc.
+   - ALB/NLB/CLB/GWLB : $7.50-22/mois
 
-6. **RDS Instances arrêtées > 7 jours**
-   - State = 'stopped', max stopped time = 7 days AWS
-   - Coût : database storage uniquement
+6. **RDS Instances**
+   - 5 scénarios : arrêtée, inactive, zero I/O, jamais connectée, sans backups
+   - Coût : ~$12-560/mois
 
-7. **NAT Gateways non utilisés**
-   - BytesOutToDestination = 0 sur 30 jours
-   - Coût : $0.045/heure = ~$32/mois
+7. **NAT Gateways**
+   - 4 scénarios : pas de trafic, pas de routing, mal configuré
+   - Coût : ~$32.40/mois
 
-### Features MVP
+### Ressources AWS Avancées (18 types)
 
-✅ **Fonctionnalités Essentielles :**
-- Création compte utilisateur (email/password)
-- Connexion compte AWS (IAM Role ARN ou Access Key)
-- Validation credentials AWS (test connexion)
-- Scan manuel déclenché par user
-- Scan automatique 1x/jour (Celery Beat)
-- Dashboard : résumé des ressources orphelines par type
-- Liste détaillée des ressources avec :
-  - Nom/ID de la ressource
-  - Type
-  - Région AWS
-  - Date de création/dernière utilisation
-  - Coût mensuel estimé
-  - Actions : "Ignorer" / "Marquer comme à supprimer"
-- Export CSV/JSON des résultats
-- Notifications email : scan terminé + résumé
+8. **FSx File Systems**
+   - 8 scénarios : inactif, sur-provisionné, partages non utilisés
+   - Lustre/Windows/ONTAP/OpenZFS
 
-❌ **Hors Scope MVP :**
-- Multi-cloud (Azure/GCP) → Phase 2
-- Suppression automatique → Phase 3
-- Intégrations Slack/Teams → Phase 2
-- Recommandations ML → Phase 3
-- API publique → Phase 2
-- SSO (SAML/OIDC) → Phase 2
+9. **Neptune Clusters**
+   - Bases de données graphe sans connexions
+   - ~$250-500/mois
+
+10. **MSK Clusters**
+    - Clusters Kafka sans trafic de données
+    - ~$150-300/mois par broker
+
+11. **EKS Clusters**
+    - 5 scénarios : pas de nœuds, nœuds dégradés, CPU faible, Fargate mal configuré
+    - ~$73/mois (control plane) + nœuds
+
+12. **SageMaker Endpoints**
+    - Endpoints ML sans invocations
+    - ~$83-165/mois
+
+13. **Redshift Clusters**
+    - Entrepôts de données sans connexions
+    - ~$180-720/mois
+
+14. **ElastiCache**
+    - 4 scénarios : zero hits, hit rate faible, pas de connexions, sur-provisionné
+    - ~$12-539/mois
+
+15. **VPN Connections**
+    - VPN sans transfert de données
+    - ~$36/mois
+
+16. **Transit Gateway Attachments**
+    - Attachements sans trafic
+    - ~$36/mois
+
+17. **OpenSearch Domains**
+    - Domaines sans requêtes de recherche
+    - ~$116-164/mois
+
+18. **Global Accelerator**
+    - Accelerators sans endpoints
+    - ~$18/mois
+
+19. **Kinesis Streams**
+    - 6 scénarios : inactif, sous-utilisé, rétention excessive
+    - ~$10.80/mois par shard
+
+20. **VPC Endpoints**
+    - Endpoints sans interfaces réseau
+    - ~$7/mois
+
+21. **DocumentDB Clusters**
+    - Bases documentaires sans connexions
+    - ~$199/mois
+
+22. **S3 Buckets**
+    - 4 scénarios : vide, objets anciens, uploads incomplets, pas de lifecycle
+    - Coût variable
+
+23. **Lambda Functions**
+    - 4 scénarios : provisioned concurrency non utilisée, jamais invoquée, 100% d'erreurs
+    - Coût variable
+
+24. **DynamoDB Tables**
+    - 5 scénarios : sur-provisionné, GSI non utilisé, jamais utilisée, tables vides
+    - Coût variable
+
+### Ressources Azure (1 type)
+
+25. **Managed Disks**
+    - Disques Azure détachés avec calcul de coût basé sur SKU
+    - ~$0.048-0.30/GB/mois selon le type
+
+### Fonctionnalités Clés de Détection
+
+- **Analyse CloudWatch Metrics** - Patterns d'utilisation réels, pas juste des vérifications de statut
+- **Niveaux de Confiance** - Critical (90+ jours), High (30+ jours), Medium (7-30 jours), Low (<7 jours)
+- **Calcul de Coût** - "Future waste" (mensuel) + "Already wasted" (cumulé depuis création)
+- **Système Detection Rules** - Seuils personnalisables par type de ressource
+- **Détection Multi-Scénarios** - Ressources avancées ont 4-8 scénarios de détection
+
+### ✅ Fonctionnalités Implémentées
+
+**Authentification & Gestion Utilisateurs :**
+- ✅ Création compte utilisateur (email/password)
+- ✅ Connexion JWT (access + refresh tokens)
+- ✅ Gestion multi-comptes cloud
+
+**Intégration Cloud :**
+- ✅ Connexion compte AWS (IAM credentials)
+- ✅ Connexion compte Azure (Service Principal)
+- ✅ Validation credentials AWS/Azure
+- ✅ Support multi-régions
+
+**Détection & Analyse :**
+- ✅ 25 types de ressources AWS
+- ✅ Disques Azure managés
+- ✅ Analyse CloudWatch Metrics
+- ✅ Niveaux de confiance (Critical/High/Medium/Low)
+- ✅ Calcul "Future waste" + "Already wasted"
+- ✅ Système Detection Rules personnalisable
+
+**Scans :**
+- ✅ Scan manuel déclenché par user
+- ✅ Scan automatique quotidien (Celery Beat)
+- ✅ Historique des scans
+- ✅ Workers Celery pour scans asynchrones
+
+**Interface Utilisateur :**
+- ✅ Dashboard avec métriques temps réel
+- ✅ Liste détaillée des ressources avec filtres
+- ✅ Actions : Voir détails / Ignorer / Marquer pour suppression / Supprimer l'enregistrement
+- ✅ Page Settings avec éditeur Detection Rules
+- ✅ Page de documentation complète
+- ✅ Système de notifications avec alertes audio
+- ✅ Toast notifications
+
+**Calcul de Coûts :**
+- ✅ Estimation coût mensuel par ressource
+- ✅ Calcul coût déjà gaspillé (cumul depuis création)
+- ✅ Total gaspillage mensuel par scan
+- ✅ Coûts basés sur AWS/Azure pricing
+
+### 🚀 Fonctionnalités Futures
+
+**Phase Suivante :**
+- 📅 Export CSV/PDF des résultats
+- 📅 Notifications email (scan terminé + résumé)
+- 📅 Graphiques tendances de coûts
+- 📅 Azure complet (tous les types de ressources)
+- 📅 Support GCP
+- 📅 Intégrations Slack/Teams
+- 📅 SSO (SAML/OIDC)
+- 📅 API publique
+- 📅 Suppression automatique avec workflows d'approbation
 
 ---
 
@@ -502,8 +615,8 @@ CREATE TABLE orphan_resources (
     cloud_account_id UUID REFERENCES cloud_accounts(id) ON DELETE CASCADE,
 
     -- Resource identification
-    resource_type VARCHAR(100) NOT NULL, -- 'ebs_volume', 'elastic_ip', etc.
-    resource_id VARCHAR(255) NOT NULL, -- AWS resource ID
+    resource_type VARCHAR(100) NOT NULL, -- 'ebs_volume', 'elastic_ip', 'managed_disk_unattached', etc.
+    resource_id VARCHAR(255) NOT NULL, -- AWS/Azure resource ID
     resource_name VARCHAR(255),
     region VARCHAR(50) NOT NULL,
 
@@ -512,12 +625,12 @@ CREATE TABLE orphan_resources (
     currency VARCHAR(3) DEFAULT 'USD',
 
     -- Metadata
-    resource_metadata JSON, -- Specific attributes per resource type
+    resource_metadata JSON, -- Specific attributes per resource type (includes 'orphan_reason', 'confidence_level', 'age_days')
     last_used_at TIMESTAMP,
     created_at_cloud TIMESTAMP, -- When created in cloud provider
 
     -- User actions
-    status VARCHAR(50) DEFAULT 'active', -- 'active', 'ignored', 'marked_for_deletion', 'deleted'
+    status VARCHAR(50) DEFAULT 'active', -- 'active', 'ignored', 'marked_for_deletion'
     ignored_at TIMESTAMP,
     ignored_reason TEXT,
 
@@ -525,6 +638,22 @@ CREATE TABLE orphan_resources (
     updated_at TIMESTAMP DEFAULT NOW(),
 
     UNIQUE(cloud_account_id, resource_id, resource_type)
+);
+
+-- detection_rules table
+CREATE TABLE detection_rules (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID REFERENCES users(id) ON DELETE CASCADE,
+    resource_type VARCHAR(50) NOT NULL, -- 'ebs_volume', 'elastic_ip', etc.
+
+    -- Custom rules (JSONB for flexibility)
+    -- Example: {"enabled": true, "min_age_days": 14, "confidence_threshold_days": 45}
+    rules JSON NOT NULL,
+
+    created_at TIMESTAMP DEFAULT NOW(),
+    updated_at TIMESTAMP DEFAULT NOW(),
+
+    UNIQUE(user_id, resource_type)
 );
 
 -- Create indexes
