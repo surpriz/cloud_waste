@@ -564,11 +564,20 @@ function AddAWSAccountForm({ onClose }: { onClose: () => void }) {
 
 function EditAccountForm({ account, onClose }: { account: any; onClose: () => void }) {
   const { updateAccount, isLoading, error } = useAccountStore();
+  const isAzure = account.provider === "azure";
+
   const [formData, setFormData] = useState({
     account_name: account.account_name || "",
+    // AWS fields
     aws_access_key_id: "",
     aws_secret_access_key: "",
-    regions: account.regions?.join(",") || "us-east-1",
+    // Azure fields
+    azure_tenant_id: "",
+    azure_client_id: "",
+    azure_client_secret: "",
+    azure_subscription_id: "",
+    // Common fields
+    regions: account.regions?.join(",") || (isAzure ? "eastus,westeurope,northeurope" : "us-east-1"),
     scheduled_scan_enabled: account.scheduled_scan_enabled ?? true,
     scheduled_scan_frequency: account.scheduled_scan_frequency || "daily",
     scheduled_scan_hour: account.scheduled_scan_hour ?? 2,
@@ -595,9 +604,21 @@ function EditAccountForm({ account, onClose }: { account: any; onClose: () => vo
       }
 
       // Only include credentials if they were provided
-      if (formData.aws_access_key_id && formData.aws_secret_access_key) {
-        updateData.aws_access_key_id = formData.aws_access_key_id;
-        updateData.aws_secret_access_key = formData.aws_secret_access_key;
+      if (isAzure) {
+        // Azure credentials - all 4 fields must be provided to update
+        if (formData.azure_tenant_id && formData.azure_client_id &&
+            formData.azure_client_secret && formData.azure_subscription_id) {
+          updateData.azure_tenant_id = formData.azure_tenant_id;
+          updateData.azure_client_id = formData.azure_client_id;
+          updateData.azure_client_secret = formData.azure_client_secret;
+          updateData.azure_subscription_id = formData.azure_subscription_id;
+        }
+      } else {
+        // AWS credentials - both fields must be provided to update
+        if (formData.aws_access_key_id && formData.aws_secret_access_key) {
+          updateData.aws_access_key_id = formData.aws_access_key_id;
+          updateData.aws_secret_access_key = formData.aws_secret_access_key;
+        }
       }
 
       await updateAccount(account.id, updateData);
@@ -612,7 +633,7 @@ function EditAccountForm({ account, onClose }: { account: any; onClose: () => vo
       <div className="max-w-2xl w-full rounded-2xl border-2 border-blue-200 bg-white p-8 shadow-xl max-h-[90vh] overflow-y-auto">
         <div className="flex items-center justify-between mb-6">
           <h2 className="text-2xl font-bold bg-gradient-to-r from-blue-600 to-purple-600 bg-clip-text text-transparent">
-            Edit AWS Account
+            Edit {isAzure ? "Azure" : "AWS"} Account
           </h2>
         </div>
 
@@ -636,48 +657,119 @@ function EditAccountForm({ account, onClose }: { account: any; onClose: () => vo
                 setFormData({ ...formData, account_name: e.target.value })
               }
               className="block w-full rounded-xl border-2 border-gray-300 px-4 py-3 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/20 transition-all"
-              placeholder="Production AWS"
+              placeholder={isAzure ? "Production Azure" : "Production AWS"}
             />
           </div>
 
           <div className="rounded-xl bg-blue-50 border border-blue-200 p-4">
             <p className="text-sm text-blue-900">
-              <strong>Update Credentials (optional):</strong> Leave empty to keep existing credentials. Fill both fields to update.
+              <strong>Update Credentials (optional):</strong> Leave empty to keep existing credentials. {isAzure ? "Fill all 4 fields to update." : "Fill both fields to update."}
             </p>
           </div>
 
-          <div>
-            <label className="block text-sm font-semibold text-gray-700 mb-2">
-              New AWS Access Key ID (optional)
-            </label>
-            <input
-              type="text"
-              value={formData.aws_access_key_id}
-              onChange={(e) =>
-                setFormData({ ...formData, aws_access_key_id: e.target.value })
-              }
-              className="block w-full rounded-xl border-2 border-gray-300 px-4 py-3 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/20 transition-all font-mono text-sm"
-              placeholder="AKIAIOSFODNN7EXAMPLE"
-            />
-          </div>
+          {isAzure ? (
+            <>
+              {/* Azure Credentials */}
+              <div>
+                <label className="block text-sm font-semibold text-gray-700 mb-2">
+                  New Azure Tenant ID (optional)
+                  <span className="ml-2 text-xs font-normal text-gray-500">(Directory ID)</span>
+                </label>
+                <input
+                  type="text"
+                  value={formData.azure_tenant_id}
+                  onChange={(e) =>
+                    setFormData({ ...formData, azure_tenant_id: e.target.value })
+                  }
+                  className="block w-full rounded-xl border-2 border-gray-300 px-4 py-3 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/20 transition-all font-mono text-sm"
+                  placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+                />
+              </div>
 
-          <div>
-            <label className="block text-sm font-semibold text-gray-700 mb-2">
-              New AWS Secret Access Key (optional)
-            </label>
-            <input
-              type="password"
-              value={formData.aws_secret_access_key}
-              onChange={(e) =>
-                setFormData({
-                  ...formData,
-                  aws_secret_access_key: e.target.value,
-                })
-              }
-              className="block w-full rounded-xl border-2 border-gray-300 px-4 py-3 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/20 transition-all font-mono text-sm"
-              placeholder="wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
-            />
-          </div>
+              <div>
+                <label className="block text-sm font-semibold text-gray-700 mb-2">
+                  New Azure Client ID (optional)
+                  <span className="ml-2 text-xs font-normal text-gray-500">(Application ID)</span>
+                </label>
+                <input
+                  type="text"
+                  value={formData.azure_client_id}
+                  onChange={(e) =>
+                    setFormData({ ...formData, azure_client_id: e.target.value })
+                  }
+                  className="block w-full rounded-xl border-2 border-gray-300 px-4 py-3 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/20 transition-all font-mono text-sm"
+                  placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm font-semibold text-gray-700 mb-2">
+                  New Azure Client Secret (optional)
+                </label>
+                <input
+                  type="password"
+                  value={formData.azure_client_secret}
+                  onChange={(e) =>
+                    setFormData({ ...formData, azure_client_secret: e.target.value })
+                  }
+                  className="block w-full rounded-xl border-2 border-gray-300 px-4 py-3 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/20 transition-all font-mono text-sm"
+                  placeholder="Client secret value"
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm font-semibold text-gray-700 mb-2">
+                  New Azure Subscription ID (optional)
+                  <span className="ml-2 text-xs font-normal text-gray-500">(GUID format)</span>
+                </label>
+                <input
+                  type="text"
+                  value={formData.azure_subscription_id}
+                  onChange={(e) =>
+                    setFormData({ ...formData, azure_subscription_id: e.target.value })
+                  }
+                  className="block w-full rounded-xl border-2 border-gray-300 px-4 py-3 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/20 transition-all font-mono text-sm"
+                  placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+                />
+              </div>
+            </>
+          ) : (
+            <>
+              {/* AWS Credentials */}
+              <div>
+                <label className="block text-sm font-semibold text-gray-700 mb-2">
+                  New AWS Access Key ID (optional)
+                </label>
+                <input
+                  type="text"
+                  value={formData.aws_access_key_id}
+                  onChange={(e) =>
+                    setFormData({ ...formData, aws_access_key_id: e.target.value })
+                  }
+                  className="block w-full rounded-xl border-2 border-gray-300 px-4 py-3 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/20 transition-all font-mono text-sm"
+                  placeholder="AKIAIOSFODNN7EXAMPLE"
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm font-semibold text-gray-700 mb-2">
+                  New AWS Secret Access Key (optional)
+                </label>
+                <input
+                  type="password"
+                  value={formData.aws_secret_access_key}
+                  onChange={(e) =>
+                    setFormData({
+                      ...formData,
+                      aws_secret_access_key: e.target.value,
+                    })
+                  }
+                  className="block w-full rounded-xl border-2 border-gray-300 px-4 py-3 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/20 transition-all font-mono text-sm"
+                  placeholder="wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+                />
+              </div>
+            </>
+          )}
 
           <div>
             <label className="block text-sm font-semibold text-gray-700 mb-2">
@@ -690,7 +782,7 @@ function EditAccountForm({ account, onClose }: { account: any; onClose: () => vo
                 setFormData({ ...formData, regions: e.target.value })
               }
               className="block w-full rounded-xl border-2 border-gray-300 px-4 py-3 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/20 transition-all font-mono"
-              placeholder="us-east-1,eu-west-1,eu-central-1"
+              placeholder={isAzure ? "eastus,westeurope,francecentral" : "us-east-1,eu-west-1,eu-central-1"}
             />
             <p className="mt-2 text-xs text-gray-500">
               💡 Tip: Limit to 3 regions for faster scans

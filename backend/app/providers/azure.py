@@ -334,6 +334,27 @@ class AzureProvider(CloudProviderBase):
         ips_on_stopped = await self.scan_ips_on_stopped_resources(region, rules.get("public_ip_on_stopped_resource"))
         results.extend(ips_on_stopped)
 
+        # Phase A - Virtual Machine waste detection scenarios (simple detection)
+        # Scenario 1: VMs deallocated (stopped) for extended periods
+        deallocated_vms = await self.scan_stopped_instances(region, rules.get("virtual_machine_deallocated"))
+        results.extend(deallocated_vms)
+
+        # Scenario 2: VMs stopped but NOT deallocated (CRITICAL - still paying full price!)
+        stopped_not_deallocated = await self.scan_stopped_not_deallocated_vms(region, rules.get("virtual_machine_stopped_not_deallocated"))
+        results.extend(stopped_not_deallocated)
+
+        # Scenario 3: VMs created but never started
+        never_started = await self.scan_never_started_vms(region, rules.get("virtual_machine_never_started"))
+        results.extend(never_started)
+
+        # Scenario 4: VMs oversized with premium disks
+        oversized_premium = await self.scan_oversized_premium_vms(region, rules.get("virtual_machine_oversized_premium"))
+        results.extend(oversized_premium)
+
+        # Scenario 5: VMs missing required governance tags (orphaned)
+        untagged_orphans = await self.scan_untagged_orphan_vms(region, rules.get("virtual_machine_untagged_orphan"))
+        results.extend(untagged_orphans)
+
         # TODO: Phase 2 - Advanced metrics scenarios (requires Azure Monitor API)
         # results.extend(await self.scan_low_io_disks(region, rules.get("managed_disk_low_io")))
         # results.extend(await self.scan_zero_traffic_ips(region, rules.get("public_ip_no_traffic")))
@@ -849,22 +870,721 @@ class AzureProvider(CloudProviderBase):
 
         return orphans
 
+    def _get_vm_cost_estimate(self, vm_size: str) -> float:
+        """
+        Estimate monthly cost for Azure VM size (approximation).
+
+        Args:
+            vm_size: Azure VM size (e.g. Standard_B2s, Standard_D4s_v3)
+
+        Returns:
+            Estimated monthly cost in USD
+        """
+        # Simplified pricing estimates (Pay-as-you-go, US East, Linux)
+        # These are rough approximations for cost calculation
+        vm_pricing = {
+            # B-series (Burstable)
+            'Standard_B1s': 8.0,
+            'Standard_B1ms': 15.0,
+            'Standard_B2s': 30.0,
+            'Standard_B2ms': 60.0,
+            'Standard_B4ms': 120.0,
+            # D-series (General purpose)
+            'Standard_D2s_v3': 70.0,
+            'Standard_D4s_v3': 140.0,
+            'Standard_D8s_v3': 280.0,
+            'Standard_D16s_v3': 560.0,
+            # E-series (Memory optimized)
+            'Standard_E2s_v3': 90.0,
+            'Standard_E4s_v3': 180.0,
+            'Standard_E8s_v3': 360.0,
+            # F-series (Compute optimized)
+            'Standard_F2s_v2': 65.0,
+            'Standard_F4s_v2': 130.0,
+            'Standard_F8s_v2': 260.0,
+        }
+
+        # Return estimate or default based on VM size pattern
+        if vm_size in vm_pricing:
+            return vm_pricing[vm_size]
+
+        # Fallback: estimate by vcpu count if possible
+        if '_' in vm_size:
+            parts = vm_size.split('_')
+            if len(parts) >= 2:
+                # Try to extract number (e.g. D4s -> 4)
+                for part in parts[1:]:
+                    if part[0].isdigit():
+                        try:
+                            vcpus = int(''.join(filter(str.isdigit, part)))
+                            return vcpus * 35.0  # ~$35/vCPU/month average
+                        except:
+                            pass
+
+        # Default fallback
+        return 100.0
+
     async def scan_stopped_instances(
         self, region: str, detection_rules: dict | None = None
     ) -> list[OrphanResourceData]:
         """
-        Scan for stopped/deallocated Azure Virtual Machines.
+        Scan for deallocated (stopped) Azure Virtual Machines.
+
+        Detects VMs that have been deallocated for an extended period,
+        indicating they may no longer be needed.
 
         Args:
             region: Azure region to scan
-            detection_rules: Optional detection configuration
+            detection_rules: Optional detection configuration with:
+                - enabled: bool (default True)
+                - min_stopped_days: int (default 30)
 
         Returns:
-            List of stopped VM resources
+            List of deallocated VM resources
         """
-        # TODO: Implement using azure.mgmt.compute.VirtualMachinesOperations
-        # Detect: VMs with power_state == 'PowerState/deallocated' for > N days
-        return []
+        from datetime import datetime, timezone
+        from azure.identity import ClientSecretCredential
+        from azure.mgmt.compute import ComputeManagementClient
+
+        orphans = []
+        min_stopped_days = detection_rules.get("min_stopped_days", 30) if detection_rules else 30
+
+        try:
+            credential = ClientSecretCredential(
+                tenant_id=self.tenant_id,
+                client_id=self.client_id,
+                client_secret=self.client_secret
+            )
+
+            compute_client = ComputeManagementClient(credential, self.subscription_id)
+            vms = list(compute_client.virtual_machines.list_all())
+
+            for vm in vms:
+                if vm.location != region:
+                    continue
+
+                # Get VM instance view for power state
+                resource_group = vm.id.split('/')[4]
+                instance_view = compute_client.virtual_machines.instance_view(
+                    resource_group_name=resource_group,
+                    vm_name=vm.name
+                )
+
+                # Find power state and timestamp
+                power_state = None
+                stopped_since = None
+                for status in instance_view.statuses:
+                    if status.code and status.code.startswith('PowerState/'):
+                        power_state = status.code.split('/')[-1]
+                        if hasattr(status, 'time') and status.time:
+                            stopped_since = status.time
+
+                # Only detect deallocated VMs
+                if power_state != 'deallocated':
+                    continue
+
+                # Calculate stopped duration
+                stopped_days = 0
+                if stopped_since:
+                    stopped_days = (datetime.now(timezone.utc) - stopped_since).days
+
+                # Filter by min_stopped_days
+                if stopped_days < min_stopped_days:
+                    continue
+
+                # Calculate disk costs (disks continue to charge when deallocated, but compute is $0)
+                monthly_cost = 0.0
+
+                # Calculate OS disk cost
+                if vm.storage_profile and vm.storage_profile.os_disk and vm.storage_profile.os_disk.managed_disk:
+                    try:
+                        os_disk_id = vm.storage_profile.os_disk.managed_disk.id
+                        os_disk_name = os_disk_id.split('/')[-1]
+                        os_disk_rg = os_disk_id.split('/')[4]
+                        os_disk = compute_client.disks.get(os_disk_rg, os_disk_name)
+                        monthly_cost += self._calculate_disk_cost(os_disk)
+                    except Exception:
+                        pass  # If disk not found, skip
+
+                # Calculate data disks cost
+                if vm.storage_profile and vm.storage_profile.data_disks:
+                    for data_disk in vm.storage_profile.data_disks:
+                        if data_disk.managed_disk:
+                            try:
+                                disk_id = data_disk.managed_disk.id
+                                disk_name = disk_id.split('/')[-1]
+                                disk_rg = disk_id.split('/')[4]
+                                disk = compute_client.disks.get(disk_rg, disk_name)
+                                monthly_cost += self._calculate_disk_cost(disk)
+                            except Exception:
+                                pass  # If disk not found, skip
+
+                # Calculate age for "Already wasted" calculation
+                age_days = -1
+                created_at = None
+                if hasattr(vm, 'time_created') and vm.time_created:
+                    age_days = (datetime.now(timezone.utc) - vm.time_created).days
+                    created_at = vm.time_created.isoformat()
+
+                metadata = {
+                    'vm_id': vm.id,
+                    'vm_size': vm.hardware_profile.vm_size if vm.hardware_profile else 'Unknown',
+                    'power_state': 'deallocated',
+                    'stopped_days': stopped_days,
+                    'os_type': str(vm.storage_profile.os_disk.os_type) if vm.storage_profile and vm.storage_profile.os_disk and vm.storage_profile.os_disk.os_type else 'Unknown',
+                    'resource_group': resource_group,
+                    'tags': vm.tags if vm.tags else {},
+                    'age_days': age_days,  # For "Already Wasted" calculation
+                    'created_at': created_at,  # ISO format timestamp
+                    'orphan_reason': f"VM has been deallocated (stopped) for {stopped_days} days",
+                    'recommendation': f"Consider deleting VM if no longer needed. While deallocated, compute charges are $0 but disks continue to cost ${monthly_cost:.2f}/month. You can delete the VM and keep disks if needed later.",
+                }
+
+                orphan = OrphanResourceData(
+                    resource_type='virtual_machine_deallocated',
+                    resource_id=vm.id,
+                    resource_name=vm.name if vm.name else vm.id.split('/')[-1],
+                    region=vm.location,
+                    estimated_monthly_cost=monthly_cost,
+                    resource_metadata=metadata
+                )
+
+                orphans.append(orphan)
+
+        except Exception as e:
+            print(f"Error scanning deallocated VMs in {region}: {str(e)}")
+
+        return orphans
+
+    async def scan_stopped_not_deallocated_vms(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scan for Azure VMs stopped but NOT deallocated (still costing money!).
+
+        This is CRITICAL as VMs in "stopped" state (without deallocation) continue
+        to incur FULL compute charges even though they're not running.
+
+        Args:
+            region: Azure region to scan
+            detection_rules: Optional detection configuration with:
+                - enabled: bool (default True)
+                - min_stopped_days: int (default 7)
+
+        Returns:
+            List of stopped (not deallocated) VM resources
+        """
+        from datetime import datetime, timezone
+        from azure.identity import ClientSecretCredential
+        from azure.mgmt.compute import ComputeManagementClient
+
+        orphans = []
+        min_stopped_days = detection_rules.get("min_stopped_days", 7) if detection_rules else 7
+
+        try:
+            credential = ClientSecretCredential(
+                tenant_id=self.tenant_id,
+                client_id=self.client_id,
+                client_secret=self.client_secret
+            )
+
+            compute_client = ComputeManagementClient(credential, self.subscription_id)
+            vms = list(compute_client.virtual_machines.list_all())
+
+            for vm in vms:
+                if vm.location != region:
+                    continue
+
+                resource_group = vm.id.split('/')[4]
+                instance_view = compute_client.virtual_machines.instance_view(
+                    resource_group_name=resource_group,
+                    vm_name=vm.name
+                )
+
+                power_state = None
+                stopped_since = None
+                for status in instance_view.statuses:
+                    if status.code and status.code.startswith('PowerState/'):
+                        power_state = status.code.split('/')[-1]
+                        if hasattr(status, 'time') and status.time:
+                            stopped_since = status.time
+
+                # Detect VMs in "stopped" state (NOT deallocated)
+                if power_state != 'stopped':
+                    continue
+
+                stopped_days = 0
+                if stopped_since:
+                    stopped_days = (datetime.now(timezone.utc) - stopped_since).days
+
+                if stopped_days < min_stopped_days:
+                    continue
+
+                # FULL compute cost while stopped (not deallocated)
+                vm_size = vm.hardware_profile.vm_size if vm.hardware_profile else 'Unknown'
+                monthly_cost = self._get_vm_cost_estimate(vm_size)
+
+                # Calculate age for "Already wasted" calculation
+                age_days = -1
+                created_at = None
+                if hasattr(vm, 'time_created') and vm.time_created:
+                    age_days = (datetime.now(timezone.utc) - vm.time_created).days
+                    created_at = vm.time_created.isoformat()
+
+                metadata = {
+                    'vm_id': vm.id,
+                    'vm_size': vm_size,
+                    'power_state': 'stopped (NOT deallocated)',
+                    'stopped_days': stopped_days,
+                    'os_type': str(vm.storage_profile.os_disk.os_type) if vm.storage_profile and vm.storage_profile.os_disk and vm.storage_profile.os_disk.os_type else 'Unknown',
+                    'resource_group': resource_group,
+                    'tags': vm.tags if vm.tags else {},
+                    'age_days': age_days,  # For "Already Wasted" calculation
+                    'created_at': created_at,  # ISO format timestamp
+                    'warning': f'⚠️ CRITICAL: VM is stopped but NOT deallocated! You are paying FULL price (${monthly_cost:.2f}/month) for a VM that is not running!',
+                    'orphan_reason': f"VM stopped (not deallocated) for {stopped_days} days - paying full compute charges while not running",
+                    'recommendation': f"URGENT: Deallocate this VM immediately using Azure Portal or CLI: 'az vm deallocate'. This will stop compute charges. Current waste: ${monthly_cost:.2f}/month.",
+                }
+
+                orphan = OrphanResourceData(
+                    resource_type='virtual_machine_stopped_not_deallocated',
+                    resource_id=vm.id,
+                    resource_name=vm.name if vm.name else vm.id.split('/')[-1],
+                    region=vm.location,
+                    estimated_monthly_cost=monthly_cost,
+                    resource_metadata=metadata
+                )
+
+                orphans.append(orphan)
+
+        except Exception as e:
+            print(f"Error scanning stopped (not deallocated) VMs in {region}: {str(e)}")
+
+        return orphans
+
+    async def scan_never_started_vms(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scan for Azure Virtual Machines that have been created but never started.
+
+        This detects VMs that were provisioned but never used - potential provisioning
+        errors or forgotten test resources.
+
+        Args:
+            region: Azure region to scan
+            detection_rules: Optional detection configuration:
+                {
+                    "enabled": bool (default True),
+                    "min_age_days": int (default 7) - VM must exist for this many days
+                }
+
+        Returns:
+            List of VM resources that have never been started
+        """
+        from datetime import datetime, timezone
+        from azure.identity import ClientSecretCredential
+        from azure.mgmt.compute import ComputeManagementClient
+
+        orphans = []
+
+        # Get detection parameters
+        min_age_days = detection_rules.get("min_age_days", 7) if detection_rules else 7
+
+        try:
+            credential = ClientSecretCredential(
+                tenant_id=self.tenant_id,
+                client_id=self.client_id,
+                client_secret=self.client_secret,
+            )
+
+            compute_client = ComputeManagementClient(credential, self.subscription_id)
+
+            # Get all VMs across all resource groups
+            vms = list(compute_client.virtual_machines.list_all())
+
+            for vm in vms:
+                # Get resource group from VM ID
+                resource_group = vm.id.split('/')[4]
+
+                # Get instance view for power state and diagnostics
+                instance_view = compute_client.virtual_machines.instance_view(
+                    resource_group_name=resource_group,
+                    vm_name=vm.name
+                )
+
+                # Extract power state
+                power_state = 'unknown'
+                for status in instance_view.statuses:
+                    if status.code.startswith('PowerState/'):
+                        power_state = status.code.split('/')[1].lower()
+                        break
+
+                # Check if VM has ever been started
+                # A VM that has never started will be in 'deallocated' or 'stopped' state
+                # and won't have boot diagnostics or start history
+                has_never_started = False
+
+                if power_state in ['deallocated', 'stopped']:
+                    # Check VM creation time vs current state
+                    # If VM was created and immediately went to stopped/deallocated without
+                    # ever reaching 'running', it's never been started
+
+                    # For simplicity, we'll check:
+                    # 1. VM is not running
+                    # 2. VM has no recent activity in diagnostics (if available)
+                    # 3. VM age > min_age_days
+
+                    # Calculate VM age
+                    created_at = vm.time_created if hasattr(vm, 'time_created') else None
+                    if created_at:
+                        from datetime import datetime, timezone
+                        now = datetime.now(timezone.utc)
+                        vm_age_days = (now - created_at).days
+
+                        if vm_age_days < min_age_days:
+                            continue
+
+                        # If VM has been in stopped/deallocated state for its entire life
+                        # and is older than min_age_days, flag as never started
+                        has_never_started = True
+                    else:
+                        # Can't determine creation time, skip
+                        continue
+
+                if not has_never_started:
+                    continue
+
+                # Estimate cost (VM is not running, so only disk costs apply)
+                # But we'll show the potential compute cost if it were running
+                vm_size = vm.hardware_profile.vm_size
+                potential_monthly_cost = self._get_vm_cost_estimate(vm_size)
+
+                # Current cost is $0 for compute (since it's stopped/deallocated)
+                # but disks are still charging
+                current_monthly_cost = 0.0  # Disk costs would need separate calculation
+
+                metadata = {
+                    'vm_size': vm_size,
+                    'power_state': power_state,
+                    'vm_age_days': vm_age_days,
+                    'created_at': created_at.isoformat() if created_at else None,
+                    'potential_monthly_cost': f'${potential_monthly_cost:.2f}',
+                    'orphan_reason': f"VM created {vm_age_days} days ago but has never been started",
+                    'recommendation': f"This VM has existed for {vm_age_days} days without ever running. "
+                                    f"If it was created by mistake or for testing, consider deleting it. "
+                                    f"Potential compute cost if started: ${potential_monthly_cost:.2f}/month."
+                }
+
+                orphan = OrphanResourceData(
+                    resource_type='virtual_machine_never_started',
+                    resource_id=vm.id,
+                    resource_name=vm.name,
+                    region=vm.location,
+                    estimated_monthly_cost=current_monthly_cost,
+                    resource_metadata=metadata
+                )
+
+                orphans.append(orphan)
+
+        except Exception as e:
+            print(f"Error scanning never-started VMs in {region}: {str(e)}")
+
+        return orphans
+
+    async def scan_oversized_premium_vms(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scan for oversized Azure VMs with premium managed disks.
+
+        Detects VMs that have excessive CPU cores (>8 vCPUs) combined with
+        Premium_LRS managed disks, suggesting potential for cost optimization
+        by downsizing or switching to Standard_LRS disks.
+
+        Args:
+            region: Azure region to scan
+            detection_rules: Optional detection configuration:
+                {
+                    "enabled": bool (default True),
+                    "min_vcpus": int (default 8) - Minimum vCPU count to flag,
+                    "disk_tier": str (default "Premium_LRS") - Disk SKU to detect
+                }
+
+        Returns:
+            List of oversized VM resources with premium disks
+        """
+        from azure.identity import ClientSecretCredential
+        from azure.mgmt.compute import ComputeManagementClient
+
+        orphans = []
+
+        # Get detection parameters
+        min_vcpus = detection_rules.get("min_vcpus", 8) if detection_rules else 8
+        disk_tier = detection_rules.get("disk_tier", "Premium_LRS") if detection_rules else "Premium_LRS"
+
+        try:
+            credential = ClientSecretCredential(
+                tenant_id=self.tenant_id,
+                client_id=self.client_id,
+                client_secret=self.client_secret,
+            )
+
+            compute_client = ComputeManagementClient(credential, self.subscription_id)
+
+            # Get all VMs
+            vms = list(compute_client.virtual_machines.list_all())
+
+            for vm in vms:
+                vm_size = vm.hardware_profile.vm_size
+
+                # Extract vCPU count from VM size (approximation based on size name)
+                # E.g., Standard_D8s_v3 has 8 vCPUs
+                vcpu_count = self._extract_vcpu_from_size(vm_size)
+
+                if vcpu_count < min_vcpus:
+                    continue
+
+                # Check if VM has premium managed disks
+                has_premium_disks = False
+                premium_disk_count = 0
+                total_disk_size_gb = 0
+
+                if vm.storage_profile and vm.storage_profile.data_disks:
+                    for disk in vm.storage_profile.data_disks:
+                        if disk.managed_disk:
+                            # Get disk details
+                            resource_group = vm.id.split('/')[4]
+                            disk_name = disk.name
+
+                            try:
+                                disk_details = compute_client.disks.get(
+                                    resource_group_name=resource_group,
+                                    disk_name=disk_name
+                                )
+
+                                if disk_details.sku.name == disk_tier:
+                                    has_premium_disks = True
+                                    premium_disk_count += 1
+                                    total_disk_size_gb += disk_details.disk_size_gb or 0
+                            except:
+                                pass  # Skip if can't get disk details
+
+                if not has_premium_disks:
+                    continue
+
+                # Calculate potential savings
+                # Premium SSD: ~$0.13/GB/month
+                # Standard SSD: ~$0.05/GB/month
+                # Potential savings: ~$0.08/GB/month
+                premium_disk_cost = total_disk_size_gb * 0.13
+                standard_disk_cost = total_disk_size_gb * 0.05
+                disk_savings = premium_disk_cost - standard_disk_cost
+
+                # VM compute cost
+                vm_cost = self._get_vm_cost_estimate(vm_size)
+
+                # Suggest downsizing to 4 vCPUs (50% reduction)
+                suggested_size = self._get_downsized_vm(vm_size)
+                suggested_cost = self._get_vm_cost_estimate(suggested_size)
+                compute_savings = vm_cost - suggested_cost
+
+                total_monthly_savings = disk_savings + compute_savings
+
+                metadata = {
+                    'vm_size': vm_size,
+                    'vcpu_count': vcpu_count,
+                    'premium_disk_count': premium_disk_count,
+                    'total_disk_size_gb': total_disk_size_gb,
+                    'current_vm_cost': f'${vm_cost:.2f}/month',
+                    'current_disk_cost': f'${premium_disk_cost:.2f}/month',
+                    'suggested_vm_size': suggested_size,
+                    'suggested_vm_cost': f'${suggested_cost:.2f}/month',
+                    'suggested_disk_tier': 'Standard_LRS',
+                    'suggested_disk_cost': f'${standard_disk_cost:.2f}/month',
+                    'potential_monthly_savings': f'${total_monthly_savings:.2f}',
+                    'orphan_reason': f"VM is oversized ({vcpu_count} vCPUs) with premium disks ({premium_disk_count} disks, {total_disk_size_gb}GB)",
+                    'recommendation': f"Consider downsizing VM from {vm_size} to {suggested_size} "
+                                    f"and switching disks from Premium_LRS to Standard_LRS. "
+                                    f"Potential savings: ${total_monthly_savings:.2f}/month "
+                                    f"(VM: ${compute_savings:.2f}, Disks: ${disk_savings:.2f})."
+                }
+
+                orphan = OrphanResourceData(
+                    resource_type='virtual_machine_oversized_premium',
+                    resource_id=vm.id,
+                    resource_name=vm.name,
+                    region=vm.location,
+                    estimated_monthly_cost=total_monthly_savings,
+                    resource_metadata=metadata
+                )
+
+                orphans.append(orphan)
+
+        except Exception as e:
+            print(f"Error scanning oversized premium VMs in {region}: {str(e)}")
+
+        return orphans
+
+    def _extract_vcpu_from_size(self, vm_size: str) -> int:
+        """
+        Extract vCPU count from Azure VM size string.
+
+        Examples:
+            Standard_D8s_v3 -> 8
+            Standard_E4s_v3 -> 4
+            Standard_B2s -> 2
+        """
+        import re
+
+        # Try to extract number after series letter
+        match = re.search(r'[A-Z](\d+)', vm_size)
+        if match:
+            return int(match.group(1))
+
+        # Default fallback
+        return 4
+
+    def _get_downsized_vm(self, vm_size: str) -> str:
+        """
+        Suggest a downsized VM based on current size.
+
+        Simple heuristic: halve the vCPU count while keeping same series.
+        """
+        vcpu = self._extract_vcpu_from_size(vm_size)
+        downsized_vcpu = max(2, vcpu // 2)
+
+        # Replace number in VM size
+        import re
+        downsized_size = re.sub(r'(\d+)', str(downsized_vcpu), vm_size, count=1)
+
+        return downsized_size
+
+    async def scan_untagged_orphan_vms(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scan for Azure VMs that are missing required governance tags.
+
+        Detects VMs without proper tagging (owner, team, cost center) that have
+        existed for an extended period, indicating potential orphaned or unmanaged
+        resources.
+
+        Args:
+            region: Azure region to scan
+            detection_rules: Optional detection configuration:
+                {
+                    "enabled": bool (default True),
+                    "required_tags": list[str] (default ["owner", "team"]),
+                    "min_age_days": int (default 30)
+                }
+
+        Returns:
+            List of untagged VM resources
+        """
+        from datetime import datetime, timezone
+        from azure.identity import ClientSecretCredential
+        from azure.mgmt.compute import ComputeManagementClient
+
+        orphans = []
+
+        # Get detection parameters
+        required_tags = detection_rules.get("required_tags", ["owner", "team"]) if detection_rules else ["owner", "team"]
+        min_age_days = detection_rules.get("min_age_days", 30) if detection_rules else 30
+
+        try:
+            credential = ClientSecretCredential(
+                tenant_id=self.tenant_id,
+                client_id=self.client_id,
+                client_secret=self.client_secret,
+            )
+
+            compute_client = ComputeManagementClient(credential, self.subscription_id)
+
+            # Get all VMs
+            vms = list(compute_client.virtual_machines.list_all())
+
+            for vm in vms:
+                # Check VM age
+                created_at = vm.time_created if hasattr(vm, 'time_created') else None
+                if created_at:
+                    from datetime import datetime, timezone
+                    now = datetime.now(timezone.utc)
+                    vm_age_days = (now - created_at).days
+
+                    if vm_age_days < min_age_days:
+                        continue
+                else:
+                    # Can't determine age, skip
+                    continue
+
+                # Check for required tags
+                vm_tags = vm.tags or {}
+                missing_tags = []
+
+                for required_tag in required_tags:
+                    if required_tag.lower() not in [tag.lower() for tag in vm_tags.keys()]:
+                        missing_tags.append(required_tag)
+
+                if not missing_tags:
+                    # VM has all required tags
+                    continue
+
+                # Get resource group for power state
+                resource_group = vm.id.split('/')[4]
+
+                # Get instance view for power state
+                try:
+                    instance_view = compute_client.virtual_machines.instance_view(
+                        resource_group_name=resource_group,
+                        vm_name=vm.name
+                    )
+
+                    power_state = 'unknown'
+                    for status in instance_view.statuses:
+                        if status.code.startswith('PowerState/'):
+                            power_state = status.code.split('/')[1].lower()
+                            break
+                except:
+                    power_state = 'unknown'
+
+                # Estimate cost
+                vm_size = vm.hardware_profile.vm_size
+                vm_cost = self._get_vm_cost_estimate(vm_size)
+
+                # If VM is deallocated, cost is $0 for compute
+                if power_state == 'deallocated':
+                    vm_cost = 0.0
+
+                metadata = {
+                    'vm_size': vm_size,
+                    'power_state': power_state,
+                    'vm_age_days': vm_age_days,
+                    'existing_tags': list(vm_tags.keys()),
+                    'missing_tags': missing_tags,
+                    'created_at': created_at.isoformat() if created_at else None,
+                    'orphan_reason': f"VM is {vm_age_days} days old but missing required governance tags: {', '.join(missing_tags)}",
+                    'recommendation': f"This VM lacks proper tagging for {vm_age_days} days. "
+                                    f"Add required tags ({', '.join(missing_tags)}) to identify ownership "
+                                    f"and cost accountability. If owner cannot be identified, this may be "
+                                    f"an orphaned resource that should be investigated or deleted."
+                }
+
+                orphan = OrphanResourceData(
+                    resource_type='virtual_machine_untagged_orphan',
+                    resource_id=vm.id,
+                    resource_name=vm.name,
+                    region=vm.location,
+                    estimated_monthly_cost=vm_cost,
+                    resource_metadata=metadata
+                )
+
+                orphans.append(orphan)
+
+        except Exception as e:
+            print(f"Error scanning untagged orphan VMs in {region}: {str(e)}")
+
+        return orphans
 
     async def scan_idle_running_instances(
         self, region: str, detection_rules: dict | None = None

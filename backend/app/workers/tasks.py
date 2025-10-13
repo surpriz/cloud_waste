@@ -196,10 +196,10 @@ async def _scan_cloud_account_async(
 
             elif account.provider == "azure":
                 provider = AzureProvider(
-                    tenant_id=credentials["tenant_id"],
-                    client_id=credentials["client_id"],
-                    client_secret=credentials["client_secret"],
-                    subscription_id=credentials["subscription_id"],
+                    tenant_id=credentials["azure_tenant_id"],
+                    client_id=credentials["azure_client_id"],
+                    client_secret=credentials["azure_client_secret"],
+                    subscription_id=credentials["azure_subscription_id"],
                     regions=account.regions if account.regions else None,
                 )
 

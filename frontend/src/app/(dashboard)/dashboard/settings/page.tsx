@@ -57,6 +57,11 @@ const AZURE_RESOURCE_ICONS: { [key: string]: any } = {
   // Phase 1 - Advanced waste scenarios
   managed_disk_on_stopped_vm: HardDrive,
   public_ip_on_stopped_resource: Globe,
+  // VM Phase A - Virtual Machine waste scenarios
+  virtual_machine_stopped_not_deallocated: Server,
+  virtual_machine_never_started: Server,
+  virtual_machine_oversized_premium: Server,
+  virtual_machine_untagged_orphan: Server,
 };
 
 const AZURE_RESOURCE_LABELS: { [key: string]: string } = {
@@ -67,6 +72,11 @@ const AZURE_RESOURCE_LABELS: { [key: string]: string } = {
   // Phase 1 - Advanced waste scenarios
   managed_disk_on_stopped_vm: "Managed Disks (On Stopped VMs)",
   public_ip_on_stopped_resource: "Public IPs (On Stopped Resources)",
+  // VM Phase A - Virtual Machine waste scenarios
+  virtual_machine_stopped_not_deallocated: "Virtual Machines (Stopped, NOT Deallocated) ⚠️",
+  virtual_machine_never_started: "Virtual Machines (Never Started)",
+  virtual_machine_oversized_premium: "Virtual Machines (Oversized + Premium Disks)",
+  virtual_machine_untagged_orphan: "Virtual Machines (Untagged Orphans)",
 };
 
 // Helper function to get provider from resource type

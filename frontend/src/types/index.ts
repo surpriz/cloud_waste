@@ -136,7 +136,12 @@ export type ResourceType =
   | "virtual_machine_deallocated"
   // Azure Phase 1 - Advanced waste scenarios
   | "managed_disk_on_stopped_vm"
-  | "public_ip_on_stopped_resource";
+  | "public_ip_on_stopped_resource"
+  // Azure VM Phase A - Virtual Machine waste scenarios
+  | "virtual_machine_stopped_not_deallocated"
+  | "virtual_machine_never_started"
+  | "virtual_machine_oversized_premium"
+  | "virtual_machine_untagged_orphan";
 
 export interface OrphanResource {
   id: string;
