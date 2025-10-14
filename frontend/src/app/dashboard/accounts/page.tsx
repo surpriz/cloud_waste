@@ -130,9 +130,9 @@ function AccountCard({ account, onEdit, onDelete }: any) {
           <p className="mt-1 text-sm text-gray-600">
             ID: {account.account_identifier}
           </p>
-          {account.regions?.regions && (
+          {account.regions && Array.isArray(account.regions) && account.regions.length > 0 && (
             <p className="mt-2 text-sm text-gray-500">
-              Regions: {account.regions.regions.join(", ")}
+              Regions: {account.regions.join(", ")}
             </p>
           )}
           {account.last_scan_at && (

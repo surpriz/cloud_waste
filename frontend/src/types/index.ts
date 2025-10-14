@@ -37,10 +37,15 @@ export interface CloudAccount {
   provider: "aws" | "azure" | "gcp";
   account_name: string;
   account_identifier: string;
-  regions: { regions: string[] } | null;
+  regions: string[] | null;
   description: string | null;
   is_active: boolean;
   last_scan_at: string | null;
+  scheduled_scan_enabled: boolean;
+  scheduled_scan_frequency: string;
+  scheduled_scan_hour: number;
+  scheduled_scan_day_of_week: number | null;
+  scheduled_scan_day_of_month: number | null;
   created_at: string;
   updated_at: string;
 }

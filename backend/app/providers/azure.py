@@ -1268,6 +1268,7 @@ class AzureProvider(CloudProviderBase):
                     'vm_size': vm_size,
                     'power_state': power_state,
                     'vm_age_days': vm_age_days,
+                    'age_days': vm_age_days,  # For "Already Wasted" calculation
                     'created_at': created_at.isoformat() if created_at else None,
                     'potential_monthly_cost': f'${potential_monthly_cost:.2f}',
                     'orphan_reason': f"VM created {vm_age_days} days ago but has never been started",
@@ -1391,6 +1392,14 @@ class AzureProvider(CloudProviderBase):
 
                 total_monthly_savings = disk_savings + compute_savings
 
+                # Calculate age for "Already wasted" calculation
+                age_days = -1
+                created_at = None
+                if hasattr(vm, 'time_created') and vm.time_created:
+                    from datetime import datetime, timezone
+                    age_days = (datetime.now(timezone.utc) - vm.time_created).days
+                    created_at = vm.time_created.isoformat()
+
                 metadata = {
                     'vm_size': vm_size,
                     'vcpu_count': vcpu_count,
@@ -1403,6 +1412,8 @@ class AzureProvider(CloudProviderBase):
                     'suggested_disk_tier': 'Standard_LRS',
                     'suggested_disk_cost': f'${standard_disk_cost:.2f}/month',
                     'potential_monthly_savings': f'${total_monthly_savings:.2f}',
+                    'age_days': age_days,  # For "Already Wasted" calculation
+                    'created_at': created_at,  # ISO format timestamp
                     'orphan_reason': f"VM is oversized ({vcpu_count} vCPUs) with premium disks ({premium_disk_count} disks, {total_disk_size_gb}GB)",
                     'recommendation': f"Consider downsizing VM from {vm_size} to {suggested_size} "
                                     f"and switching disks from Premium_LRS to Standard_LRS. "
@@ -1560,6 +1571,7 @@ class AzureProvider(CloudProviderBase):
                     'vm_size': vm_size,
                     'power_state': power_state,
                     'vm_age_days': vm_age_days,
+                    'age_days': vm_age_days,  # For "Already Wasted" calculation
                     'existing_tags': list(vm_tags.keys()),
                     'missing_tags': missing_tags,
                     'created_at': created_at.isoformat() if created_at else None,

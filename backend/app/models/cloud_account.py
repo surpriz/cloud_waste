@@ -48,7 +48,7 @@ class CloudAccount(Base):
     )
 
     # Metadata
-    regions: Mapped[dict | None] = mapped_column(
+    regions: Mapped[list | None] = mapped_column(
         JSON,
         nullable=True,
     )  # List of regions to scan, e.g., ['eu-west-1', 'us-east-1']
