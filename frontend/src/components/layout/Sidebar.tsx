@@ -10,7 +10,8 @@ import {
   Settings,
   BookOpen,
   LogOut,
-  X
+  X,
+  TrendingUp
 } from "lucide-react";
 import { useAuthStore } from "@/stores/useAuthStore";
 
@@ -19,6 +20,7 @@ const navigation = [
   { name: "Cloud Accounts", href: "/dashboard/accounts", icon: Cloud },
   { name: "Scans", href: "/dashboard/scans", icon: Search },
   { name: "Resources", href: "/dashboard/resources", icon: FolderOpen },
+  { name: "💰 Impact & Savings", href: "/dashboard/impact", icon: TrendingUp },
   { name: "Settings", href: "/dashboard/settings", icon: Settings },
   { name: "Documentation", href: "/dashboard/docs", icon: BookOpen },
 ];
