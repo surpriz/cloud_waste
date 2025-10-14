@@ -22,6 +22,7 @@ class AzureProvider(CloudProviderBase):
         client_secret: str,
         subscription_id: str,
         regions: list[str] | None = None,
+        resource_groups: list[str] | None = None,
     ) -> None:
         """
         Initialize Azure provider client.
@@ -32,6 +33,8 @@ class AzureProvider(CloudProviderBase):
             client_secret: Service Principal Client Secret
             subscription_id: Azure Subscription ID
             regions: List of Azure regions to scan (e.g., ['eastus', 'westeurope'])
+            resource_groups: List of Azure resource groups to scan (e.g., ['rg-prod', 'rg-dev'])
+                           If None or empty, all resource groups will be scanned.
         """
         # Azure uses different authentication than AWS, so we override the base class params
         self.tenant_id = tenant_id
@@ -39,6 +42,36 @@ class AzureProvider(CloudProviderBase):
         self.client_secret = client_secret
         self.subscription_id = subscription_id
         self.regions = regions or []
+        self.resource_groups = resource_groups or []
+
+    def _is_resource_in_scope(self, resource_id: str) -> bool:
+        """
+        Check if a resource is in scope based on resource_groups filter.
+
+        Args:
+            resource_id: Azure resource ID (format: /subscriptions/{sub}/resourceGroups/{rg}/...)
+
+        Returns:
+            True if resource should be scanned, False otherwise
+        """
+        # If no resource_groups filter specified, scan all resources
+        if not self.resource_groups:
+            return True
+
+        # Extract resource group name from resource ID
+        # Format: /subscriptions/{subscription_id}/resourceGroups/{resource_group_name}/...
+        parts = resource_id.split('/')
+        try:
+            rg_index = parts.index('resourceGroups')
+            if rg_index + 1 < len(parts):
+                resource_group_name = parts[rg_index + 1].lower()
+                # Check if resource group is in the filter list (case-insensitive)
+                return any(rg.lower() == resource_group_name for rg in self.resource_groups)
+        except (ValueError, IndexError):
+            # If we can't parse the resource group, include it to be safe
+            return True
+
+        return False
 
     async def validate_credentials(self) -> dict[str, str]:
         """
@@ -123,6 +156,10 @@ class AzureProvider(CloudProviderBase):
             for disk in disks:
                 # Filter by region (Azure uses 'location')
                 if disk.location != region:
+                    continue
+
+                # Filter by resource group (if specified)
+                if not self._is_resource_in_scope(disk.id):
                     continue
 
                 # Check if disk is unattached
@@ -402,6 +439,10 @@ class AzureProvider(CloudProviderBase):
                 if ip.location != region:
                     continue
 
+                # Filter by resource group (if specified)
+                if not self._is_resource_in_scope(ip.id):
+                    continue
+
                 # Check if Public IP is unassociated
                 # ip_configuration is None when the IP is not attached to any NIC/LB
                 if ip.ip_configuration is None:
@@ -505,6 +546,10 @@ class AzureProvider(CloudProviderBase):
 
             for vm in vms:
                 if vm.location != region:
+                    continue
+
+                # Filter by resource group (if specified)
+                if not self._is_resource_in_scope(vm.id):
                     continue
 
                 # Get VM instance view to check power state

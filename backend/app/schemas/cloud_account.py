@@ -36,6 +36,10 @@ class CloudAccountBase(BaseModel):
         default=None,
         description="List of regions to scan (e.g., ['eu-west-1', 'us-east-1'])",
     )
+    resource_groups: list[str] | None = Field(
+        default=None,
+        description="List of Azure resource groups to scan (e.g., ['rg-prod', 'rg-dev']). If None, all resource groups will be scanned.",
+    )
     description: str | None = Field(default=None, max_length=1000)
     is_active: bool = True
 
@@ -94,6 +98,7 @@ class CloudAccountUpdate(BaseModel):
 
     account_name: str | None = Field(default=None, min_length=1, max_length=255)
     regions: list[str] | None = None
+    resource_groups: list[str] | None = None
     description: str | None = Field(default=None, max_length=1000)
     is_active: bool | None = None
 

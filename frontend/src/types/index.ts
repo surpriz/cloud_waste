@@ -38,6 +38,7 @@ export interface CloudAccount {
   account_name: string;
   account_identifier: string;
   regions: string[] | null;
+  resource_groups: string[] | null;
   description: string | null;
   is_active: boolean;
   last_scan_at: string | null;
@@ -66,6 +67,7 @@ export interface CloudAccountCreate {
   azure_subscription_id?: string;
 
   regions?: string[];
+  resource_groups?: string[];
   description?: string;
 }
 

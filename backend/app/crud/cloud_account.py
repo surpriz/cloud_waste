@@ -133,6 +133,7 @@ async def create_cloud_account(
         account_identifier=account_in.account_identifier,
         credentials_encrypted=encrypted_credentials,
         regions=account_in.regions,
+        resource_groups=account_in.resource_groups,
         description=account_in.description,
         is_active=account_in.is_active,
     )

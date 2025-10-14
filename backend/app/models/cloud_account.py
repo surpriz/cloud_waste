@@ -53,6 +53,11 @@ class CloudAccount(Base):
         nullable=True,
     )  # List of regions to scan, e.g., ['eu-west-1', 'us-east-1']
 
+    resource_groups: Mapped[list | None] = mapped_column(
+        JSON,
+        nullable=True,
+    )  # List of Azure resource groups to scan, e.g., ['rg-prod', 'rg-dev']
+
     description: Mapped[str | None] = mapped_column(
         Text,
         nullable=True,

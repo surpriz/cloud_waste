@@ -1191,6 +1191,7 @@ function AddAzureAccountForm({ onClose }: { onClose: () => void }) {
     azure_client_secret: "",
     azure_subscription_id: "",
     regions: "eastus,westeurope,northeurope",
+    resource_groups: "",
     description: "",
   });
 
@@ -1246,7 +1247,8 @@ function AddAzureAccountForm({ onClose }: { onClose: () => void }) {
         azure_client_id: formData.azure_client_id,
         azure_client_secret: formData.azure_client_secret,
         azure_subscription_id: formData.azure_subscription_id,
-        regions: formData.regions.split(",").map((r) => r.trim()),
+        regions: formData.regions.split(",").map((r) => r.trim()).filter(Boolean),
+        resource_groups: formData.resource_groups ? formData.resource_groups.split(",").map((rg) => rg.trim()).filter(Boolean) : undefined,
         description: formData.description || undefined,
       });
       onClose();
@@ -1384,6 +1386,25 @@ function AddAzureAccountForm({ onClose }: { onClose: () => void }) {
           />
           <p className="mt-2 text-xs text-gray-500">
             💡 Tip: Common regions - eastus, westeurope, northeurope, westus2
+          </p>
+        </div>
+
+        <div>
+          <label className="block text-sm font-semibold text-gray-700 mb-2">
+            Resource Groups (comma-separated, optional)
+            <span className="ml-2 text-xs font-normal text-gray-500">Leave empty to scan ALL resource groups</span>
+          </label>
+          <input
+            type="text"
+            value={formData.resource_groups}
+            onChange={(e) =>
+              setFormData({ ...formData, resource_groups: e.target.value })
+            }
+            className="block w-full rounded-xl border-2 border-gray-300 px-4 py-3 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/20 transition-all font-mono"
+            placeholder="rg-prod,rg-staging,rg-dev"
+          />
+          <p className="mt-2 text-xs text-gray-500">
+            🎯 Tip: Filter by specific resource groups to scan only what matters (e.g., rg-production, rg-dev)
           </p>
         </div>
 
