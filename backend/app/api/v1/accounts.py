@@ -122,6 +122,93 @@ async def create_cloud_account(
         )
 
 
+@router.post("/validate-credentials", response_model=dict)
+async def validate_credentials_before_creation(
+    credentials_data: CloudAccountCreate,
+) -> dict:
+    """
+    Validate cloud provider credentials without creating an account.
+
+    This endpoint allows users to test their credentials before account creation,
+    providing immediate feedback on whether the credentials are valid.
+
+    Args:
+        credentials_data: Cloud account credentials to validate
+
+    Returns:
+        Dict with validation result including provider info
+
+    Raises:
+        HTTPException: If validation fails or required fields are missing
+    """
+    if credentials_data.provider == "aws":
+        if not credentials_data.aws_access_key_id or not credentials_data.aws_secret_access_key:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="AWS Access Key ID and Secret Access Key are required",
+            )
+
+        credentials = AWSCredentials(
+            access_key_id=credentials_data.aws_access_key_id,
+            secret_access_key=credentials_data.aws_secret_access_key,
+            region=credentials_data.regions[0] if credentials_data.regions else "us-east-1",
+        )
+
+        try:
+            account_info = await validate_aws_credentials(credentials)
+            return {
+                "valid": True,
+                "provider": "aws",
+                "account_id": account_info["account_id"],
+                "message": f"✅ AWS credentials are valid! Account ID: {account_info['account_id']}",
+            }
+        except AWSValidationError as e:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"❌ AWS validation failed: {str(e)}",
+            )
+
+    elif credentials_data.provider == "azure":
+        if not all([
+            credentials_data.azure_tenant_id,
+            credentials_data.azure_client_id,
+            credentials_data.azure_client_secret,
+            credentials_data.azure_subscription_id,
+        ]):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Azure Tenant ID, Client ID, Client Secret, and Subscription ID are required",
+            )
+
+        credentials = AzureCredentials(
+            tenant_id=credentials_data.azure_tenant_id,
+            client_id=credentials_data.azure_client_id,
+            client_secret=credentials_data.azure_client_secret,
+            subscription_id=credentials_data.azure_subscription_id,
+        )
+
+        try:
+            subscription_info = await validate_azure_credentials(credentials)
+            return {
+                "valid": True,
+                "provider": "azure",
+                "subscription_id": subscription_info["subscription_id"],
+                "subscription_name": subscription_info.get("subscription_name", "N/A"),
+                "message": f"✅ Azure credentials are valid! Subscription: {subscription_info.get('subscription_name', subscription_info['subscription_id'])}",
+            }
+        except AzureValidationError as e:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"❌ Azure validation failed: {str(e)}",
+            )
+
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Unsupported provider: {credentials_data.provider}",
+        )
+
+
 @router.get("/", response_model=list[CloudAccount])
 async def list_cloud_accounts(
     db: Annotated[AsyncSession, Depends(get_db)],

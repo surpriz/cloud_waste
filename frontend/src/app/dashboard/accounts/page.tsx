@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { useAccountStore } from "@/stores/useAccountStore";
+import { accountsAPI } from "@/lib/api";
 import { Plus, Trash2, RefreshCw, CheckCircle, XCircle, HelpCircle, ChevronDown, ChevronUp, Copy, ExternalLink, Edit } from "lucide-react";
 
 export default function AccountsPage() {
@@ -76,7 +77,7 @@ export default function AccountsPage() {
             Get started by adding your first cloud account
           </p>
           <button
-            onClick={() => setShowAddForm(true)}
+            onClick={() => setShowProviderSelector(true)}
             className="mt-4 inline-flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2 font-medium text-white hover:bg-blue-700"
           >
             <Plus className="h-5 w-5" />
@@ -174,15 +175,18 @@ function AWSCredentialsHelp() {
       "rds:Describe*",
       "s3:List*",
       "s3:Get*",
+      "s3:GetBucketLocation",
+      "s3:ListBucket",
+      "s3:ListBucketMultipartUploads",
+      "s3:ListAllMyBuckets",
       "elasticloadbalancing:Describe*",
-      "ce:GetCostAndUsage",
-      "ce:GetCostForecast",
-      "cloudwatch:GetMetricStatistics",
-      "cloudwatch:ListMetrics",
-      "sts:GetCallerIdentity",
-      "fsx:DescribeFileSystems",
+      "fsx:Describe*",
+      "neptune:Describe*",
+      "neptune:List*",
       "kafka:ListClusters",
       "kafka:ListClustersV2",
+      "kafka:DescribeCluster",
+      "kafka:DescribeClusterV2",
       "eks:ListClusters",
       "eks:DescribeCluster",
       "eks:ListNodegroups",
@@ -192,11 +196,29 @@ function AWSCredentialsHelp() {
       "sagemaker:DescribeEndpointConfig",
       "redshift:DescribeClusters",
       "elasticache:DescribeCacheClusters",
+      "elasticache:DescribeReplicationGroups",
       "globalaccelerator:ListAccelerators",
       "globalaccelerator:ListListeners",
       "globalaccelerator:ListEndpointGroups",
       "kinesis:ListStreams",
-      "kinesis:DescribeStream"
+      "kinesis:DescribeStream",
+      "kinesis:DescribeStreamSummary",
+      "es:DescribeDomains",
+      "es:ListDomainNames",
+      "docdb:DescribeDBClusters",
+      "docdb:DescribeDBInstances",
+      "lambda:ListFunctions",
+      "lambda:GetFunction",
+      "lambda:GetFunctionConfiguration",
+      "lambda:GetProvisionedConcurrencyConfig",
+      "dynamodb:ListTables",
+      "dynamodb:DescribeTable",
+      "dynamodb:DescribeTimeToLive",
+      "ce:GetCostAndUsage",
+      "ce:GetCostForecast",
+      "cloudwatch:GetMetricStatistics",
+      "cloudwatch:ListMetrics",
+      "sts:GetCallerIdentity"
     ],
     "Resource": "*"
   }]
@@ -375,6 +397,11 @@ function ProviderSelector({ onSelectProvider, onClose }: { onSelectProvider: (pr
 function AddAWSAccountForm({ onClose }: { onClose: () => void }) {
   const { createAccount, isLoading, error } = useAccountStore();
   const [showHelp, setShowHelp] = useState(false);
+  const [isValidating, setIsValidating] = useState(false);
+  const [validationResult, setValidationResult] = useState<{
+    status: 'idle' | 'success' | 'error';
+    message: string;
+  } | null>(null);
   const [formData, setFormData] = useState({
     account_name: "",
     account_identifier: "",
@@ -383,6 +410,44 @@ function AddAWSAccountForm({ onClose }: { onClose: () => void }) {
     regions: "us-east-1,eu-west-1,eu-central-1",
     description: "",
   });
+
+  const isFormValid = () => {
+    return !!(
+      formData.account_name &&
+      formData.account_identifier &&
+      formData.aws_access_key_id &&
+      formData.aws_secret_access_key
+    );
+  };
+
+  const handleTestConnection = async () => {
+    setIsValidating(true);
+    setValidationResult(null);
+
+    try {
+      const testData = {
+        provider: "aws" as const,
+        account_name: formData.account_name || "Test",
+        account_identifier: formData.account_identifier,
+        regions: formData.regions.split(",").map((r) => r.trim()).filter(Boolean),
+        aws_access_key_id: formData.aws_access_key_id,
+        aws_secret_access_key: formData.aws_secret_access_key,
+      };
+
+      const result = await accountsAPI.validateCredentials(testData);
+      setValidationResult({
+        status: 'success',
+        message: result.message,
+      });
+    } catch (error: any) {
+      setValidationResult({
+        status: 'error',
+        message: error.message || 'Validation failed',
+      });
+    } finally {
+      setIsValidating(false);
+    }
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -531,10 +596,47 @@ function AddAWSAccountForm({ onClose }: { onClose: () => void }) {
           />
         </div>
 
-        <div className="flex gap-4 pt-4">
+        {/* Validation Result */}
+        {validationResult && (
+          <div className={`p-4 rounded-xl ${
+            validationResult.status === 'success'
+              ? 'bg-green-50 border-2 border-green-200'
+              : 'bg-red-50 border-2 border-red-200'
+          }`}>
+            <p className={`text-sm font-medium ${
+              validationResult.status === 'success' ? 'text-green-700' : 'text-red-700'
+            }`}>
+              {validationResult.message}
+            </p>
+          </div>
+        )}
+
+        {/* Action Buttons */}
+        <div className="flex gap-3 pt-4">
+          {/* Test Connection Button */}
+          <button
+            type="button"
+            onClick={handleTestConnection}
+            disabled={isValidating || !isFormValid()}
+            className="flex-1 rounded-xl border-2 border-blue-600 bg-white px-6 py-3 font-semibold text-blue-600 hover:bg-blue-50 transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+          >
+            {isValidating ? (
+              <>
+                <RefreshCw className="h-5 w-5 animate-spin" />
+                Testing...
+              </>
+            ) : (
+              <>
+                <CheckCircle className="h-5 w-5" />
+                Test Connection
+              </>
+            )}
+          </button>
+
+          {/* Add Account Button */}
           <button
             type="submit"
-            disabled={isLoading}
+            disabled={isLoading || validationResult?.status !== 'success'}
             className="flex-1 rounded-xl bg-gradient-to-r from-blue-600 to-purple-600 px-6 py-3 font-semibold text-white shadow-lg hover:shadow-xl transition-all hover:scale-[1.02] disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
           >
             {isLoading ? (
@@ -549,10 +651,11 @@ function AddAWSAccountForm({ onClose }: { onClose: () => void }) {
               </>
             )}
           </button>
+
           <button
             type="button"
             onClick={onClose}
-            className="flex-1 rounded-xl border-2 border-gray-300 bg-white px-6 py-3 font-semibold text-gray-700 hover:bg-gray-50 transition-all"
+            className="rounded-xl border-2 border-gray-300 bg-white px-6 py-3 font-semibold text-gray-700 hover:bg-gray-50 transition-all"
           >
             Cancel
           </button>
@@ -1076,6 +1179,11 @@ function AzureCredentialsHelp() {
 function AddAzureAccountForm({ onClose }: { onClose: () => void }) {
   const { createAccount, isLoading, error } = useAccountStore();
   const [showHelp, setShowHelp] = useState(false);
+  const [isValidating, setIsValidating] = useState(false);
+  const [validationResult, setValidationResult] = useState<{
+    status: 'idle' | 'success' | 'error';
+    message: string;
+  } | null>(null);
   const [formData, setFormData] = useState({
     account_name: "",
     azure_tenant_id: "",
@@ -1085,6 +1193,47 @@ function AddAzureAccountForm({ onClose }: { onClose: () => void }) {
     regions: "eastus,westeurope,northeurope",
     description: "",
   });
+
+  const isFormValid = () => {
+    return !!(
+      formData.account_name &&
+      formData.azure_tenant_id &&
+      formData.azure_client_id &&
+      formData.azure_client_secret &&
+      formData.azure_subscription_id
+    );
+  };
+
+  const handleTestConnection = async () => {
+    setIsValidating(true);
+    setValidationResult(null);
+
+    try {
+      const testData = {
+        provider: "azure" as const,
+        account_name: formData.account_name || "Test",
+        account_identifier: formData.azure_subscription_id,
+        regions: formData.regions.split(",").map((r) => r.trim()).filter(Boolean),
+        azure_tenant_id: formData.azure_tenant_id,
+        azure_client_id: formData.azure_client_id,
+        azure_client_secret: formData.azure_client_secret,
+        azure_subscription_id: formData.azure_subscription_id,
+      };
+
+      const result = await accountsAPI.validateCredentials(testData);
+      setValidationResult({
+        status: 'success',
+        message: result.message,
+      });
+    } catch (error: any) {
+      setValidationResult({
+        status: 'error',
+        message: error.message || 'Validation failed',
+      });
+    } finally {
+      setIsValidating(false);
+    }
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -1253,10 +1402,47 @@ function AddAzureAccountForm({ onClose }: { onClose: () => void }) {
           />
         </div>
 
-        <div className="flex gap-4 pt-4">
+        {/* Validation Result */}
+        {validationResult && (
+          <div className={`p-4 rounded-xl ${
+            validationResult.status === 'success'
+              ? 'bg-green-50 border-2 border-green-200'
+              : 'bg-red-50 border-2 border-red-200'
+          }`}>
+            <p className={`text-sm font-medium ${
+              validationResult.status === 'success' ? 'text-green-700' : 'text-red-700'
+            }`}>
+              {validationResult.message}
+            </p>
+          </div>
+        )}
+
+        {/* Action Buttons */}
+        <div className="flex gap-3 pt-4">
+          {/* Test Connection Button */}
+          <button
+            type="button"
+            onClick={handleTestConnection}
+            disabled={isValidating || !isFormValid()}
+            className="flex-1 rounded-xl border-2 border-blue-600 bg-white px-6 py-3 font-semibold text-blue-600 hover:bg-blue-50 transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+          >
+            {isValidating ? (
+              <>
+                <RefreshCw className="h-5 w-5 animate-spin" />
+                Testing...
+              </>
+            ) : (
+              <>
+                <CheckCircle className="h-5 w-5" />
+                Test Connection
+              </>
+            )}
+          </button>
+
+          {/* Add Account Button */}
           <button
             type="submit"
-            disabled={isLoading}
+            disabled={isLoading || validationResult?.status !== 'success'}
             className="flex-1 rounded-xl bg-gradient-to-r from-blue-600 to-purple-600 px-6 py-3 font-semibold text-white shadow-lg hover:shadow-xl transition-all hover:scale-[1.02] disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
           >
             {isLoading ? (
@@ -1271,10 +1457,11 @@ function AddAzureAccountForm({ onClose }: { onClose: () => void }) {
               </>
             )}
           </button>
+
           <button
             type="button"
             onClick={onClose}
-            className="flex-1 rounded-xl border-2 border-gray-300 bg-white px-6 py-3 font-semibold text-gray-700 hover:bg-gray-50 transition-all"
+            className="rounded-xl border-2 border-gray-300 bg-white px-6 py-3 font-semibold text-gray-700 hover:bg-gray-50 transition-all"
           >
             Cancel
           </button>
