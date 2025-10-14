@@ -203,6 +203,7 @@ class AzureProvider(CloudProviderBase):
                         'managed_by': disk.managed_by if disk.managed_by else None,  # VM ID if attached
                         'managed_by_extended': disk.managed_by_extended if hasattr(disk, 'managed_by_extended') else None,
                         'tags': disk.tags if disk.tags else {},
+                        'confidence_level': self._calculate_confidence_level(age_days, detection_rules),
                     }
 
                     # Add warning for Reserved state (billing continues!)
@@ -482,6 +483,7 @@ class AzureProvider(CloudProviderBase):
                         'age_days': age_days,  # For "Already Wasted" calculation
                         'orphan_reason': orphan_reason,
                         'tags': ip.tags if ip.tags else {},
+                        'confidence_level': self._calculate_confidence_level(age_days, detection_rules),
                     }
 
                     # Add warning for Dynamic IPs (unusual to be unassociated)
@@ -596,6 +598,12 @@ class AzureProvider(CloudProviderBase):
                         # Calculate disk cost
                         monthly_cost = self._calculate_disk_cost(disk)
 
+                        # Calculate age_days for confidence level
+                        age_days = 0
+                        if disk.time_created:
+                            from datetime import datetime, timezone
+                            age_days = (datetime.now(timezone.utc) - disk.time_created).days
+
                         metadata = {
                             'disk_id': disk.id,
                             'disk_name': disk.name,
@@ -605,9 +613,11 @@ class AzureProvider(CloudProviderBase):
                             'vm_name': vm.name,
                             'vm_power_state': power_state,
                             'vm_stopped_days': stopped_days,
+                            'age_days': age_days,
                             'orphan_reason': f"Disk attached to VM '{vm.name}' which has been deallocated (stopped) for {stopped_days} days",
                             'recommendation': f"Consider deleting disk or restarting VM if still needed. Disk continues to cost ${monthly_cost:.2f}/month while VM is stopped.",
                             'tags': disk.tags if disk.tags else {},
+                            'confidence_level': self._calculate_confidence_level(stopped_days, detection_rules),
                         }
 
                         orphan = OrphanResourceData(
@@ -630,6 +640,12 @@ class AzureProvider(CloudProviderBase):
                     os_disk = compute_client.disks.get(os_disk_rg, os_disk_name)
                     monthly_cost = self._calculate_disk_cost(os_disk)
 
+                    # Calculate age_days for confidence level
+                    age_days = 0
+                    if os_disk.time_created:
+                        from datetime import datetime, timezone
+                        age_days = (datetime.now(timezone.utc) - os_disk.time_created).days
+
                     metadata = {
                         'disk_id': os_disk.id,
                         'disk_name': os_disk.name,
@@ -640,9 +656,11 @@ class AzureProvider(CloudProviderBase):
                         'vm_name': vm.name,
                         'vm_power_state': power_state,
                         'vm_stopped_days': stopped_days,
+                        'age_days': age_days,
                         'orphan_reason': f"OS Disk attached to VM '{vm.name}' which has been deallocated (stopped) for {stopped_days} days",
                         'recommendation': f"VM is stopped but OS disk continues to cost ${monthly_cost:.2f}/month. Consider creating snapshot and deleting disk if VM no longer needed.",
                         'tags': os_disk.tags if os_disk.tags else {},
+                        'confidence_level': self._calculate_confidence_level(stopped_days, detection_rules),
                     }
 
                     orphan = OrphanResourceData(
@@ -702,6 +720,10 @@ class AzureProvider(CloudProviderBase):
                 if snapshot.location != region:
                     continue
 
+                # Filter by resource group (if specified)
+                if not self._is_resource_in_scope(snapshot.id):
+                    continue
+
                 # Calculate snapshot age
                 age_days = 0
                 if snapshot.time_created:
@@ -746,6 +768,7 @@ class AzureProvider(CloudProviderBase):
                         'orphan_reason': f"Snapshot's source disk (ID: {source_disk_id}) no longer exists. Snapshot has been orphaned for {age_days} days.",
                         'recommendation': f"Review and delete snapshot if no longer needed. Costs ${monthly_cost:.2f}/month.",
                         'tags': snapshot.tags if snapshot.tags else {},
+                        'confidence_level': self._calculate_confidence_level(age_days, detection_rules),
                     }
 
                     orphan = OrphanResourceData(
@@ -803,6 +826,10 @@ class AzureProvider(CloudProviderBase):
 
             for ip in public_ips:
                 if ip.location != region:
+                    continue
+
+                # Filter by resource group (if specified)
+                if not self._is_resource_in_scope(ip.id):
                     continue
 
                 # Only process associated IPs
@@ -885,6 +912,11 @@ class AzureProvider(CloudProviderBase):
                 # Calculate IP cost
                 monthly_cost = self._calculate_public_ip_cost(ip)
 
+                # Calculate age_days for confidence level
+                age_days = 0
+                if hasattr(ip, 'provisioning_time') and ip.provisioning_time:
+                    age_days = (datetime.now(timezone.utc) - ip.provisioning_time).days
+
                 metadata = {
                     'ip_id': ip.id,
                     'ip_address': ip.ip_address if ip.ip_address else 'Not assigned',
@@ -894,9 +926,11 @@ class AzureProvider(CloudProviderBase):
                     'attached_resource_name': resource_name,
                     'resource_stopped': True,
                     'resource_stopped_days': stopped_days,
+                    'age_days': age_days,
                     'orphan_reason': f"Public IP attached to {resource_type} '{resource_name}' which has been stopped/inactive for {stopped_days} days",
                     'recommendation': f"Consider dissociating and deleting Public IP. IP continues to cost ${monthly_cost:.2f}/month while resource is stopped.",
                     'tags': ip.tags if ip.tags else {},
+                    'confidence_level': self._calculate_confidence_level(stopped_days, detection_rules),
                 }
 
                 orphan = OrphanResourceData(
@@ -1008,6 +1042,10 @@ class AzureProvider(CloudProviderBase):
                 if vm.location != region:
                     continue
 
+                # Filter by resource group (if specified)
+                if not self._is_resource_in_scope(vm.id):
+                    continue
+
                 # Get VM instance view for power state
                 resource_group = vm.id.split('/')[4]
                 instance_view = compute_client.virtual_machines.instance_view(
@@ -1083,6 +1121,7 @@ class AzureProvider(CloudProviderBase):
                     'created_at': created_at,  # ISO format timestamp
                     'orphan_reason': f"VM has been deallocated (stopped) for {stopped_days} days",
                     'recommendation': f"Consider deleting VM if no longer needed. While deallocated, compute charges are $0 but disks continue to cost ${monthly_cost:.2f}/month. You can delete the VM and keep disks if needed later.",
+                    'confidence_level': self._calculate_confidence_level(stopped_days, detection_rules),
                 }
 
                 orphan = OrphanResourceData(
@@ -1140,6 +1179,10 @@ class AzureProvider(CloudProviderBase):
                 if vm.location != region:
                     continue
 
+                # Filter by resource group (if specified)
+                if not self._is_resource_in_scope(vm.id):
+                    continue
+
                 resource_group = vm.id.split('/')[4]
                 instance_view = compute_client.virtual_machines.instance_view(
                     resource_group_name=resource_group,
@@ -1189,6 +1232,7 @@ class AzureProvider(CloudProviderBase):
                     'warning': f'⚠️ CRITICAL: VM is stopped but NOT deallocated! You are paying FULL price (${monthly_cost:.2f}/month) for a VM that is not running!',
                     'orphan_reason': f"VM stopped (not deallocated) for {stopped_days} days - paying full compute charges while not running",
                     'recommendation': f"URGENT: Deallocate this VM immediately using Azure Portal or CLI: 'az vm deallocate'. This will stop compute charges. Current waste: ${monthly_cost:.2f}/month.",
+                    'confidence_level': self._calculate_confidence_level(stopped_days, detection_rules),
                 }
 
                 orphan = OrphanResourceData(
@@ -1249,6 +1293,13 @@ class AzureProvider(CloudProviderBase):
             vms = list(compute_client.virtual_machines.list_all())
 
             for vm in vms:
+                if vm.location != region:
+                    continue
+
+                # Filter by resource group (if specified)
+                if not self._is_resource_in_scope(vm.id):
+                    continue
+
                 # Get resource group from VM ID
                 resource_group = vm.id.split('/')[4]
 
@@ -1307,7 +1358,31 @@ class AzureProvider(CloudProviderBase):
 
                 # Current cost is $0 for compute (since it's stopped/deallocated)
                 # but disks are still charging
-                current_monthly_cost = 0.0  # Disk costs would need separate calculation
+                current_monthly_cost = 0.0
+
+                # Calculate OS disk cost
+                if vm.storage_profile and vm.storage_profile.os_disk and vm.storage_profile.os_disk.managed_disk:
+                    try:
+                        os_disk_id = vm.storage_profile.os_disk.managed_disk.id
+                        os_disk_name = os_disk_id.split('/')[-1]
+                        os_disk_rg = os_disk_id.split('/')[4]
+                        os_disk = compute_client.disks.get(os_disk_rg, os_disk_name)
+                        current_monthly_cost += self._calculate_disk_cost(os_disk)
+                    except Exception:
+                        pass  # If disk not found, skip
+
+                # Calculate data disks cost
+                if vm.storage_profile and vm.storage_profile.data_disks:
+                    for data_disk in vm.storage_profile.data_disks:
+                        if data_disk.managed_disk:
+                            try:
+                                disk_id = data_disk.managed_disk.id
+                                disk_name = disk_id.split('/')[-1]
+                                disk_rg = disk_id.split('/')[4]
+                                disk = compute_client.disks.get(disk_rg, disk_name)
+                                current_monthly_cost += self._calculate_disk_cost(disk)
+                            except Exception:
+                                pass  # If disk not found, skip
 
                 metadata = {
                     'vm_size': vm_size,
@@ -1319,7 +1394,8 @@ class AzureProvider(CloudProviderBase):
                     'orphan_reason': f"VM created {vm_age_days} days ago but has never been started",
                     'recommendation': f"This VM has existed for {vm_age_days} days without ever running. "
                                     f"If it was created by mistake or for testing, consider deleting it. "
-                                    f"Potential compute cost if started: ${potential_monthly_cost:.2f}/month."
+                                    f"Potential compute cost if started: ${potential_monthly_cost:.2f}/month.",
+                    'confidence_level': self._calculate_confidence_level(vm_age_days, detection_rules),
                 }
 
                 orphan = OrphanResourceData(
@@ -1382,6 +1458,13 @@ class AzureProvider(CloudProviderBase):
             vms = list(compute_client.virtual_machines.list_all())
 
             for vm in vms:
+                if vm.location != region:
+                    continue
+
+                # Filter by resource group (if specified)
+                if not self._is_resource_in_scope(vm.id):
+                    continue
+
                 vm_size = vm.hardware_profile.vm_size
 
                 # Extract vCPU count from VM size (approximation based on size name)
@@ -1463,7 +1546,8 @@ class AzureProvider(CloudProviderBase):
                     'recommendation': f"Consider downsizing VM from {vm_size} to {suggested_size} "
                                     f"and switching disks from Premium_LRS to Standard_LRS. "
                                     f"Potential savings: ${total_monthly_savings:.2f}/month "
-                                    f"(VM: ${compute_savings:.2f}, Disks: ${disk_savings:.2f})."
+                                    f"(VM: ${compute_savings:.2f}, Disks: ${disk_savings:.2f}).",
+                    'confidence_level': self._calculate_confidence_level(age_days, detection_rules),
                 }
 
                 orphan = OrphanResourceData(
@@ -1561,6 +1645,13 @@ class AzureProvider(CloudProviderBase):
             vms = list(compute_client.virtual_machines.list_all())
 
             for vm in vms:
+                if vm.location != region:
+                    continue
+
+                # Filter by resource group (if specified)
+                if not self._is_resource_in_scope(vm.id):
+                    continue
+
                 # Check VM age
                 created_at = vm.time_created if hasattr(vm, 'time_created') else None
                 if created_at:
@@ -1608,9 +1699,33 @@ class AzureProvider(CloudProviderBase):
                 vm_size = vm.hardware_profile.vm_size
                 vm_cost = self._get_vm_cost_estimate(vm_size)
 
-                # If VM is deallocated, cost is $0 for compute
+                # If VM is deallocated, cost is $0 for compute, but disks still charge
                 if power_state == 'deallocated':
                     vm_cost = 0.0
+
+                    # Calculate OS disk cost
+                    if vm.storage_profile and vm.storage_profile.os_disk and vm.storage_profile.os_disk.managed_disk:
+                        try:
+                            os_disk_id = vm.storage_profile.os_disk.managed_disk.id
+                            os_disk_name = os_disk_id.split('/')[-1]
+                            os_disk_rg = os_disk_id.split('/')[4]
+                            os_disk = compute_client.disks.get(os_disk_rg, os_disk_name)
+                            vm_cost += self._calculate_disk_cost(os_disk)
+                        except Exception:
+                            pass  # If disk not found, skip
+
+                    # Calculate data disks cost
+                    if vm.storage_profile and vm.storage_profile.data_disks:
+                        for data_disk in vm.storage_profile.data_disks:
+                            if data_disk.managed_disk:
+                                try:
+                                    disk_id = data_disk.managed_disk.id
+                                    disk_name = disk_id.split('/')[-1]
+                                    disk_rg = disk_id.split('/')[4]
+                                    disk = compute_client.disks.get(disk_rg, disk_name)
+                                    vm_cost += self._calculate_disk_cost(disk)
+                                except Exception:
+                                    pass  # If disk not found, skip
 
                 metadata = {
                     'vm_size': vm_size,
@@ -1624,7 +1739,8 @@ class AzureProvider(CloudProviderBase):
                     'recommendation': f"This VM lacks proper tagging for {vm_age_days} days. "
                                     f"Add required tags ({', '.join(missing_tags)}) to identify ownership "
                                     f"and cost accountability. If owner cannot be identified, this may be "
-                                    f"an orphaned resource that should be investigated or deleted."
+                                    f"an orphaned resource that should be investigated or deleted.",
+                    'confidence_level': self._calculate_confidence_level(vm_age_days, detection_rules),
                 }
 
                 orphan = OrphanResourceData(

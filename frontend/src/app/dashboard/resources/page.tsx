@@ -54,6 +54,56 @@ const resourceIcons: Record<ResourceType, any> = {
   // Azure Phase 1 - Advanced waste scenarios
   managed_disk_on_stopped_vm: HardDrive,
   public_ip_on_stopped_resource: Wifi,
+  // Azure VM Phase A - Virtual Machine waste scenarios
+  virtual_machine_stopped_not_deallocated: Server,
+  virtual_machine_never_started: Server,
+  virtual_machine_oversized_premium: Server,
+  virtual_machine_untagged_orphan: Server,
+};
+
+// Confidence level badge component
+const ConfidenceLevelBadge = ({ level }: { level?: string }) => {
+  if (!level) return null;
+
+  const config = {
+    critical: {
+      emoji: '🔴',
+      label: 'Critical',
+      bgColor: 'bg-red-100',
+      textColor: 'text-red-800',
+      borderColor: 'border-red-300',
+    },
+    high: {
+      emoji: '🟠',
+      label: 'High',
+      bgColor: 'bg-orange-100',
+      textColor: 'text-orange-800',
+      borderColor: 'border-orange-300',
+    },
+    medium: {
+      emoji: '🟡',
+      label: 'Medium',
+      bgColor: 'bg-yellow-100',
+      textColor: 'text-yellow-800',
+      borderColor: 'border-yellow-300',
+    },
+    low: {
+      emoji: '🟢',
+      label: 'Low',
+      bgColor: 'bg-green-100',
+      textColor: 'text-green-800',
+      borderColor: 'border-green-300',
+    },
+  };
+
+  const conf = config[level as keyof typeof config] || config.low;
+
+  return (
+    <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold border ${conf.bgColor} ${conf.textColor} ${conf.borderColor}`}>
+      <span>{conf.emoji}</span>
+      <span>{conf.label}</span>
+    </span>
+  );
 };
 
 export default function ResourcesPage() {
@@ -401,8 +451,10 @@ function ResourceCard({ resource, onIgnore, onMarkForDeletion, onDelete }: any) 
               {resource.resource_type.replace(/_/g, " ").toUpperCase()} · {resource.region}
             </p>
             <div className="mt-2 flex flex-col gap-2">
-              <div className="flex items-center gap-2 text-sm text-gray-500">
+              <div className="flex items-center justify-between gap-2 text-sm text-gray-500">
                 <span>ID: {resource.resource_id}</span>
+                {/* Confidence Level Badge */}
+                <ConfidenceLevelBadge level={resource.resource_metadata?.confidence_level} />
               </div>
 
               {/* Orphan reason - why is this resource orphaned? */}

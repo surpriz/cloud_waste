@@ -681,6 +681,7 @@ function EditAccountForm({ account, onClose }: { account: any; onClose: () => vo
     azure_subscription_id: "",
     // Common fields
     regions: account.regions?.join(",") || (isAzure ? "eastus,westeurope,northeurope" : "us-east-1"),
+    resource_groups: account.resource_groups?.join(",") || "",
     scheduled_scan_enabled: account.scheduled_scan_enabled ?? true,
     scheduled_scan_frequency: account.scheduled_scan_frequency || "daily",
     scheduled_scan_hour: account.scheduled_scan_hour ?? 2,
@@ -693,7 +694,8 @@ function EditAccountForm({ account, onClose }: { account: any; onClose: () => vo
     try {
       const updateData: any = {
         account_name: formData.account_name,
-        regions: formData.regions.split(",").map((r) => r.trim()),
+        regions: formData.regions.split(",").map((r) => r.trim()).filter(Boolean),
+        resource_groups: formData.resource_groups.trim() ? formData.resource_groups.split(",").map((rg) => rg.trim()).filter(Boolean) : null,
         scheduled_scan_enabled: formData.scheduled_scan_enabled,
         scheduled_scan_frequency: formData.scheduled_scan_frequency,
         scheduled_scan_hour: formData.scheduled_scan_hour,
@@ -891,6 +893,28 @@ function EditAccountForm({ account, onClose }: { account: any; onClose: () => vo
               💡 Tip: Limit to 3 regions for faster scans
             </p>
           </div>
+
+          {/* Resource Groups (Azure only) */}
+          {isAzure && (
+            <div>
+              <label className="block text-sm font-semibold text-gray-700 mb-2">
+                Resource Groups (comma-separated, optional)
+                <span className="ml-2 text-xs font-normal text-gray-500">Leave empty to scan ALL resource groups</span>
+              </label>
+              <input
+                type="text"
+                value={formData.resource_groups}
+                onChange={(e) =>
+                  setFormData({ ...formData, resource_groups: e.target.value })
+                }
+                className="block w-full rounded-xl border-2 border-gray-300 px-4 py-3 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/20 transition-all font-mono"
+                placeholder="rg-prod,rg-staging,rg-dev"
+              />
+              <p className="mt-2 text-xs text-gray-500">
+                🎯 Tip: Filter by specific resource groups to scan only what matters
+              </p>
+            </div>
+          )}
 
           {/* Scheduled Scan Settings */}
           <div className="space-y-4 rounded-xl bg-purple-50 border border-purple-200 p-6">
@@ -1248,7 +1272,7 @@ function AddAzureAccountForm({ onClose }: { onClose: () => void }) {
         azure_client_secret: formData.azure_client_secret,
         azure_subscription_id: formData.azure_subscription_id,
         regions: formData.regions.split(",").map((r) => r.trim()).filter(Boolean),
-        resource_groups: formData.resource_groups ? formData.resource_groups.split(",").map((rg) => rg.trim()).filter(Boolean) : undefined,
+        resource_groups: formData.resource_groups.trim() ? formData.resource_groups.split(",").map((rg) => rg.trim()).filter(Boolean) : undefined,
         description: formData.description || undefined,
       });
       onClose();

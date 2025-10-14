@@ -150,6 +150,8 @@ export type ResourceType =
   | "virtual_machine_oversized_premium"
   | "virtual_machine_untagged_orphan";
 
+export type ConfidenceLevel = "critical" | "high" | "medium" | "low";
+
 export interface OrphanResource {
   id: string;
   scan_id: string;
@@ -163,6 +165,7 @@ export interface OrphanResource {
   status: ResourceStatus;
   created_at: string;
   updated_at: string;
+  confidence_level?: ConfidenceLevel; // Extracted from resource_metadata for convenience
 }
 
 export interface OrphanResourceUpdate {

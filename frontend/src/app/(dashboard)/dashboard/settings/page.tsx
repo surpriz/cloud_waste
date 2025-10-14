@@ -14,6 +14,9 @@ interface DetectionRule {
     min_age_days?: number;
     min_stopped_days?: number;
     confidence_threshold_days?: number;
+    confidence_critical_days?: number;
+    confidence_high_days?: number;
+    confidence_medium_days?: number;
     [key: string]: any;
   };
   default_rules: {
@@ -21,6 +24,9 @@ interface DetectionRule {
     min_age_days?: number;
     min_stopped_days?: number;
     confidence_threshold_days?: number;
+    confidence_critical_days?: number;
+    confidence_high_days?: number;
+    confidence_medium_days?: number;
     description?: string;
     [key: string]: any;
   };
@@ -520,61 +526,152 @@ export default function SettingsPage() {
                       </div>
                     )}
 
-                    {/* Confidence Threshold */}
-                    {rule.current_rules.confidence_threshold_days !== undefined && (
-                      <div className="mb-4">
-                        <div className="flex items-center justify-between mb-2">
-                          <h4 className="font-semibold text-gray-900">
-                            High Confidence After: {rule.current_rules.confidence_threshold_days} days
-                          </h4>
-                          <span className="text-sm text-gray-500">
-                            Default: {rule.default_rules.confidence_threshold_days} days
-                          </span>
-                        </div>
-                        <input
-                          type="range"
-                          min="7"
-                          max="180"
-                          step="1"
-                          value={rule.current_rules.confidence_threshold_days}
-                          onChange={(e) =>
-                            handleRuleChange(
-                              rule.resource_type,
-                              "confidence_threshold_days",
-                              parseInt(e.target.value)
-                            )
-                          }
-                          className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-purple-600"
-                        />
-                        <div className="flex justify-between text-xs text-gray-500 mt-1">
-                          <span>7 days</span>
-                          <span>180 days</span>
+                    {/* Confidence Level Thresholds (New Standardized System) */}
+                    <div className="mb-4">
+                      <h4 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
+                        🎯 Confidence Level Thresholds
+                      </h4>
+                      <div className="space-y-4 p-4 bg-gradient-to-r from-blue-50 to-purple-50 border-2 border-blue-200 rounded-lg">
+                        {/* Critical Threshold */}
+                        <div>
+                          <div className="flex items-center justify-between mb-2">
+                            <label className="text-sm font-medium text-gray-900 flex items-center gap-2">
+                              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold border bg-red-100 text-red-800 border-red-300">
+                                🔴 Critical
+                              </span>
+                              After {rule.current_rules.confidence_critical_days || rule.default_rules.confidence_critical_days || 90} days
+                            </label>
+                            <span className="text-xs text-gray-500">
+                              Default: {rule.default_rules.confidence_critical_days || 90} days
+                            </span>
+                          </div>
+                          <input
+                            type="range"
+                            min="30"
+                            max="365"
+                            step="1"
+                            value={rule.current_rules.confidence_critical_days || rule.default_rules.confidence_critical_days || 90}
+                            onChange={(e) =>
+                              handleRuleChange(
+                                rule.resource_type,
+                                "confidence_critical_days",
+                                parseInt(e.target.value)
+                              )
+                            }
+                            className="w-full h-2 bg-gradient-to-r from-orange-200 to-red-300 rounded-lg appearance-none cursor-pointer"
+                          />
+                          <div className="flex justify-between text-xs text-gray-500 mt-1">
+                            <span>30 days</span>
+                            <span>365 days</span>
+                          </div>
                         </div>
 
-                        {/* Interactive Example for Confidence */}
-                        <div className="mt-4 rounded-lg bg-gradient-to-r from-purple-50 to-pink-50 border-2 border-purple-200 p-4">
-                          <h5 className="font-semibold text-purple-900 mb-2 flex items-center gap-2">
-                            <span>🎯</span> Confidence Levels
-                          </h5>
-                          <div className="space-y-2 text-sm">
-                            <div className="flex items-start gap-2">
-                              <span className="text-green-600 font-bold">HIGH</span>
-                              <span className="text-gray-700">
-                                Resources <strong>{rule.current_rules.confidence_threshold_days}+ days old</strong> → marked as <span className="bg-green-100 text-green-800 px-2 py-0.5 rounded font-semibold">high confidence</span>
+                        {/* High Threshold */}
+                        <div>
+                          <div className="flex items-center justify-between mb-2">
+                            <label className="text-sm font-medium text-gray-900 flex items-center gap-2">
+                              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold border bg-orange-100 text-orange-800 border-orange-300">
+                                🟠 High
                               </span>
+                              After {rule.current_rules.confidence_high_days || rule.default_rules.confidence_high_days || 30} days
+                            </label>
+                            <span className="text-xs text-gray-500">
+                              Default: {rule.default_rules.confidence_high_days || 30} days
+                            </span>
+                          </div>
+                          <input
+                            type="range"
+                            min="7"
+                            max="180"
+                            step="1"
+                            value={rule.current_rules.confidence_high_days || rule.default_rules.confidence_high_days || 30}
+                            onChange={(e) =>
+                              handleRuleChange(
+                                rule.resource_type,
+                                "confidence_high_days",
+                                parseInt(e.target.value)
+                              )
+                            }
+                            className="w-full h-2 bg-gradient-to-r from-yellow-200 to-orange-300 rounded-lg appearance-none cursor-pointer"
+                          />
+                          <div className="flex justify-between text-xs text-gray-500 mt-1">
+                            <span>7 days</span>
+                            <span>180 days</span>
+                          </div>
+                        </div>
+
+                        {/* Medium Threshold */}
+                        <div>
+                          <div className="flex items-center justify-between mb-2">
+                            <label className="text-sm font-medium text-gray-900 flex items-center gap-2">
+                              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold border bg-yellow-100 text-yellow-800 border-yellow-300">
+                                🟡 Medium
+                              </span>
+                              After {rule.current_rules.confidence_medium_days || rule.default_rules.confidence_medium_days || 7} days
+                            </label>
+                            <span className="text-xs text-gray-500">
+                              Default: {rule.default_rules.confidence_medium_days || 7} days
+                            </span>
+                          </div>
+                          <input
+                            type="range"
+                            min="1"
+                            max="60"
+                            step="1"
+                            value={rule.current_rules.confidence_medium_days || rule.default_rules.confidence_medium_days || 7}
+                            onChange={(e) =>
+                              handleRuleChange(
+                                rule.resource_type,
+                                "confidence_medium_days",
+                                parseInt(e.target.value)
+                              )
+                            }
+                            className="w-full h-2 bg-gradient-to-r from-green-200 to-yellow-300 rounded-lg appearance-none cursor-pointer"
+                          />
+                          <div className="flex justify-between text-xs text-gray-500 mt-1">
+                            <span>1 day</span>
+                            <span>60 days</span>
+                          </div>
+                        </div>
+
+                        {/* Visual Example */}
+                        <div className="mt-4 p-3 bg-white rounded border border-blue-300">
+                          <h5 className="font-semibold text-blue-900 mb-2 text-sm">How it works:</h5>
+                          <div className="space-y-1.5 text-xs text-gray-700">
+                            <div className="flex items-center gap-2">
+                              <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-xs font-semibold border bg-red-100 text-red-800 border-red-300">🔴</span>
+                              <span>Resources <strong>{rule.current_rules.confidence_critical_days || rule.default_rules.confidence_critical_days || 90}+ days old</strong> → Critical priority</span>
                             </div>
-                            <div className="flex items-start gap-2">
-                              <span className="text-yellow-600 font-bold">LOW</span>
-                              <span className="text-gray-700">
-                                Resources <strong>less than {rule.current_rules.confidence_threshold_days} days old</strong> → marked as <span className="bg-yellow-100 text-yellow-800 px-2 py-0.5 rounded font-semibold">low confidence</span>
-                              </span>
+                            <div className="flex items-center gap-2">
+                              <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-xs font-semibold border bg-orange-100 text-orange-800 border-orange-300">🟠</span>
+                              <span>Resources <strong>{rule.current_rules.confidence_high_days || rule.default_rules.confidence_high_days || 30}-{(rule.current_rules.confidence_critical_days || rule.default_rules.confidence_critical_days || 90) - 1} days old</strong> → High priority</span>
+                            </div>
+                            <div className="flex items-center gap-2">
+                              <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-xs font-semibold border bg-yellow-100 text-yellow-800 border-yellow-300">🟡</span>
+                              <span>Resources <strong>{rule.current_rules.confidence_medium_days || rule.default_rules.confidence_medium_days || 7}-{(rule.current_rules.confidence_high_days || rule.default_rules.confidence_high_days || 30) - 1} days old</strong> → Medium priority</span>
+                            </div>
+                            <div className="flex items-center gap-2">
+                              <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-xs font-semibold border bg-green-100 text-green-800 border-green-300">🟢</span>
+                              <span>Resources <strong>less than {rule.current_rules.confidence_medium_days || rule.default_rules.confidence_medium_days || 7} days old</strong> → Low priority</span>
                             </div>
                           </div>
-                          <div className="mt-3 p-3 bg-white rounded border border-purple-300">
-                            <p className="text-xs text-purple-800">
-                              <strong>Why it matters:</strong> High confidence resources are very likely to be true orphans and safe to delete. Low confidence resources might still be in use or recently created for a purpose.
-                            </p>
-                          </div>
+                          <p className="mt-2 text-xs text-blue-800 italic">
+                            💡 Tip: Use these thresholds to prioritize which orphaned resources to clean up first based on how long they've been wasting money.
+                          </p>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Legacy Confidence Threshold (Kept for backwards compatibility) */}
+                    {rule.current_rules.confidence_threshold_days !== undefined && (
+                      <div className="mb-4 opacity-50">
+                        <div className="flex items-center justify-between mb-2">
+                          <h4 className="font-semibold text-gray-900 text-sm">
+                            Legacy: High Confidence After {rule.current_rules.confidence_threshold_days} days
+                          </h4>
+                          <span className="text-xs text-gray-500">
+                            (Use new system above)
+                          </span>
                         </div>
                       </div>
                     )}

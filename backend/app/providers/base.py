@@ -61,6 +61,46 @@ class CloudProviderBase(ABC):
         self.secret_key = secret_key
         self.regions = regions or []
 
+    def _calculate_confidence_level(
+        self,
+        age_days: int,
+        detection_rules: dict | None = None,
+    ) -> str:
+        """
+        Calculate confidence level based on resource age and configurable thresholds.
+
+        Args:
+            age_days: Age of the resource in days
+            detection_rules: Optional detection configuration with custom thresholds:
+                {
+                    "confidence_critical_days": int (default 90),
+                    "confidence_high_days": int (default 30),
+                    "confidence_medium_days": int (default 7)
+                }
+
+        Returns:
+            Confidence level: "critical", "high", "medium", or "low"
+        """
+        # Get thresholds from detection rules or use defaults
+        critical_days = 90
+        high_days = 30
+        medium_days = 7
+
+        if detection_rules:
+            critical_days = detection_rules.get("confidence_critical_days", 90)
+            high_days = detection_rules.get("confidence_high_days", 30)
+            medium_days = detection_rules.get("confidence_medium_days", 7)
+
+        # Calculate confidence level based on age
+        if age_days >= critical_days:
+            return "critical"
+        elif age_days >= high_days:
+            return "high"
+        elif age_days >= medium_days:
+            return "medium"
+        else:
+            return "low"
+
     @abstractmethod
     async def validate_credentials(self) -> dict[str, str]:
         """
