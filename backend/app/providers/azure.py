@@ -368,6 +368,18 @@ class AzureProvider(CloudProviderBase):
         orphaned_snapshots = await self.scan_orphaned_snapshots(region, rules.get("disk_snapshot_orphaned"))
         results.extend(orphaned_snapshots)
 
+        # Scan redundant Disk Snapshots (multiple snapshots for same source disk)
+        redundant_snapshots = await self.scan_redundant_snapshots(region, rules.get("disk_snapshot_redundant"))
+        results.extend(redundant_snapshots)
+
+        # Scan disks with unnecessary Zone-Redundant Storage (ZRS) in dev/test
+        unnecessary_zrs = await self.scan_unnecessary_zrs_disks(region, rules.get("managed_disk_unnecessary_zrs"))
+        results.extend(unnecessary_zrs)
+
+        # Scan disks with unnecessary Customer-Managed Key encryption
+        unnecessary_cmk = await self.scan_unnecessary_cmk_encryption(region, rules.get("managed_disk_unnecessary_cmk"))
+        results.extend(unnecessary_cmk)
+
         # Scan Public IPs associated to stopped resources (VMs, LBs)
         ips_on_stopped = await self.scan_ips_on_stopped_resources(region, rules.get("public_ip_on_stopped_resource"))
         results.extend(ips_on_stopped)
@@ -393,8 +405,25 @@ class AzureProvider(CloudProviderBase):
         untagged_orphans = await self.scan_untagged_orphan_vms(region, rules.get("virtual_machine_untagged_orphan"))
         results.extend(untagged_orphans)
 
-        # TODO: Phase 2 - Advanced metrics scenarios (requires Azure Monitor API)
-        # results.extend(await self.scan_low_io_disks(region, rules.get("managed_disk_low_io")))
+        # Phase 2 - Azure Monitor Metrics-based Advanced Scenarios (requires "Monitoring Reader" permission)
+        # Scenario 6: Idle disks (zero I/O activity)
+        idle_disks = await self.scan_idle_disks(region, rules.get("managed_disk_idle"))
+        results.extend(idle_disks)
+
+        # Scenario 7: Unused disk bursting (bursting enabled but never used)
+        unused_bursting = await self.scan_unused_bursting(region, rules.get("managed_disk_unused_bursting"))
+        results.extend(unused_bursting)
+
+        # Scenario 8: Over-provisioned Premium disks (performance tier too high)
+        overprovisioned_disks = await self.scan_overprovisioned_disks(region, rules.get("managed_disk_overprovisioned"))
+        results.extend(overprovisioned_disks)
+
+        # Scenario 9: Under-utilized Standard HDD disks (should be SSD)
+        underutilized_hdd = await self.scan_underutilized_hdd_disks(region, rules.get("managed_disk_underutilized_hdd"))
+        results.extend(underutilized_hdd)
+
+        # TODO: Future scenarios (VMs, Load Balancers, etc.)
+        # results.extend(await self.scan_idle_running_instances(region, rules.get("virtual_machine_idle")))
         # results.extend(await self.scan_zero_traffic_ips(region, rules.get("public_ip_no_traffic")))
 
         return results
@@ -784,6 +813,426 @@ class AzureProvider(CloudProviderBase):
 
         except Exception as e:
             print(f"Error scanning orphaned snapshots in {region}: {str(e)}")
+
+        return orphans
+
+    async def scan_redundant_snapshots(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scan for redundant Azure Disk Snapshots (multiple snapshots for same source disk).
+
+        Detects scenarios where the same disk has >3 snapshots, suggesting that older
+        snapshots are likely redundant and can be deleted to save costs.
+
+        Typical scenario: Monthly backups kept indefinitely, but only last 2-3 needed.
+        Cost savings: $0.05/GB/month per redundant snapshot
+
+        Args:
+            region: Azure region to scan
+            detection_rules: Optional detection configuration:
+                {
+                    "enabled": bool (default True),
+                    "max_snapshots_per_disk": int (default 3),
+                    "min_age_days": int (default 90) - Only flag old snapshots
+                }
+
+        Returns:
+            List of redundant snapshot resources (keeping newest N, flagging rest)
+        """
+        from datetime import datetime, timezone
+        from azure.identity import ClientSecretCredential
+        from azure.mgmt.compute import ComputeManagementClient
+
+        print(f"🚀 CALLED scan_redundant_snapshots for region={region}, detection_rules={detection_rules}")
+
+        orphans = []
+
+        # Get detection parameters
+        max_snapshots = detection_rules.get("max_snapshots_per_disk", 3) if detection_rules else 3
+        min_age_days = detection_rules.get("min_age_days", 90) if detection_rules else 90
+
+        print(f"🔧 Parsed detection params: max_snapshots={max_snapshots}, min_age_days={min_age_days}")
+
+        try:
+            credential = ClientSecretCredential(
+                tenant_id=self.tenant_id,
+                client_id=self.client_id,
+                client_secret=self.client_secret
+            )
+
+            compute_client = ComputeManagementClient(credential, self.subscription_id)
+
+            # List all snapshots
+            snapshots = list(compute_client.snapshots.list())
+            print(f"🔍 DEBUG scan_redundant_snapshots: Total snapshots found: {len(snapshots)}")
+
+            # Filter by region
+            region_snapshots = [s for s in snapshots if s.location == region]
+            print(f"🔍 DEBUG scan_redundant_snapshots: Snapshots in region {region}: {len(region_snapshots)}")
+
+            # Filter by resource group (if specified)
+            region_snapshots = [s for s in region_snapshots if self._is_resource_in_scope(s.id)]
+            print(f"🔍 DEBUG scan_redundant_snapshots: Snapshots after RG filter: {len(region_snapshots)}")
+            print(f"🔍 DEBUG scan_redundant_snapshots: Detection rules: max_snapshots={max_snapshots}, min_age_days={min_age_days}")
+
+            # Group snapshots by source disk
+            snapshots_by_source: dict[str, list] = {}
+
+            for snapshot in region_snapshots:
+                # Calculate snapshot age
+                age_days = 0
+                if snapshot.time_created:
+                    age_days = (datetime.now(timezone.utc) - snapshot.time_created).days
+
+                print(f"🔍 DEBUG: Snapshot {snapshot.name}: age_days={age_days}, min_age_days={min_age_days}")
+
+                # Skip recent snapshots (they might still be needed for short-term recovery)
+                if age_days < min_age_days:
+                    print(f"⏭️  SKIPPED {snapshot.name} (age {age_days} < min {min_age_days})")
+                    continue
+
+                # Get source disk ID
+                source_disk_id = "unknown"
+                if snapshot.creation_data and snapshot.creation_data.source_resource_id:
+                    source_disk_id = snapshot.creation_data.source_resource_id
+
+                if source_disk_id not in snapshots_by_source:
+                    snapshots_by_source[source_disk_id] = []
+
+                snapshots_by_source[source_disk_id].append({
+                    'snapshot': snapshot,
+                    'age_days': age_days
+                })
+
+            print(f"🔍 DEBUG: Snapshots grouped by source disk: {len(snapshots_by_source)} source disks")
+            for source_id, snaps in snapshots_by_source.items():
+                print(f"  - Source disk: {source_id[-50:]} -> {len(snaps)} snapshots")
+
+            # Find redundant snapshots (keep newest N, flag rest)
+            for source_disk_id, snapshot_list in snapshots_by_source.items():
+                # Only process if more than max_snapshots exist
+                if len(snapshot_list) <= max_snapshots:
+                    print(f"⏭️  SKIPPED source disk (only {len(snapshot_list)} snapshots, max={max_snapshots})")
+                    continue
+
+                # Sort by creation date (newest first)
+                snapshot_list.sort(key=lambda x: x['snapshot'].time_created, reverse=True)
+
+                # Keep newest N, mark rest as redundant
+                redundant_snapshots = snapshot_list[max_snapshots:]
+
+                for snap_data in redundant_snapshots:
+                    snapshot = snap_data['snapshot']
+                    age_days = snap_data['age_days']
+
+                    # Calculate snapshot cost ($0.05/GB/month)
+                    snapshot_size_gb = snapshot.disk_size_gb if snapshot.disk_size_gb else 0
+                    monthly_cost = round(snapshot_size_gb * 0.05, 2)
+
+                    # Count total snapshots for this source
+                    total_snapshots = len(snapshot_list)
+                    position = snapshot_list.index(snap_data) + 1  # 1-indexed
+
+                    metadata = {
+                        'snapshot_id': snapshot.id,
+                        'snapshot_name': snapshot.name,
+                        'snapshot_size_gb': snapshot_size_gb,
+                        'source_disk_id': source_disk_id,
+                        'age_days': age_days,
+                        'time_created': snapshot.time_created.isoformat() if snapshot.time_created else None,
+                        'total_snapshots_for_source': total_snapshots,
+                        'snapshot_position': f"{position} of {total_snapshots} (oldest to newest)",
+                        'kept_snapshots_count': max_snapshots,
+                        'orphan_reason': f"Redundant snapshot: {total_snapshots} snapshots exist for source disk, but only {max_snapshots} newest are needed. This is snapshot #{position} (created {age_days} days ago).",
+                        'recommendation': f"Delete this redundant snapshot to save ${monthly_cost:.2f}/month. Keep the {max_snapshots} newest snapshots for backup rotation.",
+                        'tags': snapshot.tags if snapshot.tags else {},
+                        'confidence_level': self._calculate_confidence_level(age_days, detection_rules),
+                    }
+
+                    orphan = OrphanResourceData(
+                        resource_type='disk_snapshot_redundant',
+                        resource_id=snapshot.id,
+                        resource_name=snapshot.name,
+                        region=snapshot.location,
+                        estimated_monthly_cost=monthly_cost,
+                        resource_metadata=metadata
+                    )
+
+                    orphans.append(orphan)
+
+        except Exception as e:
+            print(f"Error scanning redundant snapshots in {region}: {str(e)}")
+
+        return orphans
+
+    async def scan_unnecessary_zrs_disks(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scan for Azure Managed Disks with Zone-Redundant Storage (ZRS) in dev/test environments.
+
+        ZRS disks cost +20% compared to Locally-Redundant Storage (LRS) but provide
+        zone redundancy that is typically unnecessary for non-production workloads.
+
+        Typical waste: Dev/Test VMs using Premium_ZRS or StandardSSD_ZRS
+        Cost savings: ~20% of disk cost by switching to LRS
+
+        Args:
+            region: Azure region to scan
+            detection_rules: Optional detection configuration:
+                {
+                    "enabled": bool (default True),
+                    "dev_environments": list[str] (default ["dev", "test", "staging", "qa"]),
+                    "min_age_days": int (default 30)
+                }
+
+        Returns:
+            List of ZRS disk resources in non-production environments
+        """
+        from datetime import datetime, timezone
+        from azure.identity import ClientSecretCredential
+        from azure.mgmt.compute import ComputeManagementClient
+
+        orphans = []
+
+        # Get detection parameters
+        dev_envs = detection_rules.get("dev_environments", ["dev", "test", "staging", "qa"]) if detection_rules else ["dev", "test", "staging", "qa"]
+        min_age_days = detection_rules.get("min_age_days", 30) if detection_rules else 30
+
+        try:
+            credential = ClientSecretCredential(
+                tenant_id=self.tenant_id,
+                client_id=self.client_id,
+                client_secret=self.client_secret
+            )
+
+            compute_client = ComputeManagementClient(credential, self.subscription_id)
+
+            # List all disks
+            disks = compute_client.disks.list()
+
+            for disk in disks:
+                # Filter by region
+                if disk.location != region:
+                    continue
+
+                # Filter by resource group (if specified)
+                if not self._is_resource_in_scope(disk.id):
+                    continue
+
+                # Check if disk is using ZRS (Zone-Redundant Storage)
+                sku_name = disk.sku.name if disk.sku else 'Standard_LRS'
+                if '_ZRS' not in sku_name:
+                    continue  # Not a ZRS disk
+
+                # Calculate disk age
+                age_days = 0
+                if disk.time_created:
+                    age_days = (datetime.now(timezone.utc) - disk.time_created).days
+
+                # Skip young disks
+                if age_days < min_age_days:
+                    continue
+
+                # Check if disk is in dev/test environment
+                # Check 1: Environment tag
+                disk_tags = disk.tags or {}
+                env_tag = None
+                for tag_key in ['environment', 'env', 'Environment', 'Env']:
+                    if tag_key in disk_tags:
+                        env_tag = disk_tags[tag_key].lower()
+                        break
+
+                is_dev_environment = False
+                if env_tag and any(env_keyword in env_tag for env_keyword in dev_envs):
+                    is_dev_environment = True
+
+                # Check 2: Resource group name contains dev/test keywords
+                rg_name = disk.id.split('/')[4].lower() if len(disk.id.split('/')) > 4 else ''
+                if any(env_keyword in rg_name for env_keyword in dev_envs):
+                    is_dev_environment = True
+
+                # Skip if not a dev environment
+                if not is_dev_environment:
+                    continue
+
+                # Calculate cost difference between ZRS and LRS
+                current_cost = self._calculate_disk_cost(disk)
+
+                # ZRS costs ~20% more than LRS, so LRS would be 1/1.2 = ~83.3% of current cost
+                lrs_cost = current_cost / 1.2
+                potential_savings = current_cost - lrs_cost
+
+                # Suggest LRS equivalent
+                lrs_sku = sku_name.replace('_ZRS', '_LRS')
+
+                metadata = {
+                    'disk_id': disk.id,
+                    'disk_name': disk.name,
+                    'disk_size_gb': disk.disk_size_gb,
+                    'current_sku': sku_name,
+                    'suggested_sku': lrs_sku,
+                    'current_monthly_cost': f'${current_cost:.2f}',
+                    'suggested_monthly_cost': f'${lrs_cost:.2f}',
+                    'potential_monthly_savings': f'${potential_savings:.2f}',
+                    'environment': env_tag if env_tag else 'inferred from resource group',
+                    'resource_group': rg_name,
+                    'age_days': age_days,
+                    'created_at': disk.time_created.isoformat() if disk.time_created else None,
+                    'zones': disk.zones if disk.zones else None,
+                    'orphan_reason': f"Zone-Redundant Storage (ZRS) disk in {env_tag or 'dev/test'} environment. ZRS costs +20% but zone redundancy is unnecessary for non-production workloads.",
+                    'recommendation': f"Switch from {sku_name} to {lrs_sku} to save ${potential_savings:.2f}/month (~20% cost reduction). ZRS is designed for high-availability production workloads, not dev/test.",
+                    'tags': disk_tags,
+                    'confidence_level': self._calculate_confidence_level(age_days, detection_rules),
+                }
+
+                orphan = OrphanResourceData(
+                    resource_type='managed_disk_unnecessary_zrs',
+                    resource_id=disk.id,
+                    resource_name=disk.name if disk.name else disk.id.split('/')[-1],
+                    region=disk.location,
+                    estimated_monthly_cost=round(potential_savings, 2),
+                    resource_metadata=metadata
+                )
+
+                orphans.append(orphan)
+
+        except Exception as e:
+            print(f"Error scanning unnecessary ZRS disks in {region}: {str(e)}")
+
+        return orphans
+
+    async def scan_unnecessary_cmk_encryption(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scan for Azure Managed Disks with Customer-Managed Key (CMK) encryption without compliance requirement.
+
+        Customer-Managed Keys cost ~8% more than Platform-Managed Keys but are typically
+        only needed for compliance/regulatory requirements (HIPAA, PCI-DSS, etc.).
+
+        Typical waste: Non-regulated workloads using CMK encryption unnecessarily
+        Cost savings: ~8% of disk cost by switching to Platform-Managed Key
+
+        Args:
+            region: Azure region to scan
+            detection_rules: Optional detection configuration:
+                {
+                    "enabled": bool (default True),
+                    "compliance_tags": list[str] (default ["compliance", "hipaa", "pci", "sox"]),
+                    "min_age_days": int (default 30)
+                }
+
+        Returns:
+            List of disks with unnecessary CMK encryption
+        """
+        from datetime import datetime, timezone
+        from azure.identity import ClientSecretCredential
+        from azure.mgmt.compute import ComputeManagementClient
+
+        orphans = []
+
+        # Get detection parameters
+        compliance_tags = detection_rules.get("compliance_tags", ["compliance", "hipaa", "pci", "sox", "gdpr", "regulated"]) if detection_rules else ["compliance", "hipaa", "pci", "sox", "gdpr", "regulated"]
+        min_age_days = detection_rules.get("min_age_days", 30) if detection_rules else 30
+
+        try:
+            credential = ClientSecretCredential(
+                tenant_id=self.tenant_id,
+                client_id=self.client_id,
+                client_secret=self.client_secret
+            )
+
+            compute_client = ComputeManagementClient(credential, self.subscription_id)
+
+            # List all disks
+            disks = compute_client.disks.list()
+
+            for disk in disks:
+                # Filter by region
+                if disk.location != region:
+                    continue
+
+                # Filter by resource group (if specified)
+                if not self._is_resource_in_scope(disk.id):
+                    continue
+
+                # Check if disk is using Customer-Managed Key encryption
+                if not disk.encryption or not disk.encryption.type:
+                    continue  # No encryption info
+
+                encryption_type = disk.encryption.type
+
+                # Skip if using Platform-Managed Key (default, no extra cost)
+                if encryption_type == 'EncryptionAtRestWithPlatformKey':
+                    continue
+
+                # Calculate disk age
+                age_days = 0
+                if disk.time_created:
+                    age_days = (datetime.now(timezone.utc) - disk.time_created).days
+
+                # Skip young disks
+                if age_days < min_age_days:
+                    continue
+
+                # Check for compliance/regulatory tags
+                disk_tags = disk.tags or {}
+                has_compliance_requirement = False
+
+                for tag_key, tag_value in disk_tags.items():
+                    tag_key_lower = tag_key.lower()
+                    tag_value_lower = str(tag_value).lower() if tag_value else ''
+
+                    # Check if any compliance keyword is in tag key or value
+                    if any(comp_tag in tag_key_lower or comp_tag in tag_value_lower for comp_tag in compliance_tags):
+                        has_compliance_requirement = True
+                        break
+
+                # Skip if disk has compliance requirement
+                if has_compliance_requirement:
+                    continue
+
+                # Calculate cost difference
+                current_cost = self._calculate_disk_cost(disk)
+
+                # CMK encryption costs ~8% more, so Platform-Managed would be current_cost / 1.08
+                platform_managed_cost = current_cost / 1.08
+                potential_savings = current_cost - platform_managed_cost
+
+                metadata = {
+                    'disk_id': disk.id,
+                    'disk_name': disk.name,
+                    'disk_size_gb': disk.disk_size_gb,
+                    'sku_name': disk.sku.name if disk.sku else 'Unknown',
+                    'current_encryption': encryption_type,
+                    'suggested_encryption': 'EncryptionAtRestWithPlatformKey',
+                    'current_monthly_cost': f'${current_cost:.2f}',
+                    'suggested_monthly_cost': f'${platform_managed_cost:.2f}',
+                    'potential_monthly_savings': f'${potential_savings:.2f}',
+                    'age_days': age_days,
+                    'created_at': disk.time_created.isoformat() if disk.time_created else None,
+                    'disk_encryption_set_id': disk.encryption.disk_encryption_set_id if disk.encryption and hasattr(disk.encryption, 'disk_encryption_set_id') else None,
+                    'orphan_reason': f"Customer-Managed Key (CMK) encryption enabled without compliance requirement. CMK costs +8% but no compliance tags found ({', '.join(compliance_tags)}).",
+                    'recommendation': f"Switch to Platform-Managed Key encryption to save ${potential_savings:.2f}/month (~8% cost reduction). CMK is designed for compliance/regulatory requirements (HIPAA, PCI-DSS, etc.). If not required, Platform-Managed Key provides equivalent security at lower cost.",
+                    'tags': disk_tags,
+                    'confidence_level': self._calculate_confidence_level(age_days, detection_rules),
+                }
+
+                orphan = OrphanResourceData(
+                    resource_type='managed_disk_unnecessary_cmk',
+                    resource_id=disk.id,
+                    resource_name=disk.name if disk.name else disk.id.split('/')[-1],
+                    region=disk.location,
+                    estimated_monthly_cost=round(potential_savings, 2),
+                    resource_metadata=metadata
+                )
+
+                orphans.append(orphan)
+
+        except Exception as e:
+            print(f"Error scanning unnecessary CMK encryption in {region}: {str(e)}")
 
         return orphans
 
@@ -1756,6 +2205,686 @@ class AzureProvider(CloudProviderBase):
 
         except Exception as e:
             print(f"Error scanning untagged orphan VMs in {region}: {str(e)}")
+
+        return orphans
+
+    async def _get_disk_metrics(
+        self,
+        disk_id: str,
+        metric_names: list[str],
+        timespan_days: int,
+        aggregation: str = "Average"
+    ) -> dict[str, float]:
+        """
+        Query Azure Monitor metrics for a managed disk.
+
+        Args:
+            disk_id: Full Azure resource ID of the disk
+            metric_names: List of metric names to query (e.g., ["Composite Disk Read Operations/sec"])
+            timespan_days: Number of days to look back
+            aggregation: Aggregation type ("Average", "Maximum", "Minimum", "Total")
+
+        Returns:
+            Dict mapping metric_name -> aggregated value over the timespan
+
+        Example:
+            metrics = await _get_disk_metrics(
+                disk_id="/subscriptions/.../disks/my-disk",
+                metric_names=["Composite Disk Read Operations/sec", "Composite Disk Write Operations/sec"],
+                timespan_days=60,
+                aggregation="Average"
+            )
+            # Returns: {"Composite Disk Read Operations/sec": 0.05, "Composite Disk Write Operations/sec": 0.02}
+        """
+        from datetime import datetime, timedelta, timezone
+        from azure.monitor.query import MetricsQueryClient, MetricAggregationType
+        from azure.identity import ClientSecretCredential
+
+        try:
+            credential = ClientSecretCredential(
+                tenant_id=self.tenant_id,
+                client_id=self.client_id,
+                client_secret=self.client_secret
+            )
+
+            metrics_client = MetricsQueryClient(credential)
+
+            # Calculate timespan
+            end_time = datetime.now(timezone.utc)
+            start_time = end_time - timedelta(days=timespan_days)
+
+            # Map aggregation string to enum
+            aggregation_map = {
+                "Average": MetricAggregationType.AVERAGE,
+                "Maximum": MetricAggregationType.MAXIMUM,
+                "Minimum": MetricAggregationType.MINIMUM,
+                "Total": MetricAggregationType.TOTAL,
+                "Count": MetricAggregationType.COUNT
+            }
+            agg_type = aggregation_map.get(aggregation, MetricAggregationType.AVERAGE)
+
+            # Query metrics
+            response = metrics_client.query_resource(
+                resource_uri=disk_id,
+                metric_names=metric_names,
+                timespan=(start_time, end_time),
+                aggregations=[agg_type]
+            )
+
+            results = {}
+            for metric in response.metrics:
+                if metric.timeseries:
+                    # Collect all data points and calculate overall average
+                    values = []
+                    for ts in metric.timeseries:
+                        for data in ts.data:
+                            if aggregation == "Average" and data.average is not None:
+                                values.append(data.average)
+                            elif aggregation == "Maximum" and data.maximum is not None:
+                                values.append(data.maximum)
+                            elif aggregation == "Minimum" and data.minimum is not None:
+                                values.append(data.minimum)
+                            elif aggregation == "Total" and data.total is not None:
+                                values.append(data.total)
+
+                    # Calculate overall metric value
+                    if values:
+                        results[metric.name] = sum(values) / len(values)
+                    else:
+                        results[metric.name] = 0.0
+                else:
+                    results[metric.name] = 0.0
+
+            return results
+
+        except Exception as e:
+            print(f"Error querying Azure Monitor metrics for {disk_id}: {str(e)}")
+            # Return zeros if metrics unavailable
+            return {name: 0.0 for name in metric_names}
+
+    async def scan_idle_disks(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scan for idle Azure Managed Disks with zero I/O activity.
+
+        Detects disks attached to VMs that have had virtually no read/write operations
+        over an extended period (default 60 days), indicating they are not being used.
+
+        Requires: Azure Monitor "Monitoring Reader" permission
+        Metrics used: "Composite Disk Read Operations/sec", "Composite Disk Write Operations/sec"
+
+        Args:
+            region: Azure region to scan
+            detection_rules: Optional detection configuration:
+                {
+                    "enabled": bool (default True),
+                    "min_idle_days": int (default 60),
+                    "max_iops_threshold": float (default 0.1) - Avg IOPS below this = idle
+                }
+
+        Returns:
+            List of idle disk resources
+        """
+        from datetime import datetime, timezone
+        from azure.identity import ClientSecretCredential
+        from azure.mgmt.compute import ComputeManagementClient
+
+        orphans = []
+        min_idle_days = detection_rules.get("min_idle_days", 60) if detection_rules else 60
+        max_iops_threshold = detection_rules.get("max_iops_threshold", 0.1) if detection_rules else 0.1
+
+        try:
+            credential = ClientSecretCredential(
+                tenant_id=self.tenant_id,
+                client_id=self.client_id,
+                client_secret=self.client_secret
+            )
+
+            compute_client = ComputeManagementClient(credential, self.subscription_id)
+
+            # List all disks
+            disks = compute_client.disks.list()
+
+            for disk in disks:
+                # Filter by region
+                if disk.location != region:
+                    continue
+
+                # Filter by resource group (if specified)
+                if not self._is_resource_in_scope(disk.id):
+                    continue
+
+                # Only check attached disks (idle detection only makes sense for attached disks)
+                if disk.disk_state != 'Attached':
+                    continue
+
+                # Calculate disk age
+                age_days = 0
+                if disk.time_created:
+                    age_days = (datetime.now(timezone.utc) - disk.time_created).days
+
+                # Skip young disks
+                if age_days < min_idle_days:
+                    continue
+
+                # Query Azure Monitor metrics for I/O activity
+                metrics = await self._get_disk_metrics(
+                    disk_id=disk.id,
+                    metric_names=["Composite Disk Read Operations/sec", "Composite Disk Write Operations/sec"],
+                    timespan_days=min_idle_days,
+                    aggregation="Average"
+                )
+
+                avg_read_iops = metrics.get("Composite Disk Read Operations/sec", 0.0)
+                avg_write_iops = metrics.get("Composite Disk Write Operations/sec", 0.0)
+                total_avg_iops = avg_read_iops + avg_write_iops
+
+                # Detect idle disk (very low I/O activity)
+                if total_avg_iops < max_iops_threshold:
+                    monthly_cost = self._calculate_disk_cost(disk)
+
+                    metadata = {
+                        'disk_id': disk.id,
+                        'disk_name': disk.name,
+                        'disk_size_gb': disk.disk_size_gb,
+                        'sku_name': disk.sku.name if disk.sku else 'Unknown',
+                        'disk_state': disk.disk_state,
+                        'avg_read_iops': round(avg_read_iops, 4),
+                        'avg_write_iops': round(avg_write_iops, 4),
+                        'total_avg_iops': round(total_avg_iops, 4),
+                        'observation_period_days': min_idle_days,
+                        'iops_threshold': max_iops_threshold,
+                        'age_days': age_days,
+                        'created_at': disk.time_created.isoformat() if disk.time_created else None,
+                        'orphan_reason': f"Disk attached to VM but idle for {min_idle_days} days with {total_avg_iops:.4f} avg IOPS (threshold: {max_iops_threshold} IOPS)",
+                        'recommendation': f"Detach and delete idle disk to save ${monthly_cost:.2f}/month. Disk has no meaningful I/O activity.",
+                        'tags': disk.tags if disk.tags else {},
+                        'confidence_level': self._calculate_confidence_level(age_days, detection_rules),
+                    }
+
+                    orphan = OrphanResourceData(
+                        resource_type='managed_disk_idle',
+                        resource_id=disk.id,
+                        resource_name=disk.name if disk.name else disk.id.split('/')[-1],
+                        region=disk.location,
+                        estimated_monthly_cost=monthly_cost,
+                        resource_metadata=metadata
+                    )
+
+                    orphans.append(orphan)
+
+        except Exception as e:
+            print(f"Error scanning idle disks in {region}: {str(e)}")
+
+        return orphans
+
+    async def scan_unused_bursting(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scan for Azure Premium Managed Disks with bursting enabled but never used.
+
+        Disk bursting costs +15% but is only useful if the workload actually bursts
+        beyond baseline IOPS. This detects disks with bursting enabled that have
+        never used their burst credits over the observation period.
+
+        Requires: Azure Monitor "Monitoring Reader" permission
+        Metrics used: "OS Disk Used Burst IO Credits %", "Data Disk Used Burst IO Credits %"
+
+        Args:
+            region: Azure region to scan
+            detection_rules: Optional detection configuration:
+                {
+                    "enabled": bool (default True),
+                    "min_observation_days": int (default 30),
+                    "max_burst_usage_percent": float (default 0.01) - Max % burst credits used
+                }
+
+        Returns:
+            List of disks with unused bursting feature
+        """
+        from datetime import datetime, timezone
+        from azure.identity import ClientSecretCredential
+        from azure.mgmt.compute import ComputeManagementClient
+
+        orphans = []
+        min_observation_days = detection_rules.get("min_observation_days", 30) if detection_rules else 30
+        max_burst_usage = detection_rules.get("max_burst_usage_percent", 0.01) if detection_rules else 0.01
+
+        try:
+            credential = ClientSecretCredential(
+                tenant_id=self.tenant_id,
+                client_id=self.client_id,
+                client_secret=self.client_secret
+            )
+
+            compute_client = ComputeManagementClient(credential, self.subscription_id)
+
+            # List all disks
+            disks = compute_client.disks.list()
+
+            for disk in disks:
+                # Filter by region
+                if disk.location != region:
+                    continue
+
+                # Filter by resource group (if specified)
+                if not self._is_resource_in_scope(disk.id):
+                    continue
+
+                # Only check Premium disks with bursting enabled
+                sku_name = disk.sku.name if disk.sku else 'Standard_LRS'
+                if 'Premium' not in sku_name:
+                    continue  # Bursting only available on Premium disks
+
+                # Check if bursting is enabled
+                bursting_enabled = getattr(disk, 'bursting_enabled', False)
+                if not bursting_enabled:
+                    continue
+
+                # Calculate disk age
+                age_days = 0
+                if disk.time_created:
+                    age_days = (datetime.now(timezone.utc) - disk.time_created).days
+
+                # Skip young disks
+                if age_days < min_observation_days:
+                    continue
+
+                # Determine metric name based on disk type (OS vs Data)
+                # We'll try both and use whichever returns data
+                metric_names = ["OS Disk Used Burst IO Credits Percentage", "Data Disk Used Burst IO Credits Percentage"]
+
+                metrics = await self._get_disk_metrics(
+                    disk_id=disk.id,
+                    metric_names=metric_names,
+                    timespan_days=min_observation_days,
+                    aggregation="Maximum"  # Use Maximum to catch any burst usage
+                )
+
+                # Get the max burst usage from either OS or Data disk metric
+                max_burst_percentage = max(
+                    metrics.get("OS Disk Used Burst IO Credits Percentage", 0.0),
+                    metrics.get("Data Disk Used Burst IO Credits Percentage", 0.0)
+                )
+
+                # Detect unused bursting (never used burst credits)
+                if max_burst_percentage < max_burst_usage:
+                    current_cost = self._calculate_disk_cost(disk)
+
+                    # Bursting adds ~15% to disk cost
+                    cost_without_bursting = current_cost / 1.15
+                    potential_savings = current_cost - cost_without_bursting
+
+                    metadata = {
+                        'disk_id': disk.id,
+                        'disk_name': disk.name,
+                        'disk_size_gb': disk.disk_size_gb,
+                        'sku_name': sku_name,
+                        'bursting_enabled': True,
+                        'max_burst_credits_used_percent': round(max_burst_percentage, 4),
+                        'observation_period_days': min_observation_days,
+                        'burst_usage_threshold': max_burst_usage,
+                        'current_monthly_cost': f'${current_cost:.2f}',
+                        'cost_without_bursting': f'${cost_without_bursting:.2f}',
+                        'potential_monthly_savings': f'${potential_savings:.2f}',
+                        'age_days': age_days,
+                        'created_at': disk.time_created.isoformat() if disk.time_created else None,
+                        'orphan_reason': f"Bursting enabled but unused for {min_observation_days} days. Max burst credits used: {max_burst_percentage:.4f}% (threshold: {max_burst_usage}%)",
+                        'recommendation': f"Disable bursting to save ${potential_savings:.2f}/month (~15% cost reduction). Bursting has never been utilized.",
+                        'tags': disk.tags if disk.tags else {},
+                        'confidence_level': self._calculate_confidence_level(age_days, detection_rules),
+                    }
+
+                    orphan = OrphanResourceData(
+                        resource_type='managed_disk_unused_bursting',
+                        resource_id=disk.id,
+                        resource_name=disk.name if disk.name else disk.id.split('/')[-1],
+                        region=disk.location,
+                        estimated_monthly_cost=round(potential_savings, 2),
+                        resource_metadata=metadata
+                    )
+
+                    orphans.append(orphan)
+
+        except Exception as e:
+            print(f"Error scanning unused bursting in {region}: {str(e)}")
+
+        return orphans
+
+    async def scan_overprovisioned_disks(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scan for over-provisioned Azure Premium Managed Disks (performance tier too high).
+
+        Detects Premium disks where actual IOPS/bandwidth usage is significantly lower
+        than provisioned capacity, indicating a lower-tier disk would suffice with
+        substantial cost savings.
+
+        Example: P50 (7500 IOPS, $307/mo) used at 500 IOPS → P30 (5000 IOPS, $135/mo) saves $172/mo
+
+        Requires: Azure Monitor "Monitoring Reader" permission
+        Metrics used: "Data/OS Disk IOPS Consumed %", "Data/OS Disk Bandwidth Consumed %"
+
+        Args:
+            region: Azure region to scan
+            detection_rules: Optional detection configuration:
+                {
+                    "enabled": bool (default True),
+                    "min_observation_days": int (default 30),
+                    "max_utilization_percent": float (default 30) - Max % of provisioned IOPS/BW used
+                }
+
+        Returns:
+            List of over-provisioned disk resources
+        """
+        from datetime import datetime, timezone
+        from azure.identity import ClientSecretCredential
+        from azure.mgmt.compute import ComputeManagementClient
+
+        orphans = []
+        min_observation_days = detection_rules.get("min_observation_days", 30) if detection_rules else 30
+        max_utilization = detection_rules.get("max_utilization_percent", 30) if detection_rules else 30
+
+        # Premium disk SKU downgrade mapping (size in GB -> SKU name -> (IOPS, MB/s))
+        premium_tiers = [
+            ("P80", 32767, 16384, 900),   # 32TB
+            ("P70", 16384, 8192, 750),    # 16TB
+            ("P60", 8192, 4096, 600),     # 8TB
+            ("P50", 4096, 7500, 250),     # 4TB
+            ("P40", 2048, 7500, 250),     # 2TB
+            ("P30", 1024, 5000, 200),     # 1TB
+            ("P20", 512, 2300, 150),      # 512GB
+            ("P15", 256, 1100, 125),      # 256GB
+            ("P10", 128, 500, 100),       # 128GB
+        ]
+
+        try:
+            credential = ClientSecretCredential(
+                tenant_id=self.tenant_id,
+                client_id=self.client_id,
+                client_secret=self.client_secret
+            )
+
+            compute_client = ComputeManagementClient(credential, self.subscription_id)
+
+            # List all disks
+            disks = compute_client.disks.list()
+
+            for disk in disks:
+                # Filter by region
+                if disk.location != region:
+                    continue
+
+                # Filter by resource group (if specified)
+                if not self._is_resource_in_scope(disk.id):
+                    continue
+
+                # Only check Premium disks
+                sku_name = disk.sku.name if disk.sku else 'Standard_LRS'
+                if 'Premium' not in sku_name:
+                    continue
+
+                # Calculate disk age
+                age_days = 0
+                if disk.time_created:
+                    age_days = (datetime.now(timezone.utc) - disk.time_created).days
+
+                # Skip young disks
+                if age_days < min_observation_days:
+                    continue
+
+                # Query Azure Monitor metrics for utilization
+                metric_names = [
+                    "OS Disk IOPS Consumed Percentage",
+                    "Data Disk IOPS Consumed Percentage",
+                    "OS Disk Bandwidth Consumed Percentage",
+                    "Data Disk Bandwidth Consumed Percentage"
+                ]
+
+                metrics = await self._get_disk_metrics(
+                    disk_id=disk.id,
+                    metric_names=metric_names,
+                    timespan_days=min_observation_days,
+                    aggregation="Average"
+                )
+
+                # Get max utilization from either OS or Data disk metrics
+                iops_utilization = max(
+                    metrics.get("OS Disk IOPS Consumed Percentage", 0.0),
+                    metrics.get("Data Disk IOPS Consumed Percentage", 0.0)
+                )
+                bandwidth_utilization = max(
+                    metrics.get("OS Disk Bandwidth Consumed Percentage", 0.0),
+                    metrics.get("Data Disk Bandwidth Consumed Percentage", 0.0)
+                )
+
+                # Detect over-provisioning (both IOPS and bandwidth under-utilized)
+                if iops_utilization < max_utilization and bandwidth_utilization < max_utilization:
+                    current_cost = self._calculate_disk_cost(disk)
+                    disk_size_gb = disk.disk_size_gb if disk.disk_size_gb else 0
+
+                    # Find current tier and suggest downgrade
+                    current_tier = None
+                    suggested_tier = None
+
+                    for tier_name, tier_size, tier_iops, tier_mbps in premium_tiers:
+                        if disk_size_gb >= tier_size:
+                            current_tier = (tier_name, tier_size, tier_iops, tier_mbps)
+                            break
+
+                    # Find next lower tier that would still accommodate usage
+                    # Assume actual usage is iops_utilization% of current tier's IOPS
+                    if current_tier:
+                        current_iops = current_tier[2]
+                        actual_iops_usage = (iops_utilization / 100) * current_iops
+
+                        for tier_name, tier_size, tier_iops, tier_mbps in reversed(premium_tiers):
+                            # Suggest tier if it provides at least 2x actual usage (safety margin)
+                            if tier_iops >= actual_iops_usage * 2:
+                                suggested_tier = (tier_name, tier_size, tier_iops, tier_mbps)
+
+                    if suggested_tier and suggested_tier != current_tier:
+                        # Calculate cost savings
+                        suggested_cost = suggested_tier[1] * 0.135  # Rough estimate $0.135/GB/month for Premium
+                        potential_savings = current_cost - suggested_cost
+
+                        if potential_savings > 5:  # Only flag if savings > $5/month
+                            metadata = {
+                                'disk_id': disk.id,
+                                'disk_name': disk.name,
+                                'disk_size_gb': disk_size_gb,
+                                'current_sku': sku_name,
+                                'current_tier': current_tier[0] if current_tier else 'Unknown',
+                                'suggested_tier': suggested_tier[0],
+                                'current_iops': current_tier[2] if current_tier else 0,
+                                'suggested_iops': suggested_tier[2],
+                                'avg_iops_utilization_percent': round(iops_utilization, 2),
+                                'avg_bandwidth_utilization_percent': round(bandwidth_utilization, 2),
+                                'observation_period_days': min_observation_days,
+                                'utilization_threshold': max_utilization,
+                                'current_monthly_cost': f'${current_cost:.2f}',
+                                'suggested_monthly_cost': f'${suggested_cost:.2f}',
+                                'potential_monthly_savings': f'${potential_savings:.2f}',
+                                'age_days': age_days,
+                                'created_at': disk.time_created.isoformat() if disk.time_created else None,
+                                'orphan_reason': f"Disk over-provisioned for {min_observation_days} days. IOPS utilization: {iops_utilization:.2f}%, Bandwidth utilization: {bandwidth_utilization:.2f}% (threshold: {max_utilization}%)",
+                                'recommendation': f"Downgrade from {current_tier[0] if current_tier else 'current tier'} to {suggested_tier[0]} to save ${potential_savings:.2f}/month while maintaining performance.",
+                                'tags': disk.tags if disk.tags else {},
+                                'confidence_level': self._calculate_confidence_level(age_days, detection_rules),
+                            }
+
+                            orphan = OrphanResourceData(
+                                resource_type='managed_disk_overprovisioned',
+                                resource_id=disk.id,
+                                resource_name=disk.name if disk.name else disk.id.split('/')[-1],
+                                region=disk.location,
+                                estimated_monthly_cost=round(potential_savings, 2),
+                                resource_metadata=metadata
+                            )
+
+                            orphans.append(orphan)
+
+        except Exception as e:
+            print(f"Error scanning overprovisioned disks in {region}: {str(e)}")
+
+        return orphans
+
+    async def scan_underutilized_hdd_disks(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scan for under-utilized Standard HDD disks that should be Standard SSD.
+
+        Detects large Standard HDD disks with low IOPS usage where a smaller
+        Standard SSD would provide better performance at lower cost.
+
+        Example: 1TB Standard HDD ($48/mo, 500 IOPS) with 50 IOPS usage →
+                 128GB Standard SSD ($12/mo, 500 IOPS) saves $36/mo + 20x faster
+
+        Requires: Azure Monitor "Monitoring Reader" permission
+        Metrics used: "Composite Disk Read/Write Operations/sec"
+
+        Args:
+            region: Azure region to scan
+            detection_rules: Optional detection configuration:
+                {
+                    "enabled": bool (default True),
+                    "min_observation_days": int (default 30),
+                    "max_iops_threshold": float (default 100) - Max avg IOPS
+                    "min_disk_size_gb": int (default 256) - Only flag large disks
+                }
+
+        Returns:
+            List of under-utilized HDD disk resources
+        """
+        from datetime import datetime, timezone
+        from azure.identity import ClientSecretCredential
+        from azure.mgmt.compute import ComputeManagementClient
+
+        orphans = []
+        min_observation_days = detection_rules.get("min_observation_days", 30) if detection_rules else 30
+        max_iops_threshold = detection_rules.get("max_iops_threshold", 100) if detection_rules else 100
+        min_disk_size_gb = detection_rules.get("min_disk_size_gb", 256) if detection_rules else 256
+
+        # Standard SSD sizing (GB -> IOPS)
+        ssd_tiers = [
+            (4096, 500),   # 4TB
+            (2048, 500),   # 2TB
+            (1024, 500),   # 1TB
+            (512, 500),    # 512GB
+            (256, 500),    # 256GB
+            (128, 500),    # 128GB
+            (64, 500),     # 64GB
+        ]
+
+        try:
+            credential = ClientSecretCredential(
+                tenant_id=self.tenant_id,
+                client_id=self.client_id,
+                client_secret=self.client_secret
+            )
+
+            compute_client = ComputeManagementClient(credential, self.subscription_id)
+
+            # List all disks
+            disks = compute_client.disks.list()
+
+            for disk in disks:
+                # Filter by region
+                if disk.location != region:
+                    continue
+
+                # Filter by resource group (if specified)
+                if not self._is_resource_in_scope(disk.id):
+                    continue
+
+                # Only check Standard HDD disks
+                sku_name = disk.sku.name if disk.sku else 'Standard_LRS'
+                if sku_name != 'Standard_LRS':
+                    continue  # Not Standard HDD
+
+                # Only check large disks
+                disk_size_gb = disk.disk_size_gb if disk.disk_size_gb else 0
+                if disk_size_gb < min_disk_size_gb:
+                    continue
+
+                # Calculate disk age
+                age_days = 0
+                if disk.time_created:
+                    age_days = (datetime.now(timezone.utc) - disk.time_created).days
+
+                # Skip young disks
+                if age_days < min_observation_days:
+                    continue
+
+                # Query Azure Monitor metrics for IOPS usage
+                metrics = await self._get_disk_metrics(
+                    disk_id=disk.id,
+                    metric_names=["Composite Disk Read Operations/sec", "Composite Disk Write Operations/sec"],
+                    timespan_days=min_observation_days,
+                    aggregation="Average"
+                )
+
+                avg_read_iops = metrics.get("Composite Disk Read Operations/sec", 0.0)
+                avg_write_iops = metrics.get("Composite Disk Write Operations/sec", 0.0)
+                total_avg_iops = avg_read_iops + avg_write_iops
+
+                # Detect under-utilization (low IOPS on large HDD)
+                if total_avg_iops < max_iops_threshold:
+                    # Calculate current HDD cost (~$0.04/GB/month for Standard HDD)
+                    current_cost = disk_size_gb * 0.04
+
+                    # Find smallest SSD tier that can handle the IOPS
+                    suggested_ssd_size = 128  # Minimum SSD size for cost efficiency
+                    for ssd_size, ssd_iops in reversed(ssd_tiers):
+                        if ssd_iops >= total_avg_iops * 2:  # 2x safety margin
+                            suggested_ssd_size = ssd_size
+                            break
+
+                    # Standard SSD pricing (~$0.096/GB/month)
+                    suggested_cost = suggested_ssd_size * 0.096
+                    potential_savings = current_cost - suggested_cost
+
+                    if potential_savings > 5:  # Only flag if savings > $5/month
+                        metadata = {
+                            'disk_id': disk.id,
+                            'disk_name': disk.name,
+                            'disk_size_gb': disk_size_gb,
+                            'current_sku': 'Standard_LRS (HDD)',
+                            'suggested_sku': 'StandardSSD_LRS',
+                            'suggested_size_gb': suggested_ssd_size,
+                            'avg_read_iops': round(avg_read_iops, 2),
+                            'avg_write_iops': round(avg_write_iops, 2),
+                            'total_avg_iops': round(total_avg_iops, 2),
+                            'observation_period_days': min_observation_days,
+                            'iops_threshold': max_iops_threshold,
+                            'current_monthly_cost': f'${current_cost:.2f}',
+                            'suggested_monthly_cost': f'${suggested_cost:.2f}',
+                            'potential_monthly_savings': f'${potential_savings:.2f}',
+                            'age_days': age_days,
+                            'created_at': disk.time_created.isoformat() if disk.time_created else None,
+                            'orphan_reason': f"Standard HDD {disk_size_gb}GB under-utilized for {min_observation_days} days with {total_avg_iops:.2f} avg IOPS (threshold: {max_iops_threshold} IOPS)",
+                            'recommendation': f"Switch from Standard HDD {disk_size_gb}GB to Standard SSD {suggested_ssd_size}GB to save ${potential_savings:.2f}/month. SSD provides 20x better performance (IOPS) at lower cost.",
+                            'tags': disk.tags if disk.tags else {},
+                            'confidence_level': self._calculate_confidence_level(age_days, detection_rules),
+                        }
+
+                        orphan = OrphanResourceData(
+                            resource_type='managed_disk_underutilized_hdd',
+                            resource_id=disk.id,
+                            resource_name=disk.name if disk.name else disk.id.split('/')[-1],
+                            region=disk.location,
+                            estimated_monthly_cost=round(potential_savings, 2),
+                            resource_metadata=metadata
+                        )
+
+                        orphans.append(orphan)
+
+        except Exception as e:
+            print(f"Error scanning underutilized HDD disks in {region}: {str(e)}")
 
         return orphans
 

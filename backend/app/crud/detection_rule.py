@@ -27,7 +27,11 @@ async def get_user_rules(
     result = await db.execute(
         select(DetectionRule).where(DetectionRule.user_id == user_id)
     )
-    return list(result.scalars().all())
+    rules = list(result.scalars().all())
+    print(f"🔍 DEBUG get_user_rules: Found {len(rules)} rules for user {user_id}")
+    for rule in rules:
+        print(f"  - {rule.resource_type}: {rule.rules}")
+    return rules
 
 
 async def get_rule_by_type(
