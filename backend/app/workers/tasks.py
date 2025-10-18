@@ -111,13 +111,6 @@ async def _scan_cloud_account_async(
             for rule in user_rules:
                 user_detection_rules[rule.resource_type] = rule.rules
 
-            print(f"🔍 DEBUG: Loaded {len(user_detection_rules)} detection rules for user {account.user_id}")
-            print(f"🔍 DEBUG: Detection rules keys: {list(user_detection_rules.keys())}")
-            if "disk_snapshot_redundant" in user_detection_rules:
-                print(f"✅ disk_snapshot_redundant rule found: {user_detection_rules['disk_snapshot_redundant']}")
-            else:
-                print(f"❌ disk_snapshot_redundant rule NOT found in loaded rules")
-
             # Initialize provider based on account type
             if account.provider == "aws":
                 provider = AWSProvider(

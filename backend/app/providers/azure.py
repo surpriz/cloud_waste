@@ -844,15 +844,11 @@ class AzureProvider(CloudProviderBase):
         from azure.identity import ClientSecretCredential
         from azure.mgmt.compute import ComputeManagementClient
 
-        print(f"🚀 CALLED scan_redundant_snapshots for region={region}, detection_rules={detection_rules}")
-
         orphans = []
 
         # Get detection parameters
         max_snapshots = detection_rules.get("max_snapshots_per_disk", 3) if detection_rules else 3
         min_age_days = detection_rules.get("min_age_days", 90) if detection_rules else 90
-
-        print(f"🔧 Parsed detection params: max_snapshots={max_snapshots}, min_age_days={min_age_days}")
 
         try:
             credential = ClientSecretCredential(
@@ -865,16 +861,12 @@ class AzureProvider(CloudProviderBase):
 
             # List all snapshots
             snapshots = list(compute_client.snapshots.list())
-            print(f"🔍 DEBUG scan_redundant_snapshots: Total snapshots found: {len(snapshots)}")
 
             # Filter by region
             region_snapshots = [s for s in snapshots if s.location == region]
-            print(f"🔍 DEBUG scan_redundant_snapshots: Snapshots in region {region}: {len(region_snapshots)}")
 
             # Filter by resource group (if specified)
             region_snapshots = [s for s in region_snapshots if self._is_resource_in_scope(s.id)]
-            print(f"🔍 DEBUG scan_redundant_snapshots: Snapshots after RG filter: {len(region_snapshots)}")
-            print(f"🔍 DEBUG scan_redundant_snapshots: Detection rules: max_snapshots={max_snapshots}, min_age_days={min_age_days}")
 
             # Group snapshots by source disk
             snapshots_by_source: dict[str, list] = {}
@@ -885,11 +877,8 @@ class AzureProvider(CloudProviderBase):
                 if snapshot.time_created:
                     age_days = (datetime.now(timezone.utc) - snapshot.time_created).days
 
-                print(f"🔍 DEBUG: Snapshot {snapshot.name}: age_days={age_days}, min_age_days={min_age_days}")
-
                 # Skip recent snapshots (they might still be needed for short-term recovery)
                 if age_days < min_age_days:
-                    print(f"⏭️  SKIPPED {snapshot.name} (age {age_days} < min {min_age_days})")
                     continue
 
                 # Get source disk ID
@@ -905,15 +894,10 @@ class AzureProvider(CloudProviderBase):
                     'age_days': age_days
                 })
 
-            print(f"🔍 DEBUG: Snapshots grouped by source disk: {len(snapshots_by_source)} source disks")
-            for source_id, snaps in snapshots_by_source.items():
-                print(f"  - Source disk: {source_id[-50:]} -> {len(snaps)} snapshots")
-
             # Find redundant snapshots (keep newest N, flag rest)
             for source_disk_id, snapshot_list in snapshots_by_source.items():
                 # Only process if more than max_snapshots exist
                 if len(snapshot_list) <= max_snapshots:
-                    print(f"⏭️  SKIPPED source disk (only {len(snapshot_list)} snapshots, max={max_snapshots})")
                     continue
 
                 # Sort by creation date (newest first)
