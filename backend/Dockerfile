@@ -18,9 +18,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy application code
 COPY . .
 
-# Create non-root user
-RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app
-USER appuser
+# Create non-root user (disabled for development - encryption key volume permissions)
+# TODO: In production, use entrypoint script to set volume permissions before switching user
+# RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app
+# USER appuser
 
 # Expose port
 EXPOSE 8000

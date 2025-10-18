@@ -29,7 +29,7 @@ def upgrade() -> None:
         UPDATE detection_rules
         SET rules = jsonb_set(
             jsonb_set(
-                rules,
+                rules::jsonb,
                 '{detect_attached_unused}',
                 'true'::jsonb,
                 true
@@ -37,7 +37,7 @@ def upgrade() -> None:
             '{min_idle_days_attached}',
             '30'::jsonb,
             true
-        ),
+        )::json,
         updated_at = NOW()
         WHERE resource_type = 'ebs_volume'
         AND (

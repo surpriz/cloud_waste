@@ -4,6 +4,11 @@
 .env.*.local
 *.env
 
+# Encryption Key (CRITICAL - Never commit!)
+.encryption_key
+.encryption_key_volume
+encryption_key.backup
+
 # Python
 __pycache__/
 *.py[cod]

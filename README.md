@@ -51,6 +51,25 @@
 
 ## 🚀 Quick Start
 
+### ⚠️ CRITICAL - READ BEFORE FIRST STARTUP
+
+**CloudWaste uses `ENCRYPTION_KEY` to encrypt ALL cloud account credentials** (AWS access keys, Azure client secrets, etc.).
+
+**IF THIS KEY IS LOST OR CHANGED:**
+- ❌ **ALL cloud accounts become permanently UNRECOVERABLE**
+- ❌ **ALL users must re-enter their credentials**
+- ❌ **Complete data loss** for encrypted cloud credentials
+
+**CloudWaste now auto-protects against key loss:**
+- ✅ Key generated ONCE on first startup (`init_encryption.sh`)
+- ✅ Stored in persistent Docker volume (`encryption_key`)
+- ✅ Validated on every startup (blocks if key changed)
+- ✅ See `ENCRYPTION_KEY_MANAGEMENT.md` for complete details
+
+**⚠️ In production: BACKUP YOUR ENCRYPTION KEY IMMEDIATELY AFTER FIRST STARTUP!**
+
+---
+
 ### Prerequisites
 
 - Docker & Docker Compose
@@ -64,34 +83,49 @@ git clone <repository-url>
 cd CloudWaste
 ```
 
-### 2. Generate Encryption Keys
-
-Generate required encryption keys for production:
+### 2. Start the Application (First Time)
 
 ```bash
-# Generate Fernet encryption key
-python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
-
-# Generate JWT secret key
-python -c "import secrets; print(secrets.token_urlsafe(32))"
-```
-
-### 3. Configure Environment Variables
-
-```bash
+# Copy environment template
 cp .env.example .env
-```
 
-Edit `.env` and update the following:
-- `ENCRYPTION_KEY`: Your Fernet key (from step 2)
-- `JWT_SECRET_KEY`: Your JWT secret (from step 2)
-- `SECRET_KEY`: Any random secret string
-
-### 4. Start the Application
-
-```bash
+# Start all services
 docker-compose up -d
 ```
+
+**What happens on first startup:**
+1. `init_encryption.sh` runs automatically
+2. Generates `ENCRYPTION_KEY` (Fernet key) → Saved in `.encryption_key`
+3. Generates and saves to persistent Docker volume
+4. Updates `.env` with generated key
+5. Application validates key and starts
+
+**Check logs to verify:**
+```bash
+docker-compose logs backend | grep "🔐"
+# Should show: ✅ ENCRYPTION_KEY validated
+```
+
+### 3. Backup Your Encryption Key (MANDATORY for Production)
+
+```bash
+# After first startup, backup the encryption key
+docker run --rm \
+  -v cloudwaste_encryption_key:/data \
+  -v $(pwd):/backup \
+  alpine cp /data/.encryption_key /backup/encryption_key.backup
+
+# Store backup in a SECURE location:
+# - Password manager (1Password, Bitwarden)
+# - Encrypted USB drive
+# - Secure cloud storage (encrypted)
+```
+
+**See `ENCRYPTION_KEY_MANAGEMENT.md` for complete backup/restore procedures.**
+
+### 4. Access the Application
+
+After startup (`docker-compose up -d`):
 
 This will start:
 - PostgreSQL (port 5432)

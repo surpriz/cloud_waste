@@ -19,17 +19,12 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    # Add default detection rule for Azure Public IP (Unassociated)
-    op.execute("""
-        INSERT INTO detection_rules (resource_type, rules, created_at, updated_at)
-        VALUES ('public_ip_unassociated', '{"enabled": true, "min_age_days": 7}', NOW(), NOW())
-        ON CONFLICT (resource_type) DO UPDATE
-        SET rules = EXCLUDED.rules, updated_at = NOW();
-    """)
+    # NOTE: This migration was designed to add global detection rules, but detection_rules
+    # table is user-specific (has user_id foreign key). This migration is kept for history
+    # but does nothing, as default detection rules are now managed by the application code.
+    pass
 
 
 def downgrade() -> None:
-    # Remove Azure Public IP detection rule
-    op.execute("""
-        DELETE FROM detection_rules WHERE resource_type = 'public_ip_unassociated';
-    """)
+    # See upgrade() - this migration is a no-op
+    pass

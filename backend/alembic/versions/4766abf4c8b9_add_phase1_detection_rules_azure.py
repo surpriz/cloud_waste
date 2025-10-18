@@ -19,39 +19,12 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    # Add Phase 1 detection rules for Azure waste scenarios
-
-    # Rule 1: Managed Disks on Stopped VMs
-    op.execute("""
-        INSERT INTO detection_rules (resource_type, rules, created_at, updated_at)
-        VALUES ('managed_disk_on_stopped_vm', '{"enabled": true, "min_stopped_days": 30, "description": "Managed disks attached to VMs that have been deallocated (stopped) for extended periods"}', NOW(), NOW())
-        ON CONFLICT (resource_type) DO UPDATE
-        SET rules = EXCLUDED.rules, updated_at = NOW();
-    """)
-
-    # Rule 2: Orphaned Disk Snapshots
-    op.execute("""
-        INSERT INTO detection_rules (resource_type, rules, created_at, updated_at)
-        VALUES ('disk_snapshot_orphaned', '{"enabled": true, "min_age_days": 90, "description": "Disk snapshots whose source disks have been deleted"}', NOW(), NOW())
-        ON CONFLICT (resource_type) DO UPDATE
-        SET rules = EXCLUDED.rules, updated_at = NOW();
-    """)
-
-    # Rule 3: Public IPs on Stopped Resources
-    op.execute("""
-        INSERT INTO detection_rules (resource_type, rules, created_at, updated_at)
-        VALUES ('public_ip_on_stopped_resource', '{"enabled": true, "min_stopped_days": 30, "description": "Public IP addresses associated to stopped VMs or inactive load balancers"}', NOW(), NOW())
-        ON CONFLICT (resource_type) DO UPDATE
-        SET rules = EXCLUDED.rules, updated_at = NOW();
-    """)
+    # NOTE: This migration was designed to add global detection rules, but detection_rules
+    # table is user-specific (has user_id foreign key). This migration is kept for history
+    # but does nothing, as default detection rules are now managed by the application code.
+    pass
 
 
 def downgrade() -> None:
-    # Remove Phase 1 detection rules
-    op.execute("""
-        DELETE FROM detection_rules WHERE resource_type IN (
-            'managed_disk_on_stopped_vm',
-            'disk_snapshot_orphaned',
-            'public_ip_on_stopped_resource'
-        );
-    """)
+    # See upgrade() - this migration is a no-op
+    pass

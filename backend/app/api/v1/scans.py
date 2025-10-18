@@ -48,6 +48,9 @@ async def create_scan(
     # Create scan record
     scan = await scan_crud.create_scan(db, scan_in)
 
+    # Ensure database transaction is fully committed before queuing task
+    await db.commit()
+
     # Queue background task
     scan_cloud_account.delay(str(scan.id), str(account.id))
 
