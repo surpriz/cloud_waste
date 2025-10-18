@@ -67,6 +67,11 @@ class User(Base):
         back_populates="user",
         cascade="all, delete-orphan",
     )
+    chat_conversations: Mapped[list["ChatConversation"]] = relationship(  # type: ignore
+        "ChatConversation",
+        back_populates="user",
+        cascade="all, delete-orphan",
+    )
 
     def __repr__(self) -> str:
         """String representation."""

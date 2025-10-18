@@ -208,3 +208,39 @@ export interface ScanFilters {
   skip?: number;
   limit?: number;
 }
+
+// Chat types
+export interface ChatMessage {
+  id: string;
+  conversation_id: string;
+  role: "user" | "assistant";
+  content: string;
+  message_metadata?: Record<string, any>;
+  created_at: string;
+}
+
+export interface ChatConversation {
+  id: string;
+  user_id: string;
+  title: string;
+  created_at: string;
+  updated_at: string;
+  messages?: ChatMessage[];
+}
+
+export interface ChatConversationListItem {
+  id: string;
+  user_id: string;
+  title: string;
+  created_at: string;
+  updated_at: string;
+  message_count: number;
+}
+
+export interface ChatConversationCreate {
+  title: string;
+}
+
+export interface ChatMessageCreate {
+  content: string;
+}

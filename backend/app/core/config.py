@@ -60,6 +60,12 @@ class Settings(BaseSettings):
     AWS_SECRET_ACCESS_KEY: str = ""
     AWS_DEFAULT_REGION: str = "eu-west-1"
 
+    # AI Assistant (Anthropic)
+    ANTHROPIC_API_KEY: str = ""
+    CHAT_MAX_MESSAGES_PER_USER_PER_DAY: int = 50
+    CHAT_CONTEXT_MAX_RESOURCES: int = 20
+    CHAT_MODEL: str = "claude-haiku-4-5-20250818"
+
     @field_validator("ALLOWED_ORIGINS", mode="before")
     @classmethod
     def parse_allowed_origins(cls, v: str | List[str]) -> List[str]:
