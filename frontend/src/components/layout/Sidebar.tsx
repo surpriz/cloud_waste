@@ -12,7 +12,8 @@ import {
   LogOut,
   X,
   TrendingUp,
-  MessageSquare
+  MessageSquare,
+  Shield
 } from "lucide-react";
 import { useAuthStore } from "@/stores/useAuthStore";
 
@@ -35,6 +36,7 @@ interface SidebarProps {
 export function Sidebar({ isMobileMenuOpen = false, onCloseMobileMenu }: SidebarProps) {
   const pathname = usePathname();
   const logout = useAuthStore((state) => state.logout);
+  const user = useAuthStore((state) => state.user);
 
   const SidebarContent = () => (
     <>
@@ -78,6 +80,28 @@ export function Sidebar({ isMobileMenuOpen = false, onCloseMobileMenu }: Sidebar
             </Link>
           );
         })}
+
+        {/* Admin Panel - Only visible to superusers */}
+        {user?.is_superuser && (
+          <>
+            <div className="border-t border-gray-700 my-2"></div>
+            <Link
+              href="/dashboard/admin"
+              onClick={onCloseMobileMenu}
+              className={`
+                flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition-colors
+                ${
+                  pathname === "/dashboard/admin"
+                    ? "bg-purple-900 text-white"
+                    : "text-purple-400 hover:bg-purple-900 hover:text-white"
+                }
+              `}
+            >
+              <Shield className="h-5 w-5" />
+              Admin Panel
+            </Link>
+          </>
+        )}
       </nav>
 
       {/* Logout */}

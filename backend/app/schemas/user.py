@@ -35,6 +35,14 @@ class UserUpdate(BaseModel):
     is_active: bool | None = None
 
 
+# Properties to receive via API on admin update
+class UserAdminUpdate(BaseModel):
+    """Schema for admin user update (can modify is_superuser)."""
+
+    is_active: bool | None = None
+    is_superuser: bool | None = None
+
+
 # Properties shared by models stored in DB
 class UserInDBBase(UserBase):
     """User schema with database fields."""

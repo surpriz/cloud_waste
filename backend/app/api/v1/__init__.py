@@ -2,7 +2,7 @@
 
 from fastapi import APIRouter
 
-from app.api.v1 import accounts, auth, chat, detection_rules, impact, resources, scans
+from app.api.v1 import accounts, admin, auth, chat, detection_rules, impact, resources, scans
 
 api_router = APIRouter()
 
@@ -14,6 +14,7 @@ api_router.include_router(resources.router, prefix="/resources", tags=["resource
 api_router.include_router(detection_rules.router, prefix="/detection-rules", tags=["detection-rules"])
 api_router.include_router(impact.router, prefix="/impact", tags=["impact-savings"])
 api_router.include_router(chat.router, prefix="/chat", tags=["ai-assistant"])
+api_router.include_router(admin.router, prefix="/admin", tags=["admin"])
 
 # Future routers:
 # api_router.include_router(costs.router, prefix="/costs", tags=["costs"])

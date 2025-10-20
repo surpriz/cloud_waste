@@ -244,3 +244,16 @@ export interface ChatConversationCreate {
 export interface ChatMessageCreate {
   content: string;
 }
+
+// Admin types
+export interface UserAdminUpdate {
+  is_active?: boolean;
+  is_superuser?: boolean;
+}
+
+export interface AdminStats {
+  total_users: number;
+  active_users: number;
+  inactive_users: number;
+  superusers: number;
+}

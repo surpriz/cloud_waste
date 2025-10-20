@@ -694,8 +694,8 @@ function EditAccountForm({ account, onClose }: { account: any; onClose: () => vo
     try {
       const updateData: any = {
         account_name: formData.account_name,
-        regions: formData.regions.split(",").map((r) => r.trim()).filter(Boolean),
-        resource_groups: formData.resource_groups.trim() ? formData.resource_groups.split(",").map((rg) => rg.trim()).filter(Boolean) : null,
+        regions: formData.regions.split(",").map((r: string) => r.trim()).filter(Boolean),
+        resource_groups: formData.resource_groups.trim() ? formData.resource_groups.split(",").map((rg: string) => rg.trim()).filter(Boolean) : null,
         scheduled_scan_enabled: formData.scheduled_scan_enabled,
         scheduled_scan_frequency: formData.scheduled_scan_frequency,
         scheduled_scan_hour: formData.scheduled_scan_hour,
@@ -1238,7 +1238,7 @@ function AddAzureAccountForm({ onClose }: { onClose: () => void }) {
         provider: "azure" as const,
         account_name: formData.account_name || "Test",
         account_identifier: formData.azure_subscription_id,
-        regions: formData.regions.split(",").map((r) => r.trim()).filter(Boolean),
+        regions: formData.regions.split(",").map((r: string) => r.trim()).filter(Boolean),
         azure_tenant_id: formData.azure_tenant_id,
         azure_client_id: formData.azure_client_id,
         azure_client_secret: formData.azure_client_secret,
@@ -1271,8 +1271,8 @@ function AddAzureAccountForm({ onClose }: { onClose: () => void }) {
         azure_client_id: formData.azure_client_id,
         azure_client_secret: formData.azure_client_secret,
         azure_subscription_id: formData.azure_subscription_id,
-        regions: formData.regions.split(",").map((r) => r.trim()).filter(Boolean),
-        resource_groups: formData.resource_groups.trim() ? formData.resource_groups.split(",").map((rg) => rg.trim()).filter(Boolean) : undefined,
+        regions: formData.regions.split(",").map((r: string) => r.trim()).filter(Boolean),
+        resource_groups: formData.resource_groups.trim() ? formData.resource_groups.split(",").map((rg: string) => rg.trim()).filter(Boolean) : undefined,
         description: formData.description || undefined,
       });
       onClose();

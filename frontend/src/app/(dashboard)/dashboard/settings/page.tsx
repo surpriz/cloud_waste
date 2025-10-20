@@ -514,11 +514,11 @@ export default function SettingsPage() {
                           </div>
                           <div className="mt-3 p-3 bg-white rounded border border-blue-300">
                             <p className="text-xs text-blue-800">
-                              <strong>Example:</strong> If set to <strong>{rule.current_rules.min_age_days || rule.current_rules.min_stopped_days} days</strong>:
-                              {(rule.current_rules.min_age_days || rule.current_rules.min_stopped_days) === 0 ? (
+                              <strong>Example:</strong> If set to <strong>{rule.current_rules?.min_age_days || rule.current_rules?.min_stopped_days || 0} days</strong>:
+                              {(rule.current_rules?.min_age_days || rule.current_rules?.min_stopped_days || 0) === 0 ? (
                                 <> All {rule.resource_type.replace('_', ' ')} will be detected immediately, even brand new ones.</>
                               ) : (
-                                <> A {rule.resource_type.replace('_', ' ')} created on {new Date(Date.now() - (rule.current_rules.min_age_days || rule.current_rules.min_stopped_days) * 24 * 60 * 60 * 1000).toLocaleDateString()} or earlier will be detected. One created today will be ignored.</>
+                                <> A {rule.resource_type.replace('_', ' ')} created on {new Date(Date.now() - ((rule.current_rules?.min_age_days || rule.current_rules?.min_stopped_days || 0) * 24 * 60 * 60 * 1000)).toLocaleDateString()} or earlier will be detected. One created today will be ignored.</>
                               )}
                             </p>
                           </div>

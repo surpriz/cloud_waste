@@ -143,3 +143,74 @@ async def is_user_superuser(user: User) -> bool:
         True if user is superuser, False otherwise
     """
     return user.is_superuser
+
+
+async def get_all_users(
+    db: AsyncSession,
+    skip: int = 0,
+    limit: int = 100,
+) -> list[User]:
+    """
+    Get all users (admin only).
+
+    Args:
+        db: Database session
+        skip: Number of records to skip
+        limit: Maximum number of records to return
+
+    Returns:
+        List of user objects
+    """
+    result = await db.execute(
+        select(User).offset(skip).limit(limit).order_by(User.created_at.desc())
+    )
+    return list(result.scalars().all())
+
+
+async def count_users(db: AsyncSession) -> int:
+    """
+    Count total number of users.
+
+    Args:
+        db: Database session
+
+    Returns:
+        Total number of users
+    """
+    from sqlalchemy import func
+    result = await db.execute(select(func.count(User.id)))
+    return result.scalar_one()
+
+
+async def count_active_users(db: AsyncSession) -> int:
+    """
+    Count number of active users.
+
+    Args:
+        db: Database session
+
+    Returns:
+        Number of active users
+    """
+    from sqlalchemy import func
+    result = await db.execute(
+        select(func.count(User.id)).where(User.is_active == True)
+    )
+    return result.scalar_one()
+
+
+async def count_superusers(db: AsyncSession) -> int:
+    """
+    Count number of superusers.
+
+    Args:
+        db: Database session
+
+    Returns:
+        Number of superusers
+    """
+    from sqlalchemy import func
+    result = await db.execute(
+        select(func.count(User.id)).where(User.is_superuser == True)
+    )
+    return result.scalar_one()
