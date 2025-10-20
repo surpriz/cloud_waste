@@ -714,10 +714,114 @@ docs(readme): update setup instructions
 
 ---
 
+## 🚀 Production Deployment
+
+CloudWaste is production-ready with full VPS deployment automation.
+
+### Quick Production Setup (30 minutes)
+
+Deploy CloudWaste on your Ubuntu VPS with automated scripts:
+
+```bash
+# 1. Copy setup script to VPS
+scp deployment/setup-vps.sh administrator@YOUR_VPS_IP:~/
+# Note: Replace 'administrator' with your admin user (root, ubuntu, admin, etc.)
+
+# 2. Run initialization script (installs Docker, Nginx, SSL, monitoring)
+ssh administrator@YOUR_VPS_IP
+sudo bash ~/setup-vps.sh
+
+# 3. Clone and deploy
+ssh cloudwaste@YOUR_VPS_IP
+cd /opt/cloudwaste
+git clone https://github.com/YOUR_USERNAME/CloudWaste.git .
+bash deployment/deploy.sh
+```
+
+**Complete documentation:**
+- **[deployment/QUICKSTART.md](deployment/QUICKSTART.md)** - 30-minute production setup guide
+- **[VPS_PRODUCTION_GUIDE.md](VPS_PRODUCTION_GUIDE.md)** - Complete production manual
+- **[deployment/README.md](deployment/README.md)** - Deployment scripts documentation
+- **[deployment/DEPLOYMENT_CHECKLIST.md](deployment/DEPLOYMENT_CHECKLIST.md)** - Pre-flight checklist
+
+### Production Features
+
+✅ **Security Hardened**
+- UFW firewall configured
+- Fail2Ban SSH protection
+- SSL/TLS with Let's Encrypt
+- Non-root user with sudo
+- Automatic security updates
+
+✅ **Monitoring & Observability**
+- Netdata for system metrics
+- Portainer for Docker management
+- Health check scripts
+- Centralized logging
+
+✅ **Automated Deployments**
+- GitHub Actions CI/CD
+- Zero-downtime deployments
+- Automatic database migrations
+- Docker Compose orchestration
+
+✅ **Backup & Recovery**
+- Automated daily backups
+- PostgreSQL dumps
+- Docker volumes backup
+- 7-day retention policy
+- One-command restore
+
+✅ **Production Stack**
+- Nginx reverse proxy
+- Docker containers with health checks
+- PostgreSQL with persistent volumes
+- Redis for caching/queuing
+- Celery for background jobs
+- Ollama for AI (optional)
+
+### Available Scripts
+
+```bash
+# Deployment
+bash deploy.sh              # Deploy/update application
+bash backup.sh              # Manual backup
+bash restore.sh backup.tar.gz  # Restore from backup
+bash health-check.sh        # Full system health check
+
+# Configuration
+bash setup-vps.sh           # Initial VPS setup
+bash install-nginx-config.sh  # Install Nginx config
+```
+
+### Deployment Architecture
+
+```
+Internet (80/443)
+    ↓
+Nginx (SSL termination + reverse proxy)
+    ↓
+┌──────────────┬──────────────┬──────────────┐
+│   Frontend   │   Backend    │  Monitoring  │
+│  (Next.js)   │  (FastAPI)   │  (Netdata)   │
+│    :3000     │    :8000     │   :19999     │
+└──────┬───────┴──────┬───────┴──────────────┘
+       │              │
+   ┌───▼────┐    ┌───▼────────┐
+   │Postgres│    │Celery+Redis│
+   │ :5432  │    │  :6379     │
+   └────────┘    └────────────┘
+```
+
+---
+
 ## 📖 Additional Documentation
 
 - **[SETUP_GUIDE.md](SETUP_GUIDE.md)** - Detailed AWS setup and API examples
 - **[CLAUDE.md](CLAUDE.md)** - AI assistant guidance and project rules
+- **[VPS_PRODUCTION_GUIDE.md](VPS_PRODUCTION_GUIDE.md)** - Complete VPS production guide
+- **[deployment/QUICKSTART.md](deployment/QUICKSTART.md)** - Quick production deployment
+- **[ENCRYPTION_KEY_MANAGEMENT.md](ENCRYPTION_KEY_MANAGEMENT.md)** - Encryption key security
 
 ---
 
