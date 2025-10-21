@@ -2,6 +2,22 @@
 
 **CloudWaste** is a SaaS platform that detects and identifies orphaned or unused cloud resources (zombies) to help businesses reduce unnecessary costs. Studies show that 30-35% of cloud spending is wasted.
 
+## 🌐 Production Site
+
+**🚀 Live Site:** https://cutcosts.tech
+
+**🔧 Management Tools:**
+- **Portainer** (Docker): https://cutcosts.tech:9443 *(ignorer l'avertissement SSL)*
+- **Netdata** (Monitoring): http://cutcosts.tech:19999
+- **API Documentation**: https://cutcosts.tech/api/v1/docs
+
+**📖 Documentation:**
+- **Workflow de déploiement**: Voir [DEPLOYMENT_WORKFLOW.md](DEPLOYMENT_WORKFLOW.md)
+- **Guide rapide**: Voir [deployment/QUICKSTART.md](deployment/QUICKSTART.md)
+- **Scripts de déploiement**: Voir [deployment/README.md](deployment/README.md)
+
+---
+
 ## 🎯 Project Vision
 
 **Problem:** Businesses waste significant money on orphaned cloud resources that are no longer in use.
