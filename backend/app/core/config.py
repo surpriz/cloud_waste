@@ -52,7 +52,7 @@ class Settings(BaseSettings):
     SMTP_PORT: int = 587
     SMTP_USER: str = ""
     SMTP_PASSWORD: str = ""
-    EMAILS_FROM_EMAIL: EmailStr | None = None
+    EMAILS_FROM_EMAIL: str = ""  # Changed from EmailStr to str to accept empty values
     EMAILS_FROM_NAME: str = "CloudWaste"
 
     # AWS (Optional - for testing)
