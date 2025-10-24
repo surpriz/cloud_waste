@@ -8,7 +8,9 @@
 
 **🔧 Management Tools:**
 - **Portainer** (Docker): https://cutcosts.tech:9443 *(ignorer l'avertissement SSL)*
-- **Netdata** (Monitoring): http://cutcosts.tech:19999
+  - **⚠️ Premier accès** : Créez votre compte admin dans les 5 minutes
+  - **Si timeout** : `docker restart portainer` puis reconnectez-vous immédiatement
+- **Netdata** (Monitoring): **http://cutcosts.tech:19999** *(HTTP, pas HTTPS !)*
 - **API Documentation**: https://cutcosts.tech/api/v1/docs
 
 **📖 Documentation:**

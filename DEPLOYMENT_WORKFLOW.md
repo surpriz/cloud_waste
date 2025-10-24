@@ -262,12 +262,47 @@ bash deployment/backup.sh
 
 ---
 
-## 📊 Monitoring
+## 📊 Monitoring et Outils de Gestion
 
-- **Portainer** : https://cutcosts.tech:9443 (ignorer l'avertissement SSL)
-- **Netdata** : http://cutcosts.tech:19999
-- **API Docs** : https://cutcosts.tech/api/v1/docs
-- **Logs** : `docker compose -f docker-compose.production.yml logs -f`
+### **Portainer** (Gestion Docker)
+**URL** : https://cutcosts.tech:9443
+
+**⚠️ IMPORTANT - Premier Accès** :
+1. Le navigateur affichera "Connexion non privée" → **C'est normal**
+2. Cliquez sur **"Avancé"** puis **"Continuer vers le site"**
+3. **Créez votre compte admin dans les 5 minutes** sinon timeout
+4. Si message "timed out" : 
+   ```bash
+   ssh cloudwaste@155.117.43.17
+   docker restart portainer
+   ```
+   Puis reconnectez-vous **immédiatement**
+
+### **Netdata** (Monitoring Système)
+**URL** : **http://cutcosts.tech:19999** *(HTTP, PAS https !)*
+
+**⚠️ ERREUR COMMUNE** :
+- ❌ Ne PAS utiliser : `https://cutcosts.tech:19999`
+- ✅ Utiliser : `http://cutcosts.tech:19999`
+
+Netdata n'a pas de certificat SSL et écoute uniquement en HTTP.
+
+### **API Documentation**
+**URL** : https://cutcosts.tech/api/v1/docs
+
+Documentation interactive Swagger/OpenAPI de l'API backend.
+
+### **Logs en Temps Réel**
+```bash
+ssh cloudwaste@155.117.43.17
+cd /opt/cloudwaste
+
+# Tous les services
+docker compose -f docker-compose.production.yml logs -f
+
+# Service spécifique
+docker compose -f docker-compose.production.yml logs -f backend
+```
 
 ---
 
