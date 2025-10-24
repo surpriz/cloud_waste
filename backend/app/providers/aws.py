@@ -1,14 +1,19 @@
 """AWS cloud provider implementation."""
 
 import json
+import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import aioboto3
 import boto3
-from botocore.exceptions import ClientError
+from botocore.config import Config
+from botocore.exceptions import ClientError, EndpointConnectionError, ConnectionError
 
 from app.providers.base import CloudProviderBase, OrphanResourceData
+
+# Logger for AWS connectivity debugging
+logger = logging.getLogger(__name__)
 
 
 class AWSProvider(CloudProviderBase):
@@ -135,10 +140,20 @@ class AWSProvider(CloudProviderBase):
             regions: List of AWS regions to scan (None = all regions)
         """
         super().__init__(access_key, secret_key, regions)
+
+        # Configure boto3 with longer timeouts for VPS environments
+        self.config = Config(
+            connect_timeout=60,  # 60 seconds to establish connection
+            read_timeout=60,     # 60 seconds to read response
+            retries={'max_attempts': 3, 'mode': 'standard'}
+        )
+
         self.session = aioboto3.Session(
             aws_access_key_id=access_key,
             aws_secret_access_key=secret_key,
         )
+
+        logger.info(f"AWSProvider initialized with config: connect_timeout=60s, read_timeout=60s, retries=3")
 
     async def validate_credentials(self) -> dict[str, str]:
         """
@@ -149,14 +164,72 @@ class AWSProvider(CloudProviderBase):
 
         Raises:
             ClientError: If credentials are invalid
+            EndpointConnectionError: If cannot connect to AWS endpoints
         """
-        async with self.session.client("sts", region_name="us-east-1") as sts:
-            response = await sts.get_caller_identity()
-            return {
-                "account_id": response["Account"],
-                "arn": response["Arn"],
-                "user_id": response["UserId"],
-            }
+        logger.info("🔍 Starting AWS credential validation...")
+        logger.info(f"📍 Attempting to connect to AWS STS endpoint (us-east-1)")
+
+        try:
+            async with self.session.client(
+                "sts",
+                region_name="us-east-1",
+                config=self.config
+            ) as sts:
+                logger.info("✅ STS client created successfully")
+                logger.info("📞 Calling sts.get_caller_identity()...")
+
+                response = await sts.get_caller_identity()
+
+                logger.info(f"✅ AWS credentials validated successfully!")
+                logger.info(f"   Account ID: {response['Account']}")
+                logger.info(f"   ARN: {response['Arn']}")
+
+                return {
+                    "account_id": response["Account"],
+                    "arn": response["Arn"],
+                    "user_id": response["UserId"],
+                }
+
+        except EndpointConnectionError as e:
+            logger.error(f"❌ ENDPOINT CONNECTION ERROR: Cannot connect to AWS STS")
+            logger.error(f"   Error: {str(e)}")
+            logger.error(f"   This usually means:")
+            logger.error(f"   1. Firewall blocking HTTPS (port 443) outbound traffic")
+            logger.error(f"   2. DNS cannot resolve sts.amazonaws.com")
+            logger.error(f"   3. No internet connectivity from server")
+            logger.error(f"")
+            logger.error(f"   🔧 TROUBLESHOOTING:")
+            logger.error(f"   Run: ./diagnose_aws_connectivity.sh")
+            raise
+
+        except ConnectionError as e:
+            logger.error(f"❌ CONNECTION ERROR: Network issue connecting to AWS")
+            logger.error(f"   Error: {str(e)}")
+            logger.error(f"   Check: Network configuration, proxy settings, firewall rules")
+            raise
+
+        except ClientError as e:
+            error_code = e.response.get('Error', {}).get('Code', 'Unknown')
+            logger.error(f"❌ AWS CLIENT ERROR: {error_code}")
+            logger.error(f"   Error: {str(e)}")
+
+            if error_code == 'InvalidClientTokenId':
+                logger.error(f"   🔑 AWS Access Key ID is invalid or does not exist")
+            elif error_code == 'SignatureDoesNotMatch':
+                logger.error(f"   🔑 AWS Secret Access Key is incorrect")
+            elif error_code == 'AccessDenied':
+                logger.error(f"   🚫 AWS credentials do not have permission to call STS")
+            else:
+                logger.error(f"   ❓ Unexpected AWS error: {error_code}")
+
+            raise
+
+        except Exception as e:
+            logger.error(f"❌ UNEXPECTED ERROR during AWS credential validation")
+            logger.error(f"   Error type: {type(e).__name__}")
+            logger.error(f"   Error: {str(e)}")
+            logger.exception("Full traceback:")
+            raise
 
     async def get_available_regions(self) -> list[str]:
         """
@@ -165,7 +238,7 @@ class AWSProvider(CloudProviderBase):
         Returns:
             List of region names (e.g., ['us-east-1', 'eu-west-1'])
         """
-        async with self.session.client("ec2", region_name="us-east-1") as ec2:
+        async with self.session.client("ec2", region_name="us-east-1", config=self.config) as ec2:
             response = await ec2.describe_regions()
             return [region["RegionName"] for region in response["Regions"]]
 
