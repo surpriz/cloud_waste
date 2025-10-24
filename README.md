@@ -13,9 +13,9 @@
 - **Netdata** (Monitoring): **https://cutcosts.tech/netdata** *(via Nginx reverse proxy)*
   - Alternative : Accès direct via IP http://155.117.43.17:19999
 - **API Documentation**:
-  - Swagger UI: https://cutcosts.tech/docs
-  - ReDoc: https://cutcosts.tech/redoc
-  - OpenAPI JSON: https://cutcosts.tech/openapi.json
+  - Swagger UI: https://cutcosts.tech/api/docs
+  - ReDoc: https://cutcosts.tech/api/redoc
+  - OpenAPI JSON: https://cutcosts.tech/api/openapi.json
 
 **📖 Documentation:**
 - **Workflow de déploiement**: Voir [DEPLOYMENT_WORKFLOW.md](DEPLOYMENT_WORKFLOW.md)

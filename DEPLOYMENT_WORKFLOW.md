@@ -224,12 +224,14 @@ bash deployment/fix-issues.sh
 
 ### 📚 API Docs retourne 404 ou "Not Found"
 
-**Le problème**: Vous essayez d'accéder à `/api/v1/docs` mais FastAPI expose les docs à `/docs`.
+**Le problème**: FastAPI expose les docs à `/api/docs`, pas à `/docs` ou `/api/v1/docs`.
 
 **✅ Bonnes URLs** :
-- Swagger UI : `https://cutcosts.tech/docs`
-- ReDoc : `https://cutcosts.tech/redoc`
-- OpenAPI JSON : `https://cutcosts.tech/openapi.json`
+- Swagger UI : `https://cutcosts.tech/api/docs`
+- ReDoc : `https://cutcosts.tech/api/redoc`
+- OpenAPI JSON : `https://cutcosts.tech/api/openapi.json`
+
+**Vérification** : Les docs devraient fonctionner immédiatement car Nginx redirige déjà `/api/*` vers le backend.
 
 **Si les docs ne fonctionnent toujours pas** :
 ```bash
@@ -237,12 +239,14 @@ bash deployment/fix-issues.sh
 ssh cloudwaste@155.117.43.17
 cd /opt/cloudwaste
 
+# Tester directement le backend
+curl http://localhost:8000/api/docs
+
 # Vérifier que le backend fonctionne
 docker compose -f docker-compose.production.yml logs backend --tail=50
 
-# Exécuter le script de correction
-git pull origin master
-bash deployment/fix-ssl-and-docs.sh
+# Redémarrer le backend si nécessaire
+docker compose -f docker-compose.production.yml restart backend
 ```
 
 ### Le site ne se met pas à jour
@@ -325,11 +329,11 @@ Netdata est accessible via Nginx en HTTPS pour éviter les problèmes de HSTS du
 
 FastAPI expose automatiquement la documentation à plusieurs URLs :
 
-- **Swagger UI** : https://cutcosts.tech/docs *(interface interactive)*
-- **ReDoc** : https://cutcosts.tech/redoc *(documentation alternative)*
-- **OpenAPI JSON** : https://cutcosts.tech/openapi.json *(schéma brut)*
+- **Swagger UI** : https://cutcosts.tech/api/docs *(interface interactive)*
+- **ReDoc** : https://cutcosts.tech/api/redoc *(documentation alternative)*
+- **OpenAPI JSON** : https://cutcosts.tech/api/openapi.json *(schéma brut)*
 
-⚠️ **Note** : Les docs sont à `/docs` et `/redoc`, PAS à `/api/v1/docs`.
+⚠️ **Note** : Les docs sont à `/api/docs` et `/api/redoc` (configuré dans `backend/app/main.py`).
 
 ### **Logs en Temps Réel**
 ```bash
