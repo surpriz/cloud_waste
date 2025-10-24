@@ -12,7 +12,10 @@
   - **Si timeout** : `docker restart portainer` puis reconnectez-vous immédiatement
 - **Netdata** (Monitoring): **https://cutcosts.tech/netdata** *(via Nginx reverse proxy)*
   - Alternative : Accès direct via IP http://155.117.43.17:19999
-- **API Documentation**: https://cutcosts.tech/api/v1/docs
+- **API Documentation**:
+  - Swagger UI: https://cutcosts.tech/docs
+  - ReDoc: https://cutcosts.tech/redoc
+  - OpenAPI JSON: https://cutcosts.tech/openapi.json
 
 **📖 Documentation:**
 - **Workflow de déploiement**: Voir [DEPLOYMENT_WORKFLOW.md](DEPLOYMENT_WORKFLOW.md)

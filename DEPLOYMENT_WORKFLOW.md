@@ -163,19 +163,34 @@ ssh-copy-id -i ~/.ssh/cloudwaste_deploy.pub cloudwaste@155.117.43.17
 
 **Symptôme**: Le navigateur affiche "Non sécurisé" sur https://cutcosts.tech
 
-**Solutions**:
-```bash
-# Sur le VPS, exécuter le script de diagnostic
-ssh cloudwaste@155.117.43.17
-cd /opt/cloudwaste
-bash deployment/diagnose-issues.sh
+**Solution Rapide** : Utilisez `www.cutcosts.tech` au lieu de `cutcosts.tech`.
 
-# Puis le script de correction automatique
-bash deployment/fix-issues.sh
+**Correction Définitive** :
+
+Si `www.cutcosts.tech` fonctionne mais pas `cutcosts.tech`, le certificat SSL ne couvre probablement pas le domaine sans "www".
+
+```bash
+# Sur le VPS
+ssh cloudwaste@155.117.43.17
+
+# Vérifier les certificats
+sudo certbot certificates
+
+# Si cutcosts.tech n'apparaît pas dans les domaines, étendre le certificat
+sudo certbot --nginx -d cutcosts.tech -d www.cutcosts.tech --expand
+
+# Suivre les instructions et accepter de remplacer le certificat existant
+```
+
+**OU** Utilisez le script de correction :
+```bash
+cd /opt/cloudwaste
+git pull origin master
+bash deployment/fix-ssl-and-docs.sh
 ```
 
 **Causes possibles**:
-- Certificat SSL non installé ou expiré
+- Certificat SSL ne couvre que `www.cutcosts.tech` et pas `cutcosts.tech`
 - Configuration Nginx incorrecte
 - Redirection HTTP → HTTPS manquante
 
@@ -209,18 +224,25 @@ bash deployment/fix-issues.sh
 
 ### 📚 API Docs retourne 404 ou "Not Found"
 
-**Solutions**:
+**Le problème**: Vous essayez d'accéder à `/api/v1/docs` mais FastAPI expose les docs à `/docs`.
+
+**✅ Bonnes URLs** :
+- Swagger UI : `https://cutcosts.tech/docs`
+- ReDoc : `https://cutcosts.tech/redoc`
+- OpenAPI JSON : `https://cutcosts.tech/openapi.json`
+
+**Si les docs ne fonctionnent toujours pas** :
 ```bash
-# Vérifier que le backend fonctionne
+# Sur le VPS
 ssh cloudwaste@155.117.43.17
 cd /opt/cloudwaste
+
+# Vérifier que le backend fonctionne
 docker compose -f docker-compose.production.yml logs backend --tail=50
 
-# Vérifier la configuration Nginx
-sudo nginx -t
-
-# Si erreur, exécuter le script de correction
-bash deployment/fix-issues.sh
+# Exécuter le script de correction
+git pull origin master
+bash deployment/fix-ssl-and-docs.sh
 ```
 
 ### Le site ne se met pas à jour
@@ -300,9 +322,14 @@ bash deployment/backup.sh
 Netdata est accessible via Nginx en HTTPS pour éviter les problèmes de HSTS du navigateur.
 
 ### **API Documentation**
-**URL** : https://cutcosts.tech/api/v1/docs
 
-Documentation interactive Swagger/OpenAPI de l'API backend.
+FastAPI expose automatiquement la documentation à plusieurs URLs :
+
+- **Swagger UI** : https://cutcosts.tech/docs *(interface interactive)*
+- **ReDoc** : https://cutcosts.tech/redoc *(documentation alternative)*
+- **OpenAPI JSON** : https://cutcosts.tech/openapi.json *(schéma brut)*
+
+⚠️ **Note** : Les docs sont à `/docs` et `/redoc`, PAS à `/api/v1/docs`.
 
 ### **Logs en Temps Réel**
 ```bash
