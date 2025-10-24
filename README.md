@@ -10,7 +10,8 @@
 - **Portainer** (Docker): https://cutcosts.tech:9443 *(ignorer l'avertissement SSL)*
   - **⚠️ Premier accès** : Créez votre compte admin dans les 5 minutes
   - **Si timeout** : `docker restart portainer` puis reconnectez-vous immédiatement
-- **Netdata** (Monitoring): **http://cutcosts.tech:19999** *(HTTP, pas HTTPS !)*
+- **Netdata** (Monitoring): **https://cutcosts.tech/netdata** *(via Nginx reverse proxy)*
+  - Alternative : Accès direct via IP http://155.117.43.17:19999
 - **API Documentation**: https://cutcosts.tech/api/v1/docs
 
 **📖 Documentation:**

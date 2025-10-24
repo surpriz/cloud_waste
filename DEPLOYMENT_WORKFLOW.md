@@ -189,12 +189,23 @@ bash deployment/fix-issues.sh
 3. Cliquez sur **"Continuer vers le site"** ou **"Accéder au site"**
 4. Créez votre compte admin
 
-### 📊 Netdata: ERR_SSL_PROTOCOL_ERROR
+### 📊 Netdata: Redirection automatique vers HTTPS (HSTS)
 
-**Le problème**: Vous essayez d'accéder en HTTPS alors que Netdata utilise HTTP.
+**Le problème**: Le navigateur redirige automatiquement `http://cutcosts.tech:19999` vers HTTPS à cause du header HSTS.
 
-**Solution**: Utilisez **HTTP** (sans le 's'):
-👉 **http://cutcosts.tech:19999**
+**Solution 1** (Recommandée): Utilisez Nginx comme proxy :
+👉 **https://cutcosts.tech/netdata**
+
+**Solution 2** (Alternative): Accédez via l'IP directement :
+👉 **http://155.117.43.17:19999**
+
+**Pour activer le proxy Nginx** (si pas déjà fait):
+```bash
+ssh cloudwaste@155.117.43.17
+cd /opt/cloudwaste
+git pull origin master
+bash deployment/fix-issues.sh
+```
 
 ### 📚 API Docs retourne 404 ou "Not Found"
 
@@ -279,13 +290,14 @@ bash deployment/backup.sh
    Puis reconnectez-vous **immédiatement**
 
 ### **Netdata** (Monitoring Système)
-**URL** : **http://cutcosts.tech:19999** *(HTTP, PAS https !)*
+**URL** : **https://cutcosts.tech/netdata** *(via Nginx reverse proxy)*
 
-**⚠️ ERREUR COMMUNE** :
-- ❌ Ne PAS utiliser : `https://cutcosts.tech:19999`
-- ✅ Utiliser : `http://cutcosts.tech:19999`
+**💡 ASTUCE** :
+- ✅ Recommandé : `https://cutcosts.tech/netdata` (sécurisé via Nginx)
+- ✅ Alternative : `http://155.117.43.17:19999` (accès direct via IP)
+- ❌ Ne fonctionne pas : `http://cutcosts.tech:19999` (redirigé vers HTTPS par HSTS)
 
-Netdata n'a pas de certificat SSL et écoute uniquement en HTTP.
+Netdata est accessible via Nginx en HTTPS pour éviter les problèmes de HSTS du navigateur.
 
 ### **API Documentation**
 **URL** : https://cutcosts.tech/api/v1/docs
