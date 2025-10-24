@@ -159,6 +159,59 @@ ssh-copy-id -i ~/.ssh/cloudwaste_deploy.pub cloudwaste@155.117.43.17
 
 ## 🆘 Problèmes Courants
 
+### 🔒 Site affiché comme "Non sécurisé"
+
+**Symptôme**: Le navigateur affiche "Non sécurisé" sur https://cutcosts.tech
+
+**Solutions**:
+```bash
+# Sur le VPS, exécuter le script de diagnostic
+ssh cloudwaste@155.117.43.17
+cd /opt/cloudwaste
+bash deployment/diagnose-issues.sh
+
+# Puis le script de correction automatique
+bash deployment/fix-issues.sh
+```
+
+**Causes possibles**:
+- Certificat SSL non installé ou expiré
+- Configuration Nginx incorrecte
+- Redirection HTTP → HTTPS manquante
+
+### 🐳 Portainer: "Connexion non privée" (ERR_CERT_AUTHORITY_INVALID)
+
+**C'est NORMAL !** Portainer utilise un certificat auto-signé.
+
+**Solution**: 
+1. Allez sur https://cutcosts.tech:9443
+2. Cliquez sur **"Avancé"** ou **"Paramètres avancés"**
+3. Cliquez sur **"Continuer vers le site"** ou **"Accéder au site"**
+4. Créez votre compte admin
+
+### 📊 Netdata: ERR_SSL_PROTOCOL_ERROR
+
+**Le problème**: Vous essayez d'accéder en HTTPS alors que Netdata utilise HTTP.
+
+**Solution**: Utilisez **HTTP** (sans le 's'):
+👉 **http://cutcosts.tech:19999**
+
+### 📚 API Docs retourne 404 ou "Not Found"
+
+**Solutions**:
+```bash
+# Vérifier que le backend fonctionne
+ssh cloudwaste@155.117.43.17
+cd /opt/cloudwaste
+docker compose -f docker-compose.production.yml logs backend --tail=50
+
+# Vérifier la configuration Nginx
+sudo nginx -t
+
+# Si erreur, exécuter le script de correction
+bash deployment/fix-issues.sh
+```
+
 ### Le site ne se met pas à jour
 
 ```bash
@@ -186,6 +239,25 @@ docker compose -f docker-compose.production.yml restart backend
 cd /opt/cloudwaste
 ls -lh backups/
 bash deployment/restore.sh backups/[fichier-backup].tar.gz
+```
+
+### 💾 Vérifier les Backups
+
+```bash
+ssh cloudwaste@155.117.43.17
+
+# Vérifier le cron job
+cat /etc/cron.d/cloudwaste-backup
+
+# Voir les backups existants
+ls -lh /opt/cloudwaste/backups/
+
+# Voir les logs de backup
+tail -50 /var/log/cloudwaste-backup.log
+
+# Tester un backup manuel
+cd /opt/cloudwaste
+bash deployment/backup.sh
 ```
 
 ---
