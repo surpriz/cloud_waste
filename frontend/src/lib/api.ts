@@ -491,6 +491,12 @@ export const adminAPI = {
       method: "POST",
     });
   },
+
+  async deleteUser(userId: string): Promise<void> {
+    return fetchAPI<void>(`/api/v1/admin/users/${userId}`, {
+      method: "DELETE",
+    });
+  },
 };
 
 export { APIError, clearAuthTokens, getAuthToken, setAuthTokens };

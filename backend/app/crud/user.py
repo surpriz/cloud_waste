@@ -214,3 +214,21 @@ async def count_superusers(db: AsyncSession) -> int:
         select(func.count(User.id)).where(User.is_superuser == True)
     )
     return result.scalar_one()
+
+
+async def delete_user(db: AsyncSession, db_user: User) -> None:
+    """
+    Delete user permanently.
+
+    This will CASCADE delete all associated data:
+    - Cloud accounts
+    - Scans
+    - Orphan resources
+    - Chat conversations
+
+    Args:
+        db: Database session
+        db_user: User object to delete
+    """
+    await db.delete(db_user)
+    await db.commit()

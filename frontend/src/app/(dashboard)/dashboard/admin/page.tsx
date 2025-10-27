@@ -67,6 +67,26 @@ export default function AdminPage() {
     }
   };
 
+  const handleDeleteUser = async (user: User) => {
+    if (
+      !confirm(
+        `⚠️ WARNING: Are you sure you want to PERMANENTLY DELETE user ${user.email}?\n\nThis will delete:\n- User account\n- All cloud accounts\n- All scans\n- All orphan resources\n- All chat conversations\n\nThis action CANNOT be undone!`
+      )
+    ) {
+      return;
+    }
+
+    try {
+      setActionLoading(user.id);
+      await adminAPI.deleteUser(user.id);
+      await loadData();
+    } catch (err: any) {
+      setError(err.message || "Failed to delete user");
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
   const formatDate = (dateString: string) => {
     return new Date(dateString).toLocaleDateString("en-US", {
       year: "numeric",
@@ -265,6 +285,14 @@ export default function AdminPage() {
                           : user.is_superuser
                           ? "Demote"
                           : "Promote"}
+                      </button>
+                      <span className="text-gray-300">|</span>
+                      <button
+                        onClick={() => handleDeleteUser(user)}
+                        disabled={actionLoading === user.id}
+                        className="text-red-600 hover:text-red-900 font-semibold disabled:opacity-50 disabled:cursor-not-allowed"
+                      >
+                        {actionLoading === user.id ? "Loading..." : "Delete"}
                       </button>
                     </td>
                   </tr>

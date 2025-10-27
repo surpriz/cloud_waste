@@ -199,3 +199,49 @@ async def toggle_user_active(
     updated_user = await user_crud.update_user(db, target_user, update_data)
 
     return UserSchema.model_validate(updated_user)
+
+
+@router.delete(
+    "/users/{user_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Delete user",
+)
+async def delete_user(
+    user_id: uuid.UUID,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_superuser)],
+) -> None:
+    """
+    Delete user permanently (superuser only).
+
+    This will CASCADE delete all associated data:
+    - Cloud accounts
+    - Scans
+    - Orphan resources
+    - Chat conversations
+
+    Args:
+        user_id: User UUID
+
+    Raises:
+        HTTPException: If user not found or attempting to delete self
+    """
+    # Get target user
+    target_user = await user_crud.get_user_by_id(db, user_id)
+    if not target_user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found",
+        )
+
+    # Prevent admin from deleting themselves
+    if target_user.id == current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot delete your own account. Contact another admin.",
+        )
+
+    # Delete user (CASCADE will handle related data)
+    await user_crud.delete_user(db, target_user)
+
+    return None
