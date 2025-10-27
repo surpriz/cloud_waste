@@ -49,7 +49,7 @@ services:
   # FastAPI Backend
   backend:
     build:
-      context: ../backend
+      context: ./backend
       dockerfile: Dockerfile
     container_name: cloudwaste_backend_prod
     command: sh -c "./init_encryption.sh && uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 4"
@@ -57,9 +57,9 @@ services:
       - "127.0.0.1:8000:8000"  # Only expose to localhost (Nginx will proxy)
     volumes:
       - encryption_key:/encryption_key_data
-      - ../init_encryption.sh:/app/init_encryption.sh:ro
+      - ./init_encryption.sh:/app/init_encryption.sh:ro
     env_file:
-      - ../.env
+      - .env
     environment:
       - DATABASE_URL=${DATABASE_URL}
       - REDIS_URL=${REDIS_URL}
@@ -91,15 +91,15 @@ services:
   # Celery Worker
   celery_worker:
     build:
-      context: ../backend
+      context: ./backend
       dockerfile: Dockerfile
     container_name: cloudwaste_celery_worker_prod
     command: sh -c "./init_encryption.sh && celery -A app.workers.celery_app worker --loglevel=info --concurrency=2"
     volumes:
       - encryption_key:/encryption_key_data
-      - ../init_encryption.sh:/app/init_encryption.sh:ro
+      - ./init_encryption.sh:/app/init_encryption.sh:ro
     env_file:
-      - ../.env
+      - .env
     environment:
       - DATABASE_URL=${DATABASE_URL}
       - REDIS_URL=${REDIS_URL}
@@ -130,16 +130,16 @@ services:
   # Celery Beat Scheduler
   celery_beat:
     build:
-      context: ../backend
+      context: ./backend
       dockerfile: Dockerfile
     container_name: cloudwaste_celery_beat_prod
     command: sh -c "./init_encryption.sh && celery -A app.workers.celery_app beat --loglevel=info"
     volumes:
       - encryption_key:/encryption_key_data
-      - ../init_encryption.sh:/app/init_encryption.sh:ro
+      - ./init_encryption.sh:/app/init_encryption.sh:ro
       - celery_beat_data:/app/celerybeat-schedule
     env_file:
-      - ../.env
+      - .env
     environment:
       - DATABASE_URL=${DATABASE_URL}
       - REDIS_URL=${REDIS_URL}
@@ -164,7 +164,7 @@ services:
   # Next.js Frontend
   frontend:
     build:
-      context: ../frontend
+      context: ./frontend
       dockerfile: Dockerfile.production
       args:
         NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL}

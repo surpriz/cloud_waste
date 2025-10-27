@@ -1,0 +1,95 @@
+name: Deploy to Production
+
+on:
+  push:
+    branches:
+      - master
+  workflow_dispatch:  # Allow manual trigger
+
+jobs:
+  deploy:
+    name: Deploy CloudWaste to VPS
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.VPS_SSH_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H ${{ secrets.VPS_HOST }} >> ~/.ssh/known_hosts
+
+      - name: Deploy to VPS
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+        run: |
+          ssh ${VPS_USER}@${VPS_HOST} << 'ENDSSH'
+            set -e
+            
+            echo "=========================================="
+            echo "Starting CloudWaste deployment..."
+            echo "=========================================="
+            
+            # Navigate to app directory
+            cd /opt/cloudwaste
+            
+            # Pull latest changes
+            echo "Pulling latest changes from Git..."
+            git fetch origin
+            git reset --hard origin/master
+            
+            # Show commit info
+            echo "Deployed commit: $(git log -1 --oneline)"
+            
+            # Run deployment script
+            echo "Running deployment script..."
+            bash deployment/deploy.sh --no-backup
+            
+            echo "=========================================="
+            echo "Deployment completed successfully!"
+            echo "=========================================="
+          ENDSSH
+
+      - name: Verify deployment
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+        run: |
+          ssh ${VPS_USER}@${VPS_HOST} << 'ENDSSH'
+            cd /opt/cloudwaste
+            
+            # Wait for services to be ready
+            echo "Waiting for services to start..."
+            sleep 15
+            
+            # Check if containers are running
+            echo "Checking container status..."
+            docker compose -f deployment/docker-compose.production.yml ps
+            
+            # Test API health endpoint
+            echo "Testing API health..."
+            if curl -f http://localhost:8000/api/v1/health > /dev/null 2>&1; then
+              echo "✓ API is healthy"
+            else
+              echo "✗ API health check failed"
+              exit 1
+            fi
+          ENDSSH
+
+      - name: Send success notification
+        if: success()
+        run: |
+          echo "✅ Deployment successful!"
+          echo "🚀 CloudWaste is now live at https://cutcosts.tech"
+
+      - name: Send failure notification
+        if: failure()
+        run: |
+          echo "❌ Deployment failed!"
+          echo "Please check the logs and fix the issue."
+          exit 1
+
