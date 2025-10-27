@@ -249,6 +249,48 @@ docker compose -f docker-compose.production.yml logs backend --tail=50
 docker compose -f docker-compose.production.yml restart backend
 ```
 
+---
+
+### 🎨 Frontend retourne 500 avec "Module parse failed: Unexpected character '@'"
+
+**Le problème**: Le `Dockerfile.production` installait seulement les production dependencies, excluant Tailwind CSS (devDependency nécessaire pour le build).
+
+**Symptômes** :
+```
+Module parse failed: Unexpected character '@' (1:0)
+> @tailwind base;
+| @tailwind components;
+| @tailwind utilities;
+```
+
+**Solution automatique** :
+```bash
+# Sur le VPS
+ssh cloudwaste@155.117.43.17
+cd /opt/cloudwaste
+
+# Récupérer le correctif
+git pull origin master
+
+# Rebuilder le frontend (prend 2-3 minutes)
+bash deployment/rebuild-frontend.sh
+```
+
+**Ce qui est corrigé** :
+- ✅ Installation de **TOUTES** les dépendances (y compris devDependencies)
+- ✅ Tailwind CSS, PostCSS et Autoprefixer installés pour le build
+- ✅ Build Next.js en mode production avec output standalone
+- ✅ Image optimisée avec seulement les fichiers nécessaires à l'exécution
+
+**Vérification manuelle** :
+```bash
+# Vérifier que le frontend est en mode production
+docker compose -f docker-compose.production.yml logs frontend --tail=30
+
+# Vous devriez voir "Ready in X.Xs" sans erreur Tailwind
+# Et le buildId devrait être un hash, pas "development"
+```
+
 ### Le site ne se met pas à jour
 
 ```bash
