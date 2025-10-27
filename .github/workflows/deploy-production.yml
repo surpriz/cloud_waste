@@ -1,0 +1,107 @@
+name: Deploy to Production
+
+on:
+  push:
+    branches:
+      - master
+  workflow_dispatch:  # Allow manual trigger
+
+jobs:
+  deploy:
+    name: Deploy to VPS
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+      
+      - name: 🔐 Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.VPS_SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H ${{ secrets.VPS_HOST }} >> ~/.ssh/known_hosts
+      
+      - name: 🚀 Deploy to Production
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+        run: |
+          ssh ${VPS_USER}@${VPS_HOST} << 'ENDSSH'
+            set -e
+            
+            echo "╔════════════════════════════════════════════════════════════════════╗"
+            echo "║                                                                    ║"
+            echo "║         🚀 DÉPLOIEMENT AUTOMATIQUE (GitHub Actions)                ║"
+            echo "║                                                                    ║"
+            echo "╚════════════════════════════════════════════════════════════════════╝"
+            echo ""
+            
+            cd /opt/cloudwaste
+            
+            # Pull latest changes
+            echo "📥 Récupération des modifications..."
+            git pull origin master
+            
+            # Run quick deploy script
+            echo ""
+            echo "🔄 Lancement du déploiement..."
+            bash deployment/quick-deploy.sh
+            
+            echo ""
+            echo "✅ Déploiement terminé avec succès !"
+          ENDSSH
+      
+      - name: 🧪 Health Check
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+        run: |
+          echo "🧪 Vérification de la santé de l'application..."
+          sleep 10
+          
+          # Test frontend
+          FRONTEND_STATUS=$(curl -s -o /dev/null -w "%{http_code}" https://cutcosts.tech || echo "000")
+          if [ "$FRONTEND_STATUS" == "200" ] || [ "$FRONTEND_STATUS" == "304" ]; then
+            echo "✅ Frontend: OK (HTTP $FRONTEND_STATUS)"
+          else
+            echo "❌ Frontend: FAIL (HTTP $FRONTEND_STATUS)"
+            exit 1
+          fi
+          
+          # Test backend
+          API_STATUS=$(curl -s -o /dev/null -w "%{http_code}" https://cutcosts.tech/api/v1/health || echo "000")
+          if [ "$API_STATUS" == "200" ]; then
+            echo "✅ Backend API: OK (HTTP $API_STATUS)"
+          else
+            echo "❌ Backend API: FAIL (HTTP $API_STATUS)"
+            exit 1
+          fi
+          
+          echo ""
+          echo "🎉 Tous les tests de santé sont passés !"
+      
+      - name: 📊 Deployment Summary
+        if: success()
+        run: |
+          echo "╔════════════════════════════════════════════════════════════════════╗"
+          echo "║                                                                    ║"
+          echo "║              ✅ DÉPLOIEMENT RÉUSSI                                 ║"
+          echo "║                                                                    ║"
+          echo "╚════════════════════════════════════════════════════════════════════╝"
+          echo ""
+          echo "🌐 Application en ligne:"
+          echo "   • Site web: https://cutcosts.tech"
+          echo "   • API Docs: https://cutcosts.tech/api/docs"
+          echo ""
+      
+      - name: ❌ Deployment Failed
+        if: failure()
+        run: |
+          echo "╔════════════════════════════════════════════════════════════════════╗"
+          echo "║                                                                    ║"
+          echo "║              ❌ ÉCHEC DU DÉPLOIEMENT                               ║"
+          echo "║                                                                    ║"
+          echo "╚════════════════════════════════════════════════════════════════════╝"
+          echo ""
+          echo "⚠️  Le déploiement a échoué. Vérifiez les logs ci-dessus."
+          echo ""
