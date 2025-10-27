@@ -19,6 +19,7 @@ import {
   Zap,
 } from "lucide-react";
 import type { ResourceStatus, ResourceType } from "@/types";
+import { ResourceChartsSection } from "@/components/dashboard/ResourceChartsSection";
 
 const resourceIcons: Record<ResourceType, any> = {
   // AWS Resources
@@ -215,6 +216,12 @@ export default function ResourcesPage() {
           />
         </div>
       )}
+
+      {/* Visual Overview Charts */}
+      <ResourceChartsSection
+        resources={resources}
+        stats={stats}
+      />
 
       {/* Filters */}
       {showFilters && (
