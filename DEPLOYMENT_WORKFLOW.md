@@ -1,26 +1,200 @@
 # 🚀 Workflow de Développement et Déploiement
 
-## 🔄 Comment Mettre à Jour le Site en Production
+> **📌 Dernière mise à jour** : Workflow simplifié avec scripts automatisés et déploiement GitHub Actions
 
-### Workflow Simple (Recommandé)
+---
+
+## 🎯 Workflow Ultra-Simple (Recommandé)
+
+### **Sur votre machine locale (Mac)**
 
 ```bash
-# 1. Développez localement sur votre Mac
+# 1. Démarrer l'environnement de développement
 cd /Users/jerome_laval/Desktop/CloudWaste
+bash dev-start.sh
 
-# 2. Testez vos modifications en local
-docker compose up
+# 2. Développer et tester
+# → Frontend: http://localhost:3000
+# → Backend API: http://localhost:8000
+# → Hot-reload activé automatiquement
 
-# 3. Une fois satisfait, committez et poussez
+# 3. Arrêter l'environnement
+bash dev-stop.sh
+
+# 4. Pousser vers production
 git add .
-git commit -m "Description de vos modifications"
+git commit -m "feat: Nouvelle fonctionnalité"
 git push origin master
 
-# 4. Déployez sur le VPS
+# → GitHub Actions déploie automatiquement ! 🎉
+```
+
+### **Déploiement manuel sur le VPS (si besoin)**
+
+```bash
+# Connexion SSH
+ssh cloudwaste@155.117.43.17
+
+# Déploiement en une commande
+cd /opt/cloudwaste && bash deployment/quick-deploy.sh
+```
+
+**C'est tout !** ✨ Le script gère automatiquement :
+- ✅ Récupération du code depuis GitHub
+- ✅ Rebuild des images Docker
+- ✅ Redémarrage des services
+- ✅ Tests de santé
+- ✅ Rapport de déploiement
+
+---
+
+## 📚 Configuration Initiale (Une Seule Fois)
+
+### **1. Configuration GitHub Actions (Déploiement Automatique)**
+
+Suivez le guide complet : [`GITHUB_ACTIONS_SETUP.md`](./GITHUB_ACTIONS_SETUP.md)
+
+**Résumé rapide** :
+1. Générer une clé SSH pour GitHub Actions
+2. Ajouter la clé publique sur le VPS
+3. Configurer 3 secrets dans GitHub (VPS_SSH_PRIVATE_KEY, VPS_HOST, VPS_USER)
+4. Pousser le code → déploiement automatique !
+
+### **2. Configuration des Credentials Azure (Sur le VPS)**
+
+```bash
 ssh cloudwaste@155.117.43.17
 cd /opt/cloudwaste
-git pull origin master
-docker compose -f docker-compose.production.yml up -d --build
+bash deployment/configure-azure-credentials.sh
+```
+
+Le script vous guidera interactivement pour :
+- ✅ Ajouter vos credentials Azure au fichier `.env`
+- ✅ Valider le format des credentials
+- ✅ Redémarrer les services automatiquement
+
+### **3. Tester la connexion Azure**
+
+```bash
+bash deployment/test-azure-connection.sh
+```
+
+Ce script vérifie :
+- ✅ Credentials présents dans `.env`
+- ✅ Connectivité réseau vers Azure API
+- ✅ Authentification réussie avec Azure
+
+---
+
+## 🔧 Commandes Utiles
+
+### **Développement Local**
+
+```bash
+bash dev-start.sh              # Démarrer l'environnement
+bash dev-stop.sh               # Arrêter l'environnement
+bash dev-logs.sh backend       # Voir les logs d'un service
+bash dev-logs.sh               # Voir tous les logs (mode suivi)
+```
+
+### **Production (VPS)**
+
+```bash
+# Déploiement rapide
+bash deployment/quick-deploy.sh
+
+# Déploiement de services spécifiques
+bash deployment/quick-deploy.sh --services backend,celery_worker
+
+# Déploiement sans rebuild (plus rapide)
+bash deployment/quick-deploy.sh --skip-build
+
+# Configuration Azure
+bash deployment/configure-azure-credentials.sh
+
+# Test connexion Azure
+bash deployment/test-azure-connection.sh
+
+# Rebuild frontend uniquement
+bash deployment/rebuild-frontend.sh
+
+# Diagnostic de problèmes
+bash deployment/diagnose-issues.sh
+
+# Correction automatique de problèmes connus
+bash deployment/fix-issues.sh
+```
+
+---
+
+## 🔄 Workflow Complet Détaillé
+
+### **Étape 1 : Développement Local**
+
+```bash
+cd /Users/jerome_laval/Desktop/CloudWaste
+
+# Démarrer l'environnement
+bash dev-start.sh
+
+# Développer votre code
+# - backend/ : Python/FastAPI
+# - frontend/ : Next.js/React
+# - Hot-reload automatique des deux côtés
+
+# Tester localement
+# → http://localhost:3000 (Frontend)
+# → http://localhost:8000 (Backend)
+# → http://localhost:8000/docs (API Docs)
+
+# Voir les logs si nécessaire
+bash dev-logs.sh backend
+bash dev-logs.sh frontend
+```
+
+### **Étape 2 : Commit et Push**
+
+```bash
+# Ajouter les fichiers modifiés
+git add .
+
+# Committer avec un message clair
+git commit -m "feat: Description de la fonctionnalité"
+# Ou: fix:, docs:, refactor:, etc.
+
+# Pousser vers GitHub
+git push origin master
+```
+
+### **Étape 3 : Déploiement Automatique (GitHub Actions)**
+
+Une fois que vous faites `git push origin master` :
+
+1. **GitHub Actions se déclenche automatiquement**
+2. **Connexion SSH au VPS** avec la clé configurée
+3. **Récupération du code** : `git pull origin master`
+4. **Déploiement** : Exécute `deployment/quick-deploy.sh`
+5. **Tests de santé** : Vérifie que l'application fonctionne
+6. **Notification** : ✅ Succès ou ❌ Échec dans l'onglet Actions
+
+**Suivi du déploiement** :
+- Allez sur GitHub → Onglet `Actions`
+- Cliquez sur le workflow en cours
+- Voir les logs en temps réel
+
+### **Étape 4 : Vérification**
+
+```bash
+# Tester l'application en production
+open https://cutcosts.tech
+
+# Vérifier l'API
+open https://cutcosts.tech/api/docs
+
+# Surveiller les logs (optionnel)
+ssh cloudwaste@155.117.43.17
+cd /opt/cloudwaste
+docker compose -f docker-compose.production.yml logs -f --tail=50
 ```
 
 ---
@@ -290,6 +464,76 @@ docker compose -f docker-compose.production.yml logs frontend --tail=30
 # Vous devriez voir "Ready in X.Xs" sans erreur Tailwind
 # Et le buildId devrait être un hash, pas "development"
 ```
+
+---
+
+### ☁️ Les Scans Azure ne trouvent aucune ressource (0 ressources)
+
+**Le problème** : Les scans Azure retournent "completed" avec 0 ressources alors que des ressources existent réellement.
+
+**Symptômes dans les logs** :
+```
+Failed to resolve 'login.microsoftonline.com' ([Errno -3] Temporary failure in name resolution)
+ClientSecretCredential.get_token failed: Authentication failed
+```
+
+**Causes racines** :
+1. ❌ Credentials Azure vides ou manquants dans `.env`
+2. ❌ Réseau Docker `backend_network` configuré avec `internal: true` (bloque Internet)
+
+**Solution complète** :
+
+```bash
+# 1. Connexion au VPS
+ssh cloudwaste@155.117.43.17
+cd /opt/cloudwaste
+
+# 2. Récupérer les correctifs (correction réseau Docker)
+git pull origin master
+
+# 3. Configurer les credentials Azure (script interactif)
+bash deployment/configure-azure-credentials.sh
+# → Suivre les instructions pour ajouter AZURE_TENANT_ID, AZURE_CLIENT_ID, etc.
+
+# 4. Tester la connexion Azure
+bash deployment/test-azure-connection.sh
+# → Vérifie que tout fonctionne (DNS, credentials, authentification)
+
+# 5. Redéployer avec la nouvelle configuration réseau
+bash deployment/quick-deploy.sh
+```
+
+**Ce qui est corrigé** :
+- ✅ Retrait de `internal: true` du réseau Docker (permet l'accès à Internet)
+- ✅ Sécurité maintenue (pas d'exposition publique des ports)
+- ✅ Celery workers peuvent accéder aux API Azure/AWS
+- ✅ Credentials Azure configurés et validés
+
+**Vérification** :
+```bash
+# Vérifier que les workers Celery peuvent accéder à Internet
+docker compose -f docker-compose.production.yml exec celery_worker curl -s https://login.microsoftonline.com
+
+# Vérifier les credentials dans le conteneur
+docker compose -f docker-compose.production.yml exec backend env | grep AZURE
+
+# Lancer un nouveau scan depuis l'interface web
+# → https://cutcosts.tech
+```
+
+**Où trouver les credentials Azure ?**
+
+1. Allez sur [Azure Portal](https://portal.azure.com)
+2. `Azure Active Directory` → `App registrations` → Créer ou sélectionner une app
+3. Notez :
+   - **AZURE_TENANT_ID** : Directory (tenant) ID
+   - **AZURE_CLIENT_ID** : Application (client) ID
+   - **AZURE_SUBSCRIPTION_ID** : ID de votre subscription
+4. `Certificates & secrets` → `Client secrets` → Créer un nouveau secret
+   - **AZURE_CLIENT_SECRET** : Valeur du secret (copiez immédiatement !)
+5. Attribuez le rôle **Reader** à l'application sur votre subscription
+
+---
 
 ### Le site ne se met pas à jour
 

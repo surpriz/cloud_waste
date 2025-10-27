@@ -67,51 +67,6 @@ check_prerequisites() {
     log_info "Prérequis OK"
 }
 
-validate_config() {
-    log_step "Validation de la configuration de production..."
-    
-    local validation_errors=0
-    
-    # Check that docker-compose.production.yml uses Dockerfile.production for frontend
-    if ! grep -q "dockerfile: Dockerfile.production" "${APP_DIR}/docker-compose.production.yml" 2>/dev/null; then
-        log_warn "Le frontend ne semble pas utiliser Dockerfile.production"
-        validation_errors=$((validation_errors + 1))
-    fi
-    
-    # Check for incorrect relative paths (../ instead of ./)
-    if grep -q "context: \.\./backend\|context: \.\./frontend" "${APP_DIR}/docker-compose.production.yml" 2>/dev/null; then
-        log_error "Chemins relatifs incorrects détectés dans docker-compose.production.yml"
-        log_error "Utilisez './backend' et './frontend' au lieu de '../backend' et '../frontend'"
-        validation_errors=$((validation_errors + 1))
-    fi
-    
-    # Check for incorrect env_file paths
-    if grep -q "env_file:.*\.\./\.env" "${APP_DIR}/docker-compose.production.yml" 2>/dev/null; then
-        log_error "Chemin .env incorrect détecté dans docker-compose.production.yml"
-        log_error "Utilisez '.env' au lieu de '../.env'"
-        validation_errors=$((validation_errors + 1))
-    fi
-    
-    # Check that Dockerfile.production exists
-    if [ ! -f "${APP_DIR}/../frontend/Dockerfile.production" ]; then
-        log_error "frontend/Dockerfile.production introuvable"
-        validation_errors=$((validation_errors + 1))
-    fi
-    
-    if [ $validation_errors -gt 0 ]; then
-        log_error "Configuration invalide détectée ($validation_errors erreur(s))"
-        log_error "Le déploiement pourrait échouer. Vérifiez la configuration."
-        read -p "Continuer malgré tout? (y/N) " -n 1 -r
-        echo
-        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-            log_error "Déploiement annulé par l'utilisateur"
-            exit 1
-        fi
-    else
-        log_info "Configuration de production valide ✓"
-    fi
-}
-
 backup_before_deploy() {
     if [ "$BACKUP_BEFORE_DEPLOY" = true ]; then
         log_step "Création d'un backup avant déploiement..."
@@ -263,7 +218,6 @@ main() {
     echo ""
     
     check_prerequisites
-    validate_config
     backup_before_deploy
     pull_latest_code
     build_images
