@@ -3,6 +3,7 @@
 from datetime import timedelta
 from typing import Annotated
 
+import structlog
 from fastapi import APIRouter, Depends, Form, HTTPException, status
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -15,8 +16,10 @@ from app.models.user import User
 from app.schemas.token import RefreshTokenRequest, Token
 from app.schemas.user import User as UserSchema
 from app.schemas.user import UserCreate
+from app.services import email_service
 
 router = APIRouter()
+logger = structlog.get_logger()
 
 
 @router.post("/register", response_model=UserSchema, status_code=status.HTTP_201_CREATED)
@@ -25,14 +28,14 @@ async def register(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> User:
     """
-    Register a new user.
+    Register a new user and send verification email.
 
     Args:
         user_in: User registration data
         db: Database session
 
     Returns:
-        Created user
+        Created user (email_verified=False)
 
     Raises:
         HTTPException: If email already registered
@@ -45,8 +48,33 @@ async def register(
             detail="Email already registered",
         )
 
-    # Create new user
+    # Create new user (email_verified defaults to False)
     user = await user_crud.create_user(db, user_in)
+
+    # Generate verification token
+    verification_token = await user_crud.set_verification_token(db, user)
+
+    # Send verification email (async but don't wait)
+    email_sent = email_service.send_verification_email(
+        email=user.email,
+        full_name=user.full_name or "User",
+        verification_token=verification_token,
+    )
+
+    if not email_sent:
+        logger.warning(
+            "auth.verification_email_failed",
+            user_id=str(user.id),
+            email=user.email,
+        )
+
+    logger.info(
+        "auth.user_registered",
+        user_id=str(user.id),
+        email=user.email,
+        email_sent=email_sent,
+    )
+
     return user
 
 
@@ -82,6 +110,13 @@ async def login(
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Inactive user",
+        )
+
+    # Check if email is verified
+    if not user.email_verified:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Email not verified. Please check your email and click the verification link.",
         )
 
     # Create access token
@@ -199,3 +234,115 @@ async def get_current_user_info(
         Current user
     """
     return current_user
+
+
+@router.get("/verify-email/{token}")
+async def verify_email(
+    token: str,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> dict[str, str]:
+    """
+    Verify user email with token.
+
+    Args:
+        token: Email verification token
+        db: Database session
+
+    Returns:
+        Success message
+
+    Raises:
+        HTTPException: If token is invalid or expired
+    """
+    # Get user by verification token
+    user = await user_crud.get_user_by_verification_token(db, token)
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid or expired verification token",
+        )
+
+    # Verify email
+    await user_crud.verify_user_email(db, user)
+
+    # Send welcome email
+    email_sent = email_service.send_welcome_email(
+        email=user.email,
+        full_name=user.full_name or "User",
+    )
+
+    logger.info(
+        "auth.email_verified",
+        user_id=str(user.id),
+        email=user.email,
+        welcome_email_sent=email_sent,
+    )
+
+    return {
+        "message": "Email verified successfully. You can now login.",
+    }
+
+
+@router.post("/resend-verification")
+async def resend_verification_email(
+    email: Annotated[str, Form()],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> dict[str, str]:
+    """
+    Resend verification email to user.
+
+    Args:
+        email: User email address
+        db: Database session
+
+    Returns:
+        Success message
+
+    Raises:
+        HTTPException: If user not found or already verified
+    """
+    # Get user by email
+    user = await user_crud.get_user_by_email(db, email)
+    if not user:
+        # Don't reveal that user doesn't exist for security
+        return {
+            "message": "If the email exists and is not verified, a new verification email has been sent.",
+        }
+
+    # Check if already verified
+    if user.email_verified:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Email already verified",
+        )
+
+    # Generate new verification token
+    verification_token = await user_crud.set_verification_token(db, user)
+
+    # Send verification email
+    email_sent = email_service.send_verification_email(
+        email=user.email,
+        full_name=user.full_name or "User",
+        verification_token=verification_token,
+    )
+
+    if not email_sent:
+        logger.error(
+            "auth.resend_verification_failed",
+            user_id=str(user.id),
+            email=user.email,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to send verification email",
+        )
+
+    logger.info(
+        "auth.verification_email_resent",
+        user_id=str(user.id),
+        email=user.email,
+    )
+
+    return {
+        "message": "Verification email sent successfully",
+    }

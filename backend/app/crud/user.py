@@ -1,10 +1,13 @@
 """CRUD operations for User model."""
 
+import secrets
 import uuid
+from datetime import datetime, timedelta
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.core.security import get_password_hash, verify_password
 from app.models.user import User
 from app.schemas.user import UserCreate, UserUpdate
@@ -232,3 +235,109 @@ async def delete_user(db: AsyncSession, db_user: User) -> None:
     """
     await db.delete(db_user)
     await db.commit()
+
+
+def generate_verification_token() -> str:
+    """
+    Generate a secure random token for email verification.
+
+    Returns:
+        URL-safe random token
+    """
+    return secrets.token_urlsafe(32)
+
+
+async def set_verification_token(db: AsyncSession, db_user: User) -> str:
+    """
+    Set verification token for user.
+
+    Args:
+        db: Database session
+        db_user: User object
+
+    Returns:
+        Generated verification token
+    """
+    token = generate_verification_token()
+    expires_at = datetime.utcnow() + timedelta(
+        hours=settings.EMAIL_VERIFICATION_TOKEN_EXPIRE_HOURS
+    )
+
+    db_user.email_verification_token = token
+    db_user.verification_token_expires_at = expires_at
+
+    db.add(db_user)
+    await db.commit()
+    await db.refresh(db_user)
+
+    return token
+
+
+async def get_user_by_verification_token(
+    db: AsyncSession,
+    token: str,
+) -> User | None:
+    """
+    Get user by verification token.
+
+    Args:
+        db: Database session
+        token: Verification token
+
+    Returns:
+        User object or None if not found or expired
+    """
+    result = await db.execute(
+        select(User).where(
+            User.email_verification_token == token,
+            User.verification_token_expires_at > datetime.utcnow(),
+        )
+    )
+    return result.scalar_one_or_none()
+
+
+async def verify_user_email(db: AsyncSession, db_user: User) -> User:
+    """
+    Mark user email as verified.
+
+    Args:
+        db: Database session
+        db_user: User object
+
+    Returns:
+        Updated user object
+    """
+    db_user.email_verified = True
+    db_user.email_verification_token = None
+    db_user.verification_token_expires_at = None
+
+    db.add(db_user)
+    await db.commit()
+    await db.refresh(db_user)
+
+    return db_user
+
+
+async def get_unverified_users_older_than(
+    db: AsyncSession,
+    days: int,
+) -> list[User]:
+    """
+    Get users whose email is not verified and account is older than specified days.
+
+    Args:
+        db: Database session
+        days: Number of days
+
+    Returns:
+        List of unverified users
+    """
+    cutoff_date = datetime.utcnow() - timedelta(days=days)
+
+    result = await db.execute(
+        select(User).where(
+            User.email_verified == False,  # noqa: E712
+            User.created_at < cutoff_date,
+        )
+    )
+    return list(result.scalars().all())

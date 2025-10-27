@@ -9,6 +9,7 @@ export interface User {
   full_name: string | null;
   is_active: boolean;
   is_superuser: boolean;
+  email_verified: boolean;
   created_at: string;
 }
 

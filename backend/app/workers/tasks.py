@@ -481,3 +481,92 @@ async def _check_and_trigger_scheduled_scans_async() -> dict[str, Any]:
                 "status": "error",
                 "error": str(e),
             }
+
+
+@celery_app.task(name="app.workers.tasks.cleanup_unverified_accounts")
+def cleanup_unverified_accounts() -> dict[str, Any]:
+    """
+    Cleanup unverified user accounts older than configured threshold.
+
+    This task runs daily via Celery Beat and deletes user accounts
+    that have not verified their email within the configured timeframe.
+
+    Returns:
+        Dict with cleanup results
+    """
+    import structlog
+
+    from app.crud import user as user_crud
+
+    logger = structlog.get_logger()
+
+    # Get or create event loop
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_closed():
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
+    async def _cleanup_accounts() -> dict[str, Any]:
+        """Inner async function to perform cleanup."""
+        async with AsyncSessionLocal() as db:
+            try:
+                # Get unverified users older than threshold
+                users_to_delete = await user_crud.get_unverified_users_older_than(
+                    db,
+                    days=settings.UNVERIFIED_ACCOUNT_CLEANUP_DAYS,
+                )
+
+                deleted_count = 0
+                deleted_emails = []
+
+                # Delete each unverified user
+                for user in users_to_delete:
+                    try:
+                        logger.info(
+                            "cleanup.deleting_unverified_user",
+                            user_id=str(user.id),
+                            email=user.email,
+                            created_at=user.created_at.isoformat(),
+                        )
+
+                        await user_crud.delete_user(db, user)
+                        deleted_count += 1
+                        deleted_emails.append(user.email)
+
+                    except Exception as e:
+                        logger.error(
+                            "cleanup.delete_user_failed",
+                            user_id=str(user.id),
+                            email=user.email,
+                            error=str(e),
+                        )
+
+                logger.info(
+                    "cleanup.completed",
+                    deleted_count=deleted_count,
+                    total_checked=len(users_to_delete),
+                )
+
+                return {
+                    "status": "success",
+                    "deleted_count": deleted_count,
+                    "total_checked": len(users_to_delete),
+                    "deleted_emails": deleted_emails,
+                }
+
+            except Exception as e:
+                logger.error(
+                    "cleanup.error",
+                    error=str(e),
+                )
+                return {
+                    "status": "error",
+                    "error": str(e),
+                }
+
+    # Run async cleanup
+    return loop.run_until_complete(_cleanup_accounts())

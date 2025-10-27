@@ -41,6 +41,10 @@ celery_app.conf.beat_schedule = {
         "task": "app.workers.tasks.check_and_trigger_scheduled_scans",
         "schedule": crontab(minute=0),  # Every hour at minute 0
     },
+    "cleanup-unverified-accounts": {
+        "task": "app.workers.tasks.cleanup_unverified_accounts",
+        "schedule": crontab(hour=3, minute=0),  # Every day at 3:00 AM UTC
+    },
 }
 
 if __name__ == "__main__":

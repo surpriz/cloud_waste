@@ -49,9 +49,21 @@ export default function LoginPage() {
         </div>
 
         {error && (
-          <div className="mb-6 rounded-xl bg-red-50 border border-red-200 p-4 text-sm text-red-700 flex items-start gap-2">
-            <span className="text-lg">⚠️</span>
-            <span>{error}</span>
+          <div className="mb-6 rounded-xl bg-red-50 border border-red-200 p-4 text-sm text-red-700">
+            <div className="flex items-start gap-2 mb-2">
+              <span className="text-lg">⚠️</span>
+              <span>{error}</span>
+            </div>
+            {error.toLowerCase().includes("email not verified") && (
+              <div className="mt-3 pl-7">
+                <Link
+                  href={`/auth/verify-email-sent?email=${encodeURIComponent(formData.username)}`}
+                  className="inline-block text-blue-600 hover:text-blue-700 font-medium underline"
+                >
+                  Renvoyer l'email de vérification →
+                </Link>
+              </div>
+            )}
           </div>
         )}
 

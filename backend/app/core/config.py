@@ -55,6 +55,11 @@ class Settings(BaseSettings):
     EMAILS_FROM_EMAIL: str = ""  # Changed from EmailStr to str to accept empty values
     EMAILS_FROM_NAME: str = "CloudWaste"
 
+    # Email verification
+    EMAIL_VERIFICATION_TOKEN_EXPIRE_HOURS: int = 168  # 7 days
+    UNVERIFIED_ACCOUNT_CLEANUP_DAYS: int = 14  # Auto-delete after 14 days
+    FRONTEND_URL: str = "http://localhost:3000"
+
     # AWS (Optional - for testing)
     AWS_ACCESS_KEY_ID: str = ""
     AWS_SECRET_ACCESS_KEY: str = ""

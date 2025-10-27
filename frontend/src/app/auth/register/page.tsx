@@ -35,7 +35,8 @@ export default function RegisterPage() {
         password: formData.password,
         full_name: formData.full_name || undefined,
       });
-      router.push("/dashboard");
+      // Redirect to verify email page
+      router.push(`/verify-email-sent?email=${encodeURIComponent(formData.email)}`);
     } catch (err) {
       // Error is handled by the store
     }

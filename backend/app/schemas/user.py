@@ -14,6 +14,7 @@ class UserBase(BaseModel):
     full_name: str | None = None
     is_active: bool = True
     is_superuser: bool = False
+    email_verified: bool = False
 
 
 # Properties to receive via API on creation
