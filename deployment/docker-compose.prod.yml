@@ -73,7 +73,7 @@ services:
   celery_worker:
     build:
       context: ../backend
-      dockerfile: /Dockerfile.prod
+      dockerfile: Dockerfile.prod
     container_name: cloudwaste_celery_worker
     restart: always
     command: sh -c "./init_encryption.sh && celery -A app.workers.celery_app worker --loglevel=info --concurrency=4"
@@ -99,7 +99,7 @@ services:
   celery_beat:
     build:
       context: ../backend
-      dockerfile: /Dockerfile.prod
+      dockerfile: Dockerfile.prod
     container_name: cloudwaste_celery_beat
     restart: always
     command: sh -c "./init_encryption.sh && celery -A app.workers.celery_app beat --loglevel=info"
