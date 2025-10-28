@@ -39,8 +39,8 @@ services:
   # FastAPI Backend
   backend:
     build:
-      context: ..
-      dockerfile: backend/Dockerfile.prod
+      context: ../backend
+      dockerfile: Dockerfile.prod
     container_name: cloudwaste_backend
     restart: always
     command: sh -c "./init_encryption.sh && uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 4"
@@ -72,8 +72,8 @@ services:
   # Celery Worker
   celery_worker:
     build:
-      context: ..
-      dockerfile: backend/Dockerfile.prod
+      context: ../backend
+      dockerfile: /Dockerfile.prod
     container_name: cloudwaste_celery_worker
     restart: always
     command: sh -c "./init_encryption.sh && celery -A app.workers.celery_app worker --loglevel=info --concurrency=4"
@@ -98,8 +98,8 @@ services:
   # Celery Beat Scheduler
   celery_beat:
     build:
-      context: ..
-      dockerfile: backend/Dockerfile.prod
+      context: ../backend
+      dockerfile: /Dockerfile.prod
     container_name: cloudwaste_celery_beat
     restart: always
     command: sh -c "./init_encryption.sh && celery -A app.workers.celery_app beat --loglevel=info"
@@ -124,8 +124,8 @@ services:
   # Next.js Frontend
   frontend:
     build:
-      context: ..
-      dockerfile: frontend/Dockerfile.prod
+      context: ../frontend
+      dockerfile: Dockerfile.prod
     container_name: cloudwaste_frontend
     restart: always
     environment:
