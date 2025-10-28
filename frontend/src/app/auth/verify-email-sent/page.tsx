@@ -6,6 +6,8 @@ import { authAPI } from "@/lib/api";
 import { Mail, RefreshCcw } from "lucide-react";
 import Link from "next/link";
 
+export const dynamic = 'force-dynamic'
+
 export default function VerifyEmailSentPage() {
   const searchParams = useSearchParams();
   const email = searchParams.get("email") || "";
