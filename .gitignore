@@ -2,6 +2,7 @@
 .env
 .env.local
 .env.*.local
+.env.prod
 *.env
 
 # Encryption Key (CRITICAL - Never commit!)
@@ -77,6 +78,11 @@ logs/
 *.db
 *.sqlite
 *.sqlite3
+
+# Backups (contains sensitive data)
+backups/
+*.sql.gz
+*.backup
 
 # Alembic
 alembic/versions/*.pyc

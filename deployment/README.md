@@ -1,0 +1,455 @@
+# CloudWaste - Production Deployment Guide
+
+Complete guide for deploying CloudWaste to your VPS using Docker + GitHub Actions.
+
+---
+
+## 🎯 Deployment Overview
+
+**Infrastructure:**
+- **VPS:** Ubuntu Server 24 LTS
+- **Domain:** cutcosts.tech (155.117.43.17)
+- **SSL:** Let's Encrypt (auto-renewal)
+- **Stack:** Docker Compose with Nginx reverse proxy
+
+**Automated CI/CD:**
+```
+Local Dev → git push → GitHub Actions → VPS → Production Live
+```
+
+**Deployment Time:** ~2-3 minutes per deployment
+
+---
+
+## 📁 Deployment Files
+
+```
+deployment/
+├── docker-compose.prod.yml    # Production Docker stack
+├── nginx.conf                 # Reverse proxy + SSL config
+├── setup-server.sh            # Initial VPS setup (run once)
+├── quick-deploy.sh            # Fast deployment script
+├── backup-db.sh               # Database backup automation
+└── README.md                  # This file
+```
+
+---
+
+## 🚀 Initial Setup (One-Time)
+
+### Step 1: Prepare Your Local Machine
+
+1. **Update GitHub repository URL** in `deployment/setup-server.sh`:
+   ```bash
+   # Line 37
+   GITHUB_REPO="https://github.com/YOUR_USERNAME/CloudWaste.git"
+   ```
+
+2. **Generate SSH key** for GitHub Actions:
+   ```bash
+   ssh-keygen -t ed25519 -f ~/.ssh/cloudwaste_deploy -N ""
+   cat ~/.ssh/cloudwaste_deploy.pub
+   ```
+
+3. **Add SSH public key to VPS:**
+   ```bash
+   ssh administrator@155.117.43.17
+   mkdir -p ~/.ssh
+   echo "YOUR_PUBLIC_KEY_HERE" >> ~/.ssh/authorized_keys
+   chmod 600 ~/.ssh/authorized_keys
+   exit
+   ```
+
+4. **Configure GitHub Secrets:**
+
+   Go to your GitHub repo → Settings → Secrets and variables → Actions → New repository secret
+
+   Add these secrets:
+
+   | Secret Name | Value |
+   |-------------|-------|
+   | `VPS_HOST` | `155.117.43.17` |
+   | `VPS_USER` | `administrator` |
+   | `VPS_SSH_PRIVATE_KEY` | Content of `~/.ssh/cloudwaste_deploy` |
+
+### Step 2: Initial VPS Setup
+
+1. **Connect to your VPS:**
+   ```bash
+   ssh administrator@155.117.43.17
+   ```
+
+2. **Download and run setup script:**
+   ```bash
+   # Download setup script (adjust URL to your repo)
+   wget https://raw.githubusercontent.com/YOUR_USERNAME/CloudWaste/master/deployment/setup-server.sh
+
+   # OR if repo is already cloned locally, use scp:
+   # scp deployment/setup-server.sh administrator@155.117.43.17:~/
+
+   # Make executable and run
+   chmod +x setup-server.sh
+   sudo ./setup-server.sh
+   ```
+
+3. **What the setup script does:**
+   - ✅ Installs Docker & Docker Compose
+   - ✅ Configures firewall (ports 22, 80, 443)
+   - ✅ Installs Certbot for SSL
+   - ✅ Generates SSL certificates for cutcosts.tech
+   - ✅ Clones repository to `/opt/cloudwaste`
+   - ✅ Generates `.env.prod` with secure secrets
+   - ✅ Sets up automatic SSL renewal
+
+4. **Configure email settings (optional):**
+   ```bash
+   nano /opt/cloudwaste/.env.prod
+
+   # Update these lines:
+   SMTP_HOST=smtp.sendgrid.net
+   SMTP_PORT=587
+   SMTP_USER=apikey
+   SMTP_PASSWORD=YOUR_SENDGRID_API_KEY
+   ```
+
+5. **Initial deployment:**
+   ```bash
+   cd /opt/cloudwaste
+   bash deployment/quick-deploy.sh
+   ```
+
+6. **Verify deployment:**
+
+   Open in browser:
+   - 🌐 https://cutcosts.tech
+   - 📚 https://cutcosts.tech/api/docs
+
+---
+
+## 🔄 Automated Deployments (GitHub Actions)
+
+Once initial setup is complete, every `git push` to the `master` branch triggers automatic deployment.
+
+### Workflow:
+
+```bash
+# On your local machine
+git add .
+git commit -m "feat: add new feature"
+git push origin master
+
+# GitHub Actions automatically:
+# 1. Connects to VPS via SSH
+# 2. Pulls latest code
+# 3. Runs deployment/quick-deploy.sh
+# 4. Performs health checks
+# 5. Reports success/failure
+```
+
+### Manual Trigger:
+
+You can also trigger deployment manually via GitHub Actions UI:
+1. Go to your repo → Actions tab
+2. Select "Deploy to Production" workflow
+3. Click "Run workflow"
+
+---
+
+## 📦 Manual Deployments
+
+If you need to deploy manually from the VPS:
+
+```bash
+ssh administrator@155.117.43.17
+cd /opt/cloudwaste
+git pull origin master
+bash deployment/quick-deploy.sh
+```
+
+---
+
+## 🔍 Monitoring & Logs
+
+### View Container Status:
+```bash
+cd /opt/cloudwaste
+docker compose -f deployment/docker-compose.prod.yml ps
+```
+
+### View Logs:
+```bash
+# Backend
+docker logs -f cloudwaste_backend
+
+# Frontend
+docker logs -f cloudwaste_frontend
+
+# Celery Worker
+docker logs -f cloudwaste_celery_worker
+
+# Nginx
+docker logs -f cloudwaste_nginx
+
+# All logs combined
+docker compose -f deployment/docker-compose.prod.yml logs -f
+```
+
+### Container Stats (CPU, Memory):
+```bash
+docker stats
+```
+
+---
+
+## 🛠 Common Operations
+
+### Restart a Service:
+```bash
+docker compose -f deployment/docker-compose.prod.yml restart backend
+```
+
+### Access Container Shell:
+```bash
+docker exec -it cloudwaste_backend bash
+```
+
+### Run Database Migrations:
+```bash
+docker compose -f deployment/docker-compose.prod.yml run --rm backend alembic upgrade head
+```
+
+### Access PostgreSQL:
+```bash
+# From container
+docker exec -it cloudwaste_postgres psql -U cloudwaste -d cloudwaste
+
+# Run SQL query
+docker exec cloudwaste_postgres psql -U cloudwaste -d cloudwaste -c "SELECT COUNT(*) FROM users;"
+```
+
+### Rebuild Single Service:
+```bash
+docker compose -f deployment/docker-compose.prod.yml up -d --build --no-deps backend
+```
+
+---
+
+## 💾 Backups
+
+### Manual Backup:
+```bash
+cd /opt/cloudwaste
+bash deployment/backup-db.sh
+```
+
+Backups are stored in `/opt/cloudwaste/backups/` and include:
+- 📦 PostgreSQL database dump (compressed)
+- 🔐 Encryption key (CRITICAL for credentials)
+- 📋 Backup manifest with restore instructions
+
+### Automated Daily Backups:
+
+Add to crontab:
+```bash
+crontab -e
+
+# Add this line (runs daily at 2 AM)
+0 2 * * * /opt/cloudwaste/deployment/backup-db.sh >> /var/log/cloudwaste-backup.log 2>&1
+```
+
+### Restore from Backup:
+
+See backup manifest file for specific restore instructions:
+```bash
+cat /opt/cloudwaste/backups/backup_manifest_TIMESTAMP.txt
+```
+
+**General restore process:**
+```bash
+# 1. Stop containers
+docker compose -f deployment/docker-compose.prod.yml down
+
+# 2. Restore encryption key
+docker run --rm \
+  -v cloudwaste_encryption_key:/data \
+  -v /opt/cloudwaste/backups:/backup \
+  alpine sh -c "cp /backup/encryption_key_TIMESTAMP.txt /data/.encryption_key"
+
+# 3. Restore database
+gunzip < /opt/cloudwaste/backups/db_backup_TIMESTAMP.sql.gz | \
+  docker exec -i cloudwaste_postgres psql -U cloudwaste -d cloudwaste
+
+# 4. Start containers
+docker compose -f deployment/docker-compose.prod.yml up -d
+```
+
+---
+
+## 🔐 Security Best Practices
+
+### 1. Keep .env.prod Secure:
+```bash
+# Never commit to Git
+chmod 600 /opt/cloudwaste/.env.prod
+
+# Verify it's in .gitignore
+grep "\.env\.prod" /opt/cloudwaste/.gitignore
+```
+
+### 2. Rotate Secrets Regularly:
+
+Generate new secrets:
+```bash
+# Generate new secret
+openssl rand -hex 32
+
+# Update .env.prod
+nano /opt/cloudwaste/.env.prod
+
+# Restart services
+docker compose -f deployment/docker-compose.prod.yml restart
+```
+
+### 3. Monitor Failed Login Attempts:
+```bash
+# Backend logs
+docker logs cloudwaste_backend | grep "401\|403"
+```
+
+### 4. Update SSL Certificates:
+
+Certificates auto-renew via cron, but you can manually renew:
+```bash
+sudo certbot renew
+docker exec cloudwaste_nginx nginx -s reload
+```
+
+---
+
+## 🐛 Troubleshooting
+
+### Issue: Containers Keep Restarting
+
+**Solution:**
+```bash
+# Check logs
+docker logs cloudwaste_backend
+
+# Common causes:
+# - Missing .env.prod
+# - Database connection failed
+# - Port already in use
+```
+
+### Issue: SSL Certificate Error
+
+**Solution:**
+```bash
+# Verify certificates exist
+sudo ls -la /etc/letsencrypt/live/cutcosts.tech/
+
+# Regenerate if missing
+sudo certbot certonly --standalone -d cutcosts.tech -d www.cutcosts.tech
+```
+
+### Issue: Frontend Shows 502 Bad Gateway
+
+**Solution:**
+```bash
+# Check if backend is healthy
+docker exec cloudwaste_backend curl -f http://localhost:8000/api/v1/health
+
+# Restart nginx
+docker compose -f deployment/docker-compose.prod.yml restart nginx
+```
+
+### Issue: Database Connection Error
+
+**Solution:**
+```bash
+# Verify PostgreSQL is running
+docker exec cloudwaste_postgres pg_isready -U cloudwaste
+
+# Check credentials in .env.prod
+cat /opt/cloudwaste/.env.prod | grep POSTGRES
+
+# Restart database
+docker compose -f deployment/docker-compose.prod.yml restart postgres
+```
+
+---
+
+## 🔄 Rollback to Previous Version
+
+If deployment fails, rollback to previous commit:
+
+```bash
+# On VPS
+cd /opt/cloudwaste
+git log --oneline  # Find previous commit hash
+git reset --hard COMMIT_HASH
+bash deployment/quick-deploy.sh
+```
+
+---
+
+## 📊 Performance Optimization
+
+### Monitor Container Resources:
+```bash
+docker stats --no-stream
+```
+
+### Scale Services (if needed):
+```bash
+# Edit docker-compose.prod.yml
+# Change --workers 4 to --workers 8 for backend
+
+docker compose -f deployment/docker-compose.prod.yml up -d --no-deps --build backend
+```
+
+### Database Optimization:
+```bash
+# Run VACUUM and ANALYZE
+docker exec cloudwaste_postgres psql -U cloudwaste -d cloudwaste -c "VACUUM ANALYZE;"
+```
+
+---
+
+## 📝 Maintenance Checklist
+
+**Daily:**
+- ✅ Check application uptime: `curl https://cutcosts.tech/api/v1/health`
+- ✅ Verify backups completed: `ls -lh /opt/cloudwaste/backups/`
+
+**Weekly:**
+- ✅ Review logs for errors: `docker logs cloudwaste_backend | grep ERROR`
+- ✅ Check disk space: `df -h`
+- ✅ Update Docker images: `docker compose -f deployment/docker-compose.prod.yml pull`
+
+**Monthly:**
+- ✅ Rotate secrets (JWT_SECRET, POSTGRES_PASSWORD)
+- ✅ Review SSL certificate expiration: `sudo certbot certificates`
+- ✅ Test backup restoration process
+
+---
+
+## 🆘 Emergency Contacts
+
+**VPS Provider:** [Your VPS provider support]
+**Domain Registrar:** [Your domain registrar]
+**SSL Issues:** Let's Encrypt Community: https://community.letsencrypt.org/
+
+---
+
+## 📚 Additional Resources
+
+- **Docker Compose Docs:** https://docs.docker.com/compose/
+- **Nginx Docs:** https://nginx.org/en/docs/
+- **Let's Encrypt:** https://letsencrypt.org/docs/
+- **PostgreSQL Backups:** https://www.postgresql.org/docs/current/backup.html
+
+---
+
+**Last Updated:** 2025-10-28
+**Deployment Version:** 1.0.0

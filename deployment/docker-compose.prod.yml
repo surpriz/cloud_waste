@@ -1,0 +1,182 @@
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15-alpine
+    container_name: cloudwaste_postgres
+    restart: always
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-cloudwaste}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-cloudwaste}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-cloudwaste}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - cloudwaste_network
+    # No port exposure - only accessible within Docker network
+
+  # Redis Cache & Queue
+  redis:
+    image: redis:7-alpine
+    container_name: cloudwaste_redis
+    restart: always
+    command: redis-server --appendonly yes --appendfsync everysec
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - cloudwaste_network
+    # No port exposure - only accessible within Docker network
+
+  # FastAPI Backend
+  backend:
+    build:
+      context: ..
+      dockerfile: backend/Dockerfile.prod
+    container_name: cloudwaste_backend
+    restart: always
+    command: sh -c "./init_encryption.sh && uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 4"
+    volumes:
+      - encryption_key:/encryption_key_data
+      - ../init_encryption.sh:/app/init_encryption.sh:ro
+    env_file:
+      - ../.env.prod
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-cloudwaste}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-cloudwaste}
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    networks:
+      - cloudwaste_network
+    # No port exposure - Nginx handles external access
+
+  # Celery Worker
+  celery_worker:
+    build:
+      context: ..
+      dockerfile: backend/Dockerfile.prod
+    container_name: cloudwaste_celery_worker
+    restart: always
+    command: sh -c "./init_encryption.sh && celery -A app.workers.celery_app worker --loglevel=info --concurrency=4"
+    volumes:
+      - encryption_key:/encryption_key_data
+      - ../init_encryption.sh:/app/init_encryption.sh:ro
+    env_file:
+      - ../.env.prod
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-cloudwaste}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-cloudwaste}
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - cloudwaste_network
+
+  # Celery Beat Scheduler
+  celery_beat:
+    build:
+      context: ..
+      dockerfile: backend/Dockerfile.prod
+    container_name: cloudwaste_celery_beat
+    restart: always
+    command: sh -c "./init_encryption.sh && celery -A app.workers.celery_app beat --loglevel=info"
+    volumes:
+      - encryption_key:/encryption_key_data
+      - ../init_encryption.sh:/app/init_encryption.sh:ro
+    env_file:
+      - ../.env.prod
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-cloudwaste}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-cloudwaste}
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - cloudwaste_network
+
+  # Next.js Frontend
+  frontend:
+    build:
+      context: ..
+      dockerfile: frontend/Dockerfile.prod
+    container_name: cloudwaste_frontend
+    restart: always
+    environment:
+      - NEXT_PUBLIC_API_URL=https://cutcosts.tech
+      - NEXT_PUBLIC_APP_NAME=CloudWaste
+      - NODE_ENV=production
+    depends_on:
+      - backend
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    networks:
+      - cloudwaste_network
+    # No port exposure - Nginx handles external access
+
+  # Nginx Reverse Proxy
+  nginx:
+    image: nginx:alpine
+    container_name: cloudwaste_nginx
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - /etc/letsencrypt:/etc/letsencrypt:ro
+      - nginx_cache:/var/cache/nginx
+    depends_on:
+      - frontend
+      - backend
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - cloudwaste_network
+
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+  encryption_key:
+    driver: local
+  nginx_cache:
+    driver: local
+
+networks:
+  cloudwaste_network:
+    driver: bridge
