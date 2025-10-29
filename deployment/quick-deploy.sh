@@ -94,11 +94,16 @@
 print_step "Stopping running containers..."
 
 if docker compose -f "$COMPOSE_FILE" ps -q 2>/dev/null | grep -q .; then
-    docker compose -f "$COMPOSE_FILE" down
+    docker compose -f "$COMPOSE_FILE" down --remove-orphans
     print_success "Containers stopped"
 else
     print_warning "No running containers found"
 fi
+
+# Force remove any remaining containers with cloudwaste prefix
+print_step "Cleaning up any orphaned containers..."
+docker ps -a --filter "name=cloudwaste" -q | xargs -r docker rm -f 2>/dev/null || true
+print_success "Cleanup completed"
 
 # ============================================================================
 # Step 2: Rebuild Images
@@ -106,8 +111,8 @@ fi
 
 print_step "Building Docker images with latest code..."
 
-# Build with no cache to ensure fresh build
-docker compose -f "$COMPOSE_FILE" build --no-cache --parallel
+# Build with cache for faster deployments
+docker compose -f "$COMPOSE_FILE" build --parallel
 
 print_success "Images built successfully"
 
