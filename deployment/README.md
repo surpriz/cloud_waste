@@ -170,13 +170,51 @@ bash deployment/quick-deploy.sh
 
 ## 🔍 Monitoring & Logs
 
-### View Container Status:
+### 🐳 Portainer (Container Management UI)
+
+CloudWaste VPS includes **Portainer CE** for visual container management and monitoring.
+
+**Access Portainer:**
+- 🌐 **HTTPS (recommended):** https://155.117.43.17:9443
+- 🌐 **HTTP:** http://155.117.43.17:9000
+
+**Installation (Already done on VPS):**
+```bash
+# Portainer is installed as standalone container
+docker ps | grep portainer
+```
+
+**Using Portainer:**
+1. **Dashboard** → Overview of all containers, images, volumes, networks
+2. **Containers** → View status, logs, stats, shell access for each container
+3. **Logs** → Real-time logs with search/filter capabilities
+4. **Stats** → CPU, Memory, Network I/O per container
+5. **Console** → Execute commands inside containers without SSH
+
+**Benefits:**
+- ✅ Visual healthcheck status (healthy/unhealthy/starting)
+- ✅ One-click access to container logs
+- ✅ Restart/stop/start containers with UI
+- ✅ Resource usage graphs
+- ✅ No need to memorize docker commands
+
+**Common Tasks in Portainer:**
+
+| Task | How to do it |
+|------|--------------|
+| View logs | Containers → Click container → Logs tab |
+| Restart container | Containers → Select container → Restart button |
+| Check healthcheck | Containers → Click container → Inspect → Health section |
+| Open shell | Containers → Click container → Console tab |
+| View resource usage | Containers → Click container → Stats tab |
+
+### View Container Status (CLI):
 ```bash
 cd /opt/cloudwaste
 docker compose -f deployment/docker-compose.prod.yml ps
 ```
 
-### View Logs:
+### View Logs (CLI):
 ```bash
 # Backend
 docker logs -f cloudwaste_backend
@@ -451,5 +489,5 @@ docker exec cloudwaste_postgres psql -U cloudwaste -d cloudwaste -c "VACUUM ANAL
 
 ---
 
-**Last Updated:** 2025-10-28
-**Deployment Version:** 1.0.0
+**Last Updated:** 2025-10-29
+**Deployment Version:** 1.1.0 (Added Portainer monitoring)
