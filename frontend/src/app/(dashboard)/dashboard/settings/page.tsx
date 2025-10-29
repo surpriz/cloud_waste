@@ -92,6 +92,11 @@ const AZURE_RESOURCE_ICONS: { [key: string]: any } = {
   virtual_machine_never_started: Server,
   virtual_machine_oversized_premium: Server,
   virtual_machine_untagged_orphan: Server,
+  virtual_machine_idle: Server,
+  virtual_machine_old_generation: Server,
+  virtual_machine_spot_convertible: Server,
+  virtual_machine_underutilized: Server,
+  virtual_machine_memory_overprovisioned: Server,
   // AKS - Azure Kubernetes Service
   azure_aks_cluster: Server,
 };
@@ -133,6 +138,11 @@ const AZURE_RESOURCE_LABELS: { [key: string]: string } = {
   virtual_machine_never_started: "Virtual Machines (Never Started)",
   virtual_machine_oversized_premium: "Virtual Machines (Oversized + Premium Disks)",
   virtual_machine_untagged_orphan: "Virtual Machines (Untagged Orphans)",
+  virtual_machine_idle: "Virtual Machines (Idle - Running but Unused) 📊",
+  virtual_machine_old_generation: "Virtual Machines (Old Generation SKUs - v1/v2/v3)",
+  virtual_machine_spot_convertible: "Virtual Machines (Spot-Eligible Workloads) 💰",
+  virtual_machine_underutilized: "Virtual Machines (Underutilized - Rightsizing) 📊",
+  virtual_machine_memory_overprovisioned: "Virtual Machines (Memory Over-Provisioned) 📊",
   // AKS - Azure Kubernetes Service
   azure_aks_cluster: "AKS Clusters (Azure Kubernetes Service)",
 };

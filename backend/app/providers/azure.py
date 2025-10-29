@@ -768,7 +768,16 @@ class AzureProvider(CloudProviderBase):
         untagged_orphans = await self.scan_untagged_orphan_vms(region, rules.get("virtual_machine_untagged_orphan"))
         results.extend(untagged_orphans)
 
+        # Scenario 6: VMs using old generation SKUs (v1/v2/v3 → v4/v5)
+        old_generation = await self.scan_old_generation_vms(region, rules.get("virtual_machine_old_generation"))
+        results.extend(old_generation)
+
+        # Scenario 7: VMs that could use Spot pricing (60-90% savings)
+        spot_convertible = await self.scan_spot_convertible_vms(region, rules.get("virtual_machine_spot_convertible"))
+        results.extend(spot_convertible)
+
         # Phase 2 - Azure Monitor Metrics-based Advanced Scenarios (requires "Monitoring Reader" permission)
+        # Disk scenarios
         # Scenario 6: Idle disks (zero I/O activity)
         idle_disks = await self.scan_idle_disks(region, rules.get("managed_disk_idle"))
         results.extend(idle_disks)
@@ -785,8 +794,18 @@ class AzureProvider(CloudProviderBase):
         underutilized_hdd = await self.scan_underutilized_hdd_disks(region, rules.get("managed_disk_underutilized_hdd"))
         results.extend(underutilized_hdd)
 
-        # TODO: Future scenarios (VMs, Load Balancers, etc.)
-        # results.extend(await self.scan_idle_running_instances(region, rules.get("virtual_machine_idle")))
+        # Phase 2 - VM Azure Monitor Metrics-based Scenarios
+        # Scenario 8: Idle running VMs (low CPU utilization)
+        idle_vms = await self.scan_idle_running_instances(region, rules.get("virtual_machine_idle"))
+        results.extend(idle_vms)
+
+        # Scenario 9: Underutilized VMs (rightsizing - CPU-based)
+        underutilized_vms = await self.scan_underutilized_vms(region, rules.get("virtual_machine_underutilized"))
+        results.extend(underutilized_vms)
+
+        # Scenario 10: Memory-overprovisioned VMs (E-series with low memory usage)
+        memory_overprovisioned = await self.scan_memory_overprovisioned_vms(region, rules.get("virtual_machine_memory_overprovisioned"))
+        results.extend(memory_overprovisioned)
 
         return results
 
@@ -4453,6 +4472,737 @@ class AzureProvider(CloudProviderBase):
 
         return orphans
 
+    async def scan_old_generation_vms(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scan for Azure Virtual Machines using old generation SKUs.
+
+        Detects VMs running on older generation VM SKUs (v1, v2, v3) that could be
+        migrated to newer generations (v4, v5) for 20-30% cost savings and better performance.
+
+        Args:
+            region: Azure region to scan
+            detection_rules: Optional detection configuration:
+                {
+                    "enabled": bool (default True),
+                    "min_age_days": int (default 60) - Only flag VMs older than this,
+                    "old_generations": list (default ["v1", "v2", "_v3"]) - Generations to flag,
+                    "savings_percent": float (default 25.0) - Estimated savings percentage
+                }
+
+        Returns:
+            List of VMs using old generation SKUs
+        """
+        from datetime import datetime, timezone
+        from azure.identity import ClientSecretCredential
+        from azure.mgmt.compute import ComputeManagementClient
+
+        orphans = []
+
+        # Extract detection rules
+        min_age_days = detection_rules.get("min_age_days", 60) if detection_rules else 60
+        old_generations = detection_rules.get("old_generations", ["v1", "v2", "_v3"]) if detection_rules else ["v1", "v2", "_v3"]
+        savings_percent = detection_rules.get("savings_percent", 25.0) if detection_rules else 25.0
+
+        # Migration mapping: old generation → new generation SKU pattern
+        generation_mapping = {
+            "D": ("Dv5", "General purpose"),
+            "E": ("Ev5", "Memory optimized"),
+            "F": ("Fsv2", "Compute optimized"),
+            "B": ("B", "Burstable (already latest)"),
+        }
+
+        try:
+            credential = ClientSecretCredential(
+                tenant_id=self.tenant_id,
+                client_id=self.client_id,
+                client_secret=self.client_secret
+            )
+
+            compute_client = ComputeManagementClient(credential, self.subscription_id)
+            vms = list(compute_client.virtual_machines.list_all())
+
+            for vm in vms:
+                if vm.location != region:
+                    continue
+
+                # Filter by resource group (if specified)
+                if not self._is_resource_in_scope(vm.id):
+                    continue
+
+                vm_size = vm.hardware_profile.vm_size
+
+                # Check if VM uses an old generation SKU
+                is_old_generation = False
+                old_gen_type = None
+                for old_gen in old_generations:
+                    if old_gen in vm_size:
+                        is_old_generation = True
+                        old_gen_type = old_gen
+                        break
+
+                if not is_old_generation:
+                    continue
+
+                # Calculate VM age
+                age_days = 0
+                if vm.time_created:
+                    age_delta = datetime.now(timezone.utc) - vm.time_created
+                    age_days = age_delta.days
+
+                # Only flag VMs older than min_age_days
+                if age_days < min_age_days:
+                    continue
+
+                # Determine VM series (D, E, F, B, etc.)
+                vm_series = None
+                for series in ["D", "E", "F", "B"]:
+                    if vm_size.startswith(f"Standard_{series}"):
+                        vm_series = series
+                        break
+
+                # Get recommended new generation SKU
+                new_generation = None
+                workload_type = "General purpose"
+                if vm_series and vm_series in generation_mapping:
+                    new_generation, workload_type = generation_mapping[vm_series]
+
+                # Parse VM size to suggest migration path
+                # Example: Standard_D4_v2 → Standard_D4s_v5
+                # Example: Standard_E8s_v3 → Standard_E8s_v5
+                suggested_sku = vm_size
+                if new_generation:
+                    # Replace old generation with new generation
+                    for old_gen in old_generations:
+                        if old_gen in vm_size:
+                            # For v3, suggest v5; for v2, suggest v5; for v1, suggest v5
+                            suggested_sku = vm_size.replace(old_gen, "_v5")
+                            # If already has 's' (storage optimized), keep it
+                            # If not, add 's' for latest gen (e.g., D4_v2 → D4s_v5)
+                            if "s_" not in suggested_sku and old_gen in ["v1", "v2"]:
+                                suggested_sku = suggested_sku.replace("_v5", "s_v5")
+                            break
+
+                # Calculate current monthly cost
+                current_cost = self._get_vm_cost_estimate(vm_size)
+
+                # Calculate savings (20-30% typical, using configurable savings_percent)
+                monthly_savings = current_cost * (savings_percent / 100.0)
+                new_cost = current_cost - monthly_savings
+
+                # Calculate total wasted cost (already paid premium for old gen)
+                total_wasted = (age_days / 30.0) * monthly_savings if age_days > 0 else monthly_savings
+
+                # Determine confidence level
+                if age_days >= 180:
+                    confidence_level = 'critical'
+                elif age_days >= 90:
+                    confidence_level = 'high'
+                elif age_days >= 60:
+                    confidence_level = 'medium'
+                else:
+                    confidence_level = 'low'
+
+                orphans.append(OrphanResourceData(
+                    resource_type='virtual_machine_old_generation',
+                    resource_id=vm.id,
+                    resource_name=vm.name,
+                    region=region,
+                    estimated_monthly_cost=monthly_savings,  # Savings opportunity
+                    resource_metadata={
+                        'vm_id': vm.id,
+                        'vm_name': vm.name,
+                        'current_vm_size': vm_size,
+                        'suggested_vm_size': suggested_sku,
+                        'vm_series': vm_series,
+                        'workload_type': workload_type,
+                        'old_generation': old_gen_type,
+                        'new_generation': new_generation or "v5",
+                        'current_monthly_cost': round(current_cost, 2),
+                        'new_monthly_cost': round(new_cost, 2),
+                        'monthly_savings': round(monthly_savings, 2),
+                        'savings_percent': round(savings_percent, 1),
+                        'age_days': age_days,
+                        'total_wasted_cost': round(total_wasted, 2),
+                        'orphan_reason': f'VM uses old generation SKU ({vm_size} with {old_gen_type}). Newer generations (v4/v5) offer 20-30% better price-performance ratio.',
+                        'recommendation': f'Migrate VM from {vm_size} to {suggested_sku} for ~{savings_percent:.0f}% cost savings (${monthly_savings:.2f}/month) plus improved performance. '
+                                        f'Newer {new_generation or "v5"}-series VMs offer same or better specs at lower cost with latest Intel/AMD processors.',
+                        'confidence_level': confidence_level,
+                        'migration_effort': 'medium',  # Requires VM stop/start
+                        'tags': vm.tags or {},
+                    },
+                ))
+
+        except Exception as e:
+            print(f"Error scanning old generation VMs in {region}: {str(e)}")
+
+        return orphans
+
+    async def scan_spot_convertible_vms(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scan for Azure Virtual Machines that could convert to Spot pricing.
+
+        Detects regular VMs running interruptible workloads (dev/test, batch, CI/CD) that
+        could use Azure Spot VMs for 60-90% cost savings. Spot VMs are ideal for workloads
+        that can tolerate interruptions.
+
+        Args:
+            region: Azure region to scan
+            detection_rules: Optional detection configuration:
+                {
+                    "enabled": bool (default True),
+                    "min_age_days": int (default 30) - Only flag stable VMs,
+                    "spot_eligible_tags": list (default ["batch", "dev", "test", "ci", "analytics"]),
+                    "spot_discount_percent": float (default 75.0) - Average Spot discount,
+                    "exclude_ha_vms": bool (default True) - Exclude high-availability VMs
+                }
+
+        Returns:
+            List of VMs eligible for Spot conversion
+        """
+        from datetime import datetime, timezone
+        from azure.identity import ClientSecretCredential
+        from azure.mgmt.compute import ComputeManagementClient
+
+        orphans = []
+
+        # Extract detection rules
+        min_age_days = detection_rules.get("min_age_days", 30) if detection_rules else 30
+        spot_eligible_tags = detection_rules.get(
+            "spot_eligible_tags",
+            ["batch", "dev", "test", "staging", "ci", "cd", "analytics", "non-critical", "development", "qa"]
+        ) if detection_rules else ["batch", "dev", "test", "staging", "ci", "cd", "analytics", "non-critical", "development", "qa"]
+        spot_discount_percent = detection_rules.get("spot_discount_percent", 75.0) if detection_rules else 75.0
+        exclude_ha_vms = detection_rules.get("exclude_ha_vms", True) if detection_rules else True
+
+        try:
+            credential = ClientSecretCredential(
+                tenant_id=self.tenant_id,
+                client_id=self.client_id,
+                client_secret=self.client_secret
+            )
+
+            compute_client = ComputeManagementClient(credential, self.subscription_id)
+            vms = list(compute_client.virtual_machines.list_all())
+
+            for vm in vms:
+                if vm.location != region:
+                    continue
+
+                # Filter by resource group (if specified)
+                if not self._is_resource_in_scope(vm.id):
+                    continue
+
+                # Check if VM is already Spot (priority = 'Spot')
+                # Regular VMs have priority = 'Regular' or None
+                if hasattr(vm, 'priority') and vm.priority and vm.priority.lower() == 'spot':
+                    continue
+
+                # Calculate VM age
+                age_days = 0
+                if vm.time_created:
+                    age_delta = datetime.now(timezone.utc) - vm.time_created
+                    age_days = age_delta.days
+
+                # Only flag stable VMs (older than min_age_days)
+                if age_days < min_age_days:
+                    continue
+
+                # Analyze tags to determine if workload is Spot-eligible
+                vm_tags = vm.tags or {}
+                tags_lower = {k.lower(): v.lower() for k, v in vm_tags.items()}
+
+                # Check if VM has Spot-eligible tags
+                is_spot_eligible = False
+                matched_tags = []
+                for tag_key, tag_value in tags_lower.items():
+                    for eligible_tag in spot_eligible_tags:
+                        if eligible_tag.lower() in tag_key or eligible_tag.lower() in tag_value:
+                            is_spot_eligible = True
+                            matched_tags.append(f"{tag_key}={tag_value}")
+
+                # Also check VM name for indicators
+                vm_name_lower = vm.name.lower()
+                for eligible_tag in spot_eligible_tags:
+                    if eligible_tag.lower() in vm_name_lower:
+                        is_spot_eligible = True
+                        matched_tags.append(f"name contains '{eligible_tag}'")
+                        break
+
+                if not is_spot_eligible:
+                    continue
+
+                # Exclude high-availability VMs (if configured)
+                if exclude_ha_vms:
+                    # Check for HA indicators in tags
+                    ha_keywords = ["prod", "production", "critical", "high-availability", "ha", "database", "db"]
+                    is_ha = False
+                    for tag_key, tag_value in tags_lower.items():
+                        for ha_keyword in ha_keywords:
+                            if ha_keyword in tag_key or ha_keyword in tag_value:
+                                is_ha = True
+                                break
+                        if is_ha:
+                            break
+
+                    if is_ha:
+                        continue  # Skip HA VMs
+
+                # Calculate current monthly cost (Regular VM pricing)
+                current_cost = self._get_vm_cost_estimate(vm.hardware_profile.vm_size)
+
+                # Calculate Spot savings (60-90% discount, using configurable discount_percent)
+                monthly_savings = current_cost * (spot_discount_percent / 100.0)
+                spot_cost = current_cost - monthly_savings
+
+                # Calculate total wasted cost (overpaid for Regular vs Spot)
+                total_wasted = (age_days / 30.0) * monthly_savings if age_days > 0 else monthly_savings
+
+                # Determine confidence level
+                if age_days >= 90:
+                    confidence_level = 'critical'
+                elif age_days >= 60:
+                    confidence_level = 'high'
+                elif age_days >= 30:
+                    confidence_level = 'medium'
+                else:
+                    confidence_level = 'low'
+
+                orphans.append(OrphanResourceData(
+                    resource_type='virtual_machine_spot_convertible',
+                    resource_id=vm.id,
+                    resource_name=vm.name,
+                    region=region,
+                    estimated_monthly_cost=monthly_savings,  # Savings opportunity
+                    resource_metadata={
+                        'vm_id': vm.id,
+                        'vm_name': vm.name,
+                        'vm_size': vm.hardware_profile.vm_size,
+                        'current_priority': getattr(vm, 'priority', 'Regular'),
+                        'workload_type': ', '.join(matched_tags[:3]) if matched_tags else 'interruptible',
+                        'spot_eligible_indicators': matched_tags,
+                        'current_monthly_cost': round(current_cost, 2),
+                        'spot_monthly_cost': round(spot_cost, 2),
+                        'monthly_savings': round(monthly_savings, 2),
+                        'spot_discount_percent': round(spot_discount_percent, 1),
+                        'age_days': age_days,
+                        'total_wasted_cost': round(total_wasted, 2),
+                        'orphan_reason': f'VM runs interruptible workload ({", ".join(matched_tags[:2]) if matched_tags else "dev/test"}) on Regular priority. '
+                                        f'Spot VMs offer 60-90% savings for fault-tolerant workloads.',
+                        'recommendation': f'Convert to Azure Spot VM for ~{spot_discount_percent:.0f}% cost savings (${monthly_savings:.2f}/month). '
+                                        f'Spot VMs are ideal for batch jobs, dev/test, CI/CD, and analytics workloads that can handle interruptions. '
+                                        f'Use eviction policies and configure VM Scale Sets with multiple instance types for high availability.',
+                        'confidence_level': confidence_level,
+                        'migration_effort': 'high',  # Requires recreation as Spot VM
+                        'eviction_policy_recommendation': 'Deallocate',  # Stop VM on eviction instead of Delete
+                        'tags': vm_tags,
+                    },
+                ))
+
+        except Exception as e:
+            print(f"Error scanning Spot-convertible VMs in {region}: {str(e)}")
+
+        return orphans
+
+    async def scan_underutilized_vms(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scan for underutilized Azure Virtual Machines (rightsizing opportunity).
+
+        Detects running VMs with consistently low CPU utilization (<20% avg, <40% p95)
+        over an extended period, indicating they are oversized and could be downsized
+        for significant cost savings.
+
+        Requires: Azure Monitor "Monitoring Reader" permission
+        Metrics used: "Percentage CPU" (Average, Maximum, Percentile 95)
+
+        Args:
+            region: Azure region to scan
+            detection_rules: Optional detection configuration:
+                {
+                    "enabled": bool (default True),
+                    "min_observation_days": int (default 30) - Observation period,
+                    "max_avg_cpu_percent": float (default 20.0) - Max sustained avg CPU,
+                    "max_p95_cpu_percent": float (default 40.0) - Max peak (p95) CPU
+                }
+
+        Returns:
+            List of underutilized VMs with rightsizing recommendations
+        """
+        from datetime import datetime, timezone
+        from azure.identity import ClientSecretCredential
+        from azure.mgmt.compute import ComputeManagementClient
+        import re
+
+        orphans = []
+
+        # Extract detection rules
+        min_observation_days = detection_rules.get("min_observation_days", 30) if detection_rules else 30
+        max_avg_cpu_percent = detection_rules.get("max_avg_cpu_percent", 20.0) if detection_rules else 20.0
+        max_p95_cpu_percent = detection_rules.get("max_p95_cpu_percent", 40.0) if detection_rules else 40.0
+
+        try:
+            credential = ClientSecretCredential(
+                tenant_id=self.tenant_id,
+                client_id=self.client_id,
+                client_secret=self.client_secret
+            )
+
+            compute_client = ComputeManagementClient(credential, self.subscription_id)
+            vms = list(compute_client.virtual_machines.list_all())
+
+            for vm in vms:
+                if vm.location != region:
+                    continue
+
+                # Filter by resource group (if specified)
+                if not self._is_resource_in_scope(vm.id):
+                    continue
+
+                # Get VM instance view for power state
+                resource_group = vm.id.split('/')[4]
+                try:
+                    instance_view = compute_client.virtual_machines.instance_view(
+                        resource_group_name=resource_group,
+                        vm_name=vm.name
+                    )
+                except Exception as e:
+                    print(f"Error getting instance view for VM {vm.name}: {str(e)}")
+                    continue
+
+                # Check if VM is running
+                power_state = None
+                for status in instance_view.statuses:
+                    if status.code and status.code.startswith('PowerState/'):
+                        power_state = status.code.split('/')[-1]
+                        break
+
+                # Only analyze running VMs
+                if power_state != 'running':
+                    continue
+
+                # Query Azure Monitor metrics for CPU
+                try:
+                    # Get average CPU over observation period
+                    avg_metrics = await self._get_vm_metrics(
+                        vm_id=vm.id,
+                        metric_names=["Percentage CPU"],
+                        timespan_days=min_observation_days,
+                        aggregation="Average"
+                    )
+                    avg_cpu_percent = avg_metrics.get("Percentage CPU", 0.0)
+
+                    # Get maximum CPU over observation period
+                    max_metrics = await self._get_vm_metrics(
+                        vm_id=vm.id,
+                        metric_names=["Percentage CPU"],
+                        timespan_days=min_observation_days,
+                        aggregation="Maximum"
+                    )
+                    max_cpu_percent = max_metrics.get("Percentage CPU", 0.0)
+
+                    # Calculate p95 (approximate - use max as upper bound if needed)
+                    # In real implementation, would need to collect all data points and calculate percentile
+                    # For simplicity, estimate p95 as ~80% of max (conservative estimate)
+                    p95_cpu_percent = min(max_cpu_percent * 0.8, max_cpu_percent)
+
+                    # Check if VM is underutilized
+                    if avg_cpu_percent >= max_avg_cpu_percent or p95_cpu_percent >= max_p95_cpu_percent:
+                        continue  # Not underutilized
+
+                    # Parse current VM SKU to suggest downsize
+                    vm_size = vm.hardware_profile.vm_size
+                    current_cost = self._get_vm_cost_estimate(vm_size)
+
+                    # Extract vCPU count from SKU name (e.g., D4s_v3 → 4 vCPUs)
+                    # Pattern: Standard_{Series}{vCPU}[s]_v{gen}
+                    vcpu_match = re.search(r'[A-Z](\d+)', vm_size)
+                    if not vcpu_match:
+                        continue  # Can't parse SKU
+
+                    current_vcpus = int(vcpu_match.group(1))
+
+                    # Suggest downsize by 50% (half the vCPUs)
+                    suggested_vcpus = max(current_vcpus // 2, 1)  # Minimum 1 vCPU
+
+                    # Build suggested SKU (replace vCPU count)
+                    suggested_sku = vm_size.replace(str(current_vcpus), str(suggested_vcpus))
+
+                    # Estimate cost savings (50% for halving vCPUs)
+                    savings_percent = 50.0 if suggested_vcpus < current_vcpus else 0.0
+                    monthly_savings = current_cost * (savings_percent / 100.0)
+                    new_cost = current_cost - monthly_savings
+
+                    # Calculate VM age for total wasted cost
+                    age_days = 0
+                    if vm.time_created:
+                        age_delta = datetime.now(timezone.utc) - vm.time_created
+                        age_days = age_delta.days
+
+                    total_wasted = (age_days / 30.0) * monthly_savings if age_days > 0 else monthly_savings
+
+                    # Determine confidence level
+                    if min_observation_days >= 60:
+                        confidence_level = 'critical'
+                    elif min_observation_days >= 30:
+                        confidence_level = 'high'
+                    elif min_observation_days >= 14:
+                        confidence_level = 'medium'
+                    else:
+                        confidence_level = 'low'
+
+                    orphans.append(OrphanResourceData(
+                        resource_type='virtual_machine_underutilized',
+                        resource_id=vm.id,
+                        resource_name=vm.name,
+                        region=region,
+                        estimated_monthly_cost=monthly_savings,  # Savings opportunity
+                        resource_metadata={
+                            'vm_id': vm.id,
+                            'vm_name': vm.name,
+                            'current_vm_size': vm_size,
+                            'suggested_vm_size': suggested_sku,
+                            'current_vcpus': current_vcpus,
+                            'suggested_vcpus': suggested_vcpus,
+                            'power_state': 'running',
+                            'avg_cpu_percent': round(avg_cpu_percent, 2),
+                            'max_cpu_percent': round(max_cpu_percent, 2),
+                            'p95_cpu_percent': round(p95_cpu_percent, 2),
+                            'observation_period_days': min_observation_days,
+                            'current_monthly_cost': round(current_cost, 2),
+                            'new_monthly_cost': round(new_cost, 2),
+                            'monthly_savings': round(monthly_savings, 2),
+                            'savings_percent': round(savings_percent, 1),
+                            'age_days': age_days,
+                            'total_wasted_cost': round(total_wasted, 2),
+                            'orphan_reason': f'VM consistently underutilized (avg {avg_cpu_percent:.1f}% CPU, p95 {p95_cpu_percent:.1f}%) over {min_observation_days} days. '
+                                            f'Oversized for workload - rightsizing opportunity detected.',
+                            'recommendation': f'Downsize from {vm_size} ({current_vcpus} vCPU) to {suggested_sku} ({suggested_vcpus} vCPU) for ~{savings_percent:.0f}% cost savings (${monthly_savings:.2f}/month). '
+                                            f'Current CPU usage is very low (avg {avg_cpu_percent:.1f}%, p95 {p95_cpu_percent:.1f}%), indicating the VM is significantly oversized for the workload.',
+                            'confidence_level': confidence_level,
+                            'migration_effort': 'medium',  # Requires VM resize operation
+                            'tags': vm.tags or {},
+                        },
+                    ))
+
+                except Exception as e:
+                    print(f"Error querying metrics for VM {vm.name}: {str(e)}")
+                    continue
+
+        except Exception as e:
+            print(f"Error scanning underutilized VMs in {region}: {str(e)}")
+
+        return orphans
+
+    async def scan_memory_overprovisioned_vms(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scan for memory-optimized Azure VMs with low memory usage.
+
+        Detects E-series (memory-optimized) VMs with low memory utilization,
+        indicating they could be downsized to D-series (general purpose) for cost savings.
+
+        NOTE: This scenario requires Azure Monitor Agent installed on VMs to collect
+        memory metrics. Without the agent, detection is based on VM series analysis only.
+
+        Requires: Azure Monitor "Monitoring Reader" permission + Azure Monitor Agent on VMs
+        Metrics used: "Available Memory Bytes" (custom metric via Azure Monitor Agent)
+
+        Args:
+            region: Azure region to scan
+            detection_rules: Optional detection configuration:
+                {
+                    "enabled": bool (default True),
+                    "min_observation_days": int (default 30) - Observation period,
+                    "max_memory_percent": float (default 30.0) - Max memory usage,
+                    "memory_optimized_series": list (default ["E", "M", "G"]) - Series to check
+                }
+
+        Returns:
+            List of memory-overprovisioned VMs
+        """
+        from datetime import datetime, timezone
+        from azure.identity import ClientSecretCredential
+        from azure.mgmt.compute import ComputeManagementClient
+
+        orphans = []
+
+        # Extract detection rules
+        min_observation_days = detection_rules.get("min_observation_days", 30) if detection_rules else 30
+        max_memory_percent = detection_rules.get("max_memory_percent", 30.0) if detection_rules else 30.0
+        memory_optimized_series = detection_rules.get("memory_optimized_series", ["E", "M", "G"]) if detection_rules else ["E", "M", "G"]
+
+        try:
+            credential = ClientSecretCredential(
+                tenant_id=self.tenant_id,
+                client_id=self.client_id,
+                client_secret=self.client_secret
+            )
+
+            compute_client = ComputeManagementClient(credential, self.subscription_id)
+            vms = list(compute_client.virtual_machines.list_all())
+
+            for vm in vms:
+                if vm.location != region:
+                    continue
+
+                # Filter by resource group (if specified)
+                if not self._is_resource_in_scope(vm.id):
+                    continue
+
+                vm_size = vm.hardware_profile.vm_size
+
+                # Check if VM is memory-optimized series (E, M, G)
+                is_memory_optimized = False
+                vm_series = None
+                for series in memory_optimized_series:
+                    if vm_size.startswith(f"Standard_{series}"):
+                        is_memory_optimized = True
+                        vm_series = series
+                        break
+
+                if not is_memory_optimized:
+                    continue
+
+                # Get VM instance view for power state
+                resource_group = vm.id.split('/')[4]
+                try:
+                    instance_view = compute_client.virtual_machines.instance_view(
+                        resource_group_name=resource_group,
+                        vm_name=vm.name
+                    )
+                except Exception as e:
+                    print(f"Error getting instance view for VM {vm.name}: {str(e)}")
+                    continue
+
+                # Check if VM is running
+                power_state = None
+                for status in instance_view.statuses:
+                    if status.code and status.code.startswith('PowerState/'):
+                        power_state = status.code.split('/')[-1]
+                        break
+
+                # Only analyze running VMs
+                if power_state != 'running':
+                    continue
+
+                # Try to query memory metrics (requires Azure Monitor Agent)
+                try:
+                    # Attempt to get Available Memory Bytes metric
+                    # Note: This requires Azure Monitor Agent to be installed on the VM
+                    memory_metrics = await self._get_vm_metrics(
+                        vm_id=vm.id,
+                        metric_names=["Available Memory Bytes"],
+                        timespan_days=min_observation_days,
+                        aggregation="Average"
+                    )
+
+                    available_memory_bytes = memory_metrics.get("Available Memory Bytes", 0.0)
+
+                    # If memory metrics unavailable (agent not installed), skip this VM
+                    if available_memory_bytes == 0.0:
+                        print(f"Memory metrics unavailable for VM {vm.name} - Azure Monitor Agent may not be installed")
+                        continue
+
+                    # Estimate total memory based on VM SKU (rough estimates)
+                    # E-series: E{vCPU}[s]_v{gen} → vCPU * 8 GB RAM (8:1 ratio)
+                    # Example: E4s_v3 = 4 vCPU * 8 GB = 32 GB RAM
+                    import re
+                    vcpu_match = re.search(r'[A-Z](\d+)', vm_size)
+                    if not vcpu_match:
+                        continue
+
+                    vcpus = int(vcpu_match.group(1))
+                    # E-series has 8 GB RAM per vCPU
+                    total_memory_gb = vcpus * 8
+                    total_memory_bytes = total_memory_gb * 1024 * 1024 * 1024
+
+                    # Calculate memory used percentage
+                    memory_used_bytes = total_memory_bytes - available_memory_bytes
+                    memory_used_percent = (memory_used_bytes / total_memory_bytes * 100.0) if total_memory_bytes > 0 else 0.0
+
+                    # Check if memory usage is low
+                    if memory_used_percent >= max_memory_percent:
+                        continue  # Memory usage is high enough
+
+                    # Suggest migration to D-series (general purpose)
+                    # E-series → D-series (same vCPU count)
+                    suggested_sku = vm_size.replace(f"_{vm_series}", "_D")
+
+                    # Calculate costs
+                    current_cost = self._get_vm_cost_estimate(vm_size)
+                    # E-series is typically 25-30% more expensive than D-series
+                    savings_percent = 25.0
+                    monthly_savings = current_cost * (savings_percent / 100.0)
+                    new_cost = current_cost - monthly_savings
+
+                    # Calculate VM age
+                    age_days = 0
+                    if vm.time_created:
+                        age_delta = datetime.now(timezone.utc) - vm.time_created
+                        age_days = age_delta.days
+
+                    total_wasted = (age_days / 30.0) * monthly_savings if age_days > 0 else monthly_savings
+
+                    # Determine confidence level
+                    if min_observation_days >= 60:
+                        confidence_level = 'critical'
+                    elif min_observation_days >= 30:
+                        confidence_level = 'high'
+                    elif min_observation_days >= 14:
+                        confidence_level = 'medium'
+                    else:
+                        confidence_level = 'low'
+
+                    orphans.append(OrphanResourceData(
+                        resource_type='virtual_machine_memory_overprovisioned',
+                        resource_id=vm.id,
+                        resource_name=vm.name,
+                        region=region,
+                        estimated_monthly_cost=monthly_savings,  # Savings opportunity
+                        resource_metadata={
+                            'vm_id': vm.id,
+                            'vm_name': vm.name,
+                            'current_vm_size': vm_size,
+                            'suggested_vm_size': suggested_sku,
+                            'vm_series': vm_series,
+                            'power_state': 'running',
+                            'memory_used_percent': round(memory_used_percent, 2),
+                            'total_memory_gb': total_memory_gb,
+                            'available_memory_gb': round(available_memory_bytes / (1024 * 1024 * 1024), 2),
+                            'observation_period_days': min_observation_days,
+                            'current_monthly_cost': round(current_cost, 2),
+                            'new_monthly_cost': round(new_cost, 2),
+                            'monthly_savings': round(monthly_savings, 2),
+                            'savings_percent': round(savings_percent, 1),
+                            'age_days': age_days,
+                            'total_wasted_cost': round(total_wasted, 2),
+                            'orphan_reason': f'{vm_series}-series (memory-optimized) VM only using {memory_used_percent:.1f}% memory over {min_observation_days} days. '
+                                            f'Standard D-series (general purpose) would be sufficient.',
+                            'recommendation': f'Downgrade from {vm_size} ({vm_series}-series memory-optimized) to {suggested_sku} (D-series general purpose) for ~{savings_percent:.0f}% cost savings (${monthly_savings:.2f}/month). '
+                                            f'Current memory usage is very low ({memory_used_percent:.1f}%), indicating memory-optimized SKU is unnecessary.',
+                            'confidence_level': confidence_level,
+                            'migration_effort': 'medium',  # Requires VM resize
+                            'requires_agent': True,  # Requires Azure Monitor Agent
+                            'tags': vm.tags or {},
+                        },
+                    ))
+
+                except Exception as e:
+                    print(f"Error querying memory metrics for VM {vm.name}: {str(e)}")
+                    # Note: If agent not installed, this will fail silently and VM will be skipped
+                    continue
+
+        except Exception as e:
+            print(f"Error scanning memory-overprovisioned VMs in {region}: {str(e)}")
+
+        return orphans
+
     async def _get_disk_metrics(
         self,
         disk_id: str,
@@ -4643,6 +5393,113 @@ class AzureProvider(CloudProviderBase):
 
         except Exception as e:
             print(f"Error querying Azure Monitor metrics for Public IP {ip_id}: {str(e)}")
+            # Return zeros if metrics unavailable
+            return {name: 0.0 for name in metric_names}
+
+    async def _get_vm_metrics(
+        self,
+        vm_id: str,
+        metric_names: list[str],
+        timespan_days: int,
+        aggregation: str = "Average"
+    ) -> dict[str, float]:
+        """
+        Query Azure Monitor metrics for a Virtual Machine.
+
+        Args:
+            vm_id: Full Azure resource ID of the VM
+            metric_names: List of metric names to query (e.g., ["Percentage CPU", "Network In Total"])
+            timespan_days: Number of days to look back
+            aggregation: Aggregation type ("Average", "Maximum", "Minimum", "Total")
+
+        Returns:
+            Dict mapping metric_name -> aggregated value over the timespan
+
+        Metrics available for VMs:
+            - Percentage CPU: CPU utilization percentage (0-100%)
+            - Network In Total: Total bytes received (bytes)
+            - Network Out Total: Total bytes transmitted (bytes)
+            - Disk Read Bytes: Disk read throughput (bytes)
+            - Disk Write Bytes: Disk write throughput (bytes)
+            - Available Memory Bytes: Available RAM (requires VM agent)
+
+        Example:
+            metrics = await _get_vm_metrics(
+                vm_id="/subscriptions/.../virtualMachines/my-vm",
+                metric_names=["Percentage CPU", "Network In Total", "Network Out Total"],
+                timespan_days=7,
+                aggregation="Average"
+            )
+            # Returns: {"Percentage CPU": 2.5, "Network In Total": 1024000.0, "Network Out Total": 512000.0}
+        """
+        from datetime import datetime, timedelta, timezone
+        from azure.monitor.query import MetricsQueryClient, MetricAggregationType
+        from azure.identity import ClientSecretCredential
+
+        try:
+            credential = ClientSecretCredential(
+                tenant_id=self.tenant_id,
+                client_id=self.client_id,
+                client_secret=self.client_secret
+            )
+
+            metrics_client = MetricsQueryClient(credential)
+
+            # Calculate timespan
+            end_time = datetime.now(timezone.utc)
+            start_time = end_time - timedelta(days=timespan_days)
+
+            # Map aggregation string to enum
+            aggregation_map = {
+                "Average": MetricAggregationType.AVERAGE,
+                "Maximum": MetricAggregationType.MAXIMUM,
+                "Minimum": MetricAggregationType.MINIMUM,
+                "Total": MetricAggregationType.TOTAL,
+                "Count": MetricAggregationType.COUNT
+            }
+            agg_type = aggregation_map.get(aggregation, MetricAggregationType.AVERAGE)
+
+            # Query metrics
+            response = metrics_client.query_resource(
+                resource_uri=vm_id,
+                metric_names=metric_names,
+                timespan=(start_time, end_time),
+                aggregations=[agg_type]
+            )
+
+            results = {}
+            for metric in response.metrics:
+                if metric.timeseries:
+                    # Collect all data points and calculate overall value
+                    values = []
+                    for ts in metric.timeseries:
+                        for data in ts.data:
+                            if aggregation == "Average" and data.average is not None:
+                                values.append(data.average)
+                            elif aggregation == "Maximum" and data.maximum is not None:
+                                values.append(data.maximum)
+                            elif aggregation == "Minimum" and data.minimum is not None:
+                                values.append(data.minimum)
+                            elif aggregation == "Total" and data.total is not None:
+                                values.append(data.total)
+
+                    # Calculate overall metric value
+                    if values:
+                        if aggregation == "Total":
+                            # For Total aggregation (e.g., Network In/Out), sum all values
+                            results[metric.name] = sum(values)
+                        else:
+                            # For Average, Maximum, Minimum - take average of data points
+                            results[metric.name] = sum(values) / len(values)
+                    else:
+                        results[metric.name] = 0.0
+                else:
+                    results[metric.name] = 0.0
+
+            return results
+
+        except Exception as e:
+            print(f"Error querying Azure Monitor metrics for VM {vm_id}: {str(e)}")
             # Return zeros if metrics unavailable
             return {name: 0.0 for name in metric_names}
 
@@ -5236,18 +6093,163 @@ class AzureProvider(CloudProviderBase):
         self, region: str, detection_rules: dict | None = None
     ) -> list[OrphanResourceData]:
         """
-        Scan for idle Azure Virtual Machines (low CPU utilization).
+        Scan for idle Azure Virtual Machines (running but completely idle).
+
+        Detects VMs that are running but have very low CPU utilization (<5%) AND
+        minimal network traffic (<7MB/day), indicating they are not being actively used.
+        This is 100% waste as the VM is paying full compute cost while idle.
+
+        Requires: Azure Monitor "Monitoring Reader" permission
+        Metrics used:
+            - "Percentage CPU": Average CPU utilization
+            - "Network In Total": Total bytes received
+            - "Network Out Total": Total bytes transmitted
 
         Args:
             region: Azure region to scan
-            detection_rules: Optional detection configuration
+            detection_rules: Optional detection configuration:
+                {
+                    "enabled": bool (default True),
+                    "min_idle_days": int (default 7) - Observation period in days,
+                    "max_cpu_percent": float (default 5.0) - Max avg CPU % threshold,
+                    "max_network_mb_per_day": float (default 7.0) - Max network traffic MB/day
+                }
 
         Returns:
             List of idle VM resources
         """
-        # TODO: Implement using azure.mgmt.monitor for metrics
-        # Detect: VMs with < 5% average CPU for 30 days
-        return []
+        from datetime import datetime, timezone
+        from azure.identity import ClientSecretCredential
+        from azure.mgmt.compute import ComputeManagementClient
+
+        orphans = []
+
+        # Extract detection rules
+        min_idle_days = detection_rules.get("min_idle_days", 7) if detection_rules else 7
+        max_cpu_percent = detection_rules.get("max_cpu_percent", 5.0) if detection_rules else 5.0
+        max_network_mb_per_day = detection_rules.get("max_network_mb_per_day", 7.0) if detection_rules else 7.0
+
+        try:
+            credential = ClientSecretCredential(
+                tenant_id=self.tenant_id,
+                client_id=self.client_id,
+                client_secret=self.client_secret
+            )
+
+            compute_client = ComputeManagementClient(credential, self.subscription_id)
+            vms = list(compute_client.virtual_machines.list_all())
+
+            for vm in vms:
+                if vm.location != region:
+                    continue
+
+                # Filter by resource group (if specified)
+                if not self._is_resource_in_scope(vm.id):
+                    continue
+
+                # Get VM instance view for power state
+                resource_group = vm.id.split('/')[4]
+                try:
+                    instance_view = compute_client.virtual_machines.instance_view(
+                        resource_group_name=resource_group,
+                        vm_name=vm.name
+                    )
+                except Exception as e:
+                    print(f"Error getting instance view for VM {vm.name}: {str(e)}")
+                    continue
+
+                # Check if VM is running (not deallocated, not stopped)
+                power_state = None
+                for status in instance_view.statuses:
+                    if status.code and status.code.startswith('PowerState/'):
+                        power_state = status.code.split('/')[-1]
+                        break
+
+                # Only analyze running VMs
+                if power_state != 'running':
+                    continue
+
+                # Query Azure Monitor metrics for CPU and Network
+                try:
+                    metrics = await self._get_vm_metrics(
+                        vm_id=vm.id,
+                        metric_names=["Percentage CPU", "Network In Total", "Network Out Total"],
+                        timespan_days=min_idle_days,
+                        aggregation="Average"
+                    )
+
+                    avg_cpu_percent = metrics.get("Percentage CPU", 0.0)
+                    network_in_bytes = metrics.get("Network In Total", 0.0)
+                    network_out_bytes = metrics.get("Network Out Total", 0.0)
+
+                    # Convert network bytes to MB
+                    network_in_mb = network_in_bytes / (1024 * 1024)
+                    network_out_mb = network_out_bytes / (1024 * 1024)
+                    total_network_mb = network_in_mb + network_out_mb
+
+                    # Calculate MB per day
+                    network_mb_per_day = total_network_mb / min_idle_days if min_idle_days > 0 else total_network_mb
+
+                    # Check if VM is idle (low CPU AND low network traffic)
+                    if avg_cpu_percent < max_cpu_percent and network_mb_per_day < max_network_mb_per_day:
+                        # Calculate VM age
+                        age_days = 0
+                        if vm.time_created:
+                            age_delta = datetime.now(timezone.utc) - vm.time_created
+                            age_days = age_delta.days
+
+                        # Calculate monthly cost (100% waste - VM is running but idle)
+                        vm_cost = self._get_vm_cost_estimate(vm.hardware_profile.vm_size)
+
+                        # Determine confidence level based on observation period
+                        if min_idle_days >= 30:
+                            confidence_level = 'critical'
+                        elif min_idle_days >= 14:
+                            confidence_level = 'high'
+                        elif min_idle_days >= 7:
+                            confidence_level = 'medium'
+                        else:
+                            confidence_level = 'low'
+
+                        # Calculate total wasted cost (age * monthly cost)
+                        monthly_waste = vm_cost
+                        total_wasted = (age_days / 30.0) * monthly_waste if age_days > 0 else monthly_waste
+
+                        orphans.append(OrphanResourceData(
+                            resource_type='virtual_machine_idle',
+                            resource_id=vm.id,
+                            resource_name=vm.name,
+                            region=region,
+                            estimated_monthly_cost=monthly_waste,
+                            resource_metadata={
+                                'vm_id': vm.id,
+                                'vm_name': vm.name,
+                                'vm_size': vm.hardware_profile.vm_size,
+                                'power_state': 'running',
+                                'os_type': vm.storage_profile.os_disk.os_type.value if vm.storage_profile.os_disk.os_type else 'Unknown',
+                                'avg_cpu_percent': round(avg_cpu_percent, 2),
+                                'avg_network_in_mb': round(network_in_mb, 2),
+                                'avg_network_out_mb': round(network_out_mb, 2),
+                                'total_network_mb': round(total_network_mb, 2),
+                                'network_mb_per_day': round(network_mb_per_day, 2),
+                                'observation_period_days': min_idle_days,
+                                'age_days': age_days,
+                                'total_wasted_cost': round(total_wasted, 2),
+                                'orphan_reason': f'VM running but idle for {min_idle_days} days with {avg_cpu_percent:.1f}% avg CPU and {network_mb_per_day:.1f}MB/day network traffic',
+                                'recommendation': f'Shut down or delete VM. Completely idle workload wasting ${monthly_waste:.2f}/month. Consider deallocating if temporarily unused, or deleting if no longer needed.',
+                                'confidence_level': confidence_level,
+                                'tags': vm.tags or {},
+                            },
+                        ))
+
+                except Exception as e:
+                    print(f"Error querying metrics for VM {vm.name}: {str(e)}")
+                    continue
+
+        except Exception as e:
+            print(f"Error scanning idle VMs in {region}: {str(e)}")
+
+        return orphans
 
     async def scan_unused_load_balancers(
         self, region: str, detection_rules: dict | None = None

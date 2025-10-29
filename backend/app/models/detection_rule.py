@@ -582,7 +582,104 @@ DEFAULT_DETECTION_RULES = {
         "enabled": True,
         "min_stopped_days": 30,  # Deallocated for > 30 days
         "confidence_threshold_days": 60,
+        "confidence_critical_days": 90,
+        "confidence_high_days": 30,
+        "confidence_medium_days": 7,
         "description": "Azure VMs deallocated for extended periods",
+    },
+    "virtual_machine_stopped_not_deallocated": {
+        "enabled": True,
+        "min_stopped_days": 7,  # CRITICAL - detect quickly to prevent waste
+        "confidence_threshold_days": 14,
+        "confidence_critical_days": 30,
+        "confidence_high_days": 14,
+        "confidence_medium_days": 7,
+        "description": "Azure VMs stopped but NOT deallocated (paying full price while stopped) - CRITICAL waste scenario",
+    },
+    "virtual_machine_never_started": {
+        "enabled": True,
+        "min_age_days": 7,  # VMs never started after 7 days
+        "confidence_threshold_days": 30,
+        "confidence_critical_days": 60,
+        "confidence_high_days": 30,
+        "confidence_medium_days": 7,
+        "description": "Azure VMs created but never started - likely test or failed deployments",
+    },
+    "virtual_machine_oversized_premium": {
+        "enabled": True,
+        "min_age_days": 30,  # Ignore recently created VMs
+        "non_prod_environments": ["dev", "test", "staging", "qa", "development"],
+        "confidence_threshold_days": 60,
+        "confidence_critical_days": 90,
+        "confidence_high_days": 60,
+        "confidence_medium_days": 30,
+        "description": "Azure VMs using Premium SSD in non-production environments - Standard SSD recommended",
+    },
+    "virtual_machine_untagged_orphan": {
+        "enabled": True,
+        "min_age_days": 30,  # Ignore recently created VMs
+        "required_tags": ["owner", "project", "cost_center", "environment"],
+        "confidence_threshold_days": 60,
+        "confidence_critical_days": 90,
+        "confidence_high_days": 60,
+        "confidence_medium_days": 30,
+        "description": "Azure VMs missing required governance tags - potentially orphaned resources",
+    },
+    "virtual_machine_idle": {
+        "enabled": True,
+        "min_idle_days": 7,  # Observation period in days
+        "max_cpu_percent": 5.0,  # Azure Advisor standard: <5% CPU = idle
+        "max_network_mb_per_day": 7.0,  # Azure Advisor standard: <7MB/day network traffic = idle
+        "confidence_threshold_days": 14,
+        "confidence_critical_days": 30,
+        "confidence_high_days": 14,
+        "confidence_medium_days": 7,
+        "description": "Azure VMs running but completely idle (low CPU + low network) - Requires Azure Monitor",
+    },
+    "virtual_machine_old_generation": {
+        "enabled": True,
+        "min_age_days": 60,  # Only flag stable VMs (2 months old)
+        "old_generations": ["v1", "v2", "_v3"],  # SKU generations to flag for upgrade
+        "savings_percent": 25.0,  # Estimated savings from migrating to v4/v5
+        "confidence_threshold_days": 90,
+        "confidence_critical_days": 180,
+        "confidence_high_days": 90,
+        "confidence_medium_days": 60,
+        "description": "Azure VMs using old generation SKUs (v1/v2/v3) - migrate to v4/v5 for better price-performance",
+    },
+    "virtual_machine_spot_convertible": {
+        "enabled": True,
+        "min_age_days": 30,  # Only flag stable VMs (1 month old)
+        "spot_eligible_tags": ["batch", "dev", "test", "staging", "ci", "cd", "analytics", "non-critical", "development", "qa"],
+        "spot_discount_percent": 75.0,  # Average Spot discount (60-90%)
+        "exclude_ha_vms": True,  # Exclude high-availability production VMs
+        "confidence_threshold_days": 60,
+        "confidence_critical_days": 90,
+        "confidence_high_days": 60,
+        "confidence_medium_days": 30,
+        "description": "Azure VMs eligible for Spot pricing (60-90% savings) - interruptible workloads (dev/test/batch)",
+    },
+    "virtual_machine_underutilized": {
+        "enabled": True,
+        "min_observation_days": 30,  # Observation period for CPU analysis
+        "max_avg_cpu_percent": 20.0,  # Sustained low average CPU usage
+        "max_p95_cpu_percent": 40.0,  # Even peak (p95) CPU is low
+        "confidence_threshold_days": 30,
+        "confidence_critical_days": 60,
+        "confidence_high_days": 30,
+        "confidence_medium_days": 14,
+        "description": "Azure VMs consistently underutilized (rightsizing opportunity) - Requires Azure Monitor",
+    },
+    "virtual_machine_memory_overprovisioned": {
+        "enabled": True,
+        "min_observation_days": 30,  # Observation period for memory analysis
+        "max_memory_percent": 30.0,  # Low memory usage threshold
+        "memory_optimized_series": ["E", "M", "G"],  # Memory-optimized series to check
+        "confidence_threshold_days": 30,
+        "confidence_critical_days": 60,
+        "confidence_high_days": 30,
+        "confidence_medium_days": 14,
+        "description": "Azure memory-optimized VMs (E-series) with low memory usage - Requires Azure Monitor Agent",
     },
     "azure_aks_cluster": {
         "enabled": True,
