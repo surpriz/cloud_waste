@@ -120,86 +120,6 @@ print_success "Pre-flight checks passed"
 # Step 1: List Available Backups
 # ============================================================================
 
-list_backups() {
-    echo ""
-    print_step "Available backups:"
-    echo ""
-
-    local i=1
-    declare -A backup_map
-
-    # List monthly backups
-    if [ -d "$BACKUP_ROOT/monthly" ]; then
-        local monthly_backups=$(find "$BACKUP_ROOT/monthly" -maxdepth 1 -type d -name "backup_*" 2>/dev/null | sort -r)
-        if [ -n "$monthly_backups" ]; then
-            echo -e "${GREEN}Monthly Backups:${NC}"
-            while IFS= read -r backup_path; do
-                if [ -d "$backup_path" ]; then
-                    local backup_name=$(basename "$backup_path")
-                    local backup_date=$(echo "$backup_name" | sed 's/backup_//' | sed 's/_/ /')
-                    local backup_size=$(du -sh "$backup_path" 2>/dev/null | cut -f1)
-                    echo -e "  ${CYAN}[$i]${NC} $backup_date (${backup_size})"
-                    backup_map[$i]="$backup_path"
-                    ((i++))
-                fi
-            done <<< "$monthly_backups"
-            echo ""
-        fi
-    fi
-
-    # List weekly backups
-    if [ -d "$BACKUP_ROOT/weekly" ]; then
-        local weekly_backups=$(find "$BACKUP_ROOT/weekly" -maxdepth 1 -type d -name "backup_*" 2>/dev/null | sort -r)
-        if [ -n "$weekly_backups" ]; then
-            echo -e "${GREEN}Weekly Backups:${NC}"
-            while IFS= read -r backup_path; do
-                if [ -d "$backup_path" ]; then
-                    local backup_name=$(basename "$backup_path")
-                    local backup_date=$(echo "$backup_name" | sed 's/backup_//' | sed 's/_/ /')
-                    local backup_size=$(du -sh "$backup_path" 2>/dev/null | cut -f1)
-                    echo -e "  ${CYAN}[$i]${NC} $backup_date (${backup_size})"
-                    backup_map[$i]="$backup_path"
-                    ((i++))
-                fi
-            done <<< "$weekly_backups"
-            echo ""
-        fi
-    fi
-
-    # List daily backups
-    if [ -d "$BACKUP_ROOT/daily" ]; then
-        local daily_backups=$(find "$BACKUP_ROOT/daily" -maxdepth 1 -type d -name "backup_*" 2>/dev/null | sort -r)
-        if [ -n "$daily_backups" ]; then
-            echo -e "${GREEN}Daily Backups:${NC}"
-            while IFS= read -r backup_path; do
-                if [ -d "$backup_path" ]; then
-                    local backup_name=$(basename "$backup_path")
-                    local backup_date=$(echo "$backup_name" | sed 's/backup_//' | sed 's/_/ /')
-                    local backup_size=$(du -sh "$backup_path" 2>/dev/null | cut -f1)
-                    echo -e "  ${CYAN}[$i]${NC} $backup_date (${backup_size})"
-                    backup_map[$i]="$backup_path"
-                    ((i++))
-                fi
-            done <<< "$daily_backups"
-            echo ""
-        fi
-    fi
-
-    if [ ${#backup_map[@]} -eq 0 ]; then
-        print_error "No backups found in $BACKUP_ROOT"
-        exit 1
-    fi
-
-    # Return backup map as serialized string
-    for key in "${!backup_map[@]}"; do
-        echo "$key:${backup_map[$key]}"
-    done
-}
-
-# ============================================================================
-# Step 2: Select Backup
-# ============================================================================
-
 # Check if backup path was provided as argument
 if [ -n "$1" ]; then
     BACKUP_DIR="$1"
@@ -210,12 +130,77 @@ if [ -n "$1" ]; then
     print_info "Using backup: $BACKUP_DIR"
 else
     # Interactive selection
-    backup_list=$(list_backups)
+    echo ""
+    print_step "Available backups:"
+    echo ""
 
-    declare -A backup_map
-    while IFS=: read -r num path; do
-        backup_map[$num]="$path"
-    done <<< "$backup_list"
+    # Create temporary file for backup list
+    BACKUP_LIST_FILE=$(mktemp)
+    trap "rm -f $BACKUP_LIST_FILE" EXIT
+
+    i=1
+
+    # List monthly backups
+    if [ -d "$BACKUP_ROOT/monthly" ]; then
+        monthly_backups=$(find "$BACKUP_ROOT/monthly" -maxdepth 1 -type d -name "backup_*" 2>/dev/null | sort -r)
+        if [ -n "$monthly_backups" ]; then
+            echo -e "${GREEN}Monthly Backups:${NC}"
+            while IFS= read -r backup_path; do
+                if [ -d "$backup_path" ]; then
+                    backup_name=$(basename "$backup_path")
+                    backup_date=$(echo "$backup_name" | sed 's/backup_//' | sed 's/_/ /')
+                    backup_size=$(du -sh "$backup_path" 2>/dev/null | cut -f1)
+                    echo -e "  ${CYAN}[$i]${NC} $backup_date (${backup_size})"
+                    echo "$i|$backup_path" >> "$BACKUP_LIST_FILE"
+                    ((i++))
+                fi
+            done <<< "$monthly_backups"
+            echo ""
+        fi
+    fi
+
+    # List weekly backups
+    if [ -d "$BACKUP_ROOT/weekly" ]; then
+        weekly_backups=$(find "$BACKUP_ROOT/weekly" -maxdepth 1 -type d -name "backup_*" 2>/dev/null | sort -r)
+        if [ -n "$weekly_backups" ]; then
+            echo -e "${GREEN}Weekly Backups:${NC}"
+            while IFS= read -r backup_path; do
+                if [ -d "$backup_path" ]; then
+                    backup_name=$(basename "$backup_path")
+                    backup_date=$(echo "$backup_name" | sed 's/backup_//' | sed 's/_/ /')
+                    backup_size=$(du -sh "$backup_path" 2>/dev/null | cut -f1)
+                    echo -e "  ${CYAN}[$i]${NC} $backup_date (${backup_size})"
+                    echo "$i|$backup_path" >> "$BACKUP_LIST_FILE"
+                    ((i++))
+                fi
+            done <<< "$weekly_backups"
+            echo ""
+        fi
+    fi
+
+    # List daily backups
+    if [ -d "$BACKUP_ROOT/daily" ]; then
+        daily_backups=$(find "$BACKUP_ROOT/daily" -maxdepth 1 -type d -name "backup_*" 2>/dev/null | sort -r)
+        if [ -n "$daily_backups" ]; then
+            echo -e "${GREEN}Daily Backups:${NC}"
+            while IFS= read -r backup_path; do
+                if [ -d "$backup_path" ]; then
+                    backup_name=$(basename "$backup_path")
+                    backup_date=$(echo "$backup_name" | sed 's/backup_//' | sed 's/_/ /')
+                    backup_size=$(du -sh "$backup_path" 2>/dev/null | cut -f1)
+                    echo -e "  ${CYAN}[$i]${NC} $backup_date (${backup_size})"
+                    echo "$i|$backup_path" >> "$BACKUP_LIST_FILE"
+                    ((i++))
+                fi
+            done <<< "$daily_backups"
+            echo ""
+        fi
+    fi
+
+    if [ ! -s "$BACKUP_LIST_FILE" ]; then
+        print_error "No backups found in $BACKUP_ROOT"
+        exit 1
+    fi
 
     echo -ne "${YELLOW}Select backup number to restore (or 'q' to quit): ${NC}"
     read -r selection
@@ -225,7 +210,8 @@ else
         exit 0
     fi
 
-    BACKUP_DIR="${backup_map[$selection]}"
+    # Get backup path from selection
+    BACKUP_DIR=$(grep "^${selection}|" "$BACKUP_LIST_FILE" | cut -d'|' -f2)
 
     if [ -z "$BACKUP_DIR" ] || [ ! -d "$BACKUP_DIR" ]; then
         print_error "Invalid selection"
@@ -234,7 +220,7 @@ else
 fi
 
 # ============================================================================
-# Step 3: Display Backup Information
+# Step 2: Display Backup Information
 # ============================================================================
 
 print_step "Backup Information:"
