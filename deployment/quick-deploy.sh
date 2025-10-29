@@ -37,6 +37,24 @@ COMPOSE_FILE="deployment/docker-compose.prod.yml"
 ENV_FILE=".env.prod"
 
 # ============================================================================
+  # Load Environment Variables
+  # ============================================================================
+
+  print_step "Loading environment variables from $ENV_FILE..."
+
+  if [ ! -f "$ENV_FILE" ]; then
+      print_error "Environment file $ENV_FILE not found"
+      exit 1
+  fi
+
+  # Export all variables from .env.prod
+  set -a
+  source "$ENV_FILE"
+  set +a
+
+  print_success "Environment variables loaded"
+
+# ============================================================================
 # Helper Functions
 # ============================================================================
 
