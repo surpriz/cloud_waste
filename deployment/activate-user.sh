@@ -34,7 +34,7 @@ USER_EMAIL="$1"
 echo -e "${GREEN}▶${NC} Activating user account: $USER_EMAIL"
 
 # SQL command to activate user and make them superuser
-SQL_COMMAND="UPDATE users SET is_active = true, is_verified = true, is_superuser = true WHERE email = '$USER_EMAIL';"
+SQL_COMMAND="UPDATE users SET is_active = true, is_superuser = true WHERE email = '$USER_EMAIL';"
 
 # Load environment variables
 if [ -f ".env.prod" ]; then
@@ -54,7 +54,7 @@ docker exec cloudwaste_postgres psql \
 RESULT=$(docker exec cloudwaste_postgres psql \
     -U "${POSTGRES_USER:-cloudwaste}" \
     -d "${POSTGRES_DB:-cloudwaste}" \
-    -t -c "SELECT email, is_active, is_verified, is_superuser FROM users WHERE email = '$USER_EMAIL';")
+    -t -c "SELECT email, is_active, is_superuser FROM users WHERE email = '$USER_EMAIL';")
 
 if [ -z "$RESULT" ]; then
     echo -e "${YELLOW}⚠${NC} User $USER_EMAIL not found in database"
