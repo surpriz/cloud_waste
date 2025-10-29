@@ -140,7 +140,7 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 40s
+      start_period: 90s  # Frontend takes 70-90s to start
     networks:
       - cloudwaste_network
     # No port exposure - Nginx handles external access
