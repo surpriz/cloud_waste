@@ -1,42 +1,62 @@
 #!/bin/bash
 
 # ============================================================================
-# CloudWaste - Quick Deploy Script
-# ============================================================================
-#
-# This script performs a fast deployment of CloudWaste to production
-# It's called by:
-#   - GitHub Actions (automated on git push)
-#   - Manual deployments on the VPS
-#
-# What it does:
-#   1. Stop running containers
-#   2. Rebuild images with latest code
-#   3. Run database migrations
-#   4. Start containers
-#   5. Health checks
-#
-# Usage:
-#   cd /opt/cloudwaste
-#   bash deployment/quick-deploy.sh
-#
-# ============================================================================
+  # CloudWaste - Quick Deploy Script
+  # ============================================================================
+  #
+  # This script performs a fast deployment of CloudWaste to production
+  # It's called by:
+  #   - GitHub Actions (automated on git push)
+  #   - Manual deployments on the VPS
+  #
+  # What it does:
+  #   1. Stop running containers
+  #   2. Rebuild images with latest code
+  #   3. Run database migrations
+  #   4. Start containers
+  #   5. Health checks
+  #
+  # Usage:
+  #   cd /opt/cloudwaste
+  #   bash deployment/quick-deploy.sh
+  #
+  # ============================================================================
 
-set -e  # Exit on error
+  set -e  # Exit on error
 
-# Colors for output
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m' # No Color
+  # Colors for output
+  RED='\033[0;31m'
+  GREEN='\033[0;32m'
+  YELLOW='\033[1;33m'
+  BLUE='\033[0;34m'
+  NC='\033[0m' # No Color
 
-# Configuration
-APP_DIR="/opt/cloudwaste"
-COMPOSE_FILE="deployment/docker-compose.prod.yml"
-ENV_FILE=".env.prod"
+  # Configuration
+  APP_DIR="/opt/cloudwaste"
+  COMPOSE_FILE="deployment/docker-compose.prod.yml"
+  ENV_FILE=".env.prod"
 
-# ============================================================================
+  # ============================================================================
+  # Helper Functions
+  # ============================================================================
+
+  print_step() {
+      echo -e "${GREEN}▶${NC} $1"
+  }
+
+  print_warning() {
+      echo -e "${YELLOW}⚠${NC} $1"
+  }
+
+  print_error() {
+      echo -e "${RED}✗${NC} $1"
+  }
+
+  print_success() {
+      echo -e "${GREEN}✓${NC} $1"
+  }
+
+  # ============================================================================
   # Load Environment Variables
   # ============================================================================
 
@@ -54,45 +74,18 @@ ENV_FILE=".env.prod"
 
   print_success "Environment variables loaded"
 
-# ============================================================================
-# Helper Functions
-# ============================================================================
+  # ============================================================================
+  # Pre-flight Checks
+  # ============================================================================
 
-print_step() {
-    echo -e "${GREEN}▶${NC} $1"
-}
+  # Check if we're in the right directory
+  if [ ! -f "$COMPOSE_FILE" ]; then
+      print_error "Cannot find $COMPOSE_FILE"
+      print_error "Make sure you're running this from $APP_DIR"
+      exit 1
+  fi
 
-print_warning() {
-    echo -e "${YELLOW}⚠${NC} $1"
-}
-
-print_error() {
-    echo -e "${RED}✗${NC} $1"
-}
-
-print_success() {
-    echo -e "${GREEN}✓${NC} $1"
-}
-
-# ============================================================================
-# Pre-flight Checks
-# ============================================================================
-
-# Check if we're in the right directory
-if [ ! -f "$COMPOSE_FILE" ]; then
-    print_error "Cannot find $COMPOSE_FILE"
-    print_error "Make sure you're running this from $APP_DIR"
-    exit 1
-fi
-
-# Check if .env.prod exists
-if [ ! -f "$ENV_FILE" ]; then
-    print_error "Cannot find $ENV_FILE"
-    print_error "Run deployment/setup-server.sh first to generate environment file"
-    exit 1
-fi
-
-print_success "Pre-flight checks passed"
+  print_success "Pre-flight checks passed"
 
 # ============================================================================
 # Step 1: Stop Running Containers
