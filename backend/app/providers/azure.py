@@ -331,6 +331,310 @@ class AzureProvider(CloudProviderBase):
 
         return round(base_cost, 2)
 
+    def _get_vm_hourly_cost(self, vm_size: str) -> float:
+        """
+        Get hourly cost for Azure VM sizes (approximate US East pricing 2025).
+
+        Args:
+            vm_size: VM SKU (e.g., 'Standard_D2s_v3', 'Standard_E4s_v3')
+
+        Returns:
+            Hourly cost in USD
+        """
+        # D-series (General Purpose) - vCPU:RAM ratio 1:4
+        d_series = {
+            'Standard_D2s_v3': 0.096,   # 2 vCPU, 8 GB RAM
+            'Standard_D4s_v3': 0.192,   # 4 vCPU, 16 GB RAM
+            'Standard_D8s_v3': 0.384,   # 8 vCPU, 32 GB RAM
+            'Standard_D16s_v3': 0.768,  # 16 vCPU, 64 GB RAM
+            'Standard_D32s_v3': 1.536,  # 32 vCPU, 128 GB RAM
+            'Standard_D48s_v3': 2.304,  # 48 vCPU, 192 GB RAM
+            'Standard_D64s_v3': 3.072,  # 64 vCPU, 256 GB RAM
+        }
+
+        # E-series (Memory Optimized) - vCPU:RAM ratio 1:8
+        e_series = {
+            'Standard_E2s_v3': 0.126,   # 2 vCPU, 16 GB RAM
+            'Standard_E4s_v3': 0.252,   # 4 vCPU, 32 GB RAM
+            'Standard_E8s_v3': 0.504,   # 8 vCPU, 64 GB RAM
+            'Standard_E16s_v3': 1.008,  # 16 vCPU, 128 GB RAM
+            'Standard_E32s_v3': 2.016,  # 32 vCPU, 256 GB RAM
+            'Standard_E48s_v3': 3.024,  # 48 vCPU, 384 GB RAM
+            'Standard_E64s_v3': 4.032,  # 64 vCPU, 512 GB RAM
+        }
+
+        # F-series (Compute Optimized) - vCPU:RAM ratio 1:2
+        f_series = {
+            'Standard_F2s_v2': 0.085,   # 2 vCPU, 4 GB RAM
+            'Standard_F4s_v2': 0.169,   # 4 vCPU, 8 GB RAM
+            'Standard_F8s_v2': 0.338,   # 8 vCPU, 16 GB RAM
+            'Standard_F16s_v2': 0.677,  # 16 vCPU, 32 GB RAM
+            'Standard_F32s_v2': 1.354,  # 32 vCPU, 64 GB RAM
+        }
+
+        # Combine all series
+        pricing = {**d_series, **e_series, **f_series}
+
+        # Return price or estimate based on vCPU count if unknown
+        if vm_size in pricing:
+            return pricing[vm_size]
+
+        # Fallback: estimate based on vCPU count (rough approximation)
+        # Pattern: Standard_D{vcpu}s_v3 → extract vCPU count
+        try:
+            if 'D' in vm_size and 's_v' in vm_size:
+                vcpu_str = vm_size.split('D')[1].split('s')[0]
+                vcpus = int(vcpu_str)
+                return vcpus * 0.048  # ~$0.048/vCPU/hour (D-series average)
+            elif 'E' in vm_size and 's_v' in vm_size:
+                vcpu_str = vm_size.split('E')[1].split('s')[0]
+                vcpus = int(vcpu_str)
+                return vcpus * 0.063  # ~$0.063/vCPU/hour (E-series average)
+        except (ValueError, IndexError):
+            pass
+
+        # Default fallback (Standard_D2s_v3 equivalent)
+        return 0.096
+
+    def _calculate_aks_cluster_cost(
+        self,
+        cluster,
+        agent_pools: list,
+        include_storage: bool = True,
+        include_networking: bool = True
+    ) -> dict:
+        """
+        Calculate comprehensive monthly cost for an AKS cluster.
+
+        Args:
+            cluster: Azure ManagedCluster object
+            agent_pools: List of AgentPool objects
+            include_storage: Include OS disk storage costs
+            include_networking: Include LB and Public IP costs
+
+        Returns:
+            Dict with cost breakdown:
+            {
+                'cluster_fee': float,
+                'node_cost': float,
+                'storage_cost': float,
+                'lb_cost': float,
+                'public_ip_cost': float,
+                'total_monthly_cost': float
+            }
+        """
+        # Cluster management fee based on tier
+        tier_pricing = {
+            'Free': 0,          # No SLA, control plane free
+            'Standard': 73.0,   # $0.10/hour = $73/month, 99.9% SLA
+            'Premium': 438.0    # $0.60/hour = $438/month, 99.95% SLA, Uptime SLA
+        }
+
+        cluster_tier = cluster.sku.tier if cluster.sku else 'Free'
+        cluster_fee = tier_pricing.get(cluster_tier, 0.0)
+
+        # Node compute costs
+        node_cost = 0.0
+        total_nodes = 0
+        for pool in agent_pools:
+            pool_node_count = pool.count if pool.count else 0
+            total_nodes += pool_node_count
+            vm_size = pool.vm_size if pool.vm_size else 'Standard_D2s_v3'
+            vm_hourly_cost = self._get_vm_hourly_cost(vm_size)
+            node_cost += pool_node_count * vm_hourly_cost * 730  # 730 hours/month
+
+        # Storage costs (OS disks)
+        storage_cost = 0.0
+        if include_storage and total_nodes > 0:
+            # Each node has an OS disk (default 128 GB Premium SSD)
+            os_disk_size_gb = 128
+            os_disk_cost_per_gb = 0.12  # Premium SSD pricing
+            storage_cost = total_nodes * os_disk_size_gb * os_disk_cost_per_gb
+
+        # Load Balancer costs
+        lb_cost = 0.0
+        if include_networking:
+            # Standard Load Balancer: $0.025/hour = $18.25/month
+            # Note: This is a rough estimate. Actual cost depends on number of LB rules.
+            lb_cost = 18.25
+
+        # Public IP costs
+        public_ip_cost = 0.0
+        if include_networking:
+            # Estimate 1 Public IP per cluster (for ingress/egress)
+            # Standard Static IP: $0.005/hour = $3.65/month
+            public_ip_cost = 3.65
+
+        total_monthly_cost = (
+            cluster_fee +
+            node_cost +
+            storage_cost +
+            lb_cost +
+            public_ip_cost
+        )
+
+        return {
+            'cluster_fee': round(cluster_fee, 2),
+            'node_cost': round(node_cost, 2),
+            'storage_cost': round(storage_cost, 2),
+            'lb_cost': round(lb_cost, 2),
+            'public_ip_cost': round(public_ip_cost, 2),
+            'total_monthly_cost': round(total_monthly_cost, 2),
+            'total_nodes': total_nodes
+        }
+
+    async def _get_aks_credentials(
+        self,
+        cluster_name: str,
+        resource_group_name: str
+    ) -> dict | None:
+        """
+        Get AKS cluster admin credentials (kubeconfig).
+
+        Args:
+            cluster_name: AKS cluster name
+            resource_group_name: Resource group containing the cluster
+
+        Returns:
+            Kubeconfig dict or None if failed
+        """
+        try:
+            from azure.identity import ClientSecretCredential
+            from azure.mgmt.containerservice import ContainerServiceClient
+
+            credential = ClientSecretCredential(
+                tenant_id=self.tenant_id,
+                client_id=self.client_id,
+                client_secret=self.client_secret
+            )
+
+            aks_client = ContainerServiceClient(credential, self.subscription_id)
+
+            # Get admin credentials (cluster admin access)
+            creds_result = aks_client.managed_clusters.list_cluster_admin_credentials(
+                resource_group_name=resource_group_name,
+                resource_name=cluster_name
+            )
+
+            if creds_result.kubeconfigs and len(creds_result.kubeconfigs) > 0:
+                # kubeconfigs[0].value contains base64-encoded kubeconfig YAML
+                import base64
+                import yaml
+
+                kubeconfig_bytes = creds_result.kubeconfigs[0].value
+                kubeconfig_yaml = kubeconfig_bytes.decode('utf-8')
+                kubeconfig_dict = yaml.safe_load(kubeconfig_yaml)
+
+                return kubeconfig_dict
+
+            return None
+
+        except Exception as e:
+            print(f"Error getting AKS credentials for {cluster_name}: {str(e)}")
+            return None
+
+    async def _query_aks_metrics(
+        self,
+        cluster_id: str,
+        metric_name: str,
+        timespan_days: int = 30,
+        aggregation: str = "Average"
+    ) -> dict | None:
+        """
+        Query Azure Monitor Container Insights metrics for an AKS cluster.
+
+        Args:
+            cluster_id: Full Azure resource ID of the cluster
+            metric_name: Metric to query (e.g., 'node_cpu_usage_percentage', 'node_memory_working_set_percentage')
+            timespan_days: Number of days to look back
+            aggregation: Aggregation type ('Average', 'Maximum', 'Minimum', etc.)
+
+        Returns:
+            Dict with metric data:
+            {
+                'avg': float,
+                'max': float,
+                'min': float,
+                'p95': float,
+                'data_points': list
+            }
+            or None if no data available
+        """
+        try:
+            from datetime import datetime, timedelta, timezone
+            from azure.monitor.query import MetricsQueryClient, MetricAggregationType
+            from azure.identity import ClientSecretCredential
+
+            credential = ClientSecretCredential(
+                tenant_id=self.tenant_id,
+                client_id=self.client_id,
+                client_secret=self.client_secret
+            )
+
+            metrics_client = MetricsQueryClient(credential)
+
+            # Calculate timespan
+            end_time = datetime.now(timezone.utc)
+            start_time = end_time - timedelta(days=timespan_days)
+
+            # Map aggregation string to enum
+            aggregation_map = {
+                "Average": MetricAggregationType.AVERAGE,
+                "Maximum": MetricAggregationType.MAXIMUM,
+                "Minimum": MetricAggregationType.MINIMUM,
+                "Total": MetricAggregationType.TOTAL,
+                "Count": MetricAggregationType.COUNT
+            }
+            agg_type = aggregation_map.get(aggregation, MetricAggregationType.AVERAGE)
+
+            # Query metrics
+            response = metrics_client.query_resource(
+                resource_uri=cluster_id,
+                metric_names=[metric_name],
+                timespan=(start_time, end_time),
+                granularity=timedelta(hours=1),
+                aggregations=[agg_type]
+            )
+
+            # Extract data points
+            data_points = []
+            if response.metrics and len(response.metrics) > 0:
+                metric = response.metrics[0]
+                if metric.timeseries and len(metric.timeseries) > 0:
+                    for data in metric.timeseries[0].data:
+                        if aggregation == "Average" and data.average is not None:
+                            data_points.append(data.average)
+                        elif aggregation == "Maximum" and data.maximum is not None:
+                            data_points.append(data.maximum)
+                        elif aggregation == "Minimum" and data.minimum is not None:
+                            data_points.append(data.minimum)
+
+            if not data_points:
+                return None
+
+            # Calculate statistics
+            avg_value = sum(data_points) / len(data_points)
+            max_value = max(data_points)
+            min_value = min(data_points)
+
+            # Calculate P95
+            sorted_points = sorted(data_points)
+            p95_index = int(len(sorted_points) * 0.95)
+            p95_value = sorted_points[p95_index] if p95_index < len(sorted_points) else max_value
+
+            return {
+                'avg': round(avg_value, 2),
+                'max': round(max_value, 2),
+                'min': round(min_value, 2),
+                'p95': round(p95_value, 2),
+                'data_points': data_points,
+                'timespan_days': timespan_days
+            }
+
+        except Exception as e:
+            print(f"Error querying AKS metrics for {cluster_id}: {str(e)}")
+            return None
+
     async def scan_all_resources(
         self, region: str, detection_rules: dict[str, dict] | None = None, scan_global_resources: bool = False
     ) -> list[OrphanResourceData]:
@@ -2964,13 +3268,1077 @@ class AzureProvider(CloudProviderBase):
         # For now, return empty list (not in MVP scope)
         return []
 
+    async def _detect_aks_cluster_stopped(
+        self,
+        cluster,
+        agent_pools: list,
+        resource_group_name: str,
+        detection_rules: dict | None = None
+    ) -> OrphanResourceData | None:
+        """Scenario #1: Detect AKS cluster stopped but not deleted."""
+        from datetime import datetime, timezone
+
+        min_age_days = detection_rules.get("min_age_days", 14) if detection_rules else 14
+
+        # Check if cluster has been stopped
+        if not (cluster.power_state and cluster.power_state.code == 'Stopped'):
+            return None
+
+        # Calculate age (use creation time as proxy for stopped time)
+        age_days = 0
+        if cluster.time_created:
+            age_days = (datetime.now(timezone.utc) - cluster.time_created).days
+
+        if age_days < min_age_days:
+            return None  # Too young
+
+        # Calculate costs (cluster still incurs fees even when stopped)
+        cost_breakdown = self._calculate_aks_cluster_cost(
+            cluster, agent_pools,
+            include_storage=True,  # Storage still charged
+            include_networking=True  # LB/IPs still charged
+        )
+
+        # Remove node costs (nodes not running when stopped)
+        stopped_monthly_cost = (
+            cost_breakdown['cluster_fee'] +
+            cost_breakdown['storage_cost'] +
+            cost_breakdown['lb_cost'] +
+            cost_breakdown['public_ip_cost']
+        )
+
+        already_wasted = stopped_monthly_cost * (age_days / 30)
+
+        confidence_level = self._calculate_confidence_level(age_days, detection_rules)
+
+        metadata = {
+            'resource_type': 'azure_aks_cluster',
+            'scenario': 'aks_cluster_stopped',
+            'cluster_name': cluster.name,
+            'resource_group': resource_group_name,
+            'location': cluster.location,
+            'power_state': cluster.power_state.code,
+            'sku': {
+                'name': cluster.sku.name if cluster.sku else 'Base',
+                'tier': cluster.sku.tier if cluster.sku else 'Free'
+            },
+            'kubernetes_version': cluster.kubernetes_version,
+            'node_count_total': cost_breakdown['total_nodes'],
+            'created_date': cluster.time_created.isoformat() if cluster.time_created else None,
+            'age_days': age_days,
+            'monthly_cluster_fee': cost_breakdown['cluster_fee'],
+            'monthly_storage_cost': cost_breakdown['storage_cost'],
+            'monthly_lb_cost': cost_breakdown['lb_cost'],
+            'monthly_public_ip_cost': cost_breakdown['public_ip_cost'],
+            'total_monthly_cost_while_stopped': round(stopped_monthly_cost, 2),
+            'already_wasted_usd': round(already_wasted, 2),
+            'recommendation': 'Delete cluster if no longer needed, or restart if required',
+            'confidence_level': confidence_level
+        }
+
+        return OrphanResourceData(
+            resource_type='azure_aks_cluster',
+            resource_id=cluster.id,
+            resource_name=cluster.name,
+            region=cluster.location,
+            estimated_monthly_cost=stopped_monthly_cost,
+            resource_metadata=metadata
+        )
+
+    async def _detect_aks_cluster_zero_nodes(
+        self,
+        cluster,
+        agent_pools: list,
+        resource_group_name: str,
+        detection_rules: dict | None = None
+    ) -> OrphanResourceData | None:
+        """Scenario #2: Detect AKS cluster with 0 nodes."""
+        from datetime import datetime, timezone
+
+        min_age_days = detection_rules.get("min_age_days", 7) if detection_rules else 7
+
+        # Calculate total nodes
+        total_nodes = sum(pool.count if pool.count else 0 for pool in agent_pools)
+
+        if total_nodes > 0:
+            return None  # Has nodes
+
+        # Calculate age
+        age_days = 0
+        if cluster.time_created:
+            age_days = (datetime.now(timezone.utc) - cluster.time_created).days
+
+        if age_days < min_age_days:
+            return None  # Too young
+
+        # Calculate costs (only cluster management fee is wasted)
+        tier_pricing = {'Free': 0, 'Standard': 73.0, 'Premium': 438.0}
+        cluster_tier = cluster.sku.tier if cluster.sku else 'Free'
+        monthly_cost = tier_pricing.get(cluster_tier, 0.0)
+
+        already_wasted = monthly_cost * (age_days / 30)
+
+        confidence_level = self._calculate_confidence_level(age_days, detection_rules)
+
+        metadata = {
+            'resource_type': 'azure_aks_cluster',
+            'scenario': 'aks_cluster_zero_nodes',
+            'cluster_name': cluster.name,
+            'resource_group': resource_group_name,
+            'location': cluster.location,
+            'power_state': cluster.power_state.code if cluster.power_state else 'Running',
+            'sku': {
+                'name': cluster.sku.name if cluster.sku else 'Base',
+                'tier': cluster.sku.tier if cluster.sku else 'Free'
+            },
+            'kubernetes_version': cluster.kubernetes_version,
+            'node_pools': [
+                {
+                    'name': pool.name,
+                    'count': pool.count if pool.count else 0,
+                    'vm_size': pool.vm_size
+                }
+                for pool in agent_pools
+            ],
+            'total_nodes': total_nodes,
+            'created_date': cluster.time_created.isoformat() if cluster.time_created else None,
+            'age_days': age_days,
+            'monthly_cluster_fee': monthly_cost,
+            'already_wasted_usd': round(already_wasted, 2),
+            'recommendation': 'Delete cluster or add nodes to use it',
+            'confidence_level': confidence_level
+        }
+
+        return OrphanResourceData(
+            resource_type='azure_aks_cluster',
+            resource_id=cluster.id,
+            resource_name=cluster.name,
+            region=cluster.location,
+            estimated_monthly_cost=monthly_cost,
+            resource_metadata=metadata
+        )
+
+    async def _detect_aks_cluster_no_user_pods(
+        self,
+        cluster,
+        agent_pools: list,
+        resource_group_name: str,
+        detection_rules: dict | None = None
+    ) -> OrphanResourceData | None:
+        """Scenario #3: Detect AKS cluster with nodes but no user pods."""
+        from datetime import datetime, timezone
+
+        min_age_days = detection_rules.get("min_age_days", 14) if detection_rules else 14
+
+        try:
+            # Get kubectl credentials
+            kubeconfig = await self._get_aks_credentials(cluster.name, resource_group_name)
+
+            if not kubeconfig:
+                return None  # Cannot access cluster
+
+            # Configure Kubernetes client
+            from kubernetes import client, config
+            from kubernetes.client.rest import ApiException
+            import tempfile
+            import yaml
+            import os
+
+            # Write kubeconfig to temp file
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.yaml', delete=False) as f:
+                yaml.dump(kubeconfig, f)
+                kubeconfig_path = f.name
+
+            try:
+                # Load kubeconfig
+                config.load_kube_config(config_file=kubeconfig_path)
+                v1 = client.CoreV1Api()
+
+                # List all pods
+                all_pods = v1.list_pod_for_all_namespaces(watch=False)
+
+                # System namespaces to exclude
+                system_namespaces = ['kube-system', 'kube-public', 'kube-node-lease', 'gatekeeper-system']
+
+                # Count user pods
+                user_pods = [pod for pod in all_pods.items if pod.metadata.namespace not in system_namespaces]
+
+                if len(user_pods) > 0:
+                    return None  # Has user pods
+
+                # Calculate age
+                age_days = 0
+                if cluster.time_created:
+                    age_days = (datetime.now(timezone.utc) - cluster.time_created).days
+
+                if age_days < min_age_days:
+                    return None  # Too young
+
+                # Calculate costs (entire cluster is wasteful)
+                cost_breakdown = self._calculate_aks_cluster_cost(cluster, agent_pools)
+                total_monthly_cost = cost_breakdown['total_monthly_cost']
+                already_wasted = total_monthly_cost * (age_days / 30)
+
+                confidence_level = self._calculate_confidence_level(age_days, detection_rules)
+
+                metadata = {
+                    'resource_type': 'azure_aks_cluster',
+                    'scenario': 'aks_cluster_no_user_pods',
+                    'cluster_name': cluster.name,
+                    'resource_group': resource_group_name,
+                    'location': cluster.location,
+                    'power_state': cluster.power_state.code if cluster.power_state else 'Running',
+                    'sku': {
+                        'name': cluster.sku.name if cluster.sku else 'Base',
+                        'tier': cluster.sku.tier if cluster.sku else 'Free'
+                    },
+                    'node_count_total': cost_breakdown['total_nodes'],
+                    'node_pools': [
+                        {
+                            'name': pool.name,
+                            'count': pool.count if pool.count else 0,
+                            'vm_size': pool.vm_size
+                        }
+                        for pool in agent_pools
+                    ],
+                    'total_pods': len(all_pods.items),
+                    'system_pods': len(all_pods.items) - len(user_pods),
+                    'user_pods': len(user_pods),
+                    'age_days': age_days,
+                    'monthly_cluster_fee': cost_breakdown['cluster_fee'],
+                    'monthly_node_cost': cost_breakdown['node_cost'],
+                    'monthly_storage_cost': cost_breakdown['storage_cost'],
+                    'monthly_lb_cost': cost_breakdown['lb_cost'],
+                    'total_monthly_cost': total_monthly_cost,
+                    'already_wasted_usd': round(already_wasted, 2),
+                    'recommendation': 'Delete cluster or deploy workloads',
+                    'confidence_level': confidence_level
+                }
+
+                return OrphanResourceData(
+                    resource_type='azure_aks_cluster',
+                    resource_id=cluster.id,
+                    resource_name=cluster.name,
+                    region=cluster.location,
+                    estimated_monthly_cost=total_monthly_cost,
+                    resource_metadata=metadata
+                )
+
+            finally:
+                # Clean up temp file
+                if os.path.exists(kubeconfig_path):
+                    os.unlink(kubeconfig_path)
+
+        except Exception as e:
+            print(f"Error checking pods for cluster {cluster.name}: {str(e)}")
+            return None
+
+    async def _detect_aks_autoscaler_not_enabled(
+        self,
+        cluster,
+        agent_pools: list,
+        resource_group_name: str,
+        detection_rules: dict | None = None
+    ) -> OrphanResourceData | None:
+        """Scenario #4: Detect node pools without autoscaling enabled."""
+        from datetime import datetime, timezone
+
+        min_age_days = detection_rules.get("min_age_days", 30) if detection_rules else 30
+
+        # Check each node pool for autoscaling
+        pools_without_autoscaler = []
+        total_wasteful_cost = 0.0
+
+        for pool in agent_pools:
+            if not pool.enable_auto_scaling:
+                # Node pool without autoscaling
+                # Estimate over-provisioning: assume 40% savings if autoscaler enabled
+                pool_node_count = pool.count if pool.count else 0
+                if pool_node_count == 0:
+                    continue  # Skip empty pools
+
+                vm_size = pool.vm_size if pool.vm_size else 'Standard_D2s_v3'
+                vm_hourly_cost = self._get_vm_hourly_cost(vm_size)
+                pool_monthly_cost = pool_node_count * vm_hourly_cost * 730
+
+                # Estimate savings with autoscaler (typical: 30-50% savings)
+                savings_ratio = 0.40  # 40% average savings
+                monthly_savings = pool_monthly_cost * savings_ratio
+
+                pools_without_autoscaler.append({
+                    'name': pool.name,
+                    'count': pool_node_count,
+                    'vm_size': vm_size,
+                    'enable_auto_scaling': False,
+                    'current_monthly_cost': round(pool_monthly_cost, 2),
+                    'estimated_savings': round(monthly_savings, 2)
+                })
+
+                total_wasteful_cost += monthly_savings
+
+        if not pools_without_autoscaler:
+            return None  # All pools have autoscaling
+
+        # Calculate age
+        age_days = 0
+        if cluster.time_created:
+            age_days = (datetime.now(timezone.utc) - cluster.time_created).days
+
+        if age_days < min_age_days:
+            return None  # Too young
+
+        already_wasted = total_wasteful_cost * (age_days / 30)
+
+        confidence_level = self._calculate_confidence_level(age_days, detection_rules)
+
+        metadata = {
+            'resource_type': 'azure_aks_cluster',
+            'scenario': 'aks_autoscaler_not_enabled',
+            'cluster_name': cluster.name,
+            'resource_group': resource_group_name,
+            'location': cluster.location,
+            'sku': {
+                'tier': cluster.sku.tier if cluster.sku else 'Free'
+            },
+            'pools_without_autoscaler': pools_without_autoscaler,
+            'pools_count_total': len(agent_pools),
+            'pools_without_autoscaler_count': len(pools_without_autoscaler),
+            'age_days': age_days,
+            'monthly_savings_potential': round(total_wasteful_cost, 2),
+            'already_wasted_usd': round(already_wasted, 2),
+            'recommendation': 'Enable cluster autoscaler on node pools to optimize costs',
+            'confidence_level': confidence_level
+        }
+
+        return OrphanResourceData(
+            resource_type='azure_aks_cluster',
+            resource_id=cluster.id,
+            resource_name=cluster.name,
+            region=cluster.location,
+            estimated_monthly_cost=total_wasteful_cost,
+            resource_metadata=metadata
+        )
+
+    async def _detect_aks_node_pool_oversized_vms(
+        self,
+        cluster,
+        agent_pools: list,
+        resource_group_name: str,
+        detection_rules: dict | None = None
+    ) -> OrphanResourceData | None:
+        """Scenario #5: Detect node pools with oversized VMs (low utilization)."""
+        from datetime import datetime, timezone
+
+        min_age_days = detection_rules.get("min_age_days", 30) if detection_rules else 30
+        cpu_threshold = detection_rules.get("cpu_threshold", 30) if detection_rules else 30  # <30% CPU
+        memory_threshold = detection_rules.get("memory_threshold", 40) if detection_rules else 40  # <40% memory
+
+        # Query Azure Monitor metrics for node utilization
+        # Note: This requires Container Insights to be enabled on the cluster
+        try:
+            cpu_metrics = await self._query_aks_metrics(
+                cluster.id,
+                metric_name="node_cpu_usage_percentage",
+                timespan_days=30,
+                aggregation="Average"
+            )
+
+            memory_metrics = await self._query_aks_metrics(
+                cluster.id,
+                metric_name="node_memory_working_set_percentage",
+                timespan_days=30,
+                aggregation="Average"
+            )
+
+            if not cpu_metrics or not memory_metrics:
+                return None  # Cannot get metrics
+
+            avg_cpu = cpu_metrics['avg']
+            avg_memory = memory_metrics['avg']
+
+            # Check if both CPU and memory are low
+            if avg_cpu >= cpu_threshold or avg_memory >= memory_threshold:
+                return None  # Utilization is fine
+
+            # Calculate age
+            age_days = 0
+            if cluster.time_created:
+                age_days = (datetime.now(timezone.utc) - cluster.time_created).days
+
+            if age_days < min_age_days:
+                return None  # Too young
+
+            # Calculate current costs
+            cost_breakdown = self._calculate_aks_cluster_cost(cluster, agent_pools)
+            current_monthly_cost = cost_breakdown['node_cost']
+
+            # Recommend VM downgrade (50% savings typical)
+            # For example: D8s_v3 → D4s_v3 if low utilization
+            recommended_monthly_cost = current_monthly_cost * 0.50
+            monthly_savings = current_monthly_cost - recommended_monthly_cost
+
+            already_wasted = monthly_savings * (age_days / 30)
+
+            confidence_level = self._calculate_confidence_level(age_days, detection_rules)
+
+            metadata = {
+                'resource_type': 'azure_aks_cluster',
+                'scenario': 'aks_node_pool_oversized_vms',
+                'cluster_name': cluster.name,
+                'resource_group': resource_group_name,
+                'location': cluster.location,
+                'node_count_total': cost_breakdown['total_nodes'],
+                'monitoring_period_days': 30,
+                'avg_cpu_utilization_percent': avg_cpu,
+                'avg_memory_utilization_percent': avg_memory,
+                'p95_cpu_percent': cpu_metrics['p95'],
+                'p95_memory_percent': memory_metrics['p95'],
+                'current_monthly_cost': cost_breakdown['node_cost'],
+                'recommended_monthly_cost': round(recommended_monthly_cost, 2),
+                'monthly_savings_potential': round(monthly_savings, 2),
+                'age_days': age_days,
+                'already_wasted_usd': round(already_wasted, 2),
+                'recommendation': 'Downgrade VM sizes (e.g., D8s_v3 → D4s_v3) or reduce node count',
+                'confidence_level': confidence_level
+            }
+
+            return OrphanResourceData(
+                resource_type='azure_aks_cluster',
+                resource_id=cluster.id,
+                resource_name=cluster.name,
+                region=cluster.location,
+                estimated_monthly_cost=monthly_savings,
+                resource_metadata=metadata
+            )
+
+        except Exception as e:
+            print(f"Error checking VM utilization for cluster {cluster.name}: {str(e)}")
+            return None
+
+    async def _detect_aks_orphaned_persistent_volumes(
+        self,
+        cluster,
+        agent_pools: list,
+        resource_group_name: str,
+        detection_rules: dict | None = None
+    ) -> OrphanResourceData | None:
+        """Scenario #6: Detect orphaned persistent volumes (Released/Available)."""
+        from datetime import datetime, timezone
+
+        min_age_days = detection_rules.get("min_age_days", 14) if detection_rules else 14
+
+        try:
+            # Get kubectl credentials
+            kubeconfig = await self._get_aks_credentials(cluster.name, resource_group_name)
+            if not kubeconfig:
+                return None
+
+            from kubernetes import client, config
+            import tempfile
+            import yaml
+            import os
+
+            # Write kubeconfig to temp file
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.yaml', delete=False) as f:
+                yaml.dump(kubeconfig, f)
+                kubeconfig_path = f.name
+
+            try:
+                config.load_kube_config(config_file=kubeconfig_path)
+                v1 = client.CoreV1Api()
+
+                # List all persistent volumes
+                all_pvs = v1.list_persistent_volume(watch=False)
+
+                orphaned_pvs = []
+                total_cost = 0.0
+
+                for pv in all_pvs.items:
+                    # Check if PV is orphaned (Released or Available for >14 days)
+                    if pv.status.phase in ['Released', 'Available']:
+                        creation_time = pv.metadata.creation_timestamp
+                        age_days = (datetime.now(timezone.utc) - creation_time).days
+
+                        if age_days >= min_age_days:
+                            # Calculate PV cost
+                            size_gb = 0
+                            if pv.spec.capacity and 'storage' in pv.spec.capacity:
+                                storage_str = pv.spec.capacity['storage']
+                                # Parse storage (e.g., "100Gi" → 100)
+                                if storage_str.endswith('Gi'):
+                                    size_gb = int(storage_str[:-2])
+
+                            # Estimate disk SKU (Premium SSD default for AKS)
+                            cost_per_gb = 0.12  # Premium SSD pricing
+                            monthly_cost = size_gb * cost_per_gb
+
+                            orphaned_pvs.append({
+                                'pv_name': pv.metadata.name,
+                                'phase': pv.status.phase,
+                                'size_gb': size_gb,
+                                'age_days': age_days,
+                                'monthly_cost': round(monthly_cost, 2)
+                            })
+
+                            total_cost += monthly_cost
+
+                if not orphaned_pvs:
+                    return None  # No orphaned PVs
+
+                # Calculate total already wasted
+                avg_age_days = sum(pv['age_days'] for pv in orphaned_pvs) / len(orphaned_pvs)
+                already_wasted = total_cost * (avg_age_days / 30)
+
+                confidence_level = self._calculate_confidence_level(int(avg_age_days), detection_rules)
+
+                metadata = {
+                    'resource_type': 'azure_aks_cluster',
+                    'scenario': 'aks_orphaned_persistent_volumes',
+                    'cluster_name': cluster.name,
+                    'resource_group': resource_group_name,
+                    'location': cluster.location,
+                    'orphaned_pvs': orphaned_pvs,
+                    'total_orphaned_count': len(orphaned_pvs),
+                    'total_storage_gb': sum(pv['size_gb'] for pv in orphaned_pvs),
+                    'total_monthly_cost': round(total_cost, 2),
+                    'avg_age_days': int(avg_age_days),
+                    'already_wasted_usd': round(already_wasted, 2),
+                    'recommendation': 'Delete orphaned PVs or update reclaim policy to Delete',
+                    'confidence_level': confidence_level
+                }
+
+                return OrphanResourceData(
+                    resource_type='azure_aks_cluster',
+                    resource_id=cluster.id,
+                    resource_name=cluster.name,
+                    region=cluster.location,
+                    estimated_monthly_cost=total_cost,
+                    resource_metadata=metadata
+                )
+
+            finally:
+                if os.path.exists(kubeconfig_path):
+                    os.unlink(kubeconfig_path)
+
+        except Exception as e:
+            print(f"Error checking PVs for cluster {cluster.name}: {str(e)}")
+            return None
+
+    async def _detect_aks_unused_load_balancers(
+        self,
+        cluster,
+        agent_pools: list,
+        resource_group_name: str,
+        detection_rules: dict | None = None
+    ) -> OrphanResourceData | None:
+        """Scenario #7: Detect LoadBalancer services with 0 backends."""
+        from datetime import datetime, timezone
+
+        min_age_days = detection_rules.get("min_age_days", 7) if detection_rules else 7
+
+        try:
+            # Get kubectl credentials
+            kubeconfig = await self._get_aks_credentials(cluster.name, resource_group_name)
+            if not kubeconfig:
+                return None
+
+            from kubernetes import client, config
+            import tempfile
+            import yaml
+            import os
+
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.yaml', delete=False) as f:
+                yaml.dump(kubeconfig, f)
+                kubeconfig_path = f.name
+
+            try:
+                config.load_kube_config(config_file=kubeconfig_path)
+                v1 = client.CoreV1Api()
+
+                # List all services
+                all_services = v1.list_service_for_all_namespaces(watch=False)
+
+                unused_lbs = []
+                total_cost = 0.0
+
+                for svc in all_services.items:
+                    if svc.spec.type == 'LoadBalancer':
+                        # Check endpoints
+                        namespace = svc.metadata.namespace
+                        service_name = svc.metadata.name
+
+                        try:
+                            endpoints = v1.read_namespaced_endpoints(service_name, namespace)
+                            backend_count = 0
+                            if endpoints.subsets:
+                                for subset in endpoints.subsets:
+                                    if subset.addresses:
+                                        backend_count += len(subset.addresses)
+
+                            if backend_count == 0:
+                                # LoadBalancer with 0 backends
+                                creation_time = svc.metadata.creation_timestamp
+                                age_days = (datetime.now(timezone.utc) - creation_time).days
+
+                                if age_days >= min_age_days:
+                                    # Cost: LB fee + Public IP
+                                    monthly_lb_cost = 18.25  # Standard LB
+                                    monthly_ip_cost = 3.65   # Public IP
+                                    monthly_cost = monthly_lb_cost + monthly_ip_cost  # $21.90
+
+                                    unused_lbs.append({
+                                        'service_name': service_name,
+                                        'namespace': namespace,
+                                        'backend_count': backend_count,
+                                        'age_days': age_days,
+                                        'monthly_cost': monthly_cost
+                                    })
+
+                                    total_cost += monthly_cost
+
+                        except Exception:
+                            continue  # Skip if cannot read endpoints
+
+                if not unused_lbs:
+                    return None  # No unused LBs
+
+                avg_age_days = sum(lb['age_days'] for lb in unused_lbs) / len(unused_lbs)
+                already_wasted = total_cost * (avg_age_days / 30)
+
+                confidence_level = self._calculate_confidence_level(int(avg_age_days), detection_rules)
+
+                metadata = {
+                    'resource_type': 'azure_aks_cluster',
+                    'scenario': 'aks_unused_load_balancers',
+                    'cluster_name': cluster.name,
+                    'resource_group': resource_group_name,
+                    'location': cluster.location,
+                    'unused_services': unused_lbs,
+                    'total_unused_count': len(unused_lbs),
+                    'total_monthly_cost': round(total_cost, 2),
+                    'avg_age_days': int(avg_age_days),
+                    'already_wasted_usd': round(already_wasted, 2),
+                    'recommendation': 'Delete unused LoadBalancer services',
+                    'confidence_level': confidence_level
+                }
+
+                return OrphanResourceData(
+                    resource_type='azure_aks_cluster',
+                    resource_id=cluster.id,
+                    resource_name=cluster.name,
+                    region=cluster.location,
+                    estimated_monthly_cost=total_cost,
+                    resource_metadata=metadata
+                )
+
+            finally:
+                if os.path.exists(kubeconfig_path):
+                    os.unlink(kubeconfig_path)
+
+        except Exception as e:
+            print(f"Error checking LoadBalancers for cluster {cluster.name}: {str(e)}")
+            return None
+
+    async def _detect_aks_low_cpu_utilization(
+        self,
+        cluster,
+        agent_pools: list,
+        resource_group_name: str,
+        detection_rules: dict | None = None
+    ) -> OrphanResourceData | None:
+        """Scenario #8: Detect low CPU utilization (<20% over 30 days)."""
+        from datetime import datetime, timezone
+
+        min_age_days = detection_rules.get("min_age_days", 30) if detection_rules else 30
+        cpu_threshold = detection_rules.get("cpu_threshold", 20) if detection_rules else 20
+
+        try:
+            cpu_metrics = await self._query_aks_metrics(
+                cluster.id,
+                metric_name="node_cpu_usage_percentage",
+                timespan_days=30,
+                aggregation="Average"
+            )
+
+            if not cpu_metrics:
+                return None
+
+            avg_cpu = cpu_metrics['avg']
+
+            if avg_cpu >= cpu_threshold:
+                return None  # CPU usage is acceptable
+
+            age_days = 0
+            if cluster.time_created:
+                age_days = (datetime.now(timezone.utc) - cluster.time_created).days
+
+            if age_days < min_age_days:
+                return None
+
+            # Calculate current costs and savings potential
+            cost_breakdown = self._calculate_aks_cluster_cost(cluster, agent_pools)
+            current_monthly_cost = cost_breakdown['node_cost']
+
+            # Rightsizing savings: reduce 40% (based on low CPU)
+            optimized_monthly_cost = current_monthly_cost * 0.60
+            monthly_savings = current_monthly_cost - optimized_monthly_cost
+
+            already_wasted = monthly_savings * (age_days / 30)
+
+            confidence_level = self._calculate_confidence_level(age_days, detection_rules)
+
+            metadata = {
+                'resource_type': 'azure_aks_cluster',
+                'scenario': 'aks_low_cpu_utilization',
+                'cluster_name': cluster.name,
+                'resource_group': resource_group_name,
+                'location': cluster.location,
+                'monitoring_period_days': 30,
+                'node_count': cost_breakdown['total_nodes'],
+                'avg_cpu_percent': avg_cpu,
+                'max_cpu_percent': cpu_metrics['max'],
+                'p95_cpu_percent': cpu_metrics['p95'],
+                'current_monthly_cost': cost_breakdown['node_cost'],
+                'recommended_monthly_cost': round(optimized_monthly_cost, 2),
+                'monthly_savings_potential': round(monthly_savings, 2),
+                'age_days': age_days,
+                'already_wasted_usd': round(already_wasted, 2),
+                'recommendation': 'Reduce node count or downgrade VM sizes',
+                'confidence_level': confidence_level
+            }
+
+            return OrphanResourceData(
+                resource_type='azure_aks_cluster',
+                resource_id=cluster.id,
+                resource_name=cluster.name,
+                region=cluster.location,
+                estimated_monthly_cost=monthly_savings,
+                resource_metadata=metadata
+            )
+
+        except Exception as e:
+            print(f"Error checking CPU metrics for cluster {cluster.name}: {str(e)}")
+            return None
+
+    async def _detect_aks_low_memory_utilization(
+        self,
+        cluster,
+        agent_pools: list,
+        resource_group_name: str,
+        detection_rules: dict | None = None
+    ) -> OrphanResourceData | None:
+        """Scenario #9: Detect low memory utilization (<30% over 30 days)."""
+        from datetime import datetime, timezone
+
+        min_age_days = detection_rules.get("min_age_days", 30) if detection_rules else 30
+        memory_threshold = detection_rules.get("memory_threshold", 30) if detection_rules else 30
+
+        try:
+            memory_metrics = await self._query_aks_metrics(
+                cluster.id,
+                metric_name="node_memory_working_set_percentage",
+                timespan_days=30,
+                aggregation="Average"
+            )
+
+            if not memory_metrics:
+                return None
+
+            avg_memory = memory_metrics['avg']
+
+            if avg_memory >= memory_threshold:
+                return None  # Memory usage is acceptable
+
+            age_days = 0
+            if cluster.time_created:
+                age_days = (datetime.now(timezone.utc) - cluster.time_created).days
+
+            if age_days < min_age_days:
+                return None
+
+            # Calculate savings (downgrade to VMs with less RAM)
+            cost_breakdown = self._calculate_aks_cluster_cost(cluster, agent_pools)
+            current_monthly_cost = cost_breakdown['node_cost']
+
+            # Memory-optimized to General Purpose savings: ~24%
+            optimized_monthly_cost = current_monthly_cost * 0.76
+            monthly_savings = current_monthly_cost - optimized_monthly_cost
+
+            already_wasted = monthly_savings * (age_days / 30)
+
+            confidence_level = self._calculate_confidence_level(age_days, detection_rules)
+
+            metadata = {
+                'resource_type': 'azure_aks_cluster',
+                'scenario': 'aks_low_memory_utilization',
+                'cluster_name': cluster.name,
+                'resource_group': resource_group_name,
+                'location': cluster.location,
+                'monitoring_period_days': 30,
+                'node_count': cost_breakdown['total_nodes'],
+                'avg_memory_percent': avg_memory,
+                'max_memory_percent': memory_metrics['max'],
+                'p95_memory_percent': memory_metrics['p95'],
+                'current_monthly_cost': cost_breakdown['node_cost'],
+                'recommended_monthly_cost': round(optimized_monthly_cost, 2),
+                'monthly_savings_potential': round(monthly_savings, 2),
+                'age_days': age_days,
+                'already_wasted_usd': round(already_wasted, 2),
+                'recommendation': 'Downgrade to VMs with less RAM (e.g., E-series → D-series)',
+                'confidence_level': confidence_level
+            }
+
+            return OrphanResourceData(
+                resource_type='azure_aks_cluster',
+                resource_id=cluster.id,
+                resource_name=cluster.name,
+                region=cluster.location,
+                estimated_monthly_cost=monthly_savings,
+                resource_metadata=metadata
+            )
+
+        except Exception as e:
+            print(f"Error checking memory metrics for cluster {cluster.name}: {str(e)}")
+            return None
+
+    async def _detect_aks_dev_test_always_on(
+        self,
+        cluster,
+        agent_pools: list,
+        resource_group_name: str,
+        detection_rules: dict | None = None
+    ) -> OrphanResourceData | None:
+        """Scenario #10: Detect dev/test clusters running 24/7."""
+        from datetime import datetime, timezone
+
+        min_age_days = detection_rules.get("min_age_days", 30) if detection_rules else 30
+
+        # Check if cluster is tagged as dev/test
+        tags = cluster.tags or {}
+        environment_tag = tags.get('environment', '').lower()
+
+        is_dev_test = (
+            environment_tag in ['dev', 'test', 'development', 'testing', 'staging'] or
+            'dev' in cluster.name.lower() or
+            'test' in cluster.name.lower()
+        )
+
+        if not is_dev_test:
+            return None  # Not a dev/test cluster
+
+        # Calculate age
+        age_days = 0
+        if cluster.time_created:
+            age_days = (datetime.now(timezone.utc) - cluster.time_created).days
+
+        if age_days < min_age_days:
+            return None
+
+        # Assume cluster is always on (we'd need Activity Log to verify stop events)
+        # For now, flag all dev/test clusters >30 days old
+
+        # Calculate costs
+        cost_breakdown = self._calculate_aks_cluster_cost(cluster, agent_pools)
+        total_24_7_cost = cost_breakdown['total_monthly_cost']
+
+        # Cost with 8h/day × 5 days/week = 24% uptime
+        cluster_fee = cost_breakdown['cluster_fee']  # Always paid
+        node_cost_24_7 = cost_breakdown['node_cost']
+        node_cost_optimized = node_cost_24_7 * 0.24  # 24% uptime
+
+        total_optimized_cost = cluster_fee + node_cost_optimized
+
+        monthly_savings = total_24_7_cost - total_optimized_cost
+
+        already_wasted = monthly_savings * (age_days / 30)
+
+        confidence_level = self._calculate_confidence_level(age_days, detection_rules)
+
+        metadata = {
+            'resource_type': 'azure_aks_cluster',
+            'scenario': 'aks_dev_test_always_on',
+            'cluster_name': cluster.name,
+            'resource_group': resource_group_name,
+            'location': cluster.location,
+            'environment_tag': environment_tag or 'dev/test (inferred from name)',
+            'tags': tags,
+            'node_count': cost_breakdown['total_nodes'],
+            'created_date': cluster.time_created.isoformat() if cluster.time_created else None,
+            'age_days': age_days,
+            'uptime_ratio': 1.0,  # Assumed 100% uptime
+            'expected_uptime_ratio': 0.24,  # 8h × 5d = 24%
+            'current_monthly_cost': total_24_7_cost,
+            'optimized_monthly_cost': round(total_optimized_cost, 2),
+            'monthly_savings_potential': round(monthly_savings, 2),
+            'annual_savings_potential': round(monthly_savings * 12, 2),
+            'already_wasted_usd': round(already_wasted, 2),
+            'recommendation': 'Implement start/stop automation (8am-6pm weekdays)',
+            'confidence_level': confidence_level
+        }
+
+        return OrphanResourceData(
+            resource_type='azure_aks_cluster',
+            resource_id=cluster.id,
+            resource_name=cluster.name,
+            region=cluster.location,
+            estimated_monthly_cost=monthly_savings,
+            resource_metadata=metadata
+        )
+
     async def scan_idle_eks_clusters(
         self, region: str, detection_rules: dict | None = None
     ) -> list[OrphanResourceData]:
-        """Scan for idle Azure Kubernetes Service (AKS) clusters."""
-        # TODO: Implement using azure.mgmt.containerservice
-        # Detect: AKS clusters with 0 nodes or 0 pods
-        return []
+        """
+        Scan for idle/wasteful Azure Kubernetes Service (AKS) clusters.
+
+        Detects 10 scenarios (7 simple + 3 Azure Monitor):
+        1. aks_cluster_stopped - Cluster stopped but not deleted
+        2. aks_cluster_zero_nodes - Cluster with 0 nodes
+        3. aks_cluster_no_user_pods - No user pods (only kube-system)
+        4. aks_autoscaler_not_enabled - No autoscaling configured
+        5. aks_node_pool_oversized_vms - VMs too large for workload
+        6. aks_orphaned_persistent_volumes - Orphaned PVs (Released/Available)
+        7. aks_unused_load_balancers - LoadBalancer services with 0 backends
+        8. aks_low_cpu_utilization - CPU <20% over 30 days
+        9. aks_low_memory_utilization - Memory <30% over 30 days
+        10. aks_dev_test_always_on - Dev/test clusters running 24/7
+
+        Args:
+            region: Azure region to scan
+            detection_rules: Optional detection configuration
+
+        Returns:
+            List of orphan AKS cluster resources
+        """
+        from datetime import datetime, timezone
+        from azure.identity import ClientSecretCredential
+        from azure.mgmt.containerservice import ContainerServiceClient
+
+        orphans: list[OrphanResourceData] = []
+
+        # Extract detection rules
+        min_age_days = detection_rules.get("min_age_days", 7) if detection_rules else 7
+
+        try:
+            credential = ClientSecretCredential(
+                tenant_id=self.tenant_id,
+                client_id=self.client_id,
+                client_secret=self.client_secret
+            )
+
+            aks_client = ContainerServiceClient(credential, self.subscription_id)
+
+            # List all AKS clusters in the subscription
+            clusters = aks_client.managed_clusters.list()
+
+            for cluster in clusters:
+                # Filter by region (Azure uses 'location')
+                if cluster.location != region:
+                    continue
+
+                # Filter by resource group (if specified)
+                if not self._is_resource_in_scope(cluster.id):
+                    continue
+
+                # Extract resource group name from cluster ID
+                # Format: /subscriptions/{sub}/resourceGroups/{rg}/providers/Microsoft.ContainerService/managedClusters/{name}
+                parts = cluster.id.split('/')
+                try:
+                    rg_index = parts.index('resourceGroups')
+                    resource_group_name = parts[rg_index + 1]
+                except (ValueError, IndexError):
+                    print(f"Could not parse resource group from cluster ID: {cluster.id}")
+                    continue
+
+                # List agent pools for this cluster
+                agent_pools = list(aks_client.agent_pools.list(
+                    resource_group_name=resource_group_name,
+                    resource_name=cluster.name
+                ))
+
+                # Calculate total nodes across all pools
+                total_nodes = sum(pool.count if pool.count else 0 for pool in agent_pools)
+
+                # Scenario #1: Cluster stopped but not deleted
+                if cluster.power_state and cluster.power_state.code == 'Stopped':
+                    orphan = await self._detect_aks_cluster_stopped(
+                        cluster, agent_pools, resource_group_name, detection_rules
+                    )
+                    if orphan:
+                        orphans.append(orphan)
+                    continue  # Skip other checks if stopped
+
+                # Scenario #2: Cluster with 0 nodes (but running)
+                if total_nodes == 0:
+                    orphan = await self._detect_aks_cluster_zero_nodes(
+                        cluster, agent_pools, resource_group_name, detection_rules
+                    )
+                    if orphan:
+                        orphans.append(orphan)
+                    continue  # Skip other checks if no nodes
+
+                # For remaining scenarios, cluster must be Running with nodes
+                # Scenario #3: No user pods (requires kubectl access)
+                orphan = await self._detect_aks_cluster_no_user_pods(
+                    cluster, agent_pools, resource_group_name, detection_rules
+                )
+                if orphan:
+                    orphans.append(orphan)
+
+                # Scenario #4: Autoscaler not enabled
+                orphan = await self._detect_aks_autoscaler_not_enabled(
+                    cluster, agent_pools, resource_group_name, detection_rules
+                )
+                if orphan:
+                    orphans.append(orphan)
+
+                # Scenario #5: Node pool oversized VMs
+                orphan = await self._detect_aks_node_pool_oversized_vms(
+                    cluster, agent_pools, resource_group_name, detection_rules
+                )
+                if orphan:
+                    orphans.append(orphan)
+
+                # Scenario #6: Orphaned persistent volumes
+                orphan = await self._detect_aks_orphaned_persistent_volumes(
+                    cluster, agent_pools, resource_group_name, detection_rules
+                )
+                if orphan:
+                    orphans.append(orphan)
+
+                # Scenario #7: Unused load balancers
+                orphan = await self._detect_aks_unused_load_balancers(
+                    cluster, agent_pools, resource_group_name, detection_rules
+                )
+                if orphan:
+                    orphans.append(orphan)
+
+                # Scenario #8: Low CPU utilization (requires Azure Monitor)
+                orphan = await self._detect_aks_low_cpu_utilization(
+                    cluster, agent_pools, resource_group_name, detection_rules
+                )
+                if orphan:
+                    orphans.append(orphan)
+
+                # Scenario #9: Low memory utilization (requires Azure Monitor)
+                orphan = await self._detect_aks_low_memory_utilization(
+                    cluster, agent_pools, resource_group_name, detection_rules
+                )
+                if orphan:
+                    orphans.append(orphan)
+
+                # Scenario #10: Dev/test clusters always on
+                orphan = await self._detect_aks_dev_test_always_on(
+                    cluster, agent_pools, resource_group_name, detection_rules
+                )
+                if orphan:
+                    orphans.append(orphan)
+
+        except Exception as e:
+            print(f"Error scanning AKS clusters in {region}: {str(e)}")
+            # Log error but don't fail entire scan
+
+        return orphans
 
     async def scan_idle_sagemaker_endpoints(
         self, region: str, detection_rules: dict | None = None

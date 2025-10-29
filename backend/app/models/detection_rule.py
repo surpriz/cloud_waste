@@ -353,6 +353,29 @@ DEFAULT_DETECTION_RULES = {
         "confidence_threshold_days": 60,
         "description": "Azure VMs deallocated for extended periods",
     },
+    "azure_aks_cluster": {
+        "enabled": True,
+        "min_age_days": 7,  # Ignore clusters created in last 7 days
+        "confidence_critical_days": 90,  # Critical after 90 days
+        "confidence_high_days": 30,  # High confidence after 30 days
+        "confidence_medium_days": 7,  # Medium confidence after 7 days
+        # Scenario detection flags
+        "detect_stopped": True,  # Cluster stopped but not deleted
+        "detect_zero_nodes": True,  # Cluster with 0 nodes
+        "detect_no_user_pods": True,  # No user pods (only kube-system)
+        "detect_autoscaler_not_enabled": True,  # No autoscaling configured
+        "detect_oversized_vms": True,  # VMs too large for workload
+        "detect_orphaned_pvs": True,  # Orphaned PersistentVolumes
+        "detect_unused_load_balancers": True,  # LoadBalancer services with 0 backends
+        "detect_low_cpu": True,  # CPU <20% over 30 days
+        "detect_low_memory": True,  # Memory <30% over 30 days
+        "detect_dev_test_always_on": True,  # Dev/test clusters running 24/7
+        # Thresholds
+        "cpu_threshold": 20,  # CPU < 20% = low utilization
+        "memory_threshold": 30,  # Memory < 30% = low utilization
+        "monitoring_period_days": 30,  # Azure Monitor lookback period
+        "description": "Azure Kubernetes Service (AKS) clusters: stopped, zero nodes, no user pods, no autoscaler, oversized VMs, orphaned PVs, unused LBs, low CPU/memory, or dev/test always on",
+    },
 }
 
 

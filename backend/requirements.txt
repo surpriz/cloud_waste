@@ -32,6 +32,9 @@ azure-mgmt-network==25.2.0
 azure-mgmt-storage==21.1.0
 azure-mgmt-monitor==6.0.2
 azure-monitor-query==1.3.0
+azure-mgmt-containerservice==30.0.0  # AKS management
+kubernetes==28.1.0  # Kubernetes Python client for AKS pod/PV detection
+pyyaml==6.0.1  # YAML parsing for kubeconfig
 
 # Validation
 pydantic==2.6.1

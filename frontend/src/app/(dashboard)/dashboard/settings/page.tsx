@@ -68,6 +68,8 @@ const AZURE_RESOURCE_ICONS: { [key: string]: any } = {
   virtual_machine_never_started: Server,
   virtual_machine_oversized_premium: Server,
   virtual_machine_untagged_orphan: Server,
+  // AKS - Azure Kubernetes Service
+  azure_aks_cluster: Server,
 };
 
 const AZURE_RESOURCE_LABELS: { [key: string]: string } = {
@@ -83,6 +85,8 @@ const AZURE_RESOURCE_LABELS: { [key: string]: string } = {
   virtual_machine_never_started: "Virtual Machines (Never Started)",
   virtual_machine_oversized_premium: "Virtual Machines (Oversized + Premium Disks)",
   virtual_machine_untagged_orphan: "Virtual Machines (Untagged Orphans)",
+  // AKS - Azure Kubernetes Service
+  azure_aks_cluster: "AKS Clusters (Azure Kubernetes Service)",
 };
 
 // Helper function to get provider from resource type
