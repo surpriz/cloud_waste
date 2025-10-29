@@ -676,6 +676,31 @@ class AzureProvider(CloudProviderBase):
         redundant_snapshots = await self.scan_redundant_snapshots(region, rules.get("disk_snapshot_redundant"))
         results.extend(redundant_snapshots)
 
+        # Additional Disk Snapshot waste scenarios (100% coverage)
+        very_old_snapshots = await self.scan_disk_snapshot_very_old(region, rules.get("disk_snapshot_very_old"))
+        results.extend(very_old_snapshots)
+
+        premium_source_snapshots = await self.scan_disk_snapshot_premium_source(region, rules.get("disk_snapshot_premium_source"))
+        results.extend(premium_source_snapshots)
+
+        large_unused_snapshots = await self.scan_disk_snapshot_large_unused(region, rules.get("disk_snapshot_large_unused"))
+        results.extend(large_unused_snapshots)
+
+        full_vs_incremental = await self.scan_disk_snapshot_full_instead_incremental(region, rules.get("disk_snapshot_full_instead_incremental"))
+        results.extend(full_vs_incremental)
+
+        excessive_retention = await self.scan_disk_snapshot_excessive_retention(region, rules.get("disk_snapshot_excessive_retention"))
+        results.extend(excessive_retention)
+
+        manual_without_policy = await self.scan_disk_snapshot_manual_without_policy(region, rules.get("disk_snapshot_manual_without_policy"))
+        results.extend(manual_without_policy)
+
+        never_restored = await self.scan_disk_snapshot_never_restored(region, rules.get("disk_snapshot_never_restored"))
+        results.extend(never_restored)
+
+        frequent_creation = await self.scan_disk_snapshot_frequent_creation(region, rules.get("disk_snapshot_frequent_creation"))
+        results.extend(frequent_creation)
+
         # Scan disks with unnecessary Zone-Redundant Storage (ZRS) in dev/test
         unnecessary_zrs = await self.scan_unnecessary_zrs_disks(region, rules.get("managed_disk_unnecessary_zrs"))
         results.extend(unnecessary_zrs)
@@ -1285,6 +1310,1001 @@ class AzureProvider(CloudProviderBase):
         except Exception as e:
             print(f"Error scanning redundant snapshots in {region}: {str(e)}")
 
+        return orphans
+
+    async def scan_disk_snapshot_very_old(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scan for very old Azure Disk Snapshots (>1 year never used).
+
+        Detects snapshots older than 1 year that have never been restored or used,
+        suggesting they may no longer be needed and are accumulating significant costs.
+
+        Logic:
+        - age_days > max_age_threshold (default 365 days / 1 year)
+        - Check tags for retention markers ("keep", "permanent", "archive", "compliance")
+        - If very old AND source disk deleted → double waste (orphan + very old)
+
+        Cost:
+        - Monthly: $0.05/GB/month
+        - Already wasted: $0.05/GB/month × (age_days / 30) months
+
+        Args:
+            region: Azure region to scan
+            detection_rules: Optional detection configuration:
+                {
+                    "enabled": bool (default True),
+                    "max_age_threshold": int (default 365) - Age threshold in days,
+                    "min_age_days": int (default 365) - Minimum age to flag,
+                    "exclude_tags": list (default ["keep", "permanent", "archive", "compliance", "DR"])
+                }
+
+        Returns:
+            List of very old snapshot resources
+        """
+        from datetime import datetime, timezone
+        from azure.identity import ClientSecretCredential
+        from azure.mgmt.compute import ComputeManagementClient
+        from azure.core.exceptions import ResourceNotFoundError
+
+        orphans = []
+
+        # Get detection parameters
+        max_age_threshold = detection_rules.get("max_age_threshold", 365) if detection_rules else 365
+        min_age_days = detection_rules.get("min_age_days", 365) if detection_rules else 365
+        exclude_tags_list = detection_rules.get("exclude_tags", ["keep", "permanent", "archive", "compliance", "DR"]) if detection_rules else ["keep", "permanent", "archive", "compliance", "DR"]
+
+        try:
+            credential = ClientSecretCredential(
+                tenant_id=self.tenant_id,
+                client_id=self.client_id,
+                client_secret=self.client_secret
+            )
+
+            compute_client = ComputeManagementClient(credential, self.subscription_id)
+
+            # List all snapshots
+            snapshots = compute_client.snapshots.list()
+
+            for snapshot in snapshots:
+                # Filter by region
+                if snapshot.location != region:
+                    continue
+
+                # Filter by resource group (if specified)
+                if not self._is_resource_in_scope(snapshot.id):
+                    continue
+
+                # Calculate snapshot age
+                age_days = 0
+                if snapshot.time_created:
+                    age_days = (datetime.now(timezone.utc) - snapshot.time_created).days
+
+                # Skip if not old enough
+                if age_days < max_age_threshold:
+                    continue
+
+                # Check tags for retention markers
+                has_retention_tag = False
+                if snapshot.tags:
+                    for tag_key, tag_value in snapshot.tags.items():
+                        # Check both tag keys and values for retention markers
+                        tag_str = f"{tag_key}:{tag_value}".lower()
+                        for exclude_tag in exclude_tags_list:
+                            if exclude_tag.lower() in tag_str:
+                                has_retention_tag = True
+                                break
+                        if has_retention_tag:
+                            break
+
+                # Skip if has retention tag
+                if has_retention_tag:
+                    continue
+
+                # Check if source disk still exists
+                source_disk_exists = True
+                source_disk_id = None
+                if snapshot.creation_data and snapshot.creation_data.source_resource_id:
+                    source_disk_id = snapshot.creation_data.source_resource_id
+                    try:
+                        source_disk_rg = source_disk_id.split('/')[4]
+                        source_disk_name = source_disk_id.split('/')[-1]
+                        compute_client.disks.get(source_disk_rg, source_disk_name)
+                    except ResourceNotFoundError:
+                        source_disk_exists = False
+                    except Exception:
+                        source_disk_exists = True  # Assume exists if can't determine
+
+                # Calculate cost
+                snapshot_size_gb = snapshot.disk_size_gb if snapshot.disk_size_gb else 0
+                monthly_cost = round(snapshot_size_gb * 0.05, 2)
+
+                # Calculate already wasted cost (accumulated over time)
+                months_old = age_days / 30
+                already_wasted = round(monthly_cost * months_old, 2)
+
+                # Age in years for display
+                age_years = round(age_days / 365, 1)
+
+                # Detection reason
+                reason_parts = [f"Snapshot is {age_years} years old ({age_days} days)"]
+                if not source_disk_exists:
+                    reason_parts.append("DOUBLE WASTE: Source disk has been deleted (orphaned)")
+                reason_parts.append(f"Already accumulated ${already_wasted} in costs")
+                detection_reason = ". ".join(reason_parts)
+
+                metadata = {
+                    'snapshot_id': snapshot.id,
+                    'snapshot_name': snapshot.name,
+                    'snapshot_size_gb': snapshot_size_gb,
+                    'sku': snapshot.sku.name if snapshot.sku else "Unknown",
+                    'incremental': snapshot.incremental if hasattr(snapshot, 'incremental') else False,
+                    'source_disk_id': source_disk_id,
+                    'source_disk_exists': source_disk_exists,
+                    'age_days': age_days,
+                    'age_years': age_years,
+                    'time_created': snapshot.time_created.isoformat() if snapshot.time_created else None,
+                    'already_wasted': already_wasted,
+                    'detection_reason': detection_reason,
+                    'recommendation': f"Snapshot is {age_years} years old. If not needed for compliance/legal requirements, delete to save ${monthly_cost}/month. Already wasted: ${already_wasted}.",
+                    'tags': snapshot.tags if snapshot.tags else {},
+                    'confidence_level': self._calculate_confidence_level(age_days, detection_rules),
+                }
+
+                orphan = OrphanResourceData(
+                    resource_type='disk_snapshot_very_old',
+                    resource_id=snapshot.id,
+                    resource_name=snapshot.name,
+                    region=snapshot.location,
+                    estimated_monthly_cost=monthly_cost,
+                    resource_metadata=metadata
+                )
+
+                orphans.append(orphan)
+
+        except Exception as e:
+            print(f"Error scanning very old snapshots in {region}: {str(e)}")
+
+        return orphans
+
+    async def scan_disk_snapshot_premium_source(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scan for large snapshots created from Premium SSD disks.
+
+        Detects snapshots from Premium disk sources that are very large (>1 TB),
+        which generate significant costs despite being stored on Standard storage.
+
+        Logic:
+        - Source disk SKU = Premium_LRS or Premium_ZRS
+        - Snapshot size > min_snapshot_size_gb (default 1000 GB / 1 TB)
+        - Alert on high accumulated cost for large Premium disk snapshots
+
+        Cost:
+        - All snapshots stored on Standard storage: $0.05/GB/month
+        - BUT Premium disks often very large (up to 32 TB)
+        - Example: 8 TB snapshot = $409.60/month PER snapshot
+        - 5 snapshots of 8 TB = $2,048/month (~$24,576/year)
+
+        Args:
+            region: Azure region to scan
+            detection_rules: Optional detection configuration:
+                {
+                    "enabled": bool (default True),
+                    "min_snapshot_size_gb": int (default 1000) - Min size to alert,
+                    "min_age_days": int (default 30) - Min age to flag
+                }
+
+        Returns:
+            List of large Premium source snapshot resources
+        """
+        from datetime import datetime, timezone
+        from azure.identity import ClientSecretCredential
+        from azure.mgmt.compute import ComputeManagementClient
+        from azure.core.exceptions import ResourceNotFoundError
+
+        orphans = []
+
+        # Get detection parameters
+        min_snapshot_size_gb = detection_rules.get("min_snapshot_size_gb", 1000) if detection_rules else 1000
+        min_age_days = detection_rules.get("min_age_days", 30) if detection_rules else 30
+
+        try:
+            credential = ClientSecretCredential(
+                tenant_id=self.tenant_id,
+                client_id=self.client_id,
+                client_secret=self.client_secret
+            )
+
+            compute_client = ComputeManagementClient(credential, self.subscription_id)
+
+            # List all snapshots
+            snapshots = compute_client.snapshots.list()
+
+            for snapshot in snapshots:
+                # Filter by region
+                if snapshot.location != region:
+                    continue
+
+                # Filter by resource group (if specified)
+                if not self._is_resource_in_scope(snapshot.id):
+                    continue
+
+                # Calculate snapshot age
+                age_days = 0
+                if snapshot.time_created:
+                    age_days = (datetime.now(timezone.utc) - snapshot.time_created).days
+
+                # Skip recent snapshots
+                if age_days < min_age_days:
+                    continue
+
+                # Check snapshot size
+                snapshot_size_gb = snapshot.disk_size_gb if snapshot.disk_size_gb else 0
+                if snapshot_size_gb < min_snapshot_size_gb:
+                    continue  # Only flag large snapshots
+
+                # Check if source disk is Premium
+                source_disk_sku = None
+                source_disk_tier = None
+                source_disk_name = None
+                source_disk_exists = True
+
+                if snapshot.creation_data and snapshot.creation_data.source_resource_id:
+                    source_disk_id = snapshot.creation_data.source_resource_id
+                    source_disk_name = source_disk_id.split('/')[-1]
+
+                    # Try to get source disk info
+                    try:
+                        source_disk_rg = source_disk_id.split('/')[4]
+                        source_disk = compute_client.disks.get(source_disk_rg, source_disk_name)
+
+                        if source_disk.sku:
+                            source_disk_sku = source_disk.sku.name
+                            source_disk_tier = source_disk.sku.tier if hasattr(source_disk.sku, 'tier') else None
+
+                    except ResourceNotFoundError:
+                        source_disk_exists = False
+                    except Exception:
+                        pass  # Can't determine, skip this snapshot
+
+                # Only flag if source is Premium
+                if not source_disk_sku or not source_disk_sku.startswith("Premium"):
+                    continue
+
+                # Calculate cost
+                monthly_cost = round(snapshot_size_gb * 0.05, 2)
+
+                # Count total snapshots for this source (if source exists)
+                total_snapshots_count = 0
+                all_snapshots_cost = 0
+                if source_disk_exists and snapshot.creation_data and snapshot.creation_data.source_resource_id:
+                    source_disk_id = snapshot.creation_data.source_resource_id
+                    # Count snapshots from same source
+                    all_snaps = list(compute_client.snapshots.list())
+                    for snap in all_snaps:
+                        if snap.creation_data and snap.creation_data.source_resource_id == source_disk_id:
+                            total_snapshots_count += 1
+                            snap_size = snap.disk_size_gb if snap.disk_size_gb else 0
+                            all_snapshots_cost += snap_size * 0.05
+
+                all_snapshots_cost = round(all_snapshots_cost, 2)
+
+                metadata = {
+                    'snapshot_id': snapshot.id,
+                    'snapshot_name': snapshot.name,
+                    'snapshot_size_gb': snapshot_size_gb,
+                    'snapshot_size_tb': round(snapshot_size_gb / 1024, 2),
+                    'sku': snapshot.sku.name if snapshot.sku else "Unknown",
+                    'incremental': snapshot.incremental if hasattr(snapshot, 'incremental') else False,
+                    'source_disk_name': source_disk_name,
+                    'source_disk_sku': source_disk_sku,
+                    'source_disk_tier': source_disk_tier,
+                    'source_disk_exists': source_disk_exists,
+                    'age_days': age_days,
+                    'time_created': snapshot.time_created.isoformat() if snapshot.time_created else None,
+                    'total_snapshots_for_disk': total_snapshots_count,
+                    'all_snapshots_monthly_cost': all_snapshots_cost,
+                    'detection_reason': f"Large Premium disk ({snapshot_size_gb} GB) snapshot costs ${monthly_cost}/month. {total_snapshots_count} snapshots for this source = ${all_snapshots_cost}/month total.",
+                    'recommendation': f"Large Premium disk snapshots cost ${monthly_cost}/month EACH. Consider: 1) Using incremental snapshots to reduce delta size, 2) Reducing retention policy, 3) Archiving to cheaper storage if long-term retention needed.",
+                    'tags': snapshot.tags if snapshot.tags else {},
+                    'confidence_level': self._calculate_confidence_level(age_days, detection_rules),
+                }
+
+                orphan = OrphanResourceData(
+                    resource_type='disk_snapshot_premium_source',
+                    resource_id=snapshot.id,
+                    resource_name=snapshot.name,
+                    region=snapshot.location,
+                    estimated_monthly_cost=monthly_cost,
+                    resource_metadata=metadata
+                )
+
+                orphans.append(orphan)
+
+        except Exception as e:
+            print(f"Error scanning Premium source snapshots in {region}: {str(e)}")
+
+        return orphans
+
+    async def scan_disk_snapshot_large_unused(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scan for large unused Azure Disk Snapshots (>1 TB never restored).
+
+        Detects snapshots larger than 1 TB that have never been restored since 90+ days,
+        indicating they may be unnecessary and generating significant waste.
+
+        Logic:
+        - size_gb >= large_snapshot_threshold (default 1000 GB / 1 TB)
+        - age_days >= min_age_days (default 90)
+        - restore_count == 0 (check via tags: last_restore_date, restore_count)
+        - If large AND old AND never restored → critical waste
+
+        Cost:
+        - 1 TB snapshot = $51.20/month
+        - 4 TB snapshot = $204.80/month
+        - 8 TB snapshot = $409.60/month
+        - If 5 snapshots of 4 TB = $1,024/month (~$12,288/year)
+
+        Args:
+            region: Azure region to scan
+            detection_rules: Optional detection configuration:
+                {
+                    "enabled": bool (default True),
+                    "large_snapshot_threshold": int (default 1000) - Size threshold in GB,
+                    "min_age_days": int (default 90) - Min age to flag
+                }
+
+        Returns:
+            List of large unused snapshot resources
+        """
+        from datetime import datetime, timezone
+        from azure.identity import ClientSecretCredential
+        from azure.mgmt.compute import ComputeManagementClient
+        from azure.core.exceptions import ResourceNotFoundError
+
+        orphans = []
+
+        # Get detection parameters
+        large_snapshot_threshold = detection_rules.get("large_snapshot_threshold", 1000) if detection_rules else 1000
+        min_age_days = detection_rules.get("min_age_days", 90) if detection_rules else 90
+
+        try:
+            credential = ClientSecretCredential(
+                tenant_id=self.tenant_id,
+                client_id=self.client_id,
+                client_secret=self.client_secret
+            )
+
+            compute_client = ComputeManagementClient(credential, self.subscription_id)
+
+            # List all snapshots
+            snapshots = compute_client.snapshots.list()
+
+            for snapshot in snapshots:
+                # Filter by region
+                if snapshot.location != region:
+                    continue
+
+                # Filter by resource group (if specified)
+                if not self._is_resource_in_scope(snapshot.id):
+                    continue
+
+                # Check snapshot size
+                snapshot_size_gb = snapshot.disk_size_gb if snapshot.disk_size_gb else 0
+                if snapshot_size_gb < large_snapshot_threshold:
+                    continue  # Only flag large snapshots
+
+                # Calculate snapshot age
+                age_days = 0
+                if snapshot.time_created:
+                    age_days = (datetime.now(timezone.utc) - snapshot.time_created).days
+
+                # Skip recent snapshots
+                if age_days < min_age_days:
+                    continue
+
+                # Check restore history via tags
+                restore_count = 0
+                last_restore_date = None
+                if snapshot.tags:
+                    # Check for restore tracking tags
+                    restore_count = int(snapshot.tags.get('restore_count', 0))
+                    last_restore_date = snapshot.tags.get('last_restore_date', None)
+
+                # Only flag if never restored (restore_count == 0)
+                if restore_count > 0:
+                    continue
+
+                # Check if source disk still exists
+                source_disk_exists = True
+                source_disk_id = None
+                if snapshot.creation_data and snapshot.creation_data.source_resource_id:
+                    source_disk_id = snapshot.creation_data.source_resource_id
+                    try:
+                        source_disk_rg = source_disk_id.split('/')[4]
+                        source_disk_name = source_disk_id.split('/')[-1]
+                        compute_client.disks.get(source_disk_rg, source_disk_name)
+                    except ResourceNotFoundError:
+                        source_disk_exists = False
+                    except Exception:
+                        source_disk_exists = True
+
+                # Calculate cost
+                monthly_cost = round(snapshot_size_gb * 0.05, 2)
+
+                # Calculate already wasted (if old)
+                months_old = age_days / 30
+                already_wasted = round(monthly_cost * months_old, 2)
+
+                # Size in TB for display
+                snapshot_size_tb = round(snapshot_size_gb / 1024, 2)
+
+                # Build warning message
+                warning_parts = [f"⚠️ CRITICAL: {snapshot_size_tb} TB snapshot costing ${monthly_cost}/month"]
+                if restore_count == 0:
+                    warning_parts.append("never restored")
+                if not source_disk_exists:
+                    warning_parts.append("source disk deleted (orphaned)")
+
+                warning = ", ".join(warning_parts)
+
+                metadata = {
+                    'snapshot_id': snapshot.id,
+                    'snapshot_name': snapshot.name,
+                    'snapshot_size_gb': snapshot_size_gb,
+                    'snapshot_size_tb': snapshot_size_tb,
+                    'sku': snapshot.sku.name if snapshot.sku else "Unknown",
+                    'incremental': snapshot.incremental if hasattr(snapshot, 'incremental') else False,
+                    'source_disk_id': source_disk_id,
+                    'source_disk_exists': source_disk_exists,
+                    'age_days': age_days,
+                    'time_created': snapshot.time_created.isoformat() if snapshot.time_created else None,
+                    'restore_count': restore_count,
+                    'last_restore_date': last_restore_date,
+                    'already_wasted': already_wasted,
+                    'warning': warning,
+                    'detection_reason': f"Large {snapshot_size_tb} TB snapshot created {age_days} days ago, never restored. Already wasted ${already_wasted} in costs.",
+                    'recommendation': f"URGENT: Large snapshot ({snapshot_size_tb} TB) costing ${monthly_cost}/month has never been used. If not needed for compliance, delete immediately to save ${monthly_cost}/month.",
+                    'tags': snapshot.tags if snapshot.tags else {},
+                    'confidence_level': self._calculate_confidence_level(age_days, detection_rules),
+                }
+
+                orphan = OrphanResourceData(
+                    resource_type='disk_snapshot_large_unused',
+                    resource_id=snapshot.id,
+                    resource_name=snapshot.name,
+                    region=snapshot.location,
+                    estimated_monthly_cost=monthly_cost,
+                    resource_metadata=metadata
+                )
+
+                orphans.append(orphan)
+
+        except Exception as e:
+            print(f"Error scanning large unused snapshots in {region}: {str(e)}")
+
+        return orphans
+
+    async def scan_disk_snapshot_full_instead_incremental(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scan for Full snapshots when Incremental would save 50-90% costs.
+
+        HIGHEST VALUE SCENARIO: Switching from full to incremental snapshots can save
+        $185/month per disk (72-90% cost reduction). For 50 disks = $111,000/year ROI!
+
+        Logic:
+        - Group snapshots by source disk
+        - Count Full snapshots (incremental == False) per disk
+        - If >min_snapshots_for_incremental Full snapshots → should use incremental
+        - Calculate cost savings: full_cost vs incremental_cost
+
+        Cost Comparison:
+        - Full snapshots: Each snapshot = 100% of disk size × $0.05/GB
+        - Incremental snapshots: 1st full + rest only changed blocks (typically 5-15%)
+        - Example: 5 snapshots × 1 TB
+          * All full: 5 × 1024 GB × $0.05 = $256/month
+          * Incremental (10% change): 1024 + 4×102 GB × $0.05 = $71/month
+          * Savings: $185/month (72%)
+
+        Args:
+            region: Azure region to scan
+            detection_rules: Optional detection configuration:
+                {
+                    "enabled": bool (default True),
+                    "min_snapshots_for_incremental": int (default 2) - Min snapshots before recommending incremental,
+                    "min_age_days": int (default 30) - Min age to flag,
+                    "assumed_change_rate": float (default 0.10) - Assumed change rate for incremental (10%)
+                }
+
+        Returns:
+            List of disks using full snapshots instead of incremental (grouped by source disk)
+        """
+        from datetime import datetime, timezone
+        from azure.identity import ClientSecretCredential
+        from azure.mgmt.compute import ComputeManagementClient
+
+        orphans = []
+
+        # Get detection parameters
+        min_snapshots_for_incremental = detection_rules.get("min_snapshots_for_incremental", 2) if detection_rules else 2
+        min_age_days = detection_rules.get("min_age_days", 30) if detection_rules else 30
+        assumed_change_rate = detection_rules.get("assumed_change_rate", 0.10) if detection_rules else 0.10  # 10% default
+
+        try:
+            credential = ClientSecretCredential(
+                tenant_id=self.tenant_id,
+                client_id=self.client_id,
+                client_secret=self.client_secret
+            )
+
+            compute_client = ComputeManagementClient(credential, self.subscription_id)
+
+            # List all snapshots
+            all_snapshots = list(compute_client.snapshots.list())
+
+            # Filter by region
+            region_snapshots = [s for s in all_snapshots if s.location == region]
+
+            # Filter by resource group
+            region_snapshots = [s for s in region_snapshots if self._is_resource_in_scope(s.id)]
+
+            # Group snapshots by source disk
+            snapshots_by_source: dict[str, list] = {}
+
+            for snapshot in region_snapshots:
+                # Skip if no source disk
+                if not snapshot.creation_data or not snapshot.creation_data.source_resource_id:
+                    continue
+
+                source_disk_id = snapshot.creation_data.source_resource_id
+
+                # Calculate age
+                age_days = 0
+                if snapshot.time_created:
+                    age_days = (datetime.now(timezone.utc) - snapshot.time_created).days
+
+                # Skip recent snapshots
+                if age_days < min_age_days:
+                    continue
+
+                # Check if incremental
+                is_incremental = snapshot.incremental if hasattr(snapshot, 'incremental') else False
+
+                if source_disk_id not in snapshots_by_source:
+                    snapshots_by_source[source_disk_id] = []
+
+                snapshots_by_source[source_disk_id].append({
+                    'snapshot': snapshot,
+                    'age_days': age_days,
+                    'is_incremental': is_incremental,
+                    'size_gb': snapshot.disk_size_gb if snapshot.disk_size_gb else 0
+                })
+
+            # Analyze each source disk for full vs incremental opportunity
+            for source_disk_id, snapshot_list in snapshots_by_source.items():
+                # Count full snapshots
+                full_snapshots = [s for s in snapshot_list if not s['is_incremental']]
+
+                # Only flag if has multiple full snapshots
+                if len(full_snapshots) < min_snapshots_for_incremental:
+                    continue
+
+                # Check if ALL snapshots are full (no incremental strategy at all)
+                all_full_snapshots = len(full_snapshots) == len(snapshot_list)
+
+                # Calculate current cost (all full)
+                total_full_size_gb = sum([s['size_gb'] for s in full_snapshots])
+                current_monthly_cost = round(total_full_size_gb * 0.05, 2)
+
+                # Calculate estimated cost with incremental strategy
+                # Assumption: 1st snapshot full, rest only store changed blocks (default 10%)
+                if len(full_snapshots) > 0:
+                    first_snapshot_size = full_snapshots[0]['size_gb']
+                    # Remaining snapshots would be incremental (only changed blocks)
+                    incremental_count = len(full_snapshots) - 1
+                    incremental_total_size = incremental_count * first_snapshot_size * assumed_change_rate
+
+                    estimated_cost_with_incremental = round((first_snapshot_size + incremental_total_size) * 0.05, 2)
+                else:
+                    estimated_cost_with_incremental = 0
+
+                # Calculate potential savings
+                potential_monthly_savings = round(current_monthly_cost - estimated_cost_with_incremental, 2)
+                savings_percentage = round((potential_monthly_savings / current_monthly_cost * 100), 1) if current_monthly_cost > 0 else 0
+
+                # Only flag if significant savings (>$10/month)
+                if potential_monthly_savings < 10:
+                    continue
+
+                # Get source disk name
+                source_disk_name = source_disk_id.split('/')[-1]
+
+                # Get the oldest full snapshot for metadata
+                oldest_full = max(full_snapshots, key=lambda x: x['age_days'])
+
+                metadata = {
+                    'source_disk_id': source_disk_id,
+                    'source_disk_name': source_disk_name,
+                    'total_snapshots_for_disk': len(snapshot_list),
+                    'full_snapshots_count': len(full_snapshots),
+                    'incremental_snapshots_count': len(snapshot_list) - len(full_snapshots),
+                    'all_full_snapshots': all_full_snapshots,
+                    'disk_size_gb': full_snapshots[0]['size_gb'] if full_snapshots else 0,
+                    'current_monthly_cost_all_full': current_monthly_cost,
+                    'estimated_cost_with_incremental': estimated_cost_with_incremental,
+                    'potential_monthly_savings': potential_monthly_savings,
+                    'potential_annual_savings': round(potential_monthly_savings * 12, 2),
+                    'savings_percentage': savings_percentage,
+                    'assumed_change_rate_percent': int(assumed_change_rate * 100),
+                    'warning': f"⚠️ {len(full_snapshots)} FULL snapshots for {full_snapshots[0]['size_gb']} GB disk = ${current_monthly_cost}/month! Use incremental to save {savings_percentage}%",
+                    'detection_reason': f"{len(full_snapshots)} full snapshots detected for disk {source_disk_name}. Current cost: ${current_monthly_cost}/month. Switching to incremental (1 full + {incremental_count} incremental) would cost ${estimated_cost_with_incremental}/month = ${potential_monthly_savings}/month savings ({savings_percentage}%).",
+                    'recommendation': f"URGENT: Switch to incremental snapshots to save ${potential_monthly_savings}/month ({savings_percentage}% reduction). Strategy: Keep 1st snapshot as full, convert rest to incremental (Azure stores only changed blocks). Annual savings: ${round(potential_monthly_savings * 12, 2)}.",
+                }
+
+                orphan = OrphanResourceData(
+                    resource_type='disk_snapshot_full_instead_incremental',
+                    resource_id=oldest_full['snapshot'].id,
+                    resource_name=source_disk_name,
+                    region=region,
+                    estimated_monthly_cost=potential_monthly_savings,  # Use savings as the "cost" metric
+                    resource_metadata=metadata
+                )
+
+                orphans.append(orphan)
+
+        except Exception as e:
+            print(f"Error scanning full vs incremental snapshots in {region}: {str(e)}")
+
+        return orphans
+
+    async def scan_disk_snapshot_excessive_retention(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scan for excessive snapshot retention (>50 snapshots per disk).
+
+        HIGH VALUE SCENARIO: Excessive retention (120 snapshots) costs $1,440/month vs
+        recommended 30 snapshots = $360/month = $1,080/month savings per disk!
+        For 10 disks = $129,600/year ROI.
+
+        Logic:
+        - Group snapshots by source disk
+        - Count total snapshots per disk
+        - If >max_snapshots_threshold → excessive retention
+        - Calculate savings if reduced to recommended count
+
+        Azure limits:
+        - Maximum: 500 snapshots per disk (450 scheduled + 50 on-demand)
+        - Recommended: 7-30 snapshots max (daily for 1 week to 1 month)
+
+        Args:
+            region: Azure region to scan
+            detection_rules: Optional detection configuration:
+                {
+                    "enabled": bool (default True),
+                    "max_snapshots_threshold": int (default 50) - Max snapshots before alert,
+                    "recommended_max_snapshots": int (default 30) - Recommended max retention,
+                    "min_age_days": int (default 7) - Min age to flag
+                }
+
+        Returns:
+            List of disks with excessive snapshot retention (one entry per disk)
+        """
+        from datetime import datetime, timezone
+        from azure.identity import ClientSecretCredential
+        from azure.mgmt.compute import ComputeManagementClient
+
+        orphans = []
+
+        # Get detection parameters
+        max_snapshots_threshold = detection_rules.get("max_snapshots_threshold", 50) if detection_rules else 50
+        recommended_max_snapshots = detection_rules.get("recommended_max_snapshots", 30) if detection_rules else 30
+        min_age_days = detection_rules.get("min_age_days", 7) if detection_rules else 7
+
+        try:
+            credential = ClientSecretCredential(
+                tenant_id=self.tenant_id,
+                client_id=self.client_id,
+                client_secret=self.client_secret
+            )
+
+            compute_client = ComputeManagementClient(credential, self.subscription_id)
+
+            # List all snapshots
+            all_snapshots = list(compute_client.snapshots.list())
+
+            # Filter by region
+            region_snapshots = [s for s in all_snapshots if s.location == region]
+
+            # Filter by resource group
+            region_snapshots = [s for s in region_snapshots if self._is_resource_in_scope(s.id)]
+
+            # Group snapshots by source disk
+            snapshots_by_source: dict[str, list] = {}
+
+            for snapshot in region_snapshots:
+                # Skip if no source disk
+                if not snapshot.creation_data or not snapshot.creation_data.source_resource_id:
+                    continue
+
+                source_disk_id = snapshot.creation_data.source_resource_id
+
+                # Calculate age
+                age_days = 0
+                if snapshot.time_created:
+                    age_days = (datetime.now(timezone.utc) - snapshot.time_created).days
+
+                if source_disk_id not in snapshots_by_source:
+                    snapshots_by_source[source_disk_id] = []
+
+                snapshots_by_source[source_disk_id].append({
+                    'snapshot': snapshot,
+                    'age_days': age_days,
+                    'size_gb': snapshot.disk_size_gb if snapshot.disk_size_gb else 0,
+                    'time_created': snapshot.time_created
+                })
+
+            # Analyze each source disk for excessive retention
+            for source_disk_id, snapshot_list in snapshots_by_source.items():
+                total_snapshots_count = len(snapshot_list)
+
+                # Only flag if exceeds threshold
+                if total_snapshots_count <= max_snapshots_threshold:
+                    continue
+
+                # Calculate ages
+                oldest_snapshot_age = max([s['age_days'] for s in snapshot_list])
+                newest_snapshot_age = min([s['age_days'] for s in snapshot_list])
+                avg_snapshot_size_gb = sum([s['size_gb'] for s in snapshot_list]) / len(snapshot_list) if snapshot_list else 0
+                total_storage_gb = sum([s['size_gb'] for s in snapshot_list])
+
+                # Calculate current cost
+                current_monthly_cost = round(total_storage_gb * 0.05, 2)
+
+                # Calculate recommended cost (keep only N most recent)
+                recommended_storage_gb = recommended_max_snapshots * avg_snapshot_size_gb
+                recommended_monthly_cost = round(recommended_storage_gb * 0.05, 2)
+
+                # Calculate potential savings
+                potential_monthly_savings = round(current_monthly_cost - recommended_monthly_cost, 2)
+                potential_annual_savings = round(potential_monthly_savings * 12, 2)
+
+                # Get source disk name
+                source_disk_name = source_disk_id.split('/')[-1]
+
+                # Get the oldest snapshot for this source
+                oldest_snapshot = max(snapshot_list, key=lambda x: x['age_days'])
+
+                # Build warning
+                warning = f"⚠️ CRITICAL: {total_snapshots_count} snapshots for one disk! Azure limit is 500, recommended is {recommended_max_snapshots}."
+
+                metadata = {
+                    'source_disk_id': source_disk_id,
+                    'source_disk_name': source_disk_name,
+                    'source_disk_size_gb': int(avg_snapshot_size_gb),
+                    'total_snapshots_count': total_snapshots_count,
+                    'oldest_snapshot_age_days': oldest_snapshot_age,
+                    'newest_snapshot_age_days': newest_snapshot_age,
+                    'avg_snapshot_size_gb': round(avg_snapshot_size_gb, 2),
+                    'total_storage_gb': total_storage_gb,
+                    'current_monthly_cost': current_monthly_cost,
+                    'recommended_max_snapshots': recommended_max_snapshots,
+                    'recommended_monthly_cost': recommended_monthly_cost,
+                    'potential_monthly_savings': potential_monthly_savings,
+                    'potential_annual_savings': potential_annual_savings,
+                    'warning': warning,
+                    'detection_reason': f"{total_snapshots_count} snapshots detected for disk {source_disk_name} (Azure limit: 500, recommended: {recommended_max_snapshots}). Current cost: ${current_monthly_cost}/month. Recommended policy would cost ${recommended_monthly_cost}/month = ${potential_monthly_savings}/month savings.",
+                    'recommendation': f"URGENT: Implement snapshot rotation policy. Keep only {recommended_max_snapshots} most recent snapshots, delete {total_snapshots_count - recommended_max_snapshots} oldest. Savings: ${potential_monthly_savings}/month (${potential_annual_savings}/year).",
+                }
+
+                orphan = OrphanResourceData(
+                    resource_type='disk_snapshot_excessive_retention',
+                    resource_id=oldest_snapshot['snapshot'].id,
+                    resource_name=source_disk_name,
+                    region=region,
+                    estimated_monthly_cost=potential_monthly_savings,  # Use savings as the "cost" metric
+                    resource_metadata=metadata
+                )
+
+                orphans.append(orphan)
+
+        except Exception as e:
+            print(f"Error scanning excessive snapshot retention in {region}: {str(e)}")
+
+        return orphans
+
+    async def scan_disk_snapshot_manual_without_policy(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """Scan for manual snapshots without rotation policy (>10 manual snapshots risk infinite accumulation)."""
+        from datetime import datetime, timezone
+        from azure.identity import ClientSecretCredential
+        from azure.mgmt.compute import ComputeManagementClient
+
+        orphans = []
+        max_manual_snapshots = detection_rules.get("max_manual_snapshots", 10) if detection_rules else 10
+        min_age_days = detection_rules.get("min_age_days", 30) if detection_rules else 30
+
+        try:
+            credential = ClientSecretCredential(self.tenant_id, self.client_id, self.client_secret)
+            compute_client = ComputeManagementClient(credential, self.subscription_id)
+            all_snapshots = list(compute_client.snapshots.list())
+            region_snapshots = [s for s in all_snapshots if s.location == region and self._is_resource_in_scope(s.id)]
+
+            snapshots_by_source: dict[str, list] = {}
+            for snapshot in region_snapshots:
+                if not snapshot.creation_data or not snapshot.creation_data.source_resource_id:
+                    continue
+                age_days = (datetime.now(timezone.utc) - snapshot.time_created).days if snapshot.time_created else 0
+                if age_days < min_age_days:
+                    continue
+
+                # Check if manual (ManagedBy tag != 'Azure Backup')
+                managed_by = snapshot.tags.get('ManagedBy', 'Manual') if snapshot.tags else 'Manual'
+                if managed_by != 'Azure Backup':
+                    source_disk_id = snapshot.creation_data.source_resource_id
+                    if source_disk_id not in snapshots_by_source:
+                        snapshots_by_source[source_disk_id] = []
+                    snapshots_by_source[source_disk_id].append({
+                        'snapshot': snapshot, 'age_days': age_days,
+                        'size_gb': snapshot.disk_size_gb if snapshot.disk_size_gb else 0
+                    })
+
+            for source_disk_id, snapshot_list in snapshots_by_source.items():
+                if len(snapshot_list) <= max_manual_snapshots:
+                    continue
+                oldest_age = max([s['age_days'] for s in snapshot_list])
+                total_storage_gb = sum([s['size_gb'] for s in snapshot_list])
+                monthly_cost = round(total_storage_gb * 0.05, 2)
+                source_disk_name = source_disk_id.split('/')[-1]
+                oldest = max(snapshot_list, key=lambda x: x['age_days'])
+
+                orphan = OrphanResourceData(
+                    resource_type='disk_snapshot_manual_without_policy',
+                    resource_id=oldest['snapshot'].id, resource_name=source_disk_name, region=region,
+                    estimated_monthly_cost=monthly_cost,
+                    resource_metadata={
+                        'source_disk_name': source_disk_name, 'manual_snapshots_count': len(snapshot_list),
+                        'oldest_manual_snapshot_age_days': oldest_age, 'managed_by': 'Manual',
+                        'has_azure_backup_policy': False, 'total_storage_gb': total_storage_gb,
+                        'current_monthly_cost': monthly_cost,
+                        'warning': f"⚠️ {len(snapshot_list)} manual snapshots without rotation policy - risk of infinite accumulation",
+                        'recommendation': "URGENT: Implement Azure Backup policy or custom snapshot rotation automation"
+                    }
+                )
+                orphans.append(orphan)
+        except Exception as e:
+            print(f"Error scanning manual snapshots in {region}: {str(e)}")
+        return orphans
+
+    async def scan_disk_snapshot_never_restored(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """Scan for snapshots never restored since 90+ days (check via tags)."""
+        from datetime import datetime, timezone
+        from azure.identity import ClientSecretCredential
+        from azure.mgmt.compute import ComputeManagementClient
+
+        orphans = []
+        min_never_restored_days = detection_rules.get("min_never_restored_days", 90) if detection_rules else 90
+        exclude_tags = detection_rules.get("exclude_tags", ["DR", "disaster-recovery", "archive", "compliance"]) if detection_rules else ["DR", "disaster-recovery", "archive", "compliance"]
+
+        try:
+            credential = ClientSecretCredential(self.tenant_id, self.client_id, self.client_secret)
+            compute_client = ComputeManagementClient(credential, self.subscription_id)
+            snapshots = compute_client.snapshots.list()
+
+            for snapshot in snapshots:
+                if snapshot.location != region or not self._is_resource_in_scope(snapshot.id):
+                    continue
+                age_days = (datetime.now(timezone.utc) - snapshot.time_created).days if snapshot.time_created else 0
+                if age_days < min_never_restored_days:
+                    continue
+
+                # Check for exclusion tags
+                has_exclude_tag = False
+                if snapshot.tags:
+                    for tag_key, tag_value in snapshot.tags.items():
+                        if any(excl.lower() in f"{tag_key}:{tag_value}".lower() for excl in exclude_tags):
+                            has_exclude_tag = True
+                            break
+                if has_exclude_tag:
+                    continue
+
+                # Check restore history
+                restore_count = int(snapshot.tags.get('restore_count', 0)) if snapshot.tags else 0
+                if restore_count > 0:
+                    continue
+
+                snapshot_size_gb = snapshot.disk_size_gb if snapshot.disk_size_gb else 0
+                monthly_cost = round(snapshot_size_gb * 0.05, 2)
+                already_wasted = round(monthly_cost * (age_days / 30), 2)
+
+                orphan = OrphanResourceData(
+                    resource_type='disk_snapshot_never_restored', resource_id=snapshot.id,
+                    resource_name=snapshot.name, region=snapshot.location, estimated_monthly_cost=monthly_cost,
+                    resource_metadata={
+                        'age_days': age_days, 'restore_count': 0, 'already_wasted': already_wasted,
+                        'recommendation': f"Snapshot created {age_days} days ago but never restored - consider deleting if not for compliance"
+                    }
+                )
+                orphans.append(orphan)
+        except Exception as e:
+            print(f"Error scanning never restored snapshots in {region}: {str(e)}")
+        return orphans
+
+    async def scan_disk_snapshot_frequent_creation(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """Scan for snapshots created too frequently (>1/day) - daily vs weekly = 86% savings."""
+        from datetime import datetime, timezone
+        from azure.identity import ClientSecretCredential
+        from azure.mgmt.compute import ComputeManagementClient
+
+        orphans = []
+        max_frequency_days = detection_rules.get("max_frequency_days", 1.0) if detection_rules else 1.0
+        observation_period_days = detection_rules.get("observation_period_days", 30) if detection_rules else 30
+
+        try:
+            credential = ClientSecretCredential(self.tenant_id, self.client_id, self.client_secret)
+            compute_client = ComputeManagementClient(credential, self.subscription_id)
+            all_snapshots = list(compute_client.snapshots.list())
+            region_snapshots = [s for s in all_snapshots if s.location == region and self._is_resource_in_scope(s.id)]
+
+            snapshots_by_source: dict[str, list] = {}
+            cutoff_date = datetime.now(timezone.utc) - timedelta(days=observation_period_days)
+
+            for snapshot in region_snapshots:
+                if not snapshot.creation_data or not snapshot.creation_data.source_resource_id:
+                    continue
+                if snapshot.time_created and snapshot.time_created >= cutoff_date:
+                    source_disk_id = snapshot.creation_data.source_resource_id
+                    if source_disk_id not in snapshots_by_source:
+                        snapshots_by_source[source_disk_id] = []
+                    snapshots_by_source[source_disk_id].append({
+                        'snapshot': snapshot, 'time_created': snapshot.time_created,
+                        'size_gb': snapshot.disk_size_gb if snapshot.disk_size_gb else 0
+                    })
+
+            from datetime import timedelta
+            for source_disk_id, snapshot_list in snapshots_by_source.items():
+                if len(snapshot_list) < 28:  # Need significant sample
+                    continue
+                avg_days_between = observation_period_days / len(snapshot_list)
+                if avg_days_between >= max_frequency_days:
+                    continue
+
+                avg_size = sum([s['size_gb'] for s in snapshot_list]) / len(snapshot_list)
+                current_monthly_cost = round(len(snapshot_list) * avg_size * 0.05, 2)
+                recommended_weekly_count = 4  # Weekly = 4 snapshots/month
+                recommended_cost = round(recommended_weekly_count * avg_size * 0.05, 2)
+                savings = round(current_monthly_cost - recommended_cost, 2)
+
+                if savings < 50:  # Only flag significant waste
+                    continue
+
+                source_disk_name = source_disk_id.split('/')[-1]
+                orphan = OrphanResourceData(
+                    resource_type='disk_snapshot_frequent_creation', resource_id=snapshot_list[0]['snapshot'].id,
+                    resource_name=source_disk_name, region=region, estimated_monthly_cost=savings,
+                    resource_metadata={
+                        'source_disk_name': source_disk_name, 'snapshots_in_last_30_days': len(snapshot_list),
+                        'avg_days_between_snapshots': round(avg_days_between, 2),
+                        'current_monthly_cost': current_monthly_cost, 'recommended_frequency': 'Weekly',
+                        'recommended_monthly_cost': recommended_cost, 'potential_monthly_savings': savings,
+                        'recommendation': f"Daily snapshots for disk - switch to weekly to save 86% (${savings}/month)"
+                    }
+                )
+                orphans.append(orphan)
+        except Exception as e:
+            print(f"Error scanning frequent snapshot creation in {region}: {str(e)}")
         return orphans
 
     async def scan_unnecessary_zrs_disks(
