@@ -63,6 +63,14 @@ const AZURE_RESOURCE_ICONS: { [key: string]: any } = {
   // Phase 1 - Advanced waste scenarios
   managed_disk_on_stopped_vm: HardDrive,
   public_ip_on_stopped_resource: Globe,
+  disk_snapshot_redundant: Camera,
+  managed_disk_unnecessary_zrs: HardDrive,
+  managed_disk_unnecessary_cmk: HardDrive,
+  // Phase 2 - Azure Monitor Metrics-based scenarios
+  managed_disk_idle: HardDrive,
+  managed_disk_unused_bursting: Zap,
+  managed_disk_overprovisioned: Database,
+  managed_disk_underutilized_hdd: HardDrive,
   // VM Phase A - Virtual Machine waste scenarios
   virtual_machine_stopped_not_deallocated: Server,
   virtual_machine_never_started: Server,
@@ -80,6 +88,14 @@ const AZURE_RESOURCE_LABELS: { [key: string]: string } = {
   // Phase 1 - Advanced waste scenarios
   managed_disk_on_stopped_vm: "Managed Disks (On Stopped VMs)",
   public_ip_on_stopped_resource: "Public IPs (On Stopped Resources)",
+  disk_snapshot_redundant: "Disk Snapshots (Redundant - >3 per disk)",
+  managed_disk_unnecessary_zrs: "Managed Disks (Unnecessary ZRS in Dev/Test)",
+  managed_disk_unnecessary_cmk: "Managed Disks (Unnecessary CMK Encryption)",
+  // Phase 2 - Azure Monitor Metrics-based scenarios
+  managed_disk_idle: "Managed Disks (Idle - Zero I/O) 📊",
+  managed_disk_unused_bursting: "Managed Disks (Unused Bursting) 📊",
+  managed_disk_overprovisioned: "Managed Disks (Over-Provisioned Performance) 📊",
+  managed_disk_underutilized_hdd: "Managed Disks (Under-Utilized HDD) 📊",
   // VM Phase A - Virtual Machine waste scenarios
   virtual_machine_stopped_not_deallocated: "Virtual Machines (Stopped, NOT Deallocated) ⚠️",
   virtual_machine_never_started: "Virtual Machines (Never Started)",

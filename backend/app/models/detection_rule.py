@@ -345,7 +345,90 @@ DEFAULT_DETECTION_RULES = {
         "enabled": True,
         "min_age_days": 90,  # Snapshots older than 90 days
         "confidence_threshold_days": 180,
-        "description": "Orphaned Azure Disk Snapshots",
+        "confidence_critical_days": 180,  # Critical after 180 days
+        "confidence_high_days": 90,  # High confidence after 90 days
+        "confidence_medium_days": 30,  # Medium confidence after 30 days
+        "description": "Orphaned Azure Disk Snapshots (source disk deleted)",
+    },
+    "managed_disk_on_stopped_vm": {
+        "enabled": True,
+        "min_stopped_days": 30,  # VM deallocated for > 30 days
+        "confidence_threshold_days": 60,
+        "confidence_critical_days": 90,  # Critical after 90 days
+        "confidence_high_days": 30,  # High confidence after 30 days
+        "confidence_medium_days": 7,  # Medium confidence after 7 days
+        "description": "Managed Disks (OS + Data) attached to VMs deallocated for extended periods",
+    },
+    "disk_snapshot_redundant": {
+        "enabled": True,
+        "min_age_days": 90,  # Snapshots older than 90 days
+        "max_snapshots_per_disk": 3,  # Keep only N most recent snapshots per source disk
+        "confidence_threshold_days": 180,
+        "confidence_critical_days": 180,  # Critical after 180 days
+        "confidence_high_days": 90,  # High confidence after 90 days
+        "confidence_medium_days": 30,  # Medium confidence after 30 days
+        "description": "Redundant Disk Snapshots (>3 snapshots for same source disk)",
+    },
+    "managed_disk_unnecessary_zrs": {
+        "enabled": True,
+        "min_age_days": 30,  # Ignore disks created in last 30 days
+        "dev_environments": ["dev", "test", "staging", "qa", "development", "nonprod"],
+        "confidence_threshold_days": 60,
+        "confidence_critical_days": 90,  # Critical after 90 days
+        "confidence_high_days": 30,  # High confidence after 30 days
+        "confidence_medium_days": 7,  # Medium confidence after 7 days
+        "description": "Zone-Redundant Storage (ZRS) disks in dev/test environments (unnecessary redundancy)",
+    },
+    "managed_disk_unnecessary_cmk": {
+        "enabled": True,
+        "min_age_days": 30,  # Ignore disks created in last 30 days
+        "compliance_tags": ["compliance", "hipaa", "pci", "sox", "gdpr", "regulated", "Compliance", "HIPAA", "PCI", "SOX", "GDPR"],
+        "confidence_threshold_days": 60,
+        "confidence_critical_days": 90,  # Critical after 90 days
+        "confidence_high_days": 30,  # High confidence after 30 days
+        "confidence_medium_days": 7,  # Medium confidence after 7 days
+        "description": "Customer-Managed Key (CMK) encryption without compliance requirements (~8% cost overhead)",
+    },
+    "managed_disk_idle": {
+        "enabled": True,
+        "min_idle_days": 60,  # Observation period (Azure Monitor metrics)
+        "max_iops_threshold": 0.1,  # Average IOPS < 0.1 = idle
+        "confidence_threshold_days": 90,
+        "confidence_critical_days": 120,  # Critical after 120 days idle
+        "confidence_high_days": 60,  # High confidence after 60 days
+        "confidence_medium_days": 30,  # Medium confidence after 30 days
+        "description": "Attached disks with zero I/O activity (0 read/write IOPS over observation period) - Requires Azure Monitor",
+    },
+    "managed_disk_unused_bursting": {
+        "enabled": True,
+        "min_observation_days": 30,  # Azure Monitor lookback period
+        "max_burst_usage_percent": 0.01,  # < 0.01% burst credits used = unused
+        "confidence_threshold_days": 60,
+        "confidence_critical_days": 90,  # Critical after 90 days
+        "confidence_high_days": 30,  # High confidence after 30 days
+        "confidence_medium_days": 7,  # Medium confidence after 7 days
+        "description": "Premium SSD disks with bursting enabled but never used (~15% cost overhead) - Requires Azure Monitor",
+    },
+    "managed_disk_overprovisioned": {
+        "enabled": True,
+        "min_observation_days": 30,  # Azure Monitor lookback period
+        "max_utilization_percent": 30,  # < 30% IOPS/Bandwidth utilization = over-provisioned
+        "confidence_threshold_days": 60,
+        "confidence_critical_days": 90,  # Critical after 90 days
+        "confidence_high_days": 30,  # High confidence after 30 days
+        "confidence_medium_days": 7,  # Medium confidence after 7 days
+        "description": "Premium SSD disks over-provisioned (performance tier too high for actual usage) - Requires Azure Monitor",
+    },
+    "managed_disk_underutilized_hdd": {
+        "enabled": True,
+        "min_observation_days": 30,  # Azure Monitor lookback period
+        "max_iops_threshold": 100,  # Average IOPS < 100 for HDD = under-utilized
+        "min_disk_size_gb": 256,  # Minimum size to consider as \"large\" HDD
+        "confidence_threshold_days": 60,
+        "confidence_critical_days": 90,  # Critical after 90 days
+        "confidence_high_days": 30,  # High confidence after 30 days
+        "confidence_medium_days": 7,  # Medium confidence after 7 days
+        "description": "Large Standard HDD disks under-utilized (should migrate to smaller Standard SSD) - Requires Azure Monitor",
     },
     "virtual_machine_deallocated": {
         "enabled": True,

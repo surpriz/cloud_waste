@@ -12,7 +12,7 @@ class DetectionRuleBase(BaseModel):
 
     resource_type: str = Field(
         ...,
-        pattern="^(ebs_volume|elastic_ip|ebs_snapshot|ec2_instance|nat_gateway|load_balancer|rds_instance|fsx_file_system|neptune_cluster|msk_cluster|eks_cluster|sagemaker_endpoint|redshift_cluster|elasticache_cluster|vpn_connection|transit_gateway_attachment|opensearch_domain|global_accelerator|kinesis_stream|vpc_endpoint|documentdb_cluster|s3_bucket|lambda_function|dynamodb_table|managed_disk_unattached|public_ip_unassociated|disk_snapshot_orphaned|virtual_machine_deallocated)$",
+        pattern="^(ebs_volume|elastic_ip|ebs_snapshot|ec2_instance|nat_gateway|load_balancer|rds_instance|fsx_file_system|neptune_cluster|msk_cluster|eks_cluster|sagemaker_endpoint|redshift_cluster|elasticache_cluster|vpn_connection|transit_gateway_attachment|opensearch_domain|global_accelerator|kinesis_stream|vpc_endpoint|documentdb_cluster|s3_bucket|lambda_function|dynamodb_table|managed_disk_unattached|managed_disk_on_stopped_vm|disk_snapshot_orphaned|disk_snapshot_redundant|managed_disk_unnecessary_zrs|managed_disk_unnecessary_cmk|managed_disk_idle|managed_disk_unused_bursting|managed_disk_overprovisioned|managed_disk_underutilized_hdd|public_ip_unassociated|virtual_machine_deallocated|azure_aks_cluster)$",
     )
     rules: dict[str, Any] = Field(
         ...,
