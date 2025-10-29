@@ -272,7 +272,105 @@ docker compose -f deployment/docker-compose.prod.yml up -d --build --no-deps bac
 
 ---
 
-## 💾 Backups
+## 💾 Backups & Disaster Recovery
+
+### 🛡 Automated Local Backups
+
+CloudWaste includes a comprehensive automated backup system that runs nightly on your VPS.
+
+**What gets backed up:**
+- ✅ PostgreSQL database (all data)
+- ✅ Redis database (cache, celery results)
+- ✅ Encryption key (🔴 CRITICAL)
+- ✅ Docker volumes (postgres_data, redis_data)
+- ✅ Configuration files (.env.prod, docker-compose, nginx)
+- ✅ Git repository state
+
+**Backup rotation:**
+- Daily: Last 7 days
+- Weekly: Last 4 weeks
+- Monthly: Last 3 months
+
+### ⚡ Quick Setup
+
+**Initial setup (run once on VPS):**
+```bash
+cd /opt/cloudwaste
+sudo bash deployment/setup-backup-cron.sh
+```
+
+This will:
+1. Create cron job (runs daily at 3 AM)
+2. Set up logging (`/var/log/cloudwaste-backup.log`)
+3. Run initial test backup
+4. Verify everything works
+
+**Backups are stored in:** `/opt/cloudwaste/backups/`
+
+### 📋 Backup Management
+
+**Manual backup:**
+```bash
+bash deployment/backup-full.sh
+```
+
+**Restore from backup:**
+```bash
+bash deployment/restore-full.sh
+```
+
+**View backups:**
+```bash
+ls -lh /opt/cloudwaste/backups/daily/
+ls -lh /opt/cloudwaste/backups/weekly/
+ls -lh /opt/cloudwaste/backups/monthly/
+```
+
+**Check backup logs:**
+```bash
+tail -f /var/log/cloudwaste-backup.log
+```
+
+### 🔄 Restore Process
+
+The restore script provides an interactive menu:
+
+1. Lists all available backups (daily/weekly/monthly)
+2. Shows backup information (size, date, contents)
+3. Offers restore options:
+   - Full restore (recommended)
+   - Database only
+   - Configuration only
+   - Encryption key only
+4. Safely stops containers
+5. Restores selected data
+6. Restarts containers
+7. Verifies restoration
+
+### 💾 Storage Requirements
+
+- **Per backup:** ~100-500MB (compressed)
+- **Total (30 days):** ~2-5GB
+- **Check disk space:** `df -h /opt/cloudwaste/backups`
+
+### ⚠️ Important Notes
+
+**For MVP (current setup):**
+- ✅ Backups are LOCAL on VPS
+- ✅ Protects against data corruption, accidental deletion
+- ❌ Does NOT protect against VPS failure/loss
+
+**For Production (recommended upgrade):**
+- Add off-site backup to cloud storage:
+  - **Restic + Backblaze B2** (~$1-3/month)
+  - **rclone + S3** (~$2-5/month)
+  - **Hetzner Storage Box** (€3.81/month, EU-based)
+
+📚 **Complete guide:** See [BACKUP_GUIDE.md](BACKUP_GUIDE.md) for detailed documentation
+
+---
+
+## 💾 Legacy Backup Script (Database Only)
 
 ### Manual Backup:
 ```bash
@@ -490,4 +588,4 @@ docker exec cloudwaste_postgres psql -U cloudwaste -d cloudwaste -c "VACUUM ANAL
 ---
 
 **Last Updated:** 2025-10-29
-**Deployment Version:** 1.1.0 (Added Portainer monitoring)
+**Deployment Version:** 1.2.0 (Added Portainer + Automated Backups)
