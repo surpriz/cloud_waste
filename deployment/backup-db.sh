@@ -139,16 +139,16 @@ fi
 print_step "Backing up encryption key..."
 
 # Extract encryption key from Docker volume
-ENCRYPTION_KEY_DATA=$(docker volume inspect cloudwaste_encryption_key --format '{{ .Mountpoint }}')
+ENCRYPTION_KEY_DATA=$(docker volume inspect deployment_encryption_key --format '{{ .Mountpoint }}')
 
 if [ -d "$ENCRYPTION_KEY_DATA" ]; then
     # Copy encryption key file
-    sudo cp "$ENCRYPTION_KEY_DATA/.encryption_key" "$ENCRYPTION_KEY_BACKUP" 2>/dev/null || \
+    sudo cp "$ENCRYPTION_KEY_DATA/encryption.key" "$ENCRYPTION_KEY_BACKUP" 2>/dev/null || \
     docker run --rm \
-        -v cloudwaste_encryption_key:/data \
+        -v deployment_encryption_key:/data \
         -v "$BACKUP_DIR:/backup" \
         alpine \
-        sh -c "cp /data/.encryption_key /backup/encryption_key_$TIMESTAMP.txt"
+        sh -c "cp /data/encryption.key /backup/encryption_key_$TIMESTAMP.txt"
 
     chmod 600 "$ENCRYPTION_KEY_BACKUP"  # Secure: only owner can read
     print_success "Encryption key backed up: $ENCRYPTION_KEY_BACKUP"
@@ -191,7 +191,7 @@ Backup Location: $BACKUP_DIR
 
 To restore this backup:
   1. Stop all containers: docker compose -f deployment/docker-compose.prod.yml down
-  2. Restore encryption key: docker run --rm -v cloudwaste_encryption_key:/data -v $BACKUP_DIR:/backup alpine sh -c "cp /backup/encryption_key_$TIMESTAMP.txt /data/.encryption_key"
+  2. Restore encryption key: docker run --rm -v deployment_encryption_key:/data -v $BACKUP_DIR:/backup alpine sh -c "cp /backup/encryption_key_$TIMESTAMP.txt /data/encryption.key"
   3. Restore database: gunzip < $DB_BACKUP_FILE | docker exec -i cloudwaste_postgres psql -U ${POSTGRES_USER:-cloudwaste} -d ${POSTGRES_DB:-cloudwaste}
   4. Start containers: docker compose -f deployment/docker-compose.prod.yml up -d
 EOF

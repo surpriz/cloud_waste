@@ -118,9 +118,10 @@ if ! docker ps | grep -q cloudwaste_redis; then
 fi
 
 # Check available disk space (need at least 2GB free)
-AVAILABLE_SPACE=$(df "$BACKUP_ROOT" 2>/dev/null | awk 'NR==2 {print $4}' || echo "0")
-if [ "$AVAILABLE_SPACE" -lt 2097152 ]; then  # 2GB in KB
-    print_warning "Low disk space: $(df -h "$BACKUP_ROOT" | awk 'NR==2 {print $4}') available"
+AVAILABLE_SPACE=$(df "$APP_DIR" 2>/dev/null | awk 'NR==2 {print $4}' || echo "0")
+# Validate AVAILABLE_SPACE is a number
+if [[ "$AVAILABLE_SPACE" =~ ^[0-9]+$ ]] && [ "$AVAILABLE_SPACE" -lt 2097152 ]; then  # 2GB in KB
+    print_warning "Low disk space: $(df -h "$APP_DIR" | awk 'NR==2 {print $4}') available"
 fi
 
 print_success "Pre-flight checks passed"
@@ -217,7 +218,7 @@ docker run --rm \
     -v deployment_encryption_key:/data \
     -v "$BACKUP_DIR/volumes:/backup" \
     alpine \
-    sh -c "cp /data/.encryption_key /backup/encryption_key.txt 2>/dev/null || exit 1"
+    sh -c "cp /data/encryption.key /backup/encryption_key.txt 2>/dev/null || exit 1"
 
 if [ -f "$BACKUP_DIR/volumes/encryption_key.txt" ]; then
     chmod 600 "$BACKUP_DIR/volumes/encryption_key.txt"
@@ -396,7 +397,7 @@ Or manually:
 2. Restore encryption key:
    docker run --rm -v deployment_encryption_key:/data \\
      -v $BACKUP_DIR/volumes:/backup alpine \\
-     sh -c "cp /backup/encryption_key.txt /data/.encryption_key"
+     sh -c "cp /backup/encryption_key.txt /data/encryption.key"
 
 3. Restore PostgreSQL data volume:
    docker run --rm -v deployment_postgres_data:/data \\

@@ -383,7 +383,7 @@ docker run --rm \
   -v deployment_encryption_key:/data \
   -v /opt/cloudwaste/backups:/backup \
   alpine \
-  sh -c "cp /data/.encryption_key /backup/MANUAL_encryption_key_$(date +%Y%m%d).txt"
+  sh -c "cp /data/encryption.key /backup/MANUAL_encryption_key_$(date +%Y%m%d).txt"
 
 # Secure the file
 chmod 600 /opt/cloudwaste/backups/MANUAL_encryption_key_*.txt

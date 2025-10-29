@@ -319,7 +319,7 @@ if [ "$RESTORE_MODE" = "full" ] || [ "$RESTORE_MODE" = "encryption" ]; then
             -v deployment_encryption_key:/data \
             -v "$BACKUP_DIR/volumes:/backup" \
             alpine \
-            sh -c "cp /backup/encryption_key.txt /data/.encryption_key && chmod 600 /data/.encryption_key"
+            sh -c "cp /backup/encryption_key.txt /data/encryption.key && chmod 600 /data/encryption.key"
 
         print_success "Encryption key restored"
     else
