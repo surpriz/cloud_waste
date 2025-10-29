@@ -145,6 +145,7 @@ services:
     restart: always
     environment:
       - NODE_ENV=production
+      - HOSTNAME=0.0.0.0
     depends_on:
       - backend
     healthcheck:
