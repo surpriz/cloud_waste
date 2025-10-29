@@ -63,6 +63,12 @@ const AZURE_RESOURCE_ICONS: { [key: string]: any } = {
   // Phase 1 - Advanced waste scenarios
   managed_disk_on_stopped_vm: HardDrive,
   public_ip_on_stopped_resource: Globe,
+  public_ip_dynamic_unassociated: Globe,
+  public_ip_unnecessary_standard_sku: Globe,
+  public_ip_unnecessary_zone_redundancy: Globe,
+  public_ip_ddos_protection_unused: Globe,
+  public_ip_on_nic_without_vm: Globe,
+  public_ip_reserved_but_unused: Globe,
   disk_snapshot_redundant: Camera,
   managed_disk_unnecessary_zrs: HardDrive,
   managed_disk_unnecessary_cmk: HardDrive,
@@ -71,6 +77,8 @@ const AZURE_RESOURCE_ICONS: { [key: string]: any } = {
   managed_disk_unused_bursting: Zap,
   managed_disk_overprovisioned: Database,
   managed_disk_underutilized_hdd: HardDrive,
+  public_ip_no_traffic: Globe,
+  public_ip_very_low_traffic: Globe,
   // VM Phase A - Virtual Machine waste scenarios
   virtual_machine_stopped_not_deallocated: Server,
   virtual_machine_never_started: Server,
@@ -88,6 +96,12 @@ const AZURE_RESOURCE_LABELS: { [key: string]: string } = {
   // Phase 1 - Advanced waste scenarios
   managed_disk_on_stopped_vm: "Managed Disks (On Stopped VMs)",
   public_ip_on_stopped_resource: "Public IPs (On Stopped Resources)",
+  public_ip_dynamic_unassociated: "Public IPs (Dynamic, Stuck in Provisioned State)",
+  public_ip_unnecessary_standard_sku: "Public IPs (Standard SKU in Dev/Test)",
+  public_ip_unnecessary_zone_redundancy: "Public IPs (Unnecessary Zone Redundancy)",
+  public_ip_ddos_protection_unused: "Public IPs (DDoS Protection Unused) 💰",
+  public_ip_on_nic_without_vm: "Public IPs (On NICs without VMs)",
+  public_ip_reserved_but_unused: "Public IPs (Reserved but No IP Assigned)",
   disk_snapshot_redundant: "Disk Snapshots (Redundant - >3 per disk)",
   managed_disk_unnecessary_zrs: "Managed Disks (Unnecessary ZRS in Dev/Test)",
   managed_disk_unnecessary_cmk: "Managed Disks (Unnecessary CMK Encryption)",
@@ -96,6 +110,8 @@ const AZURE_RESOURCE_LABELS: { [key: string]: string } = {
   managed_disk_unused_bursting: "Managed Disks (Unused Bursting) 📊",
   managed_disk_overprovisioned: "Managed Disks (Over-Provisioned Performance) 📊",
   managed_disk_underutilized_hdd: "Managed Disks (Under-Utilized HDD) 📊",
+  public_ip_no_traffic: "Public IPs (Zero Network Traffic) 📊",
+  public_ip_very_low_traffic: "Public IPs (Very Low Traffic <1GB/month) 📊",
   // VM Phase A - Virtual Machine waste scenarios
   virtual_machine_stopped_not_deallocated: "Virtual Machines (Stopped, NOT Deallocated) ⚠️",
   virtual_machine_never_started: "Virtual Machines (Never Started)",

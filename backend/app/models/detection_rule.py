@@ -339,7 +339,85 @@ DEFAULT_DETECTION_RULES = {
         "enabled": True,
         "min_age_days": 3,  # Ignore IPs allocated in last 3 days
         "confidence_threshold_days": 7,
-        "description": "Unassociated Azure Public IP addresses",
+        "confidence_critical_days": 90,  # Critical after 90 days
+        "confidence_high_days": 30,  # High confidence after 30 days
+        "confidence_medium_days": 7,  # Medium confidence after 7 days
+        "description": "Unassociated Azure Public IP addresses (not attached to any resource)",
+    },
+    "public_ip_on_stopped_resource": {
+        "enabled": True,
+        "min_stopped_days": 30,  # Resource stopped/deallocated for > 30 days
+        "confidence_threshold_days": 60,
+        "confidence_critical_days": 90,  # Critical after 90 days
+        "confidence_high_days": 30,  # High confidence after 30 days
+        "confidence_medium_days": 7,  # Medium confidence after 7 days
+        "description": "Public IP addresses attached to stopped/deallocated resources (VMs, Load Balancers with no backends)",
+    },
+    "public_ip_dynamic_unassociated": {
+        "enabled": True,
+        "min_age_days": 3,  # Ignore IPs allocated in last 3 days
+        "confidence_critical_days": 30,  # Critical after 30 days (anomaly - should be auto-deallocated)
+        "confidence_high_days": 14,  # High confidence after 14 days
+        "confidence_medium_days": 7,  # Medium confidence after 7 days
+        "description": "Dynamic Public IPs stuck in provisioned state (anomaly - should be auto-deallocated when unassociated)",
+    },
+    "public_ip_unnecessary_standard_sku": {
+        "enabled": True,
+        "min_age_days": 7,  # Ignore IPs allocated in last 7 days
+        "dev_environments": ["dev", "test", "staging", "qa", "development", "nonprod"],
+        "confidence_critical_days": 90,  # Critical after 90 days
+        "confidence_high_days": 30,  # High confidence after 30 days
+        "confidence_medium_days": 7,  # Medium confidence after 7 days
+        "description": "Standard SKU Public IPs used in dev/test environments (Basic SKU would suffice until Sept 2025 retirement)",
+    },
+    "public_ip_unnecessary_zone_redundancy": {
+        "enabled": True,
+        "min_age_days": 7,  # Ignore IPs allocated in last 7 days
+        "min_zones": 3,  # Flag IPs with 3+ zones
+        "confidence_critical_days": 90,  # Critical after 90 days
+        "confidence_high_days": 30,  # High confidence after 30 days
+        "confidence_medium_days": 7,  # Medium confidence after 7 days
+        "description": "Zone-redundant Public IPs (3+ zones) without high-availability requirements (saves $0.65/month per IP)",
+    },
+    "public_ip_ddos_protection_unused": {
+        "enabled": True,
+        "lookback_days": 90,  # Check DDoS attack history over last 90 days
+        "confidence_critical_days": 180,  # Critical after 180 days (HIGH VALUE - $2,944/month + $30/IP)
+        "confidence_high_days": 90,  # High confidence after 90 days
+        "confidence_medium_days": 30,  # Medium confidence after 30 days
+        "description": "DDoS Protection Standard that has never been triggered (HIGH VALUE: $2,944/month subscription + $30/IP)",
+    },
+    "public_ip_on_nic_without_vm": {
+        "enabled": True,
+        "min_age_days": 7,  # Ignore NICs created in last 7 days
+        "confidence_critical_days": 90,  # Critical after 90 days
+        "confidence_high_days": 30,  # High confidence after 30 days
+        "confidence_medium_days": 7,  # Medium confidence after 7 days
+        "description": "Public IPs attached to orphaned Network Interfaces (NICs without VMs)",
+    },
+    "public_ip_reserved_but_unused": {
+        "enabled": True,
+        "min_age_days": 3,  # Ignore IPs allocated in last 3 days
+        "confidence_critical_days": 90,  # Critical after 90 days
+        "confidence_high_days": 30,  # High confidence after 30 days
+        "confidence_medium_days": 7,  # Medium confidence after 7 days
+        "description": "Reserved Public IPs that have never been assigned an actual IP address (misconfigured)",
+    },
+    "public_ip_no_traffic": {
+        "enabled": True,
+        "lookback_days": 30,  # Check traffic over last 30 days
+        "confidence_critical_days": 90,  # Critical after 90 days of zero traffic
+        "confidence_high_days": 30,  # High confidence after 30 days
+        "confidence_medium_days": 7,  # Medium confidence after 7 days
+        "description": "Public IPs with zero network traffic (ByteCount=0, PacketCount=0) over lookback period",
+    },
+    "public_ip_very_low_traffic": {
+        "enabled": True,
+        "lookback_days": 30,  # Check traffic over last 30 days
+        "traffic_threshold_gb": 1.0,  # Flag IPs with <1 GB/month traffic
+        "confidence_high_days": 30,  # High confidence after 30 days
+        "confidence_medium_days": 7,  # Medium confidence after 7 days
+        "description": "Public IPs with very low network traffic (<1 GB/month) suggesting over-provisioning",
     },
     "disk_snapshot_orphaned": {
         "enabled": True,

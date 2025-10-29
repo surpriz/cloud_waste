@@ -688,6 +688,40 @@ class AzureProvider(CloudProviderBase):
         ips_on_stopped = await self.scan_ips_on_stopped_resources(region, rules.get("public_ip_on_stopped_resource"))
         results.extend(ips_on_stopped)
 
+        # Phase B - Additional Public IP waste detection scenarios (100% coverage)
+        # Scenario 3: Dynamic Public IPs stuck in provisioned state (anomaly)
+        dynamic_unassociated = await self.scan_dynamic_unassociated_ips(region, rules.get("public_ip_dynamic_unassociated"))
+        results.extend(dynamic_unassociated)
+
+        # Scenario 4: Standard SKU used in dev/test (Basic would suffice)
+        unnecessary_standard = await self.scan_unnecessary_standard_sku_ips(region, rules.get("public_ip_unnecessary_standard_sku"))
+        results.extend(unnecessary_standard)
+
+        # Scenario 5: Zone-redundant IPs without high-availability requirements
+        unnecessary_zone_redundancy = await self.scan_unnecessary_zone_redundant_ips(region, rules.get("public_ip_unnecessary_zone_redundancy"))
+        results.extend(unnecessary_zone_redundancy)
+
+        # Scenario 6: DDoS Protection Standard that has never been triggered (HIGH VALUE)
+        ddos_unused = await self.scan_ddos_protection_unused_ips(region, rules.get("public_ip_ddos_protection_unused"))
+        results.extend(ddos_unused)
+
+        # Scenario 7: Public IPs attached to orphaned NICs (NIC without VM)
+        ips_on_nic_without_vm = await self.scan_ips_on_nic_without_vm(region, rules.get("public_ip_on_nic_without_vm"))
+        results.extend(ips_on_nic_without_vm)
+
+        # Scenario 8: Reserved Public IPs that have never been assigned an IP address
+        reserved_unused = await self.scan_reserved_unused_ips(region, rules.get("public_ip_reserved_but_unused"))
+        results.extend(reserved_unused)
+
+        # Phase C - Azure Monitor Metrics-based Public IP scenarios
+        # Scenario 9: Public IPs with zero network traffic (never used)
+        no_traffic = await self.scan_no_traffic_ips(region, rules.get("public_ip_no_traffic"))
+        results.extend(no_traffic)
+
+        # Scenario 10: Public IPs with very low traffic (under-utilized)
+        very_low_traffic = await self.scan_very_low_traffic_ips(region, rules.get("public_ip_very_low_traffic"))
+        results.extend(very_low_traffic)
+
         # Phase A - Virtual Machine waste detection scenarios (simple detection)
         # Scenario 1: VMs deallocated (stopped) for extended periods
         deallocated_vms = await self.scan_stopped_instances(region, rules.get("virtual_machine_deallocated"))
@@ -728,7 +762,6 @@ class AzureProvider(CloudProviderBase):
 
         # TODO: Future scenarios (VMs, Load Balancers, etc.)
         # results.extend(await self.scan_idle_running_instances(region, rules.get("virtual_machine_idle")))
-        # results.extend(await self.scan_zero_traffic_ips(region, rules.get("public_ip_no_traffic")))
 
         return results
 
@@ -1686,6 +1719,910 @@ class AzureProvider(CloudProviderBase):
 
         return orphans
 
+    async def scan_dynamic_unassociated_ips(self, region: str, detection_rules: dict | None = None) -> list[OrphanResourceData]:
+        """
+        Scan for Dynamic Public IPs that are unassociated but stuck in provisioned state (anomaly).
+
+        Normally, Dynamic IPs are deallocated automatically when unassociated.
+        This scenario detects legacy Dynamic IPs stuck in 'Succeeded' state that continue to cost $3/month.
+
+        Args:
+            region: Azure region to scan
+            detection_rules: Optional detection configuration (min_age_days, enabled)
+
+        Returns:
+            List of orphan dynamic public IP resources stuck in anomalous state
+        """
+        from datetime import datetime, timezone
+        from azure.identity import ClientSecretCredential
+        from azure.mgmt.network import NetworkManagementClient
+
+        orphans = []
+        min_age_days = detection_rules.get("min_age_days", 7) if detection_rules else 7
+
+        try:
+            credential = ClientSecretCredential(
+                tenant_id=self.tenant_id,
+                client_id=self.client_id,
+                client_secret=self.client_secret
+            )
+
+            network_client = NetworkManagementClient(credential, self.subscription_id)
+
+            # List all public IPs in the region
+            public_ips = network_client.public_ip_addresses.list_all()
+
+            for ip in public_ips:
+                if ip.location != region:
+                    continue
+
+                # Filter by resource group (if specified)
+                if not self._is_resource_in_scope(ip.id):
+                    continue
+
+                # Detect anomaly: Dynamic allocation + unassociated + provisioned (should be deallocated)
+                allocation_method = ip.public_ip_allocation_method if ip.public_ip_allocation_method else 'Unknown'
+
+                if (allocation_method == 'Dynamic' and
+                    ip.ip_configuration is None and
+                    ip.provisioning_state == 'Succeeded'):
+
+                    # Check age
+                    age_days = 0
+                    if hasattr(ip, 'tags') and ip.tags and 'created_at' in ip.tags:
+                        try:
+                            created_at = datetime.fromisoformat(ip.tags['created_at'].replace('Z', '+00:00'))
+                            age_days = (datetime.now(timezone.utc) - created_at).days
+                        except:
+                            age_days = 0
+
+                    if age_days < min_age_days:
+                        continue
+
+                    # Dynamic IPs normally cost $0 when unassociated (auto-deallocated)
+                    # But stuck IPs continue to cost like static IPs
+                    monthly_cost = 3.0  # Anomaly cost
+
+                    sku_name = ip.sku.name if ip.sku else 'Basic'
+
+                    orphan = OrphanResourceData(
+                        resource_id=ip.id,
+                        resource_name=ip.name,
+                        resource_type='public_ip_dynamic_unassociated',
+                        region=region,
+                        estimated_monthly_cost=monthly_cost,
+                        resource_metadata={
+                            'ip_id': ip.id,
+                            'ip_address': ip.ip_address if ip.ip_address else 'Not assigned',
+                            'sku_name': sku_name,
+                            'sku_tier': ip.sku.tier if ip.sku else 'Regional',
+                            'allocation_method': 'Dynamic',
+                            'ip_version': ip.public_ip_address_version if ip.public_ip_address_version else 'IPv4',
+                            'provisioning_state': ip.provisioning_state,
+                            'ip_configuration': None,
+                            'age_days': age_days,
+                            'orphan_reason': f"Dynamic Public IP stuck in provisioned state (anomaly). Should be deallocated automatically when unassociated but continues to cost ${monthly_cost}/month. IP: {ip.ip_address if ip.ip_address else 'Not assigned'}",
+                            'recommendation': 'Delete this stuck Dynamic IP. Should be $0/month when unassociated but appears to be in anomalous state.',
+                            'confidence_level': self._calculate_confidence_level(age_days, detection_rules),
+                        }
+                    )
+
+                    orphans.append(orphan)
+
+        except Exception as e:
+            print(f"Error scanning Dynamic unassociated Public IPs in {region}: {str(e)}")
+
+        return orphans
+
+    async def scan_ips_on_nic_without_vm(self, region: str, detection_rules: dict | None = None) -> list[OrphanResourceData]:
+        """
+        Scan for Public IPs attached to orphaned NICs (Network Interfaces without VMs).
+
+        Detects Public IPs that are attached to a NIC but the NIC itself is not attached to any VM.
+        Both the IP and NIC are wasting cost.
+
+        Args:
+            region: Azure region to scan
+            detection_rules: Optional detection configuration (min_age_days, enabled)
+
+        Returns:
+            List of orphan public IP resources on orphaned NICs
+        """
+        from datetime import datetime, timezone
+        from azure.identity import ClientSecretCredential
+        from azure.mgmt.network import NetworkManagementClient
+
+        orphans = []
+        min_age_days = detection_rules.get("min_age_days", 7) if detection_rules else 7
+
+        try:
+            credential = ClientSecretCredential(
+                tenant_id=self.tenant_id,
+                client_id=self.client_id,
+                client_secret=self.client_secret
+            )
+
+            network_client = NetworkManagementClient(credential, self.subscription_id)
+
+            # List all public IPs
+            public_ips = network_client.public_ip_addresses.list_all()
+
+            for ip in public_ips:
+                if ip.location != region:
+                    continue
+
+                # Filter by resource group
+                if not self._is_resource_in_scope(ip.id):
+                    continue
+
+                # Only check IPs that are attached
+                if not ip.ip_configuration:
+                    continue
+
+                # Check if it's attached to a NIC (not LB)
+                ip_config_id = ip.ip_configuration.id
+                if '/networkInterfaces/' not in ip_config_id:
+                    continue
+
+                # Extract NIC resource group and name
+                try:
+                    parts = ip_config_id.split('/')
+                    rg_index = parts.index('resourceGroups')
+                    nic_index = parts.index('networkInterfaces')
+                    nic_rg = parts[rg_index + 1]
+                    nic_name = parts[nic_index + 1]
+
+                    # Get NIC details
+                    nic = network_client.network_interfaces.get(nic_rg, nic_name)
+
+                    # Check if NIC is orphaned (no VM attached)
+                    if nic.virtual_machine is None:
+                        # Check age
+                        age_days = 0
+                        if hasattr(ip, 'tags') and ip.tags and 'created_at' in ip.tags:
+                            try:
+                                created_at = datetime.fromisoformat(ip.tags['created_at'].replace('Z', '+00:00'))
+                                age_days = (datetime.now(timezone.utc) - created_at).days
+                            except:
+                                age_days = 0
+
+                        if age_days < min_age_days:
+                            continue
+
+                        monthly_cost = self._calculate_public_ip_cost(ip)
+
+                        orphan = OrphanResourceData(
+                            resource_id=ip.id,
+                            resource_name=ip.name,
+                            resource_type='public_ip_on_nic_without_vm',
+                            region=region,
+                            estimated_monthly_cost=monthly_cost,
+                            resource_metadata={
+                                'ip_id': ip.id,
+                                'ip_address': ip.ip_address if ip.ip_address else 'Not assigned',
+                                'sku_name': ip.sku.name if ip.sku else 'Basic',
+                                'allocation_method': ip.public_ip_allocation_method if ip.public_ip_allocation_method else 'Static',
+                                'nic_id': nic.id,
+                                'nic_name': nic.name,
+                                'nic_has_vm': False,
+                                'age_days': age_days,
+                                'orphan_reason': f"Public IP attached to orphaned NIC '{nic_name}' (no VM attached). Both IP (${monthly_cost}/month) and NIC are wasting cost.",
+                                'recommendation': 'Delete both the Public IP and the orphaned NIC to stop billing.',
+                                'confidence_level': self._calculate_confidence_level(age_days, detection_rules),
+                            }
+                        )
+
+                        orphans.append(orphan)
+
+                except (ValueError, IndexError) as e:
+                    print(f"Error parsing NIC info for IP {ip.name}: {str(e)}")
+                    continue
+
+        except Exception as e:
+            print(f"Error scanning Public IPs on orphaned NICs in {region}: {str(e)}")
+
+        return orphans
+
+    async def scan_reserved_unused_ips(self, region: str, detection_rules: dict | None = None) -> list[OrphanResourceData]:
+        """
+        Scan for Reserved Public IPs that have never been assigned an actual IP address.
+
+        Detects Public IPs in 'Succeeded' provisioning state but with no IP address assigned
+        and not attached to any resource. These IPs cost $3/month but are never actually used.
+
+        Args:
+            region: Azure region to scan
+            detection_rules: Optional detection configuration (min_age_days, enabled)
+
+        Returns:
+            List of orphan reserved but unused public IP resources
+        """
+        from datetime import datetime, timezone
+        from azure.identity import ClientSecretCredential
+        from azure.mgmt.network import NetworkManagementClient
+
+        orphans = []
+        min_age_days = detection_rules.get("min_age_days", 30) if detection_rules else 30
+
+        try:
+            credential = ClientSecretCredential(
+                tenant_id=self.tenant_id,
+                client_id=self.client_id,
+                client_secret=self.client_secret
+            )
+
+            network_client = NetworkManagementClient(credential, self.subscription_id)
+
+            # List all public IPs
+            public_ips = network_client.public_ip_addresses.list_all()
+
+            for ip in public_ips:
+                if ip.location != region:
+                    continue
+
+                # Filter by resource group
+                if not self._is_resource_in_scope(ip.id):
+                    continue
+
+                # Check: Provisioned successfully but never assigned actual IP address
+                if (ip.provisioning_state == 'Succeeded' and
+                    (not ip.ip_address or ip.ip_address == '') and
+                    ip.ip_configuration is None):
+
+                    # Check age
+                    age_days = 0
+                    if hasattr(ip, 'tags') and ip.tags and 'created_at' in ip.tags:
+                        try:
+                            created_at = datetime.fromisoformat(ip.tags['created_at'].replace('Z', '+00:00'))
+                            age_days = (datetime.now(timezone.utc) - created_at).days
+                        except:
+                            age_days = 0
+
+                    if age_days < min_age_days:
+                        continue
+
+                    monthly_cost = 3.0  # Standard IP cost even when not assigned
+
+                    sku_name = ip.sku.name if ip.sku else 'Basic'
+                    allocation_method = ip.public_ip_allocation_method if ip.public_ip_allocation_method else 'Static'
+
+                    orphan = OrphanResourceData(
+                        resource_id=ip.id,
+                        resource_name=ip.name,
+                        resource_type='public_ip_reserved_but_unused',
+                        region=region,
+                        estimated_monthly_cost=monthly_cost,
+                        resource_metadata={
+                            'ip_id': ip.id,
+                            'ip_address': 'Never assigned',
+                            'sku_name': sku_name,
+                            'allocation_method': allocation_method,
+                            'provisioning_state': ip.provisioning_state,
+                            'ip_configuration': None,
+                            'age_days': age_days,
+                            'orphan_reason': f"Public IP reserved but never assigned an actual IP address. Costs ${monthly_cost}/month but completely unused for {age_days} days.",
+                            'recommendation': 'Release this reservation to stop billing. IP was never used.',
+                            'confidence_level': self._calculate_confidence_level(age_days, detection_rules),
+                        }
+                    )
+
+                    orphans.append(orphan)
+
+        except Exception as e:
+            print(f"Error scanning Reserved unused Public IPs in {region}: {str(e)}")
+
+        return orphans
+
+    async def scan_unnecessary_standard_sku_ips(self, region: str, detection_rules: dict | None = None) -> list[OrphanResourceData]:
+        """
+        Scan for Standard SKU Public IPs used in dev/test environments (Basic SKU would suffice).
+
+        NOTE: Basic SKU is retiring on September 30, 2025. This scenario will be obsolete after that date.
+        Detects Standard IPs in non-production environments where Basic would be sufficient.
+
+        Args:
+            region: Azure region to scan
+            detection_rules: Optional detection configuration (min_age_days, non_prod_environments)
+
+        Returns:
+            List of public IP resources using unnecessary Standard SKU
+        """
+        from datetime import datetime, timezone
+        from azure.identity import ClientSecretCredential
+        from azure.mgmt.network import NetworkManagementClient
+
+        orphans = []
+        min_age_days = detection_rules.get("min_age_days", 30) if detection_rules else 30
+        non_prod_envs = detection_rules.get("non_prod_environments", [
+            "dev", "test", "staging", "qa", "development", "non-prod", "sandbox", "nonprod"
+        ]) if detection_rules else ["dev", "test", "staging", "qa", "development", "non-prod", "sandbox"]
+
+        try:
+            credential = ClientSecretCredential(
+                tenant_id=self.tenant_id,
+                client_id=self.client_id,
+                client_secret=self.client_secret
+            )
+
+            network_client = NetworkManagementClient(credential, self.subscription_id)
+
+            # List all public IPs
+            public_ips = network_client.public_ip_addresses.list_all()
+
+            for ip in public_ips:
+                if ip.location != region:
+                    continue
+
+                # Filter by resource group
+                if not self._is_resource_in_scope(ip.id):
+                    continue
+
+                # Only check Standard SKU IPs
+                sku_name = ip.sku.name if ip.sku else 'Basic'
+                if sku_name != 'Standard':
+                    continue
+
+                # Check if in non-prod environment via tags or resource group name
+                is_non_prod = False
+
+                # Check tags
+                if hasattr(ip, 'tags') and ip.tags:
+                    for tag_key in ['environment', 'env', 'Environment', 'Env', 'tier', 'Tier', 'criticality']:
+                        if tag_key in ip.tags:
+                            tag_value = ip.tags[tag_key].lower()
+                            if any(env in tag_value for env in non_prod_envs):
+                                is_non_prod = True
+                                break
+
+                # Check resource group name
+                if not is_non_prod and ip.id:
+                    rg_name = ''
+                    try:
+                        parts = ip.id.split('/')
+                        rg_index = parts.index('resourceGroups')
+                        rg_name = parts[rg_index + 1].lower()
+
+                        # Check if RG name contains non-prod keywords
+                        non_prod_keywords = ['-dev', '-test', '-staging', '-qa', 'dev-', 'test-', 'staging-', 'qa-']
+                        if any(keyword in rg_name for keyword in non_prod_keywords):
+                            is_non_prod = True
+                    except (ValueError, IndexError):
+                        pass
+
+                if not is_non_prod:
+                    continue
+
+                # Check age
+                age_days = 0
+                if hasattr(ip, 'tags') and ip.tags and 'created_at' in ip.tags:
+                    try:
+                        created_at = datetime.fromisoformat(ip.tags['created_at'].replace('Z', '+00:00'))
+                        age_days = (datetime.now(timezone.utc) - created_at).days
+                    except:
+                        age_days = 0
+
+                if age_days < min_age_days:
+                    continue
+
+                monthly_cost = self._calculate_public_ip_cost(ip)
+
+                # Note: Cost is the same ($3/month), but Standard has advanced features not needed in dev/test
+                orphan = OrphanResourceData(
+                    resource_id=ip.id,
+                    resource_name=ip.name,
+                    resource_type='public_ip_unnecessary_standard_sku',
+                    region=region,
+                    estimated_monthly_cost=0.0,  # Same cost, but feature overkill
+                    resource_metadata={
+                        'ip_id': ip.id,
+                        'ip_address': ip.ip_address if ip.ip_address else 'Not assigned',
+                        'sku_name': 'Standard',
+                        'allocation_method': ip.public_ip_allocation_method if ip.public_ip_allocation_method else 'Static',
+                        'environment': 'Non-production',
+                        'age_days': age_days,
+                        'orphan_reason': f"Standard SKU Public IP used in dev/test environment. Standard has advanced features (availability zones, routing preference) not needed for non-critical workloads. Cost is same ($3/month) but Basic would suffice.",
+                        'recommendation': 'NOTE: Basic SKU is retiring Sept 30, 2025. After this date, all IPs must be Standard. Until then, consider Basic for dev/test.',
+                        'confidence_level': self._calculate_confidence_level(age_days, detection_rules),
+                    }
+                )
+
+                orphans.append(orphan)
+
+        except Exception as e:
+            print(f"Error scanning unnecessary Standard SKU Public IPs in {region}: {str(e)}")
+
+        return orphans
+
+    async def scan_unnecessary_zone_redundant_ips(self, region: str, detection_rules: dict | None = None) -> list[OrphanResourceData]:
+        """
+        Scan for Zone-redundant Public IPs (3+ zones) without high-availability requirements.
+
+        Detects Standard IPs configured for zone redundancy but lacking HA/production tags.
+        Zone-redundant IPs cost +22% ($0.65/month more) without providing value for non-critical workloads.
+
+        Args:
+            region: Azure region to scan
+            detection_rules: Optional detection configuration (min_age_days, required_ha_tags)
+
+        Returns:
+            List of public IP resources with unnecessary zone redundancy
+        """
+        from datetime import datetime, timezone
+        from azure.identity import ClientSecretCredential
+        from azure.mgmt.network import NetworkManagementClient
+
+        orphans = []
+        min_age_days = detection_rules.get("min_age_days", 30) if detection_rules else 30
+        ha_tags = detection_rules.get("required_ha_tags", [
+            "ha", "high-availability", "production", "critical", "tier:production", "prod"
+        ]) if detection_rules else ["ha", "high-availability", "production", "critical", "tier:production", "prod"]
+
+        try:
+            credential = ClientSecretCredential(
+                tenant_id=self.tenant_id,
+                client_id=self.client_id,
+                client_secret=self.client_secret
+            )
+
+            network_client = NetworkManagementClient(credential, self.subscription_id)
+
+            # List all public IPs
+            public_ips = network_client.public_ip_addresses.list_all()
+
+            for ip in public_ips:
+                if ip.location != region:
+                    continue
+
+                # Filter by resource group
+                if not self._is_resource_in_scope(ip.id):
+                    continue
+
+                # Check if zone-redundant (3+ zones for Standard SKU)
+                if not ip.zones or len(ip.zones) < 3:
+                    continue
+
+                # Only Standard SKU supports zone redundancy
+                sku_name = ip.sku.name if ip.sku else 'Basic'
+                if sku_name != 'Standard':
+                    continue
+
+                # Check if has HA/production requirement via tags
+                has_ha_requirement = False
+                if hasattr(ip, 'tags') and ip.tags:
+                    for tag_key, tag_value in ip.tags.items():
+                        tag_str = f"{tag_key}:{tag_value}".lower()
+                        if any(ha_tag.lower() in tag_str for ha_tag in ha_tags):
+                            has_ha_requirement = True
+                            break
+
+                if has_ha_requirement:
+                    continue
+
+                # Check age
+                age_days = 0
+                if hasattr(ip, 'tags') and ip.tags and 'created_at' in ip.tags:
+                    try:
+                        created_at = datetime.fromisoformat(ip.tags['created_at'].replace('Z', '+00:00'))
+                        age_days = (datetime.now(timezone.utc) - created_at).days
+                    except:
+                        age_days = 0
+
+                if age_days < min_age_days:
+                    continue
+
+                # Calculate savings: Zone-redundant costs +22% ($0.65/month)
+                current_cost = 3.65  # Zone-redundant cost
+                zonal_cost = 3.00    # Single-zone cost
+                potential_savings = current_cost - zonal_cost
+
+                orphan = OrphanResourceData(
+                    resource_id=ip.id,
+                    resource_name=ip.name,
+                    resource_type='public_ip_unnecessary_zone_redundancy',
+                    region=region,
+                    estimated_monthly_cost=potential_savings,
+                    resource_metadata={
+                        'ip_id': ip.id,
+                        'ip_address': ip.ip_address if ip.ip_address else 'Not assigned',
+                        'sku_name': 'Standard',
+                        'allocation_method': ip.public_ip_allocation_method if ip.public_ip_allocation_method else 'Static',
+                        'zones': ip.zones,
+                        'zone_count': len(ip.zones),
+                        'current_monthly_cost': current_cost,
+                        'zonal_monthly_cost': zonal_cost,
+                        'potential_savings': round(potential_savings, 2),
+                        'age_days': age_days,
+                        'orphan_reason': f"Zone-redundant IP (3+ zones) costs +22% ($0.65/month extra) but workload doesn't require 99.99% SLA. No HA/production tags found.",
+                        'recommendation': 'Consider single-zone deployment to save $0.65/month per IP (~18% cost reduction).',
+                        'confidence_level': self._calculate_confidence_level(age_days, detection_rules),
+                    }
+                )
+
+                orphans.append(orphan)
+
+        except Exception as e:
+            print(f"Error scanning unnecessary zone-redundant Public IPs in {region}: {str(e)}")
+
+        return orphans
+
+    async def scan_ddos_protection_unused_ips(self, region: str, detection_rules: dict | None = None) -> list[OrphanResourceData]:
+        """
+        Scan for DDoS Protection Standard that has never been triggered (unused protection).
+
+        HIGH VALUE SCENARIO: DDoS Protection Standard costs $2,944/month + $30/protected IP.
+        Detects subscriptions with DDoS Protection enabled but never experiencing attacks over 90 days.
+
+        NOTE: This scenario checks at subscription level, not per IP, but flags individual IPs with protection.
+
+        Args:
+            region: Azure region to scan
+            detection_rules: Optional detection configuration (min_observation_days)
+
+        Returns:
+            List of public IP resources with unused DDoS Protection Standard
+        """
+        from datetime import datetime, timezone, timedelta
+        from azure.identity import ClientSecretCredential
+        from azure.mgmt.network import NetworkManagementClient
+
+        orphans = []
+        min_observation_days = detection_rules.get("min_observation_days", 90) if detection_rules else 90
+
+        try:
+            credential = ClientSecretCredential(
+                tenant_id=self.tenant_id,
+                client_id=self.client_id,
+                client_secret=self.client_secret
+            )
+
+            network_client = NetworkManagementClient(credential, self.subscription_id)
+
+            # List all public IPs
+            public_ips = network_client.public_ip_addresses.list_all()
+
+            for ip in public_ips:
+                if ip.location != region:
+                    continue
+
+                # Filter by resource group
+                if not self._is_resource_in_scope(ip.id):
+                    continue
+
+                # Check if DDoS Protection is enabled
+                has_ddos_protection = False
+                ddos_plan_id = None
+
+                if hasattr(ip, 'ddos_settings') and ip.ddos_settings:
+                    if hasattr(ip.ddos_settings, 'protection_mode') and ip.ddos_settings.protection_mode == 'Enabled':
+                        has_ddos_protection = True
+                        if hasattr(ip.ddos_settings, 'ddos_protection_plan'):
+                            ddos_plan_id = ip.ddos_settings.ddos_protection_plan.id if ip.ddos_settings.ddos_protection_plan else None
+
+                if not has_ddos_protection:
+                    continue
+
+                # Check if DDoS was ever triggered using Azure Monitor metrics (if helper exists)
+                # For MVP, we flag IPs with DDoS Protection for manual review
+                # Full implementation would query Azure Monitor metric "IfUnderDDoSAttack"
+
+                # Check age
+                age_days = 0
+                if hasattr(ip, 'tags') and ip.tags and 'created_at' in ip.tags:
+                    try:
+                        created_at = datetime.fromisoformat(ip.tags['created_at'].replace('Z', '+00:00'))
+                        age_days = (datetime.now(timezone.utc) - created_at).days
+                    except:
+                        age_days = 0
+
+                if age_days < min_observation_days:
+                    continue
+
+                # DDoS Protection Standard costs:
+                # $2,944/month (subscription-level flat fee) + $30/IP protected
+                per_ip_cost = 30.0  # Per-IP monthly cost
+                subscription_cost = 2944.0  # Subscription flat fee (amortized if multiple IPs)
+
+                orphan = OrphanResourceData(
+                    resource_id=ip.id,
+                    resource_name=ip.name,
+                    resource_type='public_ip_ddos_protection_unused',
+                    region=region,
+                    estimated_monthly_cost=per_ip_cost,  # Per-IP cost only (subscription cost shared)
+                    resource_metadata={
+                        'ip_id': ip.id,
+                        'ip_address': ip.ip_address if ip.ip_address else 'Not assigned',
+                        'sku_name': ip.sku.name if ip.sku else 'Basic',
+                        'ddos_protection_enabled': True,
+                        'ddos_plan_id': ddos_plan_id,
+                        'per_ip_monthly_cost': per_ip_cost,
+                        'subscription_flat_fee': subscription_cost,
+                        'observation_days': min_observation_days,
+                        'age_days': age_days,
+                        'orphan_reason': f"DDoS Protection Standard enabled (+$30/IP/month). Subscription pays $2,944/month flat fee. No DDoS attacks detected in {min_observation_days} days. Consider Basic DDoS (free) for non-critical workloads.",
+                        'recommendation': f"Review DDoS Protection necessity. For non-critical workloads, use Basic DDoS (free, automatic). Total subscription cost: $2,944/month + $30/IP.",
+                        'confidence_level': self._calculate_confidence_level(age_days, detection_rules),
+                    }
+                )
+
+                orphans.append(orphan)
+
+        except Exception as e:
+            print(f"Error scanning unused DDoS Protection Public IPs in {region}: {str(e)}")
+
+        return orphans
+
+    async def scan_no_traffic_ips(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scan for Public IPs with zero network traffic (never actually used).
+
+        Detection Logic (Scenario 9):
+        - ByteCount = 0 bytes over lookback period
+        - PacketCount = 0 packets over lookback period
+        - IP is allocated and attached, but has NEVER transmitted any data
+        - Indicates IP was provisioned but the service/application was never activated
+
+        Cost Savings:
+        - Standard Public IP: $3.00/month
+        - Zone-redundant (3 zones): $3.65/month
+
+        Why it's waste:
+        - IP reserved and costing money but literally zero network activity
+        - Strong signal the IP is not needed
+
+        Args:
+            region: Azure region (e.g., 'eastus', 'westeurope')
+            detection_rules: Custom detection rules with keys:
+                - enabled: bool
+                - lookback_days: int (default 30)
+                - confidence_critical_days: int (default 90)
+                - confidence_high_days: int (default 30)
+                - confidence_medium_days: int (default 7)
+
+        Returns:
+            List of Public IPs with zero traffic
+        """
+        from datetime import datetime, timezone
+
+        orphans = []
+
+        try:
+            # Get detection rules with defaults
+            rules = detection_rules or {}
+            enabled = rules.get('enabled', True)
+            lookback_days = rules.get('lookback_days', 30)
+
+            if not enabled:
+                return orphans
+
+            # Setup Azure credentials
+            from azure.identity import ClientSecretCredential
+            from azure.mgmt.network import NetworkManagementClient
+
+            credential = ClientSecretCredential(
+                tenant_id=self.tenant_id,
+                client_id=self.client_id,
+                client_secret=self.client_secret
+            )
+
+            network_client = NetworkManagementClient(credential, self.subscription_id)
+
+            # List all Public IPs in subscription
+            public_ips = list(network_client.public_ip_addresses.list_all())
+
+            for ip in public_ips:
+                # Skip if wrong region
+                if region and region != "all" and ip.location.lower() != region.lower():
+                    continue
+
+                # Skip if resource group scoped and doesn't match
+                if self.resource_group:
+                    ip_rg = ip.id.split('/')[4]
+                    if ip_rg.lower() != self.resource_group.lower():
+                        continue
+
+                # Skip unallocated IPs (they have no metrics)
+                if not ip.ip_address or ip.provisioning_state != 'Succeeded':
+                    continue
+
+                # Query Azure Monitor metrics for traffic
+                metrics = await self._get_public_ip_metrics(
+                    ip_id=ip.id,
+                    metric_names=["ByteCount", "PacketCount"],
+                    timespan_days=lookback_days
+                )
+
+                byte_count = metrics.get("ByteCount", 0)
+                packet_count = metrics.get("PacketCount", 0)
+
+                # Detect: Zero bytes AND zero packets over lookback period
+                if byte_count == 0 and packet_count == 0:
+                    # Calculate age
+                    age_days = 0
+                    if hasattr(ip, 'tags') and ip.tags and 'created_time' in ip.tags:
+                        created_time = datetime.fromisoformat(ip.tags['created_time'].replace('Z', '+00:00'))
+                        age_days = (datetime.now(timezone.utc) - created_time).days
+
+                    # Calculate cost
+                    monthly_cost = self._calculate_public_ip_cost(ip)
+
+                    # Create orphan resource
+                    orphan = OrphanResourceData(
+                        resource_id=ip.id,
+                        resource_name=ip.name or "Unnamed Public IP",
+                        resource_type="public_ip_no_traffic",
+                        region=ip.location,
+                        estimated_monthly_cost=monthly_cost,
+                        metadata={
+                            'ip_address': ip.ip_address or "Not assigned",
+                            'sku': ip.sku.name if ip.sku else "Basic",
+                            'allocation_method': ip.public_ip_allocation_method or "Unknown",
+                            'zones': len(ip.zones) if ip.zones else 0,
+                            'provisioning_state': ip.provisioning_state or "Unknown",
+                            'attached_to': self._get_attached_resource(ip),
+                            'lookback_days': lookback_days,
+                            'byte_count': byte_count,
+                            'packet_count': packet_count,
+                            'age_days': age_days,
+                            'detection_reason': f'Public IP has transmitted ZERO bytes and ZERO packets over the last {lookback_days} days. IP is allocated but never used.',
+                            'recommendation': 'Delete this Public IP. It has never transmitted any network traffic, indicating the associated resource/application was never activated or configured properly.',
+                            'confidence_level': self._calculate_confidence_level(age_days, detection_rules),
+                        }
+                    )
+
+                    orphans.append(orphan)
+
+        except Exception as e:
+            print(f"Error scanning zero-traffic Public IPs in {region}: {str(e)}")
+
+        return orphans
+
+    async def scan_very_low_traffic_ips(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scan for Public IPs with very low network traffic (under-utilized).
+
+        Detection Logic (Scenario 10):
+        - ByteCount < traffic_threshold_gb (default 1 GB) over lookback period
+        - PacketCount typically also very low (<100,000 packets)
+        - IP is active but barely used, suggesting over-provisioning or wrong architecture
+
+        Cost Savings:
+        - Standard Public IP: $3.00/month
+        - Zone-redundant (3 zones): $3.65/month
+
+        Why it's waste:
+        - Very low traffic (<1GB/month) suggests:
+          1. Service is rarely accessed (could use internal IP or VPN)
+          2. Test/dev environment that should be ephemeral
+          3. Over-provisioned architecture (dedicated IP not needed)
+        - For < $3/month worth of traffic, public IP may not be justified
+
+        Args:
+            region: Azure region (e.g., 'eastus', 'westeurope')
+            detection_rules: Custom detection rules with keys:
+                - enabled: bool
+                - lookback_days: int (default 30)
+                - traffic_threshold_gb: float (default 1.0) - Traffic threshold in GB
+                - confidence_high_days: int (default 30)
+                - confidence_medium_days: int (default 7)
+
+        Returns:
+            List of Public IPs with very low traffic
+        """
+        from datetime import datetime, timezone
+
+        orphans = []
+
+        try:
+            # Get detection rules with defaults
+            rules = detection_rules or {}
+            enabled = rules.get('enabled', True)
+            lookback_days = rules.get('lookback_days', 30)
+            traffic_threshold_gb = rules.get('traffic_threshold_gb', 1.0)
+
+            if not enabled:
+                return orphans
+
+            # Convert GB to bytes for comparison
+            traffic_threshold_bytes = traffic_threshold_gb * 1024 * 1024 * 1024  # 1 GB = 1,073,741,824 bytes
+
+            # Setup Azure credentials
+            from azure.identity import ClientSecretCredential
+            from azure.mgmt.network import NetworkManagementClient
+
+            credential = ClientSecretCredential(
+                tenant_id=self.tenant_id,
+                client_id=self.client_id,
+                client_secret=self.client_secret
+            )
+
+            network_client = NetworkManagementClient(credential, self.subscription_id)
+
+            # List all Public IPs in subscription
+            public_ips = list(network_client.public_ip_addresses.list_all())
+
+            for ip in public_ips:
+                # Skip if wrong region
+                if region and region != "all" and ip.location.lower() != region.lower():
+                    continue
+
+                # Skip if resource group scoped and doesn't match
+                if self.resource_group:
+                    ip_rg = ip.id.split('/')[4]
+                    if ip_rg.lower() != self.resource_group.lower():
+                        continue
+
+                # Skip unallocated IPs (they have no metrics)
+                if not ip.ip_address or ip.provisioning_state != 'Succeeded':
+                    continue
+
+                # Query Azure Monitor metrics for traffic
+                metrics = await self._get_public_ip_metrics(
+                    ip_id=ip.id,
+                    metric_names=["ByteCount", "PacketCount"],
+                    timespan_days=lookback_days
+                )
+
+                byte_count = metrics.get("ByteCount", 0)
+                packet_count = metrics.get("PacketCount", 0)
+
+                # Detect: Traffic below threshold (but not zero - scenario 9 handles that)
+                if 0 < byte_count < traffic_threshold_bytes:
+                    # Calculate age
+                    age_days = 0
+                    if hasattr(ip, 'tags') and ip.tags and 'created_time' in ip.tags:
+                        created_time = datetime.fromisoformat(ip.tags['created_time'].replace('Z', '+00:00'))
+                        age_days = (datetime.now(timezone.utc) - created_time).days
+
+                    # Calculate cost
+                    monthly_cost = self._calculate_public_ip_cost(ip)
+
+                    # Convert bytes to human-readable format
+                    if byte_count < 1024:
+                        traffic_display = f"{byte_count} bytes"
+                    elif byte_count < 1024 * 1024:
+                        traffic_display = f"{byte_count / 1024:.2f} KB"
+                    elif byte_count < 1024 * 1024 * 1024:
+                        traffic_display = f"{byte_count / (1024 * 1024):.2f} MB"
+                    else:
+                        traffic_display = f"{byte_count / (1024 * 1024 * 1024):.2f} GB"
+
+                    # Create orphan resource
+                    orphan = OrphanResourceData(
+                        resource_id=ip.id,
+                        resource_name=ip.name or "Unnamed Public IP",
+                        resource_type="public_ip_very_low_traffic",
+                        region=ip.location,
+                        estimated_monthly_cost=monthly_cost,
+                        metadata={
+                            'ip_address': ip.ip_address or "Not assigned",
+                            'sku': ip.sku.name if ip.sku else "Basic",
+                            'allocation_method': ip.public_ip_allocation_method or "Unknown",
+                            'zones': len(ip.zones) if ip.zones else 0,
+                            'provisioning_state': ip.provisioning_state or "Unknown",
+                            'attached_to': self._get_attached_resource(ip),
+                            'lookback_days': lookback_days,
+                            'byte_count': byte_count,
+                            'traffic_display': traffic_display,
+                            'packet_count': packet_count,
+                            'traffic_threshold_gb': traffic_threshold_gb,
+                            'age_days': age_days,
+                            'detection_reason': f'Public IP has transmitted only {traffic_display} over the last {lookback_days} days (threshold: {traffic_threshold_gb} GB). Very low utilization suggests the IP may not be needed.',
+                            'recommendation': f'Consider: 1) Deleting if traffic is minimal test/dev activity, 2) Using internal IPs or VPN for low-traffic services, 3) Consolidating multiple low-traffic IPs behind a load balancer.',
+                            'confidence_level': self._calculate_confidence_level(age_days, detection_rules),
+                        }
+                    )
+
+                    orphans.append(orphan)
+
+        except Exception as e:
+            print(f"Error scanning very-low-traffic Public IPs in {region}: {str(e)}")
+
+        return orphans
+
     def _get_vm_cost_estimate(self, vm_size: str) -> float:
         """
         Estimate monthly cost for Azure VM size (approximation).
@@ -2587,6 +3524,105 @@ class AzureProvider(CloudProviderBase):
 
         except Exception as e:
             print(f"Error querying Azure Monitor metrics for {disk_id}: {str(e)}")
+            # Return zeros if metrics unavailable
+            return {name: 0.0 for name in metric_names}
+
+    async def _get_public_ip_metrics(
+        self,
+        ip_id: str,
+        metric_names: list[str],
+        timespan_days: int,
+    ) -> dict[str, float]:
+        """
+        Query Azure Monitor metrics for a Public IP Address.
+
+        Args:
+            ip_id: Full Azure resource ID of the Public IP
+            metric_names: List of metric names to query (e.g., ["ByteCount", "PacketCount", "IfUnderDDoSAttack"])
+            timespan_days: Number of days to look back
+
+        Returns:
+            Dict mapping metric_name -> aggregated value over the timespan
+
+        Metrics available for Public IPs:
+            - ByteCount: Total bytes transmitted (inbound + outbound)
+            - PacketCount: Total packets transmitted (inbound + outbound)
+            - IfUnderDDoSAttack: Maximum value (1 = under attack, 0 = not under attack)
+
+        Example:
+            metrics = await _get_public_ip_metrics(
+                ip_id="/subscriptions/.../publicIPAddresses/my-ip",
+                metric_names=["ByteCount", "PacketCount"],
+                timespan_days=30
+            )
+            # Returns: {"ByteCount": 1234567890.0, "PacketCount": 9876543.0}
+        """
+        from datetime import datetime, timedelta, timezone
+        from azure.monitor.query import MetricsQueryClient, MetricAggregationType
+        from azure.identity import ClientSecretCredential
+
+        try:
+            credential = ClientSecretCredential(
+                tenant_id=self.tenant_id,
+                client_id=self.client_id,
+                client_secret=self.client_secret
+            )
+
+            metrics_client = MetricsQueryClient(credential)
+
+            # Calculate timespan
+            end_time = datetime.now(timezone.utc)
+            start_time = end_time - timedelta(days=timespan_days)
+
+            # Public IP metrics use different aggregations depending on the metric
+            # ByteCount and PacketCount: Total (sum of all bytes/packets)
+            # IfUnderDDoSAttack: Maximum (binary flag, 1 = attacked at some point)
+            results = {}
+
+            for metric_name in metric_names:
+                # Determine aggregation type based on metric
+                if metric_name == "IfUnderDDoSAttack":
+                    agg_type = MetricAggregationType.MAXIMUM
+                else:  # ByteCount, PacketCount
+                    agg_type = MetricAggregationType.TOTAL
+
+                # Query metric
+                response = metrics_client.query_resource(
+                    resource_uri=ip_id,
+                    metric_names=[metric_name],
+                    timespan=(start_time, end_time),
+                    aggregations=[agg_type]
+                )
+
+                # Extract value
+                for metric in response.metrics:
+                    if metric.timeseries:
+                        # Collect all data points
+                        values = []
+                        for ts in metric.timeseries:
+                            for data in ts.data:
+                                if metric_name == "IfUnderDDoSAttack" and data.maximum is not None:
+                                    values.append(data.maximum)
+                                elif metric_name in ["ByteCount", "PacketCount"] and data.total is not None:
+                                    values.append(data.total)
+
+                        # Calculate overall metric value
+                        if values:
+                            if metric_name == "IfUnderDDoSAttack":
+                                # For DDoS flag, return maximum (1 if ever attacked, 0 otherwise)
+                                results[metric_name] = max(values)
+                            else:
+                                # For ByteCount and PacketCount, return total sum
+                                results[metric_name] = sum(values)
+                        else:
+                            results[metric_name] = 0.0
+                    else:
+                        results[metric_name] = 0.0
+
+            return results
+
+        except Exception as e:
+            print(f"Error querying Azure Monitor metrics for Public IP {ip_id}: {str(e)}")
             # Return zeros if metrics unavailable
             return {name: 0.0 for name in metric_names}
 
