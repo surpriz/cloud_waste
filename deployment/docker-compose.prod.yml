@@ -126,11 +126,12 @@ services:
     build:
       context: ../frontend
       dockerfile: Dockerfile.prod
+      args:
+        NEXT_PUBLIC_API_URL: https://cutcosts.tech
+        NEXT_PUBLIC_APP_NAME: CloudWaste
     container_name: cloudwaste_frontend
     restart: always
     environment:
-      - NEXT_PUBLIC_API_URL=https://cutcosts.tech
-      - NEXT_PUBLIC_APP_NAME=CloudWaste
       - NODE_ENV=production
     depends_on:
       - backend
