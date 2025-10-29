@@ -183,9 +183,9 @@ fi
 # Reset retry count
 RETRY_COUNT=0
 
-# Check frontend health
+# Check frontend health (using node instead of wget - not available in alpine)
 while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
-    if docker exec cloudwaste_frontend wget --quiet --tries=1 --spider http://localhost:3000 2>/dev/null; then
+    if docker exec cloudwaste_frontend node -e "require('http').get('http://localhost:3000', (r) => process.exit(r.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))" 2>/dev/null; then
         FRONTEND_HEALTHY=true
         break
     fi
