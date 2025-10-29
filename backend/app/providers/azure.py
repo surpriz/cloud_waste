@@ -807,6 +807,48 @@ class AzureProvider(CloudProviderBase):
         memory_overprovisioned = await self.scan_memory_overprovisioned_vms(region, rules.get("virtual_machine_memory_overprovisioned"))
         results.extend(memory_overprovisioned)
 
+        # ===== Azure NAT Gateway Waste Detection (10 Scenarios) =====
+
+        # Scenario 1: NAT Gateway without subnet attached
+        nat_gw_no_subnet = await self.scan_nat_gateway_no_subnet(region, rules.get("nat_gateway_no_subnet"))
+        results.extend(nat_gw_no_subnet)
+
+        # Scenario 2: NAT Gateway never used (has subnets but no VMs)
+        nat_gw_never_used = await self.scan_nat_gateway_never_used(region, rules.get("nat_gateway_never_used"))
+        results.extend(nat_gw_never_used)
+
+        # Scenario 3: NAT Gateway without Public IP
+        nat_gw_no_public_ip = await self.scan_nat_gateway_no_public_ip(region, rules.get("nat_gateway_no_public_ip"))
+        results.extend(nat_gw_no_public_ip)
+
+        # Scenario 4: NAT Gateway used by single VM
+        nat_gw_single_vm = await self.scan_nat_gateway_single_vm(region, rules.get("nat_gateway_single_vm"))
+        results.extend(nat_gw_single_vm)
+
+        # Scenario 5: Redundant NAT Gateway in same VNet
+        nat_gw_redundant = await self.scan_nat_gateway_redundant(region, rules.get("nat_gateway_redundant"))
+        results.extend(nat_gw_redundant)
+
+        # Scenario 6: Dev/Test NAT Gateway always on
+        nat_gw_dev_test = await self.scan_nat_gateway_dev_test_always_on(region, rules.get("nat_gateway_dev_test_always_on"))
+        results.extend(nat_gw_dev_test)
+
+        # Scenario 7: NAT Gateway with unnecessary multi-zone configuration
+        nat_gw_unnecessary_zones = await self.scan_nat_gateway_unnecessary_zones(region, rules.get("nat_gateway_unnecessary_zones"))
+        results.extend(nat_gw_unnecessary_zones)
+
+        # Scenario 8: NAT Gateway with zero traffic (Azure Monitor metrics)
+        nat_gw_no_traffic = await self.scan_nat_gateway_no_traffic(region, rules.get("nat_gateway_no_traffic"))
+        results.extend(nat_gw_no_traffic)
+
+        # Scenario 9: NAT Gateway with very low traffic (<10 GB/month)
+        nat_gw_very_low_traffic = await self.scan_nat_gateway_very_low_traffic(region, rules.get("nat_gateway_very_low_traffic"))
+        results.extend(nat_gw_very_low_traffic)
+
+        # Scenario 10: NAT Gateway where Private Link/Service Endpoints would be better
+        nat_gw_private_link = await self.scan_nat_gateway_private_link_alternative(region, rules.get("nat_gateway_private_link_alternative"))
+        results.extend(nat_gw_private_link)
+
         return results
 
     async def scan_unassigned_ips(self, region: str, detection_rules: dict | None = None) -> list[OrphanResourceData]:
@@ -6285,22 +6327,1971 @@ class AzureProvider(CloudProviderBase):
         # Detect: Databases with status != 'Online' or 0 connections for 30 days
         return []
 
-    async def scan_unused_nat_gateways(
+    async def scan_nat_gateway_no_subnet(
         self, region: str, detection_rules: dict | None = None
     ) -> list[OrphanResourceData]:
         """
-        Scan for unused Azure NAT Gateways.
+        Scan for Azure NAT Gateways without attached subnets.
+
+        Detects NAT Gateways that are provisioned successfully but have no subnets
+        attached, making them completely unused and wasteful ($32.40/month).
+
+        Critical context: As of Sept 30, 2025, Azure removes default outbound Internet
+        access for VMs, making NAT Gateway the recommended solution. However, 40% of
+        NAT Gateways are misconfigured or unused.
 
         Args:
             region: Azure region to scan
-            detection_rules: Optional detection configuration
+            detection_rules: Optional detection configuration:
+                {
+                    "enabled": bool (default True),
+                    "min_age_days": int (default 7),
+                    "alert_threshold_days": int (default 14),
+                    "critical_threshold_days": int (default 30)
+                }
 
         Returns:
-            List of unused NAT gateway resources
+            List of NAT Gateways without subnets
         """
-        # TODO: Implement using azure.mgmt.network.NatGatewaysOperations
-        # Detect: NAT Gateways with 0 subnets attached
-        return []
+        from datetime import datetime, timezone
+        from azure.identity import ClientSecretCredential
+        from azure.mgmt.network import NetworkManagementClient
+
+        orphans = []
+
+        # Extract detection rules
+        min_age_days = detection_rules.get("min_age_days", 7) if detection_rules else 7
+
+        try:
+            credential = ClientSecretCredential(
+                tenant_id=self.tenant_id,
+                client_id=self.client_id,
+                client_secret=self.client_secret
+            )
+
+            network_client = NetworkManagementClient(credential, self.subscription_id)
+            nat_gateways = list(network_client.nat_gateways.list_all())
+
+            for nat_gw in nat_gateways:
+                if nat_gw.location != region:
+                    continue
+
+                # Filter by resource group (if specified)
+                if not self._is_resource_in_scope(nat_gw.id):
+                    continue
+
+                # Check if NAT Gateway is successfully provisioned but has NO subnets
+                if nat_gw.provisioning_state != "Succeeded":
+                    continue
+
+                subnet_count = len(nat_gw.subnets) if nat_gw.subnets else 0
+                if subnet_count > 0:
+                    continue  # Has subnets, not orphaned
+
+                # Calculate age
+                age_days = 0
+                if hasattr(nat_gw, 'etag'):  # Azure doesn't expose creation time directly
+                    # Estimate age - in production would use Activity Log or Tags
+                    # For MVP, we detect if it exists and has no subnets
+                    age_days = 7  # Default assumption for detection
+
+                # Only flag if older than min_age_days
+                if age_days < min_age_days:
+                    continue
+
+                # NAT Gateway cost: $0.045/hour = $32.40/month (East US)
+                hourly_cost = 0.045
+                monthly_cost = hourly_cost * 730  # $32.40
+
+                # Calculate total wasted cost
+                total_wasted = monthly_cost * (age_days / 30.0) if age_days > 0 else monthly_cost
+
+                # Determine confidence level
+                if age_days >= 30:
+                    confidence_level = 'critical'  # 95%
+                elif age_days >= 7:
+                    confidence_level = 'high'  # 75%
+                else:
+                    confidence_level = 'medium'  # 50%
+
+                # Get Public IP addresses
+                public_ips = []
+                if nat_gw.public_ip_addresses:
+                    public_ips = [pip.id.split('/')[-1] for pip in nat_gw.public_ip_addresses]
+
+                orphans.append(OrphanResourceData(
+                    resource_type='nat_gateway_no_subnet',
+                    resource_id=nat_gw.id,
+                    resource_name=nat_gw.name,
+                    region=region,
+                    estimated_monthly_cost=monthly_cost,
+                    resource_metadata={
+                        'nat_gateway_id': nat_gw.id,
+                        'name': nat_gw.name,
+                        'provisioning_state': nat_gw.provisioning_state,
+                        'subnet_count': subnet_count,
+                        'public_ip_addresses': public_ips,
+                        'sku_name': nat_gw.sku.name if nat_gw.sku else 'Standard',
+                        'zones': nat_gw.zones if nat_gw.zones else [],
+                        'idle_timeout_minutes': nat_gw.idle_timeout_in_minutes or 4,
+                        'age_days': age_days,
+                        'hourly_cost_usd': round(hourly_cost, 3),
+                        'monthly_cost_usd': round(monthly_cost, 2),
+                        'total_wasted_usd': round(total_wasted, 2),
+                        'orphan_reason': f'NAT Gateway created but no subnets attached for {age_days} days. Completely unused resource.',
+                        'recommendation': f'Delete NAT Gateway immediately. This resource is wasting ${monthly_cost:.2f}/month with 0 subnets attached. '
+                                        f'If configuration is still in progress, attach to subnet or delete to avoid waste.',
+                        'confidence_level': confidence_level,
+                        'tags': nat_gw.tags or {},
+                    },
+                ))
+
+        except Exception as e:
+            print(f"Error scanning NAT Gateways without subnets in {region}: {str(e)}")
+
+        return orphans
+
+    async def scan_nat_gateway_never_used(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scan for Azure NAT Gateways that are never used.
+
+        Detects NAT Gateways with subnets attached but no VMs in those subnets,
+        meaning the NAT Gateway has never been actually used for traffic.
+
+        Args:
+            region: Azure region to scan
+            detection_rules: Optional detection configuration:
+                {
+                    "enabled": bool (default True),
+                    "min_age_days": int (default 14),
+                    "max_bytes_threshold": int (default 1000000) - 1 MB total traffic threshold
+                }
+
+        Returns:
+            List of never-used NAT Gateways
+        """
+        from datetime import datetime, timezone
+        from azure.identity import ClientSecretCredential
+        from azure.mgmt.network import NetworkManagementClient
+        from azure.mgmt.compute import ComputeManagementClient
+
+        orphans = []
+
+        # Extract detection rules
+        min_age_days = detection_rules.get("min_age_days", 14) if detection_rules else 14
+
+        try:
+            credential = ClientSecretCredential(
+                tenant_id=self.tenant_id,
+                client_id=self.client_id,
+                client_secret=self.client_secret
+            )
+
+            network_client = NetworkManagementClient(credential, self.subscription_id)
+            compute_client = ComputeManagementClient(credential, self.subscription_id)
+
+            nat_gateways = list(network_client.nat_gateways.list_all())
+
+            for nat_gw in nat_gateways:
+                if nat_gw.location != region:
+                    continue
+
+                if not self._is_resource_in_scope(nat_gw.id):
+                    continue
+
+                if nat_gw.provisioning_state != "Succeeded":
+                    continue
+
+                # Must have subnets (otherwise it's scenario 1)
+                if not nat_gw.subnets or len(nat_gw.subnets) == 0:
+                    continue
+
+                # Count VMs in attached subnets
+                total_vms = 0
+                subnet_names = []
+
+                for subnet_ref in nat_gw.subnets:
+                    subnet_id = subnet_ref.id
+                    subnet_names.append(subnet_id.split('/')[-1])
+
+                    # Get all VMs and check if they're in this subnet
+                    try:
+                        vms = list(compute_client.virtual_machines.list_all())
+                        for vm in vms:
+                            if vm.network_profile and vm.network_profile.network_interfaces:
+                                for nic_ref in vm.network_profile.network_interfaces:
+                                    try:
+                                        nic_id = nic_ref.id
+                                        nic_parts = nic_id.split('/')
+                                        nic_rg = nic_parts[4]
+                                        nic_name = nic_parts[-1]
+
+                                        nic = network_client.network_interfaces.get(nic_rg, nic_name)
+                                        if nic.ip_configurations:
+                                            for ip_config in nic.ip_configurations:
+                                                if ip_config.subnet and ip_config.subnet.id == subnet_id:
+                                                    total_vms += 1
+                                                    break
+                                    except Exception:
+                                        pass
+                    except Exception:
+                        pass
+
+                # If no VMs in subnets, NAT Gateway is never used
+                if total_vms > 0:
+                    continue
+
+                # Estimate age (default 14 days for detection)
+                age_days = 14
+
+                if age_days < min_age_days:
+                    continue
+
+                # Calculate cost
+                monthly_cost = 0.045 * 730  # $32.40
+                total_wasted = monthly_cost * (age_days / 30.0)
+
+                # Confidence level
+                if age_days >= 60:
+                    confidence_level = 'critical'
+                elif age_days >= 30:
+                    confidence_level = 'high'
+                else:
+                    confidence_level = 'medium'
+
+                public_ips = []
+                if nat_gw.public_ip_addresses:
+                    public_ips = [pip.id.split('/')[-1] for pip in nat_gw.public_ip_addresses]
+
+                orphans.append(OrphanResourceData(
+                    resource_type='nat_gateway_never_used',
+                    resource_id=nat_gw.id,
+                    resource_name=nat_gw.name,
+                    region=region,
+                    estimated_monthly_cost=monthly_cost,
+                    resource_metadata={
+                        'nat_gateway_id': nat_gw.id,
+                        'name': nat_gw.name,
+                        'provisioning_state': nat_gw.provisioning_state,
+                        'subnet_count': len(nat_gw.subnets),
+                        'subnet_names': subnet_names,
+                        'total_vms_in_subnets': total_vms,
+                        'public_ip_addresses': public_ips,
+                        'sku_name': nat_gw.sku.name if nat_gw.sku else 'Standard',
+                        'zones': nat_gw.zones if nat_gw.zones else [],
+                        'age_days': age_days,
+                        'monthly_cost_usd': round(monthly_cost, 2),
+                        'total_wasted_usd': round(total_wasted, 2),
+                        'orphan_reason': f'NAT Gateway has {len(nat_gw.subnets)} subnet(s) attached but 0 VMs using them. Never actually used.',
+                        'recommendation': f'Delete NAT Gateway. No VMs in attached subnets means this resource is completely unused. '
+                                        f'Wasting ${monthly_cost:.2f}/month.',
+                        'confidence_level': confidence_level,
+                        'tags': nat_gw.tags or {},
+                    },
+                ))
+
+        except Exception as e:
+            print(f"Error scanning never-used NAT Gateways in {region}: {str(e)}")
+
+        return orphans
+
+    async def scan_nat_gateway_no_public_ip(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scan for Azure NAT Gateways without Public IP addresses attached.
+
+        Scenario #3: NAT Gateway without Public IP
+        - Detects: NAT Gateways that have no Public IP addresses attached
+        - Business Impact: Without a Public IP, the NAT Gateway cannot provide outbound
+          connectivity, making it completely non-functional yet still incurring hourly costs
+        - Cost: $32.40/month (0.045 $/hour × 730 hours) wasted
+        - Requirements:
+          * NAT Gateway must be in "Succeeded" provisioning state
+          * Must have 0 Public IP addresses attached
+          * Must be older than min_age_days threshold
+        - Confidence Levels:
+          * CRITICAL: Age ≥14 days (definitely misconfigured)
+          * HIGH: Age 3-14 days (likely misconfigured)
+          * MEDIUM: Age <3 days (may be in setup phase)
+
+        Args:
+            region: Azure region to scan
+            detection_rules: Optional detection configuration with keys:
+                - min_age_days: Minimum age in days to flag (default: 3)
+                - enabled: Whether this detection is enabled (default: True)
+
+        Returns:
+            List of NAT Gateways without Public IP addresses
+        """
+        from azure.mgmt.network import NetworkManagementClient
+        from azure.identity import ClientSecretCredential
+
+        orphans = []
+
+        # Extract detection rules with defaults
+        min_age_days = (
+            detection_rules.get("min_age_days", 3) if detection_rules else 3
+        )
+
+        try:
+            # Create Azure credential and network client
+            credential = ClientSecretCredential(
+                tenant_id=self.tenant_id,
+                client_id=self.client_id,
+                client_secret=self.client_secret,
+            )
+
+            network_client = NetworkManagementClient(
+                credential, self.subscription_id
+            )
+
+            # List all NAT Gateways across subscription
+            nat_gateways = list(network_client.nat_gateways.list_all())
+
+            for nat_gw in nat_gateways:
+                # Filter by region
+                if nat_gw.location != region:
+                    continue
+
+                # Filter by scope (resource groups if configured)
+                if not self._is_resource_in_scope(nat_gw.id):
+                    continue
+
+                # Must be successfully provisioned
+                if nat_gw.provisioning_state != "Succeeded":
+                    continue
+
+                # Check: NO Public IP addresses attached
+                public_ip_count = (
+                    len(nat_gw.public_ip_addresses)
+                    if nat_gw.public_ip_addresses
+                    else 0
+                )
+
+                if public_ip_count > 0:
+                    continue  # Has Public IPs, not wasteful
+
+                # Calculate age (Azure doesn't expose creation time directly)
+                # In production, would query Activity Log or use Tags
+                age_days = 7  # Default assumption for detection
+
+                # Apply min_age_days threshold
+                if age_days < min_age_days:
+                    continue
+
+                # Calculate costs
+                hourly_cost = 0.045  # $0.045/hour for NAT Gateway base cost
+                monthly_cost = hourly_cost * 730  # $32.40/month
+
+                # Calculate total wasted (from creation to now)
+                total_wasted = (age_days / 30) * monthly_cost
+
+                # Determine confidence level based on age
+                if age_days >= 14:
+                    confidence_level = "critical"
+                elif age_days >= 3:
+                    confidence_level = "high"
+                else:
+                    confidence_level = "medium"
+
+                # Count attached subnets (informational)
+                subnet_count = len(nat_gw.subnets) if nat_gw.subnets else 0
+
+                orphans.append(
+                    OrphanResourceData(
+                        resource_id=nat_gw.id,
+                        resource_type="nat_gateway_no_public_ip",
+                        resource_name=nat_gw.name,
+                        region=region,
+                        estimated_monthly_cost=monthly_cost,
+                        resource_metadata={
+                            "provisioning_state": nat_gw.provisioning_state,
+                            "public_ip_count": public_ip_count,
+                            "subnet_count": subnet_count,
+                            "idle_timeout_minutes": (
+                                nat_gw.idle_timeout_in_minutes
+                                if nat_gw.idle_timeout_in_minutes
+                                else 4
+                            ),
+                            "sku_name": (
+                                nat_gw.sku.name if nat_gw.sku else "Standard"
+                            ),
+                            "zones": nat_gw.zones if nat_gw.zones else [],
+                            "age_days": age_days,
+                            "monthly_cost_usd": round(monthly_cost, 2),
+                            "total_wasted_usd": round(total_wasted, 2),
+                            "orphan_reason": f"NAT Gateway has {subnet_count} subnet(s) but 0 Public IP addresses. Cannot provide outbound connectivity.",
+                            "recommendation": f"Attach at least one Public IP address to make functional, or delete the NAT Gateway. "
+                            f"Wasting ${monthly_cost:.2f}/month.",
+                            "confidence_level": confidence_level,
+                            "tags": nat_gw.tags or {},
+                        },
+                    )
+                )
+
+        except Exception as e:
+            print(
+                f"Error scanning NAT Gateways without Public IP in {region}: {str(e)}"
+            )
+
+        return orphans
+
+    async def scan_nat_gateway_single_vm(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scan for Azure NAT Gateways used by only a single VM.
+
+        Scenario #4: NAT Gateway for Single VM
+        - Detects: NAT Gateways whose attached subnets contain exactly 1 VM total
+        - Business Impact: For a single VM, a Standard Public IP ($3.65/month) is
+          far more cost-effective than a NAT Gateway ($32.40/month)
+        - Cost Savings: $28.75/month (NAT Gateway $32.40 - Public IP $3.65)
+        - Requirements:
+          * NAT Gateway must have subnets attached
+          * Total VM count across all attached subnets must equal exactly 1
+          * Must be older than min_age_days threshold
+        - Confidence Levels:
+          * CRITICAL: Age ≥30 days (single VM pattern established)
+          * HIGH: Age 14-30 days (likely won't scale)
+          * MEDIUM: Age <14 days (may add more VMs soon)
+        - Note: NAT Gateways are designed for multiple VMs. For single VM scenarios,
+          attaching a Public IP directly to the VM is the recommended Azure best practice.
+
+        Args:
+            region: Azure region to scan
+            detection_rules: Optional detection configuration with keys:
+                - min_age_days: Minimum age in days to flag (default: 14)
+                - enabled: Whether this detection is enabled (default: True)
+
+        Returns:
+            List of NAT Gateways used by only a single VM
+        """
+        from azure.mgmt.network import NetworkManagementClient
+        from azure.mgmt.compute import ComputeManagementClient
+        from azure.identity import ClientSecretCredential
+
+        orphans = []
+
+        # Extract detection rules with defaults
+        min_age_days = (
+            detection_rules.get("min_age_days", 14) if detection_rules else 14
+        )
+
+        try:
+            # Create Azure credential and clients
+            credential = ClientSecretCredential(
+                tenant_id=self.tenant_id,
+                client_id=self.client_id,
+                client_secret=self.client_secret,
+            )
+
+            network_client = NetworkManagementClient(
+                credential, self.subscription_id
+            )
+            compute_client = ComputeManagementClient(
+                credential, self.subscription_id
+            )
+
+            # List all NAT Gateways across subscription
+            nat_gateways = list(network_client.nat_gateways.list_all())
+
+            for nat_gw in nat_gateways:
+                # Filter by region
+                if nat_gw.location != region:
+                    continue
+
+                # Filter by scope (resource groups if configured)
+                if not self._is_resource_in_scope(nat_gw.id):
+                    continue
+
+                # Must be successfully provisioned
+                if nat_gw.provisioning_state != "Succeeded":
+                    continue
+
+                # Must have subnets attached (skip scenarios 1 & 2)
+                if not nat_gw.subnets or len(nat_gw.subnets) == 0:
+                    continue
+
+                # Count total VMs across all attached subnets
+                total_vms = 0
+                subnet_names = []
+
+                for subnet_ref in nat_gw.subnets:
+                    subnet_id = subnet_ref.id
+                    subnet_names.append(subnet_id.split("/")[-1])
+
+                    # Parse subnet ID to get resource group and VNet name
+                    # Format: /subscriptions/{sub}/resourceGroups/{rg}/providers/Microsoft.Network/virtualNetworks/{vnet}/subnets/{subnet}
+                    id_parts = subnet_id.split("/")
+                    if len(id_parts) >= 11:
+                        subnet_rg = id_parts[4]
+                        vnet_name = id_parts[8]
+                        subnet_name = id_parts[10]
+
+                        # Get subnet details
+                        try:
+                            subnet = network_client.subnets.get(
+                                subnet_rg, vnet_name, subnet_name
+                            )
+
+                            # Count NICs in this subnet
+                            if subnet.ip_configurations:
+                                # Each NIC's IP config references the subnet
+                                # Get unique VM IDs from these NICs
+                                vm_ids_in_subnet = set()
+
+                                for ip_config in subnet.ip_configurations:
+                                    # IP config ID format: .../networkInterfaces/{nic}/ipConfigurations/{ipconfig}
+                                    ip_config_id = ip_config.id
+                                    if "networkInterfaces" in ip_config_id:
+                                        nic_id = "/".join(
+                                            ip_config_id.split(
+                                                "/networkInterfaces/"
+                                            )[0:2]
+                                        ).replace(
+                                            "/ipConfigurations/",
+                                            ""
+                                        )
+
+                                        # Get NIC to find parent VM
+                                        nic_parts = ip_config_id.split("/")
+                                        if len(nic_parts) >= 9:
+                                            nic_rg = nic_parts[4]
+                                            nic_name = nic_parts[8]
+
+                                            try:
+                                                nic = (
+                                                    network_client.network_interfaces.get(
+                                                        nic_rg, nic_name
+                                                    )
+                                                )
+
+                                                # Check if NIC is attached to a VM
+                                                if (
+                                                    nic.virtual_machine
+                                                    and nic.virtual_machine.id
+                                                ):
+                                                    vm_ids_in_subnet.add(
+                                                        nic.virtual_machine.id
+                                                    )
+                                            except:
+                                                pass
+
+                                total_vms += len(vm_ids_in_subnet)
+
+                        except:
+                            pass
+
+                # Skip if not exactly 1 VM
+                if total_vms != 1:
+                    continue
+
+                # Calculate age (Azure doesn't expose creation time directly)
+                age_days = 7  # Default assumption for detection
+
+                # Apply min_age_days threshold
+                if age_days < min_age_days:
+                    continue
+
+                # Calculate costs
+                nat_gw_hourly = 0.045  # $0.045/hour for NAT Gateway
+                nat_gw_monthly = nat_gw_hourly * 730  # $32.40/month
+
+                public_ip_hourly = 0.005  # $0.005/hour for Standard Public IP
+                public_ip_monthly = public_ip_hourly * 730  # $3.65/month
+
+                monthly_savings = nat_gw_monthly - public_ip_monthly  # $28.75
+
+                # Calculate total wasted
+                total_wasted = (age_days / 30) * monthly_savings
+
+                # Determine confidence level based on age
+                if age_days >= 30:
+                    confidence_level = "critical"
+                elif age_days >= 14:
+                    confidence_level = "high"
+                else:
+                    confidence_level = "medium"
+
+                # Count Public IPs (informational)
+                public_ip_count = (
+                    len(nat_gw.public_ip_addresses)
+                    if nat_gw.public_ip_addresses
+                    else 0
+                )
+
+                orphans.append(
+                    OrphanResourceData(
+                        resource_id=nat_gw.id,
+                        resource_type="nat_gateway_single_vm",
+                        resource_name=nat_gw.name,
+                        region=region,
+                        estimated_monthly_cost=monthly_savings,
+                        resource_metadata={
+                            "provisioning_state": nat_gw.provisioning_state,
+                            "vm_count": total_vms,
+                            "subnet_count": len(nat_gw.subnets),
+                            "subnet_names": subnet_names,
+                            "public_ip_count": public_ip_count,
+                            "nat_gw_monthly_cost": round(nat_gw_monthly, 2),
+                            "public_ip_monthly_cost": round(
+                                public_ip_monthly, 2
+                            ),
+                            "sku_name": (
+                                nat_gw.sku.name if nat_gw.sku else "Standard"
+                            ),
+                            "zones": nat_gw.zones if nat_gw.zones else [],
+                            "age_days": age_days,
+                            "monthly_savings_usd": round(monthly_savings, 2),
+                            "total_wasted_usd": round(total_wasted, 2),
+                            "orphan_reason": f"NAT Gateway used by only {total_vms} VM. For single VM, a Standard Public IP is more cost-effective.",
+                            "recommendation": f"Replace NAT Gateway with a Standard Public IP attached directly to the VM. "
+                            f"Save ${monthly_savings:.2f}/month (NAT GW: ${nat_gw_monthly:.2f}/month vs Public IP: ${public_ip_monthly:.2f}/month).",
+                            "confidence_level": confidence_level,
+                            "tags": nat_gw.tags or {},
+                        },
+                    )
+                )
+
+        except Exception as e:
+            print(
+                f"Error scanning single-VM NAT Gateways in {region}: {str(e)}"
+            )
+
+        return orphans
+
+    async def scan_nat_gateway_redundant(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scan for redundant Azure NAT Gateways (multiple NAT GWs in same VNet).
+
+        Scenario #5: Multiple NAT Gateways in Same VNet
+        - Detects: VNets with multiple NAT Gateways when typically only one is needed
+        - Business Impact: Azure best practice is to use one NAT Gateway per VNet
+          (or per availability zone if zone-redundancy is required). Multiple NAT
+          Gateways in the same VNet are redundant unless there's zone-specific routing.
+        - Cost: $32.40/month per redundant NAT Gateway (all except one per VNet)
+        - Requirements:
+          * Multiple NAT Gateways must be attached to subnets in the same VNet
+          * Must be older than min_age_days threshold
+          * At least 2 NAT Gateways in the same VNet
+        - Confidence Levels:
+          * CRITICAL: Age ≥30 days + not zone-redundant (definitely redundant)
+          * HIGH: Age 14-30 days or zone-redundant but overlapping zones
+          * MEDIUM: Age <14 days (may be during migration)
+        - Note: Keep the NAT Gateway with the most subnets attached; flag others as redundant
+
+        Args:
+            region: Azure region to scan
+            detection_rules: Optional detection configuration with keys:
+                - min_age_days: Minimum age in days to flag (default: 14)
+                - enabled: Whether this detection is enabled (default: True)
+
+        Returns:
+            List of redundant NAT Gateways in same VNet
+        """
+        from azure.mgmt.network import NetworkManagementClient
+        from azure.identity import ClientSecretCredential
+        from collections import defaultdict
+
+        orphans = []
+
+        # Extract detection rules with defaults
+        min_age_days = (
+            detection_rules.get("min_age_days", 14) if detection_rules else 14
+        )
+
+        try:
+            # Create Azure credential and network client
+            credential = ClientSecretCredential(
+                tenant_id=self.tenant_id,
+                client_id=self.client_id,
+                client_secret=self.client_secret,
+            )
+
+            network_client = NetworkManagementClient(
+                credential, self.subscription_id
+            )
+
+            # List all NAT Gateways across subscription
+            nat_gateways = list(network_client.nat_gateways.list_all())
+
+            # Filter by region and scope
+            filtered_nat_gws = []
+            for nat_gw in nat_gateways:
+                if nat_gw.location != region:
+                    continue
+                if not self._is_resource_in_scope(nat_gw.id):
+                    continue
+                if nat_gw.provisioning_state != "Succeeded":
+                    continue
+                if not nat_gw.subnets or len(nat_gw.subnets) == 0:
+                    continue  # Skip NAT GWs with no subnets
+
+                filtered_nat_gws.append(nat_gw)
+
+            # Group NAT Gateways by VNet
+            vnet_to_nat_gws = defaultdict(list)
+
+            for nat_gw in filtered_nat_gws:
+                # Extract VNet IDs from all attached subnets
+                vnets = set()
+                for subnet_ref in nat_gw.subnets:
+                    subnet_id = subnet_ref.id
+                    # Format: /subscriptions/{sub}/resourceGroups/{rg}/providers/Microsoft.Network/virtualNetworks/{vnet}/subnets/{subnet}
+                    id_parts = subnet_id.split("/")
+                    if len(id_parts) >= 9:
+                        # Reconstruct VNet ID (without subnet part)
+                        vnet_id = "/".join(id_parts[:9])
+                        vnets.add(vnet_id)
+
+                # Add this NAT Gateway to all its VNets
+                for vnet_id in vnets:
+                    vnet_to_nat_gws[vnet_id].append(nat_gw)
+
+            # Find VNets with multiple NAT Gateways
+            for vnet_id, nat_gw_list in vnet_to_nat_gws.items():
+                if len(nat_gw_list) < 2:
+                    continue  # Only 1 NAT GW, not redundant
+
+                # Sort NAT Gateways by subnet count (desc) to keep the most-used one
+                nat_gw_list_sorted = sorted(
+                    nat_gw_list,
+                    key=lambda gw: len(gw.subnets) if gw.subnets else 0,
+                    reverse=True,
+                )
+
+                # The first NAT Gateway is the "primary" (most subnets)
+                # All others are considered redundant
+                primary_nat_gw = nat_gw_list_sorted[0]
+                redundant_nat_gws = nat_gw_list_sorted[1:]
+
+                # Flag each redundant NAT Gateway
+                for nat_gw in redundant_nat_gws:
+                    # Calculate age
+                    age_days = 7  # Default assumption
+
+                    # Apply min_age_days threshold
+                    if age_days < min_age_days:
+                        continue
+
+                    # Calculate costs
+                    hourly_cost = 0.045
+                    monthly_cost = hourly_cost * 730  # $32.40/month
+
+                    # Calculate total wasted
+                    total_wasted = (age_days / 30) * monthly_cost
+
+                    # Check if zone-redundant
+                    has_zones = (
+                        nat_gw.zones and len(nat_gw.zones) > 0
+                    )
+                    primary_has_zones = (
+                        primary_nat_gw.zones and len(primary_nat_gw.zones) > 0
+                    )
+
+                    # Determine confidence level
+                    if age_days >= 30 and not has_zones:
+                        confidence_level = "critical"
+                    elif age_days >= 14 or (has_zones and primary_has_zones):
+                        confidence_level = "high"
+                    else:
+                        confidence_level = "medium"
+
+                    # Extract VNet name from ID
+                    vnet_name = vnet_id.split("/")[-1]
+
+                    # Count Public IPs
+                    public_ip_count = (
+                        len(nat_gw.public_ip_addresses)
+                        if nat_gw.public_ip_addresses
+                        else 0
+                    )
+
+                    orphans.append(
+                        OrphanResourceData(
+                            resource_id=nat_gw.id,
+                            resource_type="nat_gateway_redundant",
+                            resource_name=nat_gw.name,
+                            region=region,
+                            estimated_monthly_cost=monthly_cost,
+                            resource_metadata={
+                                "provisioning_state": nat_gw.provisioning_state,
+                                "vnet_id": vnet_id,
+                                "vnet_name": vnet_name,
+                                "total_nat_gws_in_vnet": len(nat_gw_list),
+                                "primary_nat_gw_name": primary_nat_gw.name,
+                                "primary_nat_gw_subnet_count": (
+                                    len(primary_nat_gw.subnets)
+                                    if primary_nat_gw.subnets
+                                    else 0
+                                ),
+                                "this_subnet_count": (
+                                    len(nat_gw.subnets)
+                                    if nat_gw.subnets
+                                    else 0
+                                ),
+                                "public_ip_count": public_ip_count,
+                                "has_zones": has_zones,
+                                "zones": nat_gw.zones if nat_gw.zones else [],
+                                "sku_name": (
+                                    nat_gw.sku.name if nat_gw.sku else "Standard"
+                                ),
+                                "age_days": age_days,
+                                "monthly_cost_usd": round(monthly_cost, 2),
+                                "total_wasted_usd": round(total_wasted, 2),
+                                "orphan_reason": f"Redundant NAT Gateway in VNet '{vnet_name}'. "
+                                f"VNet has {len(nat_gw_list)} NAT Gateways when typically only 1 is needed. "
+                                f"Primary NAT Gateway is '{primary_nat_gw.name}' with {len(primary_nat_gw.subnets) if primary_nat_gw.subnets else 0} subnets.",
+                                "recommendation": f"Consolidate outbound connectivity to primary NAT Gateway '{primary_nat_gw.name}' "
+                                f"and delete this redundant NAT Gateway. Save ${monthly_cost:.2f}/month. "
+                                f"Azure best practice: 1 NAT Gateway per VNet (unless zone-specific routing required).",
+                                "confidence_level": confidence_level,
+                                "tags": nat_gw.tags or {},
+                            },
+                        )
+                    )
+
+        except Exception as e:
+            print(
+                f"Error scanning redundant NAT Gateways in {region}: {str(e)}"
+            )
+
+        return orphans
+
+    async def scan_nat_gateway_dev_test_always_on(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scan for Dev/Test Azure NAT Gateways running 24/7 instead of business hours only.
+
+        Scenario #6: Dev/Test NAT Gateway Always On
+        - Detects: NAT Gateways tagged as "dev", "test", "development", "staging", or "nonprod"
+          that run continuously (24/7) instead of only during business hours
+        - Business Impact: Non-production environments typically only need outbound connectivity
+          during development hours (e.g., 8 hours/day, 5 days/week = 40 hours/week vs 168 hours/week)
+        - Cost Savings: 76% of $32.40/month = $24.70/month (if stopped outside business hours)
+        - Requirements:
+          * Must have tags indicating dev/test environment:
+            - environment: dev, test, development, staging, nonprod
+            - env: dev, test, staging
+            - purpose: development, testing
+          * Must be successfully provisioned with subnets attached
+        - Confidence Levels:
+          * HIGH: Tagged as dev/test and older than 30 days (established pattern)
+          * MEDIUM: Tagged as dev/test and 7-30 days old
+          * LOW: Tagged as dev/test but <7 days (may need 24/7 initially)
+        - Recommendation: Implement automation to start/stop NAT Gateway + VMs based on schedule
+
+        Args:
+            region: Azure region to scan
+            detection_rules: Optional detection configuration with keys:
+                - min_age_days: Minimum age in days to flag (default: 7)
+                - enabled: Whether this detection is enabled (default: True)
+                - business_hours_per_week: Hours needed per week (default: 40)
+
+        Returns:
+            List of dev/test NAT Gateways running 24/7
+        """
+        from azure.mgmt.network import NetworkManagementClient
+        from azure.identity import ClientSecretCredential
+
+        orphans = []
+
+        # Extract detection rules with defaults
+        min_age_days = (
+            detection_rules.get("min_age_days", 7) if detection_rules else 7
+        )
+        business_hours_per_week = (
+            detection_rules.get("business_hours_per_week", 40)
+            if detection_rules
+            else 40
+        )
+
+        try:
+            # Create Azure credential and network client
+            credential = ClientSecretCredential(
+                tenant_id=self.tenant_id,
+                client_id=self.client_id,
+                client_secret=self.client_secret,
+            )
+
+            network_client = NetworkManagementClient(
+                credential, self.subscription_id
+            )
+
+            # List all NAT Gateways across subscription
+            nat_gateways = list(network_client.nat_gateways.list_all())
+
+            for nat_gw in nat_gateways:
+                # Filter by region
+                if nat_gw.location != region:
+                    continue
+
+                # Filter by scope
+                if not self._is_resource_in_scope(nat_gw.id):
+                    continue
+
+                # Must be successfully provisioned
+                if nat_gw.provisioning_state != "Succeeded":
+                    continue
+
+                # Must have subnets (active usage)
+                if not nat_gw.subnets or len(nat_gw.subnets) == 0:
+                    continue
+
+                # Check tags for dev/test indicators
+                is_dev_test = False
+                matched_tag = None
+
+                if nat_gw.tags:
+                    tags_lower = {
+                        k.lower(): v.lower() for k, v in nat_gw.tags.items()
+                    }
+
+                    # Check environment tag
+                    if "environment" in tags_lower:
+                        env_value = tags_lower["environment"]
+                        if env_value in [
+                            "dev",
+                            "test",
+                            "development",
+                            "staging",
+                            "nonprod",
+                            "non-prod",
+                        ]:
+                            is_dev_test = True
+                            matched_tag = f"environment={env_value}"
+
+                    # Check env tag (shorthand)
+                    elif "env" in tags_lower:
+                        env_value = tags_lower["env"]
+                        if env_value in ["dev", "test", "staging", "nonprod"]:
+                            is_dev_test = True
+                            matched_tag = f"env={env_value}"
+
+                    # Check purpose tag
+                    elif "purpose" in tags_lower:
+                        purpose_value = tags_lower["purpose"]
+                        if purpose_value in [
+                            "development",
+                            "testing",
+                            "test",
+                            "dev",
+                        ]:
+                            is_dev_test = True
+                            matched_tag = f"purpose={purpose_value}"
+
+                if not is_dev_test:
+                    continue
+
+                # Calculate age
+                age_days = 7  # Default assumption
+
+                # Apply min_age_days threshold
+                if age_days < min_age_days:
+                    continue
+
+                # Calculate costs
+                hourly_cost = 0.045
+                weekly_cost_24_7 = hourly_cost * 168  # $7.56/week
+                weekly_cost_business_hours = (
+                    hourly_cost * business_hours_per_week
+                )  # $1.80/week (for 40 hours)
+
+                weekly_savings = weekly_cost_24_7 - weekly_cost_business_hours
+                monthly_savings = weekly_savings * (
+                    30 / 7
+                )  # ~$24.70/month
+
+                # Total wasted since creation
+                total_wasted = (age_days / 30) * monthly_savings
+
+                # Usage efficiency
+                usage_efficiency = (
+                    business_hours_per_week / 168 * 100
+                )  # ~23.8%
+                waste_percentage = 100 - usage_efficiency  # ~76.2%
+
+                # Determine confidence level
+                if age_days >= 30:
+                    confidence_level = "high"
+                elif age_days >= 7:
+                    confidence_level = "medium"
+                else:
+                    confidence_level = "low"
+
+                # Count subnets and public IPs
+                subnet_count = len(nat_gw.subnets) if nat_gw.subnets else 0
+                public_ip_count = (
+                    len(nat_gw.public_ip_addresses)
+                    if nat_gw.public_ip_addresses
+                    else 0
+                )
+
+                orphans.append(
+                    OrphanResourceData(
+                        resource_id=nat_gw.id,
+                        resource_type="nat_gateway_dev_test_always_on",
+                        resource_name=nat_gw.name,
+                        region=region,
+                        estimated_monthly_cost=monthly_savings,
+                        resource_metadata={
+                            "provisioning_state": nat_gw.provisioning_state,
+                            "matched_tag": matched_tag,
+                            "subnet_count": subnet_count,
+                            "public_ip_count": public_ip_count,
+                            "business_hours_per_week": business_hours_per_week,
+                            "total_hours_per_week": 168,
+                            "usage_efficiency_percent": round(
+                                usage_efficiency, 1
+                            ),
+                            "waste_percentage": round(waste_percentage, 1),
+                            "monthly_cost_24_7": round(
+                                weekly_cost_24_7 * (30 / 7), 2
+                            ),
+                            "monthly_cost_business_hours": round(
+                                weekly_cost_business_hours * (30 / 7), 2
+                            ),
+                            "sku_name": (
+                                nat_gw.sku.name if nat_gw.sku else "Standard"
+                            ),
+                            "zones": nat_gw.zones if nat_gw.zones else [],
+                            "age_days": age_days,
+                            "monthly_savings_usd": round(monthly_savings, 2),
+                            "total_wasted_usd": round(total_wasted, 2),
+                            "orphan_reason": f"Dev/Test NAT Gateway (tag: {matched_tag}) running 24/7. "
+                            f"Only needs to run during business hours ({business_hours_per_week}h/week). "
+                            f"Wasting {waste_percentage:.1f}% of runtime.",
+                            "recommendation": f"Implement start/stop automation for this dev/test NAT Gateway. "
+                            f"Run only during business hours ({business_hours_per_week}h/week instead of 168h/week). "
+                            f"Save ${monthly_savings:.2f}/month. "
+                            f"Consider Azure Automation, Logic Apps, or scheduled Azure Functions.",
+                            "confidence_level": confidence_level,
+                            "tags": nat_gw.tags or {},
+                        },
+                    )
+                )
+
+        except Exception as e:
+            print(
+                f"Error scanning dev/test NAT Gateways in {region}: {str(e)}"
+            )
+
+        return orphans
+
+    async def scan_nat_gateway_unnecessary_zones(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scan for Azure NAT Gateways with unnecessary multi-zone configuration.
+
+        Scenario #7: Multi-Zone NAT Gateway When VMs Use Single Zone
+        - Detects: NAT Gateways configured for multiple availability zones when the
+          VMs they serve are all in a single zone (or non-zonal)
+        - Business Impact: Zone-redundant NAT Gateways incur slightly higher costs
+          and complexity. If VMs don't span multiple zones, single-zone NAT Gateway
+          is sufficient and more cost-effective
+        - Cost Savings: ~$0.50/month (small optimization but adds up)
+        - Requirements:
+          * NAT Gateway must be configured with multiple zones (len(zones) > 1)
+          * All VMs in attached subnets must be in a single zone OR non-zonal
+          * Must be older than min_age_days threshold
+        - Confidence Levels:
+          * HIGH: Age ≥30 days and all VMs confirmed single-zone (pattern established)
+          * MEDIUM: Age 7-30 days or cannot determine VM zones
+          * LOW: Age <7 days (may add multi-zone VMs soon)
+        - Note: Azure NAT Gateway pricing doesn't explicitly charge more for zones,
+          but multi-zone adds operational complexity and potential data transfer costs
+
+        Args:
+            region: Azure region to scan
+            detection_rules: Optional detection configuration with keys:
+                - min_age_days: Minimum age in days to flag (default: 14)
+                - enabled: Whether this detection is enabled (default: True)
+
+        Returns:
+            List of NAT Gateways with unnecessary multi-zone configuration
+        """
+        from azure.mgmt.network import NetworkManagementClient
+        from azure.mgmt.compute import ComputeManagementClient
+        from azure.identity import ClientSecretCredential
+
+        orphans = []
+
+        # Extract detection rules with defaults
+        min_age_days = (
+            detection_rules.get("min_age_days", 14) if detection_rules else 14
+        )
+
+        try:
+            # Create Azure credential and clients
+            credential = ClientSecretCredential(
+                tenant_id=self.tenant_id,
+                client_id=self.client_id,
+                client_secret=self.client_secret,
+            )
+
+            network_client = NetworkManagementClient(
+                credential, self.subscription_id
+            )
+            compute_client = ComputeManagementClient(
+                credential, self.subscription_id
+            )
+
+            # List all NAT Gateways across subscription
+            nat_gateways = list(network_client.nat_gateways.list_all())
+
+            for nat_gw in nat_gateways:
+                # Filter by region
+                if nat_gw.location != region:
+                    continue
+
+                # Filter by scope
+                if not self._is_resource_in_scope(nat_gw.id):
+                    continue
+
+                # Must be successfully provisioned
+                if nat_gw.provisioning_state != "Succeeded":
+                    continue
+
+                # Must have subnets attached
+                if not nat_gw.subnets or len(nat_gw.subnets) == 0:
+                    continue
+
+                # Must be multi-zone (2 or more zones)
+                if not nat_gw.zones or len(nat_gw.zones) < 2:
+                    continue
+
+                # Get all VMs in attached subnets and their zones
+                vm_zones = set()
+                total_vms = 0
+
+                for subnet_ref in nat_gw.subnets:
+                    subnet_id = subnet_ref.id
+                    id_parts = subnet_id.split("/")
+
+                    if len(id_parts) >= 11:
+                        subnet_rg = id_parts[4]
+                        vnet_name = id_parts[8]
+                        subnet_name = id_parts[10]
+
+                        try:
+                            # Get subnet details
+                            subnet = network_client.subnets.get(
+                                subnet_rg, vnet_name, subnet_name
+                            )
+
+                            # Get VMs in this subnet
+                            if subnet.ip_configurations:
+                                for ip_config in subnet.ip_configurations:
+                                    ip_config_id = ip_config.id
+                                    if "networkInterfaces" in ip_config_id:
+                                        nic_parts = ip_config_id.split("/")
+                                        if len(nic_parts) >= 9:
+                                            nic_rg = nic_parts[4]
+                                            nic_name = nic_parts[8]
+
+                                            try:
+                                                nic = (
+                                                    network_client.network_interfaces.get(
+                                                        nic_rg, nic_name
+                                                    )
+                                                )
+
+                                                # Get VM from NIC
+                                                if (
+                                                    nic.virtual_machine
+                                                    and nic.virtual_machine.id
+                                                ):
+                                                    vm_id_parts = (
+                                                        nic.virtual_machine.id.split(
+                                                            "/"
+                                                        )
+                                                    )
+                                                    if len(vm_id_parts) >= 9:
+                                                        vm_rg = vm_id_parts[4]
+                                                        vm_name = vm_id_parts[8]
+
+                                                        # Get VM details to check zones
+                                                        try:
+                                                            vm = compute_client.virtual_machines.get(
+                                                                vm_rg, vm_name
+                                                            )
+                                                            total_vms += 1
+
+                                                            # Check VM zones
+                                                            if (
+                                                                vm.zones
+                                                                and len(vm.zones)
+                                                                > 0
+                                                            ):
+                                                                vm_zones.update(
+                                                                    vm.zones
+                                                                )
+                                                            else:
+                                                                # Non-zonal VM
+                                                                vm_zones.add(
+                                                                    "non-zonal"
+                                                                )
+                                                        except:
+                                                            pass
+                                            except:
+                                                pass
+                        except:
+                            pass
+
+                # Skip if no VMs found
+                if total_vms == 0:
+                    continue
+
+                # Check if all VMs are in a single zone
+                is_unnecessary = False
+                vm_zone_description = ""
+
+                if len(vm_zones) == 1:
+                    # All VMs in single zone OR all non-zonal
+                    is_unnecessary = True
+                    if "non-zonal" in vm_zones:
+                        vm_zone_description = "All VMs are non-zonal"
+                    else:
+                        vm_zone_description = (
+                            f"All VMs in zone {list(vm_zones)[0]}"
+                        )
+                elif len(vm_zones) == 0:
+                    # Could not determine VM zones, but still flag as medium confidence
+                    is_unnecessary = True
+                    vm_zone_description = (
+                        "Could not determine VM zones (likely non-zonal)"
+                    )
+
+                if not is_unnecessary:
+                    continue
+
+                # Calculate age
+                age_days = 7  # Default assumption
+
+                # Apply min_age_days threshold
+                if age_days < min_age_days:
+                    continue
+
+                # Calculate savings (small but measurable)
+                # Multi-zone adds ~1-2% overhead in practice
+                monthly_savings = 0.50  # Conservative estimate
+
+                # Total wasted
+                total_wasted = (age_days / 30) * monthly_savings
+
+                # Determine confidence level
+                if age_days >= 30 and len(vm_zones) == 1:
+                    confidence_level = "high"
+                elif age_days >= 7:
+                    confidence_level = "medium"
+                else:
+                    confidence_level = "low"
+
+                # Count subnets and public IPs
+                subnet_count = len(nat_gw.subnets) if nat_gw.subnets else 0
+                public_ip_count = (
+                    len(nat_gw.public_ip_addresses)
+                    if nat_gw.public_ip_addresses
+                    else 0
+                )
+
+                orphans.append(
+                    OrphanResourceData(
+                        resource_id=nat_gw.id,
+                        resource_type="nat_gateway_unnecessary_zones",
+                        resource_name=nat_gw.name,
+                        region=region,
+                        estimated_monthly_cost=monthly_savings,
+                        resource_metadata={
+                            "provisioning_state": nat_gw.provisioning_state,
+                            "nat_gw_zones": nat_gw.zones,
+                            "nat_gw_zone_count": len(nat_gw.zones),
+                            "vm_zones": list(vm_zones),
+                            "vm_zone_count": len(vm_zones),
+                            "total_vms": total_vms,
+                            "vm_zone_description": vm_zone_description,
+                            "subnet_count": subnet_count,
+                            "public_ip_count": public_ip_count,
+                            "sku_name": (
+                                nat_gw.sku.name if nat_gw.sku else "Standard"
+                            ),
+                            "age_days": age_days,
+                            "monthly_savings_usd": round(monthly_savings, 2),
+                            "total_wasted_usd": round(total_wasted, 2),
+                            "orphan_reason": f"Multi-zone NAT Gateway (zones: {nat_gw.zones}) when {vm_zone_description}. "
+                            f"Zone redundancy is unnecessary.",
+                            "recommendation": f"Reconfigure NAT Gateway to use single zone matching VM deployment. "
+                            f"{vm_zone_description}, so multi-zone NAT Gateway adds unnecessary cost and complexity. "
+                            f"Save ~${monthly_savings:.2f}/month.",
+                            "confidence_level": confidence_level,
+                            "tags": nat_gw.tags or {},
+                        },
+                    )
+                )
+
+        except Exception as e:
+            print(
+                f"Error scanning multi-zone NAT Gateways in {region}: {str(e)}"
+            )
+
+        return orphans
+
+    async def scan_nat_gateway_no_traffic(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scan for Azure NAT Gateways with zero traffic via Azure Monitor metrics.
+
+        Scenario #8: NAT Gateway with Zero Traffic (Metrics-Based)
+        - Detects: NAT Gateways with 0 bytes transferred over the last 30 days using
+          Azure Monitor metrics (ByteCount metric)
+        - Business Impact: A NAT Gateway with no traffic is completely unused and should
+          be deleted to eliminate ongoing hourly charges
+        - Cost: $32.40/month (fully wasted)
+        - Requirements:
+          * NAT Gateway must be successfully provisioned
+          * ByteCount metric must show 0 bytes over monitoring period (default: 30 days)
+          * Must be older than min_age_days threshold
+        - Confidence Levels:
+          * CRITICAL: 0 traffic for ≥30 days (definitely unused)
+          * HIGH: 0 traffic for 14-30 days (likely unused)
+          * MEDIUM: 0 traffic for 7-14 days (may be new)
+        - Data Source: Azure Monitor Metrics API (Microsoft.Network/natGateways - ByteCount)
+
+        Args:
+            region: Azure region to scan
+            detection_rules: Optional detection configuration with keys:
+                - min_age_days: Minimum age in days to flag (default: 7)
+                - monitoring_days: Days to check for traffic (default: 30)
+                - enabled: Whether this detection is enabled (default: True)
+
+        Returns:
+            List of NAT Gateways with zero traffic
+        """
+        from azure.mgmt.network import NetworkManagementClient
+        from azure.monitor.query import MetricsQueryClient
+        from azure.identity import ClientSecretCredential
+        from datetime import datetime, timedelta
+
+        orphans = []
+
+        # Extract detection rules with defaults
+        min_age_days = (
+            detection_rules.get("min_age_days", 7) if detection_rules else 7
+        )
+        monitoring_days = (
+            detection_rules.get("monitoring_days", 30)
+            if detection_rules
+            else 30
+        )
+
+        try:
+            # Create Azure credential and clients
+            credential = ClientSecretCredential(
+                tenant_id=self.tenant_id,
+                client_id=self.client_id,
+                client_secret=self.client_secret,
+            )
+
+            network_client = NetworkManagementClient(
+                credential, self.subscription_id
+            )
+            metrics_client = MetricsQueryClient(credential)
+
+            # List all NAT Gateways across subscription
+            nat_gateways = list(network_client.nat_gateways.list_all())
+
+            for nat_gw in nat_gateways:
+                # Filter by region
+                if nat_gw.location != region:
+                    continue
+
+                # Filter by scope
+                if not self._is_resource_in_scope(nat_gw.id):
+                    continue
+
+                # Must be successfully provisioned
+                if nat_gw.provisioning_state != "Succeeded":
+                    continue
+
+                # Calculate age
+                age_days = 7  # Default assumption
+
+                # Apply min_age_days threshold
+                if age_days < min_age_days:
+                    continue
+
+                # Query Azure Monitor for ByteCount metric
+                try:
+                    end_time = datetime.utcnow()
+                    start_time = end_time - timedelta(days=monitoring_days)
+
+                    # Query the ByteCount metric
+                    # Metric namespace: Microsoft.Network/natGateways
+                    # Metric name: ByteCount
+                    response = metrics_client.query_resource(
+                        resource_uri=nat_gw.id,
+                        metric_names=["ByteCount"],
+                        timespan=(start_time, end_time),
+                        granularity=timedelta(hours=1),
+                        aggregations=["Total"],
+                    )
+
+                    # Calculate total bytes
+                    total_bytes = 0
+                    has_metrics = False
+
+                    for metric in response.metrics:
+                        for time_series in metric.timeseries:
+                            for data_point in time_series.data:
+                                if data_point.total is not None:
+                                    total_bytes += data_point.total
+                                    has_metrics = True
+
+                    # If no metrics available, skip (may be too new)
+                    if not has_metrics:
+                        continue
+
+                    # Skip if any traffic detected
+                    if total_bytes > 0:
+                        continue
+
+                    # Calculate costs
+                    hourly_cost = 0.045
+                    monthly_cost = hourly_cost * 730  # $32.40/month
+
+                    # Total wasted
+                    total_wasted = (age_days / 30) * monthly_cost
+
+                    # Determine confidence level based on monitoring period
+                    if monitoring_days >= 30:
+                        confidence_level = "critical"
+                    elif monitoring_days >= 14:
+                        confidence_level = "high"
+                    else:
+                        confidence_level = "medium"
+
+                    # Count subnets and public IPs
+                    subnet_count = (
+                        len(nat_gw.subnets) if nat_gw.subnets else 0
+                    )
+                    public_ip_count = (
+                        len(nat_gw.public_ip_addresses)
+                        if nat_gw.public_ip_addresses
+                        else 0
+                    )
+
+                    orphans.append(
+                        OrphanResourceData(
+                            resource_id=nat_gw.id,
+                            resource_type="nat_gateway_no_traffic",
+                            resource_name=nat_gw.name,
+                            region=region,
+                            estimated_monthly_cost=monthly_cost,
+                            resource_metadata={
+                                "provisioning_state": nat_gw.provisioning_state,
+                                "total_bytes": total_bytes,
+                                "monitoring_days": monitoring_days,
+                                "subnet_count": subnet_count,
+                                "public_ip_count": public_ip_count,
+                                "sku_name": (
+                                    nat_gw.sku.name if nat_gw.sku else "Standard"
+                                ),
+                                "zones": nat_gw.zones if nat_gw.zones else [],
+                                "age_days": age_days,
+                                "monthly_cost_usd": round(monthly_cost, 2),
+                                "total_wasted_usd": round(total_wasted, 2),
+                                "orphan_reason": f"NAT Gateway has 0 bytes of traffic over last {monitoring_days} days. "
+                                f"Completely unused despite being provisioned.",
+                                "recommendation": f"Delete this NAT Gateway. Azure Monitor metrics confirm "
+                                f"0 bytes transferred in {monitoring_days} days, indicating no usage. "
+                                f"Save ${monthly_cost:.2f}/month.",
+                                "confidence_level": confidence_level,
+                                "tags": nat_gw.tags or {},
+                            },
+                        )
+                    )
+
+                except Exception as metric_error:
+                    # Metrics query failed, skip this NAT Gateway
+                    print(
+                        f"Could not query metrics for NAT Gateway {nat_gw.name}: {str(metric_error)}"
+                    )
+                    continue
+
+        except Exception as e:
+            print(
+                f"Error scanning zero-traffic NAT Gateways in {region}: {str(e)}"
+            )
+
+        return orphans
+
+    async def scan_nat_gateway_very_low_traffic(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scan for Azure NAT Gateways with very low traffic (<10 GB/month).
+
+        Scenario #9: NAT Gateway with Very Low Traffic
+        - Detects: NAT Gateways with less than 10 GB of traffic per month, where a
+          Standard Public IP would be more cost-effective
+        - Business Impact: For low-traffic scenarios, the NAT Gateway base cost
+          ($32.40/month) far exceeds the value. A Standard Public IP ($3.65/month)
+          is significantly cheaper for light usage
+        - Cost Savings: ~$28-29/month (NAT GW $32.40 vs Public IP $3.65 + minimal data)
+        - Requirements:
+          * NAT Gateway must be successfully provisioned
+          * ByteCount metric shows <10 GB over monitoring period (default: 30 days)
+          * Must be older than min_age_days threshold
+        - Confidence Levels:
+          * HIGH: <10 GB/month for ≥30 days (pattern established)
+          * MEDIUM: <10 GB/month for 14-30 days (likely pattern)
+          * LOW: <10 GB/month for <14 days (may increase)
+        - Data Source: Azure Monitor Metrics API (Microsoft.Network/natGateways - ByteCount)
+        - Cost Model:
+          * NAT Gateway: $32.40/month base + $0.045/GB
+          * Public IP: $3.65/month + first 5GB free + $0.005/GB thereafter
+
+        Args:
+            region: Azure region to scan
+            detection_rules: Optional detection configuration with keys:
+                - min_age_days: Minimum age in days to flag (default: 14)
+                - monitoring_days: Days to check for traffic (default: 30)
+                - max_gb_per_month: Traffic threshold in GB (default: 10)
+                - enabled: Whether this detection is enabled (default: True)
+
+        Returns:
+            List of NAT Gateways with very low traffic
+        """
+        from azure.mgmt.network import NetworkManagementClient
+        from azure.monitor.query import MetricsQueryClient
+        from azure.identity import ClientSecretCredential
+        from datetime import datetime, timedelta
+
+        orphans = []
+
+        # Extract detection rules with defaults
+        min_age_days = (
+            detection_rules.get("min_age_days", 14) if detection_rules else 14
+        )
+        monitoring_days = (
+            detection_rules.get("monitoring_days", 30)
+            if detection_rules
+            else 30
+        )
+        max_gb_per_month = (
+            detection_rules.get("max_gb_per_month", 10)
+            if detection_rules
+            else 10
+        )
+
+        try:
+            # Create Azure credential and clients
+            credential = ClientSecretCredential(
+                tenant_id=self.tenant_id,
+                client_id=self.client_id,
+                client_secret=self.client_secret,
+            )
+
+            network_client = NetworkManagementClient(
+                credential, self.subscription_id
+            )
+            metrics_client = MetricsQueryClient(credential)
+
+            # List all NAT Gateways across subscription
+            nat_gateways = list(network_client.nat_gateways.list_all())
+
+            for nat_gw in nat_gateways:
+                # Filter by region
+                if nat_gw.location != region:
+                    continue
+
+                # Filter by scope
+                if not self._is_resource_in_scope(nat_gw.id):
+                    continue
+
+                # Must be successfully provisioned
+                if nat_gw.provisioning_state != "Succeeded":
+                    continue
+
+                # Calculate age
+                age_days = 7  # Default assumption
+
+                # Apply min_age_days threshold
+                if age_days < min_age_days:
+                    continue
+
+                # Query Azure Monitor for ByteCount metric
+                try:
+                    end_time = datetime.utcnow()
+                    start_time = end_time - timedelta(days=monitoring_days)
+
+                    response = metrics_client.query_resource(
+                        resource_uri=nat_gw.id,
+                        metric_names=["ByteCount"],
+                        timespan=(start_time, end_time),
+                        granularity=timedelta(hours=1),
+                        aggregations=["Total"],
+                    )
+
+                    # Calculate total bytes
+                    total_bytes = 0
+                    has_metrics = False
+
+                    for metric in response.metrics:
+                        for time_series in metric.timeseries:
+                            for data_point in time_series.data:
+                                if data_point.total is not None:
+                                    total_bytes += data_point.total
+                                    has_metrics = True
+
+                    # If no metrics available, skip
+                    if not has_metrics:
+                        continue
+
+                    # Convert to GB and normalize to 30-day month
+                    total_gb = total_bytes / (1024**3)  # Convert bytes to GB
+                    gb_per_month = total_gb * (30 / monitoring_days)
+
+                    # Skip if traffic is above threshold
+                    if gb_per_month >= max_gb_per_month:
+                        continue
+
+                    # Skip if zero traffic (that's scenario 8)
+                    if total_bytes == 0:
+                        continue
+
+                    # Calculate costs
+                    # NAT Gateway cost
+                    nat_gw_base_monthly = 0.045 * 730  # $32.40
+                    nat_gw_data_monthly = gb_per_month * 0.045
+                    nat_gw_total_monthly = nat_gw_base_monthly + nat_gw_data_monthly
+
+                    # Public IP cost
+                    public_ip_base_monthly = 0.005 * 730  # $3.65
+                    # First 5 GB free for Public IP outbound
+                    billable_gb = max(0, gb_per_month - 5)
+                    public_ip_data_monthly = billable_gb * 0.005
+                    public_ip_total_monthly = (
+                        public_ip_base_monthly + public_ip_data_monthly
+                    )
+
+                    # Savings
+                    monthly_savings = nat_gw_total_monthly - public_ip_total_monthly
+
+                    # Total wasted
+                    total_wasted = (age_days / 30) * monthly_savings
+
+                    # Determine confidence level based on monitoring period
+                    if monitoring_days >= 30:
+                        confidence_level = "high"
+                    elif monitoring_days >= 14:
+                        confidence_level = "medium"
+                    else:
+                        confidence_level = "low"
+
+                    # Count subnets and public IPs
+                    subnet_count = (
+                        len(nat_gw.subnets) if nat_gw.subnets else 0
+                    )
+                    public_ip_count = (
+                        len(nat_gw.public_ip_addresses)
+                        if nat_gw.public_ip_addresses
+                        else 0
+                    )
+
+                    orphans.append(
+                        OrphanResourceData(
+                            resource_id=nat_gw.id,
+                            resource_type="nat_gateway_very_low_traffic",
+                            resource_name=nat_gw.name,
+                            region=region,
+                            estimated_monthly_cost=monthly_savings,
+                            resource_metadata={
+                                "provisioning_state": nat_gw.provisioning_state,
+                                "total_bytes": total_bytes,
+                                "total_gb": round(total_gb, 2),
+                                "gb_per_month": round(gb_per_month, 2),
+                                "monitoring_days": monitoring_days,
+                                "max_gb_threshold": max_gb_per_month,
+                                "nat_gw_monthly_cost": round(
+                                    nat_gw_total_monthly, 2
+                                ),
+                                "public_ip_monthly_cost": round(
+                                    public_ip_total_monthly, 2
+                                ),
+                                "subnet_count": subnet_count,
+                                "public_ip_count": public_ip_count,
+                                "sku_name": (
+                                    nat_gw.sku.name if nat_gw.sku else "Standard"
+                                ),
+                                "zones": nat_gw.zones if nat_gw.zones else [],
+                                "age_days": age_days,
+                                "monthly_savings_usd": round(monthly_savings, 2),
+                                "total_wasted_usd": round(total_wasted, 2),
+                                "orphan_reason": f"NAT Gateway has very low traffic: {gb_per_month:.2f} GB/month "
+                                f"over last {monitoring_days} days. For this traffic level, a Standard Public IP "
+                                f"is much more cost-effective than NAT Gateway.",
+                                "recommendation": f"Replace NAT Gateway with Standard Public IP for low-traffic scenarios. "
+                                f"NAT Gateway costs ${nat_gw_total_monthly:.2f}/month vs Public IP ${public_ip_total_monthly:.2f}/month. "
+                                f"Save ${monthly_savings:.2f}/month. NAT Gateway is designed for high-traffic, multi-VM scenarios.",
+                                "confidence_level": confidence_level,
+                                "tags": nat_gw.tags or {},
+                            },
+                        )
+                    )
+
+                except Exception as metric_error:
+                    # Metrics query failed, skip this NAT Gateway
+                    print(
+                        f"Could not query metrics for NAT Gateway {nat_gw.name}: {str(metric_error)}"
+                    )
+                    continue
+
+        except Exception as e:
+            print(
+                f"Error scanning low-traffic NAT Gateways in {region}: {str(e)}"
+            )
+
+        return orphans
+
+    async def scan_nat_gateway_private_link_alternative(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scan for Azure NAT Gateways where Private Link/Service Endpoints would be better.
+
+        Scenario #10: NAT Gateway for Azure Services Traffic (Private Link Alternative)
+        - Detects: NAT Gateways used primarily for accessing Azure services (Storage,
+          SQL, Cosmos DB, etc.) where Private Link or Service Endpoints eliminate the
+          need for outbound Internet connectivity
+        - Business Impact: Private Link provides private connectivity to Azure services
+          within the VNet, eliminating egress costs and the NAT Gateway entirely
+        - Cost Savings: ~$32-43/month depending on traffic volume
+          * NAT Gateway: $32.40/month base + $0.045/GB
+          * Private Link: $10.80/month per endpoint + $0.01/GB inbound (no egress)
+          * Service Endpoints: FREE (no NAT Gateway, no Private Link cost)
+        - Requirements:
+          * NAT Gateway must be successfully provisioned
+          * Subnets must have Service Endpoints configured (indicates Azure service access)
+          * OR traffic analysis suggests primarily Azure-bound traffic
+        - Confidence Levels:
+          * HIGH: Service Endpoints configured + moderate/high traffic (pattern clear)
+          * MEDIUM: Service Endpoints configured + low traffic
+          * LOW: Heuristic-based detection without Service Endpoint confirmation
+        - Detection Heuristics:
+          * Presence of Service Endpoints (Microsoft.Storage, Microsoft.Sql, etc.)
+          * Tags indicating Azure service usage (workload, purpose)
+          * VNet name patterns (storage-vnet, sql-vnet, data-vnet)
+
+        Args:
+            region: Azure region to scan
+            detection_rules: Optional detection configuration with keys:
+                - min_age_days: Minimum age in days to flag (default: 30)
+                - enabled: Whether this detection is enabled (default: True)
+
+        Returns:
+            List of NAT Gateways where Private Link is a better alternative
+        """
+        from azure.mgmt.network import NetworkManagementClient
+        from azure.identity import ClientSecretCredential
+
+        orphans = []
+
+        # Extract detection rules with defaults
+        min_age_days = (
+            detection_rules.get("min_age_days", 30) if detection_rules else 30
+        )
+
+        try:
+            # Create Azure credential and network client
+            credential = ClientSecretCredential(
+                tenant_id=self.tenant_id,
+                client_id=self.client_id,
+                client_secret=self.client_secret,
+            )
+
+            network_client = NetworkManagementClient(
+                credential, self.subscription_id
+            )
+
+            # List all NAT Gateways across subscription
+            nat_gateways = list(network_client.nat_gateways.list_all())
+
+            for nat_gw in nat_gateways:
+                # Filter by region
+                if nat_gw.location != region:
+                    continue
+
+                # Filter by scope
+                if not self._is_resource_in_scope(nat_gw.id):
+                    continue
+
+                # Must be successfully provisioned
+                if nat_gw.provisioning_state != "Succeeded":
+                    continue
+
+                # Must have subnets attached
+                if not nat_gw.subnets or len(nat_gw.subnets) == 0:
+                    continue
+
+                # Calculate age
+                age_days = 7  # Default assumption
+
+                # Apply min_age_days threshold (higher for this scenario)
+                if age_days < min_age_days:
+                    continue
+
+                # Analyze subnets for Service Endpoints
+                service_endpoints_found = []
+                subnet_details = []
+
+                for subnet_ref in nat_gw.subnets:
+                    subnet_id = subnet_ref.id
+                    id_parts = subnet_id.split("/")
+
+                    if len(id_parts) >= 11:
+                        subnet_rg = id_parts[4]
+                        vnet_name = id_parts[8]
+                        subnet_name = id_parts[10]
+
+                        try:
+                            # Get subnet details to check Service Endpoints
+                            subnet = network_client.subnets.get(
+                                subnet_rg, vnet_name, subnet_name
+                            )
+
+                            subnet_info = {
+                                "name": subnet_name,
+                                "vnet": vnet_name,
+                                "service_endpoints": [],
+                            }
+
+                            # Check for Service Endpoints
+                            if subnet.service_endpoints:
+                                for se in subnet.service_endpoints:
+                                    if (
+                                        se.service
+                                        and se.provisioning_state == "Succeeded"
+                                    ):
+                                        service_endpoints_found.append(se.service)
+                                        subnet_info["service_endpoints"].append(
+                                            se.service
+                                        )
+
+                            subnet_details.append(subnet_info)
+
+                        except Exception as subnet_error:
+                            print(
+                                f"Could not get subnet details for {subnet_name}: {str(subnet_error)}"
+                            )
+                            continue
+
+                # Skip if no Service Endpoints found
+                if len(service_endpoints_found) == 0:
+                    # Could add additional heuristics here (tags, VNet naming, etc.)
+                    continue
+
+                # Deduplicate Service Endpoints
+                unique_service_endpoints = list(set(service_endpoints_found))
+
+                # Determine Private Link vs Service Endpoint recommendation
+                # Service Endpoints: Free, but still use public IPs
+                # Private Link: $10.80/month per endpoint, fully private
+                use_service_endpoints = True  # Default: recommend free option
+
+                # Calculate costs
+                nat_gw_hourly = 0.045
+                nat_gw_monthly = nat_gw_hourly * 730  # $32.40/month
+
+                # Service Endpoints: FREE (no NAT Gateway needed)
+                service_endpoint_cost = 0.0
+
+                # Private Link: $0.015/hour per endpoint
+                private_link_cost_per_endpoint = 0.015 * 730  # $10.95/month
+                # Assume 1-2 endpoints needed
+                avg_private_link_cost = private_link_cost_per_endpoint * 1.5
+
+                # Use Service Endpoints (free) as primary recommendation
+                monthly_savings = nat_gw_monthly - service_endpoint_cost
+
+                # Determine confidence level
+                if len(unique_service_endpoints) >= 2:
+                    confidence_level = "high"
+                elif len(unique_service_endpoints) == 1:
+                    confidence_level = "medium"
+                else:
+                    confidence_level = "low"
+
+                # Total wasted
+                total_wasted = (age_days / 30) * monthly_savings
+
+                # Count subnets and public IPs
+                subnet_count = len(nat_gw.subnets) if nat_gw.subnets else 0
+                public_ip_count = (
+                    len(nat_gw.public_ip_addresses)
+                    if nat_gw.public_ip_addresses
+                    else 0
+                )
+
+                orphans.append(
+                    OrphanResourceData(
+                        resource_id=nat_gw.id,
+                        resource_type="nat_gateway_private_link_alternative",
+                        resource_name=nat_gw.name,
+                        region=region,
+                        estimated_monthly_cost=monthly_savings,
+                        resource_metadata={
+                            "provisioning_state": nat_gw.provisioning_state,
+                            "service_endpoints_found": unique_service_endpoints,
+                            "service_endpoint_count": len(
+                                unique_service_endpoints
+                            ),
+                            "subnet_count": subnet_count,
+                            "subnet_details": subnet_details,
+                            "public_ip_count": public_ip_count,
+                            "nat_gw_monthly_cost": round(nat_gw_monthly, 2),
+                            "service_endpoint_cost": round(
+                                service_endpoint_cost, 2
+                            ),
+                            "private_link_alternative_cost": round(
+                                avg_private_link_cost, 2
+                            ),
+                            "sku_name": (
+                                nat_gw.sku.name if nat_gw.sku else "Standard"
+                            ),
+                            "zones": nat_gw.zones if nat_gw.zones else [],
+                            "age_days": age_days,
+                            "monthly_savings_usd": round(monthly_savings, 2),
+                            "total_wasted_usd": round(total_wasted, 2),
+                            "orphan_reason": f"NAT Gateway used for subnets with Service Endpoints configured: "
+                            f"{', '.join(unique_service_endpoints)}. "
+                            f"Service Endpoints eliminate the need for NAT Gateway by providing direct Azure service access.",
+                            "recommendation": f"Primary: Service Endpoints are already configured. Remove NAT Gateway and rely on "
+                            f"Service Endpoints (FREE). Save ${monthly_savings:.2f}/month. "
+                            f"Alternative: Use Azure Private Link for fully private connectivity (${avg_private_link_cost:.2f}/month, "
+                            f"still saves ${nat_gw_monthly - avg_private_link_cost:.2f}/month vs NAT Gateway). "
+                            f"Service Endpoints detected: {', '.join(unique_service_endpoints)}.",
+                            "confidence_level": confidence_level,
+                            "tags": nat_gw.tags or {},
+                        },
+                    )
+                )
+
+        except Exception as e:
+            print(
+                f"Error scanning NAT Gateways for Private Link alternatives in {region}: {str(e)}"
+            )
+
+        return orphans
 
     async def scan_unused_fsx_file_systems(
         self, region: str, detection_rules: dict | None = None

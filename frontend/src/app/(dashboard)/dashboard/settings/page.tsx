@@ -39,7 +39,6 @@ const AWS_RESOURCE_ICONS: { [key: string]: any } = {
   elastic_ip: Globe,
   ebs_snapshot: Camera,
   ec2_instance: Server,
-  nat_gateway: Activity,
   load_balancer: Zap,
   rds_instance: Database,
 };
@@ -49,7 +48,6 @@ const AWS_RESOURCE_LABELS: { [key: string]: string } = {
   elastic_ip: "Elastic IPs",
   ebs_snapshot: "EBS Snapshots",
   ec2_instance: "EC2 Instances (Stopped)",
-  nat_gateway: "NAT Gateways",
   load_balancer: "Load Balancers",
   rds_instance: "RDS Instances",
 };
@@ -99,6 +97,17 @@ const AZURE_RESOURCE_ICONS: { [key: string]: any } = {
   virtual_machine_memory_overprovisioned: Server,
   // AKS - Azure Kubernetes Service
   azure_aks_cluster: Server,
+  // NAT Gateway - Azure NAT Gateway waste scenarios (10 types)
+  nat_gateway_no_subnet: Activity,
+  nat_gateway_never_used: Activity,
+  nat_gateway_no_public_ip: Activity,
+  nat_gateway_single_vm: Activity,
+  nat_gateway_redundant: Activity,
+  nat_gateway_dev_test_always_on: Activity,
+  nat_gateway_unnecessary_zones: Activity,
+  nat_gateway_no_traffic: Activity,
+  nat_gateway_very_low_traffic: Activity,
+  nat_gateway_private_link_alternative: Activity,
 };
 
 const AZURE_RESOURCE_LABELS: { [key: string]: string } = {
@@ -145,6 +154,17 @@ const AZURE_RESOURCE_LABELS: { [key: string]: string } = {
   virtual_machine_memory_overprovisioned: "Virtual Machines (Memory Over-Provisioned) 📊",
   // AKS - Azure Kubernetes Service
   azure_aks_cluster: "AKS Clusters (Azure Kubernetes Service)",
+  // NAT Gateway - Azure NAT Gateway waste scenarios (10 types)
+  nat_gateway_no_subnet: "NAT Gateways (No Subnets Attached) 💰",
+  nat_gateway_never_used: "NAT Gateways (Never Used - No VMs) 💰",
+  nat_gateway_no_public_ip: "NAT Gateways (No Public IP) 💰",
+  nat_gateway_single_vm: "NAT Gateways (Single VM - Use Public IP Instead) 💰",
+  nat_gateway_redundant: "NAT Gateways (Redundant in Same VNet) 💰",
+  nat_gateway_dev_test_always_on: "NAT Gateways (Dev/Test Always On - Use Scheduling) 💰",
+  nat_gateway_unnecessary_zones: "NAT Gateways (Multi-Zone Unnecessary)",
+  nat_gateway_no_traffic: "NAT Gateways (Zero Traffic - Azure Monitor) 📊💰",
+  nat_gateway_very_low_traffic: "NAT Gateways (Very Low Traffic <10GB/month) 📊💰",
+  nat_gateway_private_link_alternative: "NAT Gateways (Private Link/Service Endpoints Better) 💰",
 };
 
 // Helper function to get provider from resource type

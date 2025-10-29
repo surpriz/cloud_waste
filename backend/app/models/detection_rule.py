@@ -51,15 +51,60 @@ DEFAULT_DETECTION_RULES = {
         "idle_confidence_threshold_days": 30,  # High confidence after 30 days idle
         "description": "EC2 instances stopped for extended periods or running with very low utilization",
     },
-    "nat_gateway": {
+    # Azure NAT Gateway - 10 Waste Detection Scenarios
+    "nat_gateway_no_subnet": {
         "enabled": True,
-        "max_bytes_30d": 1_000_000,  # < 1MB traffic in 30 days
         "min_age_days": 7,
-        "confidence_threshold_days": 30,
-        "critical_age_days": 90,  # Critical alert after 90 days unused
-        "detect_no_routes": True,  # Detect NAT GW not referenced in route tables
-        "detect_no_igw": True,  # Detect NAT GW in VPC without Internet Gateway
-        "description": "NAT Gateways with no traffic, no routing, or misconfigured",
+        "description": "Azure NAT Gateways without any subnets attached ($32.40/month waste)",
+    },
+    "nat_gateway_never_used": {
+        "enabled": True,
+        "min_age_days": 7,
+        "description": "Azure NAT Gateways with subnets but no VMs using them ($32.40/month waste)",
+    },
+    "nat_gateway_no_public_ip": {
+        "enabled": True,
+        "min_age_days": 3,
+        "description": "Azure NAT Gateways without Public IP addresses attached ($32.40/month waste)",
+    },
+    "nat_gateway_single_vm": {
+        "enabled": True,
+        "min_age_days": 14,
+        "description": "Azure NAT Gateways used by only a single VM - Standard Public IP more cost-effective ($28.75/month savings)",
+    },
+    "nat_gateway_redundant": {
+        "enabled": True,
+        "min_age_days": 14,
+        "description": "Multiple NAT Gateways in same VNet - typically only one needed ($32.40/month per redundant gateway)",
+    },
+    "nat_gateway_dev_test_always_on": {
+        "enabled": True,
+        "min_age_days": 7,
+        "business_hours_per_week": 40,  # 8 hours/day × 5 days/week
+        "description": "Dev/Test NAT Gateways running 24/7 instead of business hours only ($24.70/month savings)",
+    },
+    "nat_gateway_unnecessary_zones": {
+        "enabled": True,
+        "min_age_days": 14,
+        "description": "Multi-zone NAT Gateways when VMs use single zone ($0.50/month savings)",
+    },
+    "nat_gateway_no_traffic": {
+        "enabled": True,
+        "min_age_days": 7,
+        "monitoring_days": 30,
+        "description": "NAT Gateways with zero traffic over 30 days (Azure Monitor metrics) ($32.40/month waste)",
+    },
+    "nat_gateway_very_low_traffic": {
+        "enabled": True,
+        "min_age_days": 14,
+        "monitoring_days": 30,
+        "max_gb_per_month": 10,  # < 10 GB/month = use Public IP instead
+        "description": "NAT Gateways with very low traffic (<10 GB/month) - Standard Public IP more cost-effective ($28-29/month savings)",
+    },
+    "nat_gateway_private_link_alternative": {
+        "enabled": True,
+        "min_age_days": 30,
+        "description": "NAT Gateways for Azure services traffic - Private Link/Service Endpoints eliminate need ($32.40/month savings)",
     },
     "load_balancer": {
         "enabled": True,
