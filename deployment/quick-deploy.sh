@@ -180,7 +180,7 @@ RETRY_COUNT=0
 
 # Check frontend health
 while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
-    if docker exec cloudwaste_frontend curl -f http://localhost:3000 2>/dev/null; then
+    if docker exec cloudwaste_frontend wget --quiet --tries=1 --spider http://localhost:3000 2>/dev/null; then
         FRONTEND_HEALTHY=true
         break
     fi
