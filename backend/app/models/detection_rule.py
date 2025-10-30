@@ -106,6 +106,62 @@ DEFAULT_DETECTION_RULES = {
         "min_age_days": 30,
         "description": "NAT Gateways for Azure services traffic - Private Link/Service Endpoints eliminate need ($32.40/month savings)",
     },
+    # Azure Load Balancer & Application Gateway - 10 Waste Detection Scenarios
+    "load_balancer_no_backend_instances": {
+        "enabled": True,
+        "min_age_days": 7,
+        "description": "Azure Load Balancers with no backend instances ($18.25/month Standard waste)",
+    },
+    "load_balancer_all_backends_unhealthy": {
+        "enabled": True,
+        "min_age_days": 7,
+        "min_unhealthy_days": 14,
+        "description": "Azure Load Balancers with 100% unhealthy backends ($18.25/month waste + service unavailable)",
+    },
+    "load_balancer_no_inbound_rules": {
+        "enabled": True,
+        "min_age_days": 14,
+        "description": "Azure Load Balancers without load balancing or NAT rules ($18.25/month waste)",
+    },
+    "load_balancer_basic_sku_retired": {
+        "enabled": True,
+        "description": "Azure Load Balancers using retired Basic SKU - CRITICAL migration required (service interruption risk)",
+    },
+    "application_gateway_no_backend_targets": {
+        "enabled": True,
+        "min_age_days": 7,
+        "description": "Azure Application Gateways with no backend targets ($262-323/month waste)",
+    },
+    "application_gateway_stopped": {
+        "enabled": True,
+        "min_stopped_days": 30,
+        "description": "Azure Application Gateways in stopped state - cleanup recommended (no current cost)",
+    },
+    "load_balancer_never_used": {
+        "enabled": True,
+        "min_age_days": 30,
+        "description": "Azure Load Balancers created but never used ($18.25/month waste)",
+    },
+    "load_balancer_no_traffic": {
+        "enabled": True,
+        "min_no_traffic_days": 30,
+        "max_bytes_threshold": 1048576,  # 1 MB
+        "max_packets_threshold": 1000,
+        "description": "Azure Load Balancers with zero traffic over 30 days (Azure Monitor metrics) ($18.25/month waste)",
+    },
+    "application_gateway_no_requests": {
+        "enabled": True,
+        "min_no_requests_days": 30,
+        "max_requests_threshold": 100,
+        "description": "Azure Application Gateways with zero HTTP requests over 30 days (Azure Monitor) ($262-323/month waste)",
+    },
+    "application_gateway_underutilized": {
+        "enabled": True,
+        "min_underutilized_days": 30,
+        "max_utilization_percent": 5.0,
+        "min_requests_per_day": 1000,
+        "description": "Azure Application Gateways severely underutilized (<5% capacity) - downgrade recommended ($200-260/month savings)",
+    },
     "load_balancer": {
         "enabled": True,
         "require_zero_healthy_targets": True,

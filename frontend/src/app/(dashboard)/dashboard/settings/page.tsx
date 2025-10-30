@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { User, Bell, Shield, Trash2, Save, Key, Sliders, RotateCcw, HardDrive, Globe, Camera, Server, Activity, Zap, Database, ArrowLeft } from "lucide-react";
+import { User, Bell, Shield, Trash2, Save, Key, Sliders, RotateCcw, HardDrive, Globe, Camera, Server, Activity, Zap, Database, ArrowLeft, Network, AlertTriangle, TrendingDown } from "lucide-react";
 import Link from "next/link";
 import { useNotifications } from "@/hooks/useNotifications";
 import { Toast } from "@/components/ui/Toast";
@@ -108,6 +108,17 @@ const AZURE_RESOURCE_ICONS: { [key: string]: any } = {
   nat_gateway_no_traffic: Activity,
   nat_gateway_very_low_traffic: Activity,
   nat_gateway_private_link_alternative: Activity,
+  // Load Balancer & Application Gateway
+  load_balancer_no_backend_instances: Network,
+  load_balancer_all_backends_unhealthy: Network,
+  load_balancer_no_inbound_rules: Network,
+  load_balancer_basic_sku_retired: AlertTriangle,
+  application_gateway_no_backend_targets: Globe,
+  application_gateway_stopped: Globe,
+  load_balancer_never_used: Network,
+  load_balancer_no_traffic: Activity,
+  application_gateway_no_requests: Activity,
+  application_gateway_underutilized: TrendingDown,
 };
 
 const AZURE_RESOURCE_LABELS: { [key: string]: string } = {
@@ -165,6 +176,17 @@ const AZURE_RESOURCE_LABELS: { [key: string]: string } = {
   nat_gateway_no_traffic: "NAT Gateways (Zero Traffic - Azure Monitor) 📊💰",
   nat_gateway_very_low_traffic: "NAT Gateways (Very Low Traffic <10GB/month) 📊💰",
   nat_gateway_private_link_alternative: "NAT Gateways (Private Link/Service Endpoints Better) 💰",
+  // Load Balancer & Application Gateway
+  load_balancer_no_backend_instances: "Load Balancers (No Backend Instances) 💰",
+  load_balancer_all_backends_unhealthy: "Load Balancers (All Backends Unhealthy) ⚠️💰",
+  load_balancer_no_inbound_rules: "Load Balancers (No Routing Rules) 💰",
+  load_balancer_basic_sku_retired: "Load Balancers (Basic SKU Retired) 🚨 CRITICAL",
+  application_gateway_no_backend_targets: "Application Gateways (No Backend Targets) 💰",
+  application_gateway_stopped: "Application Gateways (Stopped - Cleanup)",
+  load_balancer_never_used: "Load Balancers (Never Used) 💰",
+  load_balancer_no_traffic: "Load Balancers (Zero Traffic - Azure Monitor) 📊💰",
+  application_gateway_no_requests: "Application Gateways (Zero Requests - Azure Monitor) 📊💰",
+  application_gateway_underutilized: "Application Gateways (Underutilized <5% - Downgrade) 📊💰",
 };
 
 // Helper function to get provider from resource type
