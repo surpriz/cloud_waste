@@ -64,6 +64,24 @@ const resourceIcons: Record<ResourceType, any> = {
   storage_account_empty: HardDrive,
   storage_account_never_used: HardDrive,
   storage_account_no_transactions: HardDrive,
+  // Azure Container Apps - Phase 1 (10 scenarios)
+  container_app_stopped: Server,
+  container_app_zero_replicas: Server,
+  container_app_unnecessary_premium_tier: Server,
+  container_app_dev_zone_redundancy: Server,
+  container_app_no_ingress_configured: Server,
+  container_app_empty_environment: Server,
+  container_app_unused_revision: Server,
+  container_app_overprovisioned_cpu_memory: Server,
+  container_app_custom_domain_unused: Server,
+  container_app_secrets_unused: Server,
+  // Azure Container Apps - Phase 2 (6 scenarios with Azure Monitor)
+  container_app_low_cpu_utilization: Server,
+  container_app_low_memory_utilization: Server,
+  container_app_zero_http_requests: Server,
+  container_app_high_replica_low_traffic: Server,
+  container_app_autoscaling_not_triggering: Server,
+  container_app_cold_start_issues: Server,
 };
 
 // Confidence level badge component

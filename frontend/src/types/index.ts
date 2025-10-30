@@ -153,7 +153,25 @@ export type ResourceType =
   // Azure Storage Accounts
   | "storage_account_empty"
   | "storage_account_never_used"
-  | "storage_account_no_transactions";
+  | "storage_account_no_transactions"
+  // Azure Container Apps - Phase 1 (10 scenarios)
+  | "container_app_stopped"
+  | "container_app_zero_replicas"
+  | "container_app_unnecessary_premium_tier"
+  | "container_app_dev_zone_redundancy"
+  | "container_app_no_ingress_configured"
+  | "container_app_empty_environment"
+  | "container_app_unused_revision"
+  | "container_app_overprovisioned_cpu_memory"
+  | "container_app_custom_domain_unused"
+  | "container_app_secrets_unused"
+  // Azure Container Apps - Phase 2 (6 scenarios with Azure Monitor)
+  | "container_app_low_cpu_utilization"
+  | "container_app_low_memory_utilization"
+  | "container_app_zero_http_requests"
+  | "container_app_high_replica_low_traffic"
+  | "container_app_autoscaling_not_triggering"
+  | "container_app_cold_start_issues";
 
 export type ConfidenceLevel = "critical" | "high" | "medium" | "low";
 

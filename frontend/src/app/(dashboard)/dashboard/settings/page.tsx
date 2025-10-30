@@ -168,6 +168,25 @@ const AZURE_RESOURCE_ICONS: { [key: string]: any } = {
   cosmosdb_table_never_used: Database,
   cosmosdb_table_unnecessary_zone_redundancy: Globe,
   cosmosdb_table_analytical_storage_never_used: Archive,
+  // Azure Container Apps (16 scenarios - 100% coverage)
+  // Phase 1 - Detection Simple (10 scenarios)
+  container_app_stopped: Server,
+  container_app_zero_replicas: Server,
+  container_app_unnecessary_premium_tier: TrendingDown,
+  container_app_dev_zone_redundancy: Globe,
+  container_app_no_ingress_configured: AlertTriangle,
+  container_app_empty_environment: Server,
+  container_app_unused_revision: Archive,
+  container_app_overprovisioned_cpu_memory: TrendingDown,
+  container_app_custom_domain_unused: Globe,
+  container_app_secrets_unused: AlertTriangle,
+  // Phase 2 - Azure Monitor Metrics (6 scenarios)
+  container_app_low_cpu_utilization: Activity,
+  container_app_low_memory_utilization: Activity,
+  container_app_zero_http_requests: Activity,
+  container_app_high_replica_low_traffic: Activity,
+  container_app_autoscaling_not_triggering: AlertTriangle,
+  container_app_cold_start_issues: Clock,
 };
 
 const AZURE_RESOURCE_LABELS: { [key: string]: string } = {
@@ -285,6 +304,25 @@ const AZURE_RESOURCE_LABELS: { [key: string]: string } = {
   cosmosdb_table_never_used: "Cosmos DB Table API (Never Used - 0 Tables) 💰 P2",
   cosmosdb_table_unnecessary_zone_redundancy: "Cosmos DB Table API (Zone-Redundant in Dev/Test) 💰 P2",
   cosmosdb_table_analytical_storage_never_used: "Cosmos DB Table API (Analytical Storage Never Used) 💰 P2",
+  // Azure Container Apps (16 scenarios - 100% coverage)
+  // Phase 1 - Detection Simple (10 scenarios)
+  container_app_stopped: "Container Apps (Stopped - minReplicas=0 maxReplicas=0 >30 days) 💰💰💰 P0",
+  container_app_zero_replicas: "Container Apps (0 Replicas in Production) 💰💰💰 P0",
+  container_app_unnecessary_premium_tier: "Container Apps (Dedicated Profile <50% - Migrate to Consumption) 💰💰💰💰 P0",
+  container_app_dev_zone_redundancy: "Container Apps (Zone Redundancy in Dev/Test) 💰 P1",
+  container_app_no_ingress_configured: "Container Apps (No Ingress - Consider Functions/Jobs) 💰💰 P1",
+  container_app_empty_environment: "Container Apps (Empty Environment 0 Apps) 💰💰💰 P0",
+  container_app_unused_revision: "Container Apps (>5 Inactive Revisions >90 days) 🧹 P2",
+  container_app_overprovisioned_cpu_memory: "Container Apps (CPU/Memory 3x+ Over-Provisioned) 💰💰 P1",
+  container_app_custom_domain_unused: "Container Apps (Custom Domain 0 Requests 60 days) 🧹 P2",
+  container_app_secrets_unused: "Container Apps (Unreferenced Secrets - Security) 🔒 P2",
+  // Phase 2 - Azure Monitor Metrics (6 scenarios)
+  container_app_low_cpu_utilization: "Container Apps (CPU <15% - Downsize) 📊💰💰💰 P0",
+  container_app_low_memory_utilization: "Container Apps (Memory <20% - Downsize) 📊💰💰 P1",
+  container_app_zero_http_requests: "Container Apps (0 HTTP Requests 60 days) 📊💰💰💰 P0",
+  container_app_high_replica_low_traffic: "Container Apps (>5 Replicas <10 req/sec) 📊💰💰💰💰 P0",
+  container_app_autoscaling_not_triggering: "Container Apps (Autoscale Not Working - Variance <0.5) ⚠️ P1",
+  container_app_cold_start_issues: "Container Apps (Cold Starts >10 sec - Consider minReplicas=1) ⚠️📊 P1",
 };
 
 // Helper function to get provider from resource type

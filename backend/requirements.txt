@@ -42,6 +42,7 @@ azure-mgmt-rdbms==10.1.0  # Azure PostgreSQL/MySQL management
 azure-mgmt-synapse==2.0.0  # Azure Synapse Analytics management
 azure-mgmt-redis==14.1.0  # Azure Cache for Redis management
 azure-mgmt-web==7.2.0  # Azure App Service / Functions management
+azure-mgmt-appcontainers==4.0.0  # Azure Container Apps management
 
 # Validation
 pydantic==2.6.1

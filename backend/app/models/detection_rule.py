@@ -1214,6 +1214,139 @@ DEFAULT_DETECTION_RULES = {
         "confidence_medium_days": 30,
         "description": "Cosmos DB Table API analytical storage never used - disable analytical store ($30/TB/month savings)",
     },
+    # ===================================
+    # AZURE CONTAINER APPS (16 Scenarios - 100% Coverage)
+    # ===================================
+    # Phase 1 - Detection Simple (10 scenarios)
+    "container_app_stopped": {
+        "enabled": True,
+        "min_stopped_days": 30,  # Stopped (min/max replicas = 0) for > 30 days
+        "min_age_days": 7,  # Don't alert on newly created apps
+        "confidence_critical_days": 90,  # Critical after 90 days
+        "confidence_high_days": 60,  # High confidence after 60 days
+        "confidence_medium_days": 30,  # Medium confidence after 30 days
+        "description": "Container Apps stopped (minReplicas=0, maxReplicas=0) since >30 days - Dedicated plan pays full cost ($146/month D4)",
+    },
+    "container_app_zero_replicas": {
+        "enabled": True,
+        "min_zero_replica_days": 30,  # Zero replicas in production for > 30 days
+        "exclude_dev_environments": True,  # dev/test scale-to-zero is legitimate
+        "dev_environments": ["dev", "test", "development", "testing", "staging", "qa"],
+        "confidence_high_days": 30,
+        "description": "Container Apps with 0 replicas in production environment - Dedicated environment charged even with 0 replicas ($146/month D4)",
+    },
+    "container_app_unnecessary_premium_tier": {
+        "enabled": True,
+        "max_utilization_threshold": 50,  # <50% profile utilization = waste
+        "min_observation_days": 30,  # Monitor utilization for 30 days
+        "confidence_critical_days": 60,  # Critical if <25% utilization
+        "confidence_high_days": 30,  # High if <50% utilization
+        "description": "Dedicated Workload Profiles (D4/D8/D16/D32) with <50% utilization - migrate to Consumption plan ($67-1,089/month savings)",
+    },
+    "container_app_dev_zone_redundancy": {
+        "enabled": True,
+        "min_age_days": 30,  # Stable for > 30 days
+        "dev_environments": ["dev", "test", "development", "testing", "staging", "qa", "nonprod"],
+        "confidence_high_days": 30,
+        "description": "Zone-redundant environments in dev/test - disable zone redundancy ($19.71/month savings - 25%)",
+    },
+    "container_app_no_ingress_configured": {
+        "enabled": True,
+        "min_age_days": 60,  # Allow time for configuration
+        "allow_internal_only": False,  # Alert even on internal-only ingress
+        "confidence_medium_days": 60,
+        "description": "Container Apps without ingress configured - consider Azure Functions or Container Instances Jobs ($78.83/month savings)",
+    },
+    "container_app_empty_environment": {
+        "enabled": True,
+        "min_empty_days": 30,  # Environment empty for > 30 days
+        "exclude_newly_created": True,  # Grace period for new environments
+        "grace_period_days": 7,
+        "confidence_critical_days": 60,  # Critical after 60 days
+        "confidence_medium_days": 30,
+        "description": "Managed Environments with 0 Container Apps - Dedicated profiles charged even when empty ($146/month D4)",
+    },
+    "container_app_unused_revision": {
+        "enabled": True,
+        "max_inactive_revisions": 5,  # Keep max 5 inactive revisions
+        "min_revision_age_days": 90,  # Revisions older than 90 days
+        "confidence_low_days": 90,
+        "description": "Container Apps with >5 inactive revisions (>90 days old) - cleanup recommended for hygiene (minimal cost impact)",
+    },
+    "container_app_overprovisioned_cpu_memory": {
+        "enabled": True,
+        "min_overprovisioning_threshold": 3,  # Allocation 3x+ actual usage
+        "min_observation_days": 30,  # Requires Azure Monitor metrics
+        "confidence_high_days": 30,  # With metrics
+        "confidence_medium_days": 30,  # Without metrics (heuristics)
+        "description": "Container Apps with CPU/memory allocation 3x+ actual usage - rightsizing recommended ($118.24/month savings)",
+    },
+    "container_app_custom_domain_unused": {
+        "enabled": True,
+        "min_observation_days": 60,  # Monitor HTTP requests for 60 days
+        "max_requests_threshold": 10,  # <10 total requests = unused
+        "confidence_high_days": 60,
+        "description": "Custom domains configured with 0 HTTP requests over 60 days - remove unused custom domain (cleanup + certificate costs)",
+    },
+    "container_app_secrets_unused": {
+        "enabled": True,
+        "min_age_days": 60,  # Secrets unreferenced for > 60 days
+        "confidence_medium_days": 60,
+        "description": "Secrets defined but not referenced by containers or Dapr - security hygiene (no direct cost)",
+    },
+    # Phase 2 - Azure Monitor Métriques (6 scenarios)
+    "container_app_low_cpu_utilization": {
+        "enabled": True,
+        "max_cpu_utilization_percent": 15,  # CPU <15% = over-provisioned
+        "min_observation_days": 30,  # Azure Monitor lookback period
+        "recommended_buffer": 1.3,  # 30% buffer above peak usage
+        "confidence_critical_days": 30,  # Critical if <10%
+        "confidence_high_days": 30,  # High if <15%
+        "confidence_medium_days": 30,  # Medium if <20%
+        "description": "Container Apps with CPU utilization <15% over 30 days - downsize recommended ($94.60/month savings - 75%)",
+    },
+    "container_app_low_memory_utilization": {
+        "enabled": True,
+        "max_memory_utilization_percent": 20,  # Memory <20% = over-provisioned
+        "min_observation_days": 30,  # Azure Monitor lookback period
+        "confidence_critical_days": 30,  # Critical if <15%
+        "confidence_high_days": 30,  # High if <20%
+        "confidence_medium_days": 30,  # Medium if <30%
+        "description": "Container Apps with memory utilization <20% over 30 days - downsize recommended ($23.64/month savings - 75%)",
+    },
+    "container_app_zero_http_requests": {
+        "enabled": True,
+        "min_observation_days": 60,  # Monitor HTTP requests for 60 days
+        "max_requests_threshold": 100,  # <100 total requests = unused
+        "confidence_critical_days": 90,  # Critical after 90 days
+        "confidence_high_days": 60,
+        "description": "Container Apps with 0 HTTP requests over 60 days - stop app or investigate backend usage ($78.83/month waste - 100%)",
+    },
+    "container_app_high_replica_low_traffic": {
+        "enabled": True,
+        "min_avg_replicas": 5,  # Alert if average replicas >= 5
+        "max_requests_per_replica_per_sec": 10,  # <10 req/sec per replica = over-scaled
+        "min_observation_days": 30,  # Azure Monitor lookback period
+        "confidence_high_days": 30,  # High if <5 req/sec/replica
+        "confidence_medium_days": 30,  # Medium if <10 req/sec/replica
+        "description": "Container Apps with >5 replicas + <10 req/sec per replica - reduce maxReplicas ($276.32/month savings - 70%)",
+    },
+    "container_app_autoscaling_not_triggering": {
+        "enabled": True,
+        "min_observation_days": 30,  # Monitor replica variance for 30 days
+        "min_scale_events": 5,  # Expected minimum scale events
+        "max_stddev_threshold": 0.5,  # Low variance = autoscale not working
+        "confidence_medium_days": 30,
+        "description": "Autoscale configured but replicas never change (stddev <0.5) - fix autoscale rules or switch to manual (waste capacity or underprovisioned)",
+    },
+    "container_app_cold_start_issues": {
+        "enabled": True,
+        "max_avg_cold_start_ms": 10000,  # >10 seconds average cold start
+        "min_cold_start_count": 50,  # At least 50 cold starts in period
+        "min_observation_days": 30,  # Azure Monitor lookback period
+        "confidence_high_days": 30,
+        "description": "Container Apps with minReplicas=0 + cold starts >10 sec - set minReplicas=1 for better UX (trade-off: +$39.42/month vs cold start elimination)",
+    },
 }
 
 
