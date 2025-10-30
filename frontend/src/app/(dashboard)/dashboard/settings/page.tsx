@@ -267,6 +267,15 @@ const AZURE_RESOURCE_ICONS: { [key: string]: any } = {
   app_service_slow_response_time: Clock,
   app_service_auto_scale_never_triggers: TrendingDown,
   app_service_cold_start_excessive: Clock,
+  // Azure Networking (ExpressRoute, VPN, NICs) - 8 scenarios
+  expressroute_circuit_not_provisioned: Network,
+  expressroute_circuit_no_connection: Network,
+  expressroute_gateway_orphaned: Network,
+  expressroute_circuit_underutilized: TrendingDown,
+  vpn_gateway_disconnected: Network,
+  vpn_gateway_basic_sku_deprecated: AlertTriangle,
+  vpn_gateway_no_connections: Network,
+  network_interface_orphaned: Network,
 };
 
 const AZURE_RESOURCE_LABELS: { [key: string]: string } = {
@@ -487,6 +496,15 @@ const AZURE_RESOURCE_LABELS: { [key: string]: string } = {
   app_service_slow_response_time: "App Service (Response Time >10s avg) ⚠️📊 P1",
   app_service_auto_scale_never_triggers: "App Service (Auto-Scale Never Triggers 0 Events) 💰💰💰 P0",
   app_service_cold_start_excessive: "App Service (Cold Start >30s) ⚠️📊 P1",
+  // Azure Networking (ExpressRoute, VPN, NICs) - 8 scenarios
+  expressroute_circuit_not_provisioned: "ExpressRoute (Circuit Not Provisioned >30 days) 🚨💰💰💰💰💰 P0",
+  expressroute_circuit_no_connection: "ExpressRoute (Circuit No Connection >30 days) 🚨💰💰💰💰💰 P0",
+  expressroute_gateway_orphaned: "ExpressRoute (Gateway Orphaned 0 Circuits >14 days) 💰💰💰💰 P0",
+  expressroute_circuit_underutilized: "ExpressRoute (Circuit <10% Bandwidth 30+ days) 📊💰💰💰💰 P0",
+  vpn_gateway_disconnected: "VPN Gateway (Disconnected All Connections >30 days) 💰💰💰💰 P0",
+  vpn_gateway_basic_sku_deprecated: "VPN Gateway (Basic SKU Deprecated) 🔒⚠️ P0",
+  vpn_gateway_no_connections: "VPN Gateway (0 Connections >14 days) 💰💰💰💰 P0",
+  network_interface_orphaned: "Network Interface (NIC Not Attached >30 days) 💰 P2",
 };
 
 // Helper function to get provider from resource type

@@ -169,6 +169,15 @@ const resourceIcons: Record<ResourceType, any> = {
   app_service_slow_response_time: Clock,
   app_service_auto_scale_never_triggers: TrendingDown,
   app_service_cold_start_excessive: Clock,
+  // Azure Networking (ExpressRoute, VPN, NICs) - 8 scenarios
+  expressroute_circuit_not_provisioned: Network,
+  expressroute_circuit_no_connection: Network,
+  expressroute_gateway_orphaned: Network,
+  expressroute_circuit_underutilized: TrendingDown,
+  vpn_gateway_disconnected: Network,
+  vpn_gateway_basic_sku_deprecated: AlertTriangle,
+  vpn_gateway_no_connections: Network,
+  network_interface_orphaned: Network,
 };
 
 // Confidence level badge component

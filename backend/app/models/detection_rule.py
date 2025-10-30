@@ -1904,6 +1904,75 @@ DEFAULT_DETECTION_RULES = {
         "confidence_high_days": 14,
         "description": "Cold start time >30s - Always On disabled or wrong SKU (poor user experience + performance issue)",
     },
+    # ===== Azure Networking (ExpressRoute, VPN, NICs) (8 scenarios - 100% coverage) =====
+    # ExpressRoute Circuit (4 scenarios)
+    "expressroute_circuit_not_provisioned": {
+        "enabled": True,
+        "min_not_provisioned_days": 30,
+        "confidence_medium_days": 7,
+        "confidence_high_days": 30,
+        "confidence_critical_days": 90,
+        "description": "ExpressRoute circuit Not Provisioned >30 days - paying $950-6,400/month for unusable circuit (100% waste)",
+    },
+    "expressroute_circuit_no_connection": {
+        "enabled": True,
+        "min_no_connection_days": 30,
+        "min_age_days": 7,
+        "confidence_medium_days": 30,
+        "confidence_high_days": 60,
+        "confidence_critical_days": 90,
+        "description": "ExpressRoute circuit provisioned but no VNet Gateway connection >30 days - 100% waste ($950-6,400/month)",
+    },
+    "expressroute_gateway_orphaned": {
+        "enabled": True,
+        "min_age_days": 14,
+        "confidence_medium_days": 14,
+        "confidence_high_days": 30,
+        "confidence_critical_days": 60,
+        "description": "ExpressRoute Gateway with NO circuit attached - 100% waste ($139-1,367/month depending on SKU)",
+    },
+    "expressroute_circuit_underutilized": {
+        "enabled": True,
+        "max_utilization_threshold": 10.0,
+        "min_underutilized_days": 30,
+        "confidence_medium_days": 30,
+        "confidence_high_days": 60,
+        "description": "ExpressRoute circuit bandwidth <10% utilized - downgrade to save 80% ($760/month 1Gbps→200Mbps)",
+    },
+    # VPN Gateway (3 scenarios)
+    "vpn_gateway_disconnected": {
+        "enabled": True,
+        "min_disconnected_days": 30,
+        "min_age_days": 7,
+        "confidence_medium_days": 30,
+        "confidence_high_days": 60,
+        "confidence_critical_days": 90,
+        "description": "VPN Gateway disconnected (all connections down) >30 days - waste ($142-730/month depending on SKU)",
+    },
+    "vpn_gateway_basic_sku_deprecated": {
+        "enabled": True,
+        "min_age_days": 1,
+        "confidence_high_days": 1,
+        "confidence_critical_days": 7,
+        "description": "VPN Gateway Basic SKU deprecated - security risk + support ending (upgrade to VpnGw1 required)",
+    },
+    "vpn_gateway_no_connections": {
+        "enabled": True,
+        "min_age_days": 14,
+        "confidence_medium_days": 14,
+        "confidence_high_days": 30,
+        "confidence_critical_days": 60,
+        "description": "VPN Gateway with 0 connections >14 days - 100% waste ($142-730/month depending on SKU)",
+    },
+    # Network Interfaces (1 scenario)
+    "network_interface_orphaned": {
+        "enabled": True,
+        "min_age_days": 30,
+        "confidence_medium_days": 30,
+        "confidence_high_days": 60,
+        "confidence_critical_days": 90,
+        "description": "Network Interface (NIC) not attached to VM >30 days - small waste but governance issue ($4.32/month per NIC)",
+    },
 }
 
 

@@ -251,7 +251,16 @@ export type ResourceType =
   | "app_service_high_http_error_rate"
   | "app_service_slow_response_time"
   | "app_service_auto_scale_never_triggers"
-  | "app_service_cold_start_excessive";
+  | "app_service_cold_start_excessive"
+  // Azure Networking (ExpressRoute, VPN, NICs) - 8 scenarios
+  | "expressroute_circuit_not_provisioned"
+  | "expressroute_circuit_no_connection"
+  | "expressroute_gateway_orphaned"
+  | "expressroute_circuit_underutilized"
+  | "vpn_gateway_disconnected"
+  | "vpn_gateway_basic_sku_deprecated"
+  | "vpn_gateway_no_connections"
+  | "network_interface_orphaned";
 
 export type ConfidenceLevel = "critical" | "high" | "medium" | "low";
 
