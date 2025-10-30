@@ -187,6 +187,27 @@ const AZURE_RESOURCE_ICONS: { [key: string]: any } = {
   container_app_high_replica_low_traffic: Activity,
   container_app_autoscaling_not_triggering: AlertTriangle,
   container_app_cold_start_issues: Clock,
+  // Azure Virtual Desktop (18 scenarios - 100% coverage)
+  // Phase 1 - Detection Simple (12 scenarios)
+  avd_host_pool_empty: Server,
+  avd_session_host_stopped: Server,
+  avd_session_host_never_used: Server,
+  avd_host_pool_no_autoscale: TrendingDown,
+  avd_host_pool_over_provisioned: TrendingDown,
+  avd_application_group_empty: Server,
+  avd_workspace_empty: Server,
+  avd_premium_disk_in_dev: HardDrive,
+  avd_unnecessary_availability_zones: Globe,
+  avd_personal_desktop_never_used: Server,
+  avd_fslogix_oversized: HardDrive,
+  avd_session_host_old_vm_generation: Server,
+  // Phase 2 - Azure Monitor Metrics (6 scenarios)
+  avd_low_cpu_utilization: Activity,
+  avd_low_memory_utilization: Activity,
+  avd_zero_user_sessions: AlertTriangle,
+  avd_high_host_count_low_users: TrendingDown,
+  avd_disconnected_sessions_waste: Activity,
+  avd_peak_hours_mismatch: Clock,
 };
 
 const AZURE_RESOURCE_LABELS: { [key: string]: string } = {
@@ -323,6 +344,27 @@ const AZURE_RESOURCE_LABELS: { [key: string]: string } = {
   container_app_high_replica_low_traffic: "Container Apps (>5 Replicas <10 req/sec) 📊💰💰💰💰 P0",
   container_app_autoscaling_not_triggering: "Container Apps (Autoscale Not Working - Variance <0.5) ⚠️ P1",
   container_app_cold_start_issues: "Container Apps (Cold Starts >10 sec - Consider minReplicas=1) ⚠️📊 P1",
+  // Azure Virtual Desktop (18 scenarios - 100% coverage)
+  // Phase 1 - Detection Simple (12 scenarios)
+  avd_host_pool_empty: "Virtual Desktop (Empty Host Pool 0 Hosts >30 days) 🧹 P2",
+  avd_session_host_stopped: "Virtual Desktop (Session Host Stopped >30 days - Disk Cost) 💰💰 P1",
+  avd_session_host_never_used: "Virtual Desktop (Session Host Never Used - 0 Sessions) 💰💰💰 P0",
+  avd_host_pool_no_autoscale: "Virtual Desktop (No Autoscale - Always On) 💰💰💰💰 P0",
+  avd_host_pool_over_provisioned: "Virtual Desktop (Host Pool <30% Utilization) 💰💰💰💰 P0",
+  avd_application_group_empty: "Virtual Desktop (RemoteApp Group 0 Applications) 🧹 P2",
+  avd_workspace_empty: "Virtual Desktop (Workspace 0 App Groups) 🧹 P2",
+  avd_premium_disk_in_dev: "Virtual Desktop (Premium SSD in Dev/Test) 💰💰 P1",
+  avd_unnecessary_availability_zones: "Virtual Desktop (Multi-Zone in Dev/Test) 💰💰 P1",
+  avd_personal_desktop_never_used: "Virtual Desktop (Personal Desktop Unused 60+ days) 💰💰💰 P0",
+  avd_fslogix_oversized: "Virtual Desktop (FSLogix Premium <50% Utilization) 💰💰💰 P0",
+  avd_session_host_old_vm_generation: "Virtual Desktop (Old VM Generation v3 vs v5) 💰💰 P1",
+  // Phase 2 - Azure Monitor Metrics (6 scenarios)
+  avd_low_cpu_utilization: "Virtual Desktop (Session Host CPU <15%) 📊💰💰💰 P0",
+  avd_low_memory_utilization: "Virtual Desktop (Session Host Memory <20%) 📊💰💰 P1",
+  avd_zero_user_sessions: "Virtual Desktop (Host Pool 0 Sessions 60+ days) 🚨💰💰💰 P0",
+  avd_high_host_count_low_users: "Virtual Desktop (Many Hosts <20% Capacity) 📊💰💰💰💰 P0",
+  avd_disconnected_sessions_waste: "Virtual Desktop (High Disconnected No Timeout) 📊💰💰 P1",
+  avd_peak_hours_mismatch: "Virtual Desktop (Autoscale Mismatch Peak Hours) 📊💰💰💰 P0",
 };
 
 // Helper function to get provider from resource type

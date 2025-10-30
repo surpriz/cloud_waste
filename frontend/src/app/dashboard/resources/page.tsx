@@ -82,6 +82,26 @@ const resourceIcons: Record<ResourceType, any> = {
   container_app_high_replica_low_traffic: Server,
   container_app_autoscaling_not_triggering: Server,
   container_app_cold_start_issues: Server,
+  // Azure Virtual Desktop - Phase 1 (12 scenarios)
+  avd_host_pool_empty: Server,
+  avd_session_host_stopped: Server,
+  avd_session_host_never_used: Server,
+  avd_host_pool_no_autoscale: Server,
+  avd_host_pool_over_provisioned: Server,
+  avd_application_group_empty: Server,
+  avd_workspace_empty: Server,
+  avd_premium_disk_in_dev: HardDrive,
+  avd_unnecessary_availability_zones: Network,
+  avd_personal_desktop_never_used: Server,
+  avd_fslogix_oversized: HardDrive,
+  avd_session_host_old_vm_generation: Server,
+  // Azure Virtual Desktop - Phase 2 (6 scenarios with Azure Monitor)
+  avd_low_cpu_utilization: Server,
+  avd_low_memory_utilization: Server,
+  avd_zero_user_sessions: Server,
+  avd_high_host_count_low_users: Server,
+  avd_disconnected_sessions_waste: Server,
+  avd_peak_hours_mismatch: Server,
 };
 
 // Confidence level badge component

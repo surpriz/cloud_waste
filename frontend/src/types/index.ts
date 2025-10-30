@@ -171,7 +171,27 @@ export type ResourceType =
   | "container_app_zero_http_requests"
   | "container_app_high_replica_low_traffic"
   | "container_app_autoscaling_not_triggering"
-  | "container_app_cold_start_issues";
+  | "container_app_cold_start_issues"
+  // Azure Virtual Desktop - Phase 1 (12 scenarios)
+  | "avd_host_pool_empty"
+  | "avd_session_host_stopped"
+  | "avd_session_host_never_used"
+  | "avd_host_pool_no_autoscale"
+  | "avd_host_pool_over_provisioned"
+  | "avd_application_group_empty"
+  | "avd_workspace_empty"
+  | "avd_premium_disk_in_dev"
+  | "avd_unnecessary_availability_zones"
+  | "avd_personal_desktop_never_used"
+  | "avd_fslogix_oversized"
+  | "avd_session_host_old_vm_generation"
+  // Azure Virtual Desktop - Phase 2 (6 scenarios with Azure Monitor)
+  | "avd_low_cpu_utilization"
+  | "avd_low_memory_utilization"
+  | "avd_zero_user_sessions"
+  | "avd_high_host_count_low_users"
+  | "avd_disconnected_sessions_waste"
+  | "avd_peak_hours_mismatch";
 
 export type ConfidenceLevel = "critical" | "high" | "medium" | "low";
 

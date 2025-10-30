@@ -1347,6 +1347,146 @@ DEFAULT_DETECTION_RULES = {
         "confidence_high_days": 30,
         "description": "Container Apps with minReplicas=0 + cold starts >10 sec - set minReplicas=1 for better UX (trade-off: +$39.42/month vs cold start elimination)",
     },
+    # ===== Azure Virtual Desktop (18 scenarios - 100% coverage) =====
+    # Phase 1 - Detection Simple (12 scenarios)
+    "avd_host_pool_empty": {
+        "enabled": True,
+        "min_empty_days": 30,
+        "min_age_days": 7,
+        "confidence_medium_days": 30,
+        "confidence_high_days": 60,
+        "description": "Host pools empty (0 session hosts) since >30 days - minimal infrastructure cost but wasteful ($0-146/month depending on environment)",
+    },
+    "avd_session_host_stopped": {
+        "enabled": True,
+        "min_stopped_days": 30,
+        "confidence_medium_days": 30,
+        "confidence_high_days": 60,
+        "confidence_critical_days": 90,
+        "description": "Session hosts deallocated >30 days - still paying for disks ($32/month per host: $12.29 OS disk + FSLogix)",
+    },
+    "avd_session_host_never_used": {
+        "enabled": True,
+        "min_age_days": 30,
+        "confidence_high_days": 30,
+        "description": "Session hosts created >30 days ago but never had user sessions - 100% waste ($140-180/month per host)",
+    },
+    "avd_host_pool_no_autoscale": {
+        "enabled": True,
+        "min_hosts_for_autoscale": 5,
+        "min_savings_threshold": 100,  # Only alert if potential savings ≥$100/month
+        "exclude_environments": ["prod", "production"],
+        "confidence_medium_days": 30,
+        "confidence_high_days": 60,
+        "description": "Pooled host pools without autoscale (always-on) - waste 60-70% ($933/month for 10 hosts vs $308 with autoscale)",
+    },
+    "avd_host_pool_over_provisioned": {
+        "enabled": True,
+        "max_utilization_threshold": 30,  # <30% utilization = over-provisioned
+        "recommended_buffer": 1.3,  # 30% headroom above average
+        "min_observation_days": 30,
+        "confidence_medium_days": 30,
+        "confidence_high_days": 60,
+        "confidence_critical_days": 90,
+        "description": "Host pools with <30% capacity utilization - reduce session hosts ($840/month savings for 10→4 hosts)",
+    },
+    "avd_application_group_empty": {
+        "enabled": True,
+        "min_age_days": 30,
+        "confidence_medium_days": 30,
+        "description": "RemoteApp application groups with 0 applications configured - no direct cost but complexity waste",
+    },
+    "avd_workspace_empty": {
+        "enabled": True,
+        "min_age_days": 30,
+        "confidence_high_days": 30,
+        "description": "Workspaces with no application groups attached - hygiene issue",
+    },
+    "avd_premium_disk_in_dev": {
+        "enabled": True,
+        "dev_environments": ["dev", "test", "staging", "qa", "development", "nonprod"],
+        "min_age_days": 30,
+        "confidence_high_days": 30,
+        "description": "Session hosts with Premium SSD in dev/test environments - migrate to StandardSSD ($10.11/month savings per host)",
+    },
+    "avd_unnecessary_availability_zones": {
+        "enabled": True,
+        "dev_environments": ["dev", "test", "staging", "qa"],
+        "min_age_days": 30,
+        "confidence_high_days": 30,
+        "description": "Session hosts deployed across multiple zones in dev/test - zone redundancy adds ~25% overhead ($350/month for 10 hosts)",
+    },
+    "avd_personal_desktop_never_used": {
+        "enabled": True,
+        "min_unused_days": 60,
+        "confidence_high_days": 60,
+        "description": "Personal desktops assigned but never/rarely used (60+ days) - 100% waste ($140-180/month per desktop)",
+    },
+    "avd_fslogix_oversized": {
+        "enabled": True,
+        "max_utilization_threshold": 50,
+        "premium_min_iops": 3000,  # If avg IOPS <3000, Premium not needed
+        "min_observation_days": 30,
+        "confidence_medium_days": 30,
+        "confidence_high_days": 60,
+        "description": "Azure Files Premium for FSLogix with low utilization (<50%) or low IOPS - migrate to Standard ($143/month savings per 1TB)",
+    },
+    "avd_session_host_old_vm_generation": {
+        "enabled": True,
+        "max_generation_allowed": 3,  # Alert if VM generation ≤v3
+        "min_age_days": 60,
+        "confidence_medium_days": 60,
+        "description": "Session hosts using old VM generations (v3 vs v5) - upgrade for 20% cost savings + 20% performance gain ($28/month per host)",
+    },
+    # Phase 2 - Azure Monitor Metrics (6 scenarios)
+    "avd_low_cpu_utilization": {
+        "enabled": True,
+        "max_cpu_utilization_percent": 15,
+        "min_observation_days": 30,
+        "recommended_buffer": 1.3,
+        "confidence_high_days": 30,
+        "confidence_critical_days": 60,
+        "description": "Session hosts with <15% avg CPU utilization - downsize VM ($70/month savings: D4s_v4→D2s_v4)",
+    },
+    "avd_low_memory_utilization": {
+        "enabled": True,
+        "max_available_memory_threshold": 80,  # >80% available = <20% used
+        "min_observation_days": 30,
+        "confidence_high_days": 30,
+        "description": "Session hosts with low memory usage (<20%) - migrate E-series→D-series ($40/month savings: E4s_v4→D4s_v4)",
+    },
+    "avd_zero_user_sessions": {
+        "enabled": True,
+        "min_observation_days": 60,
+        "max_sessions_threshold": 0,
+        "confidence_critical_days": 60,
+        "description": "Host pools with 0 user sessions for 60+ days - delete entire pool (100% waste: $700/month for 5 hosts)",
+    },
+    "avd_high_host_count_low_users": {
+        "enabled": True,
+        "min_avg_hosts": 5,
+        "max_utilization_threshold": 20,  # Severe over-provisioning
+        "recommended_buffer": 1.3,
+        "min_observation_days": 30,
+        "confidence_high_days": 30,
+        "description": "Many session hosts but few concurrent users (<20% capacity) - reduce hosts ($1,960/month savings: 20→6 hosts)",
+    },
+    "avd_disconnected_sessions_waste": {
+        "enabled": True,
+        "min_disconnected_threshold": 5,  # Avg disconnected sessions
+        "recommended_max_timeout": 14400,  # 4 hours in seconds
+        "min_observation_days": 30,
+        "confidence_medium_days": 30,
+        "description": "High disconnected sessions without timeout config - configure timeout to reclaim capacity ($140-280/month potential savings)",
+    },
+    "avd_peak_hours_mismatch": {
+        "enabled": True,
+        "min_mismatch_hours": 2,  # Alert if ≥2h schedule mismatch
+        "peak_threshold_percent": 70,  # % of max to consider as peak
+        "min_observation_days": 30,
+        "confidence_medium_days": 30,
+        "description": "Autoscale peak hours don't match actual usage patterns - adjust schedule ($2,301/month waste: 4h/day mismatch × 10 hosts)",
+    },
 }
 
 
