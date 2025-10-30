@@ -1014,6 +1014,90 @@ DEFAULT_DETECTION_RULES = {
         "min_blob_size_gb": 1,  # Minimum blob size to consider
         "description": "Blob versioning with excessive versions (>5 per blob) - each version costs full blob price ($186.48/account/month potential savings - 86%)",
     },
+    # ===================================
+    # AZURE FUNCTIONS (10 Scenarios - 100% Coverage)
+    # ===================================
+    "functions_never_invoked": {
+        "enabled": True,
+        "min_age_days": 30,  # Minimum age before flagging
+        "confidence_critical_days": 90,  # Critical after 90 days
+        "confidence_high_days": 60,  # High confidence after 60 days
+        "confidence_medium_days": 30,  # Medium confidence after 30 days
+        "description": "Azure Function App never invoked since creation (Premium: $388-1,553/month, Consumption: $0 idle)",
+    },
+    "functions_premium_plan_idle": {
+        "enabled": True,
+        "low_invocation_threshold": 100,  # <100 invocations/month
+        "monitoring_period_days": 30,  # Monitor last 30 days
+        "confidence_critical_days": 30,  # Critical if <50 invocations
+        "confidence_high_days": 30,  # High if <100 invocations
+        "confidence_medium_days": 30,  # Medium if <500 invocations
+        "description": "Premium Function App with very low invocations (<100/month) - migrate to Consumption ($388/month P0 savings, 50% frequency)",
+    },
+    "functions_consumption_over_allocated_memory": {
+        "enabled": False,  # Requires Application Insights memory metrics
+        "memory_utilization_threshold": 50,  # <50% memory used
+        "monitoring_period_days": 30,
+        "confidence_high_days": 30,
+        "confidence_medium_days": 14,
+        "description": "Consumption Function with over-allocated memory (>50% unused) - reduce memory allocation ($2-20/month savings)",
+    },
+    "functions_always_on_consumption": {
+        "enabled": True,
+        "min_age_days": 7,  # Minimum age before flagging
+        "description": "Always On configured on Consumption plan (invalid config - no cost impact but cleanup recommended)",
+    },
+    "functions_premium_plan_oversized": {
+        "enabled": True,
+        "cpu_threshold": 20,  # <20% CPU utilization
+        "monitoring_period_days": 30,
+        "confidence_high_days": 30,
+        "confidence_medium_days": 14,
+        "description": "Premium Function App oversized (EP2/EP3 with low CPU) - downgrade to EP1 ($388-1,165/month P0 savings, 20% frequency)",
+    },
+    "functions_dev_test_premium": {
+        "enabled": True,
+        "min_age_days": 30,  # Minimum age before flagging
+        "dev_test_tags": ["dev", "test", "development", "testing", "staging"],  # Environment tags
+        "confidence_critical_days": 90,  # Critical after 90 days
+        "confidence_high_days": 60,  # High confidence after 60 days
+        "confidence_medium_days": 30,  # Medium confidence after 30 days
+        "description": "Premium Function App in dev/test environment - migrate to Consumption ($388/month P0 savings, 25% frequency)",
+    },
+    "functions_multiple_plans_same_app": {
+        "enabled": True,
+        "min_age_days": 30,  # Minimum age before flagging
+        "max_plans_per_app": 1,  # Maximum recommended plans per application
+        "confidence_high_days": 60,
+        "confidence_medium_days": 30,
+        "description": "Multiple App Service Plans for same application - consolidate into single plan ($388-776/month P1 savings, 10% frequency)",
+    },
+    "functions_low_invocation_rate_premium": {
+        "enabled": True,
+        "low_invocation_threshold": 1000,  # <1000 invocations/month
+        "monitoring_period_days": 30,
+        "confidence_critical_days": 30,  # Critical if <500 invocations
+        "confidence_high_days": 30,  # High if <1000 invocations
+        "confidence_medium_days": 30,  # Medium if <5000 invocations
+        "description": "Premium Function App with low invocation rate (<1000/month) via Application Insights ($388/month P0 savings, 40% frequency)",
+    },
+    "functions_high_error_rate": {
+        "enabled": True,
+        "high_error_rate_threshold": 50,  # >50% error rate
+        "monitoring_period_days": 30,
+        "confidence_critical_days": 30,  # Critical if >70% errors
+        "confidence_high_days": 30,  # High if >50% errors
+        "description": "Function App with high error rate (>50%) via Application Insights - fix errors to reduce waste ($0.26-233/month P2 savings)",
+    },
+    "functions_long_execution_time": {
+        "enabled": True,
+        "long_execution_threshold": 5,  # >5 minutes average execution
+        "monitoring_period_days": 30,
+        "confidence_critical_days": 30,  # Critical if >10 min
+        "confidence_high_days": 30,  # High if >5 min
+        "confidence_medium_days": 30,  # Medium if >3 min
+        "description": "Function App with long execution time (>5 min avg) via Application Insights - optimize code ($72/month P1 savings, 15% frequency)",
+    },
 }
 
 

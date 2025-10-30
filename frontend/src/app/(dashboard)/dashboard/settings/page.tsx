@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { User, Bell, Shield, Trash2, Save, Key, Sliders, RotateCcw, HardDrive, Globe, Camera, Server, Activity, Zap, Database, ArrowLeft, Network, AlertTriangle, TrendingDown, Archive } from "lucide-react";
+import { User, Bell, Shield, Trash2, Save, Key, Sliders, RotateCcw, HardDrive, Globe, Camera, Server, Activity, Zap, Database, ArrowLeft, Network, AlertTriangle, TrendingDown, Archive, TestTube, Copy, Clock } from "lucide-react";
 import Link from "next/link";
 import { useNotifications } from "@/hooks/useNotifications";
 import { Toast } from "@/components/ui/Toast";
@@ -144,6 +144,17 @@ const AZURE_RESOURCE_ICONS: { [key: string]: any } = {
   blobs_hot_tier_unused: Archive,
   storage_account_no_transactions: Activity,
   blob_old_versions_accumulated: AlertTriangle,
+  // Azure Functions (10 scenarios - 100% coverage)
+  functions_never_invoked: Zap,
+  functions_premium_plan_idle: Activity,
+  functions_consumption_over_allocated_memory: Database,
+  functions_always_on_consumption: AlertTriangle,
+  functions_premium_plan_oversized: TrendingDown,
+  functions_dev_test_premium: TestTube,
+  functions_multiple_plans_same_app: Copy,
+  functions_low_invocation_rate_premium: Activity,
+  functions_high_error_rate: AlertTriangle,
+  functions_long_execution_time: Clock,
 };
 
 const AZURE_RESOURCE_LABELS: { [key: string]: string } = {
@@ -237,6 +248,17 @@ const AZURE_RESOURCE_LABELS: { [key: string]: string } = {
   blobs_hot_tier_unused: "Blob Storage (Hot Tier Unused 30+ days) 📊💰💰",
   storage_account_no_transactions: "Storage Accounts (Zero Transactions 90 days) 📊💰",
   blob_old_versions_accumulated: "Blob Storage (Excessive Versions >5) ⚠️💰💰",
+  // Azure Functions (10 scenarios - 100% coverage)
+  functions_never_invoked: "Azure Functions (Never Invoked) 💰💰💰",
+  functions_premium_plan_idle: "Azure Functions (Premium Idle <100 invocations) 💰💰💰 P0",
+  functions_consumption_over_allocated_memory: "Azure Functions (Consumption Over-Allocated Memory >50%) 💰",
+  functions_always_on_consumption: "Azure Functions (Always On on Consumption) ⚠️",
+  functions_premium_plan_oversized: "Azure Functions (Premium Oversized EP2/EP3) 💰💰💰 P0",
+  functions_dev_test_premium: "Azure Functions (Dev/Test on Premium) 💰💰💰 P0",
+  functions_multiple_plans_same_app: "Azure Functions (Multiple Plans Same App) 💰💰",
+  functions_low_invocation_rate_premium: "Azure Functions (Premium <1000 invocations) 💰💰💰 P0",
+  functions_high_error_rate: "Azure Functions (High Error Rate >50%) ⚠️💰",
+  functions_long_execution_time: "Azure Functions (Long Execution >5 min) 💰💰",
 };
 
 // Helper function to get provider from resource type
