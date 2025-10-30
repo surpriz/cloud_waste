@@ -119,6 +119,22 @@ const AZURE_RESOURCE_ICONS: { [key: string]: any } = {
   load_balancer_no_traffic: Activity,
   application_gateway_no_requests: Activity,
   application_gateway_underutilized: TrendingDown,
+  // Azure Databases (15 scenarios)
+  sql_database_stopped: Database,
+  sql_database_idle_connections: Database,
+  sql_database_over_provisioned_dtu: TrendingDown,
+  sql_database_serverless_not_pausing: Activity,
+  cosmosdb_over_provisioned_ru: TrendingDown,
+  cosmosdb_idle_containers: Database,
+  cosmosdb_hot_partitions_idle_others: AlertTriangle,
+  postgres_mysql_stopped: Database,
+  postgres_mysql_idle_connections: Database,
+  postgres_mysql_over_provisioned_vcores: TrendingDown,
+  postgres_mysql_burstable_always_bursting: AlertTriangle,
+  synapse_sql_pool_paused: Database,
+  synapse_sql_pool_idle_queries: Database,
+  redis_idle_cache: Server,
+  redis_over_sized_tier: TrendingDown,
 };
 
 const AZURE_RESOURCE_LABELS: { [key: string]: string } = {
@@ -187,6 +203,22 @@ const AZURE_RESOURCE_LABELS: { [key: string]: string } = {
   load_balancer_no_traffic: "Load Balancers (Zero Traffic - Azure Monitor) 📊💰",
   application_gateway_no_requests: "Application Gateways (Zero Requests - Azure Monitor) 📊💰",
   application_gateway_underutilized: "Application Gateways (Underutilized <5% - Downgrade) 📊💰",
+  // Azure Databases (15 scenarios)
+  sql_database_stopped: "SQL Databases (Paused >30 days) 💰",
+  sql_database_idle_connections: "SQL Databases (0 Connections - Azure Monitor) 📊💰",
+  sql_database_over_provisioned_dtu: "SQL Databases (DTU <30% - Downgrade) 📊💰",
+  sql_database_serverless_not_pausing: "SQL Databases (Serverless Never Auto-Pauses) 📊💰",
+  cosmosdb_over_provisioned_ru: "Cosmos DB (RU <30% - Downscale) 📊💰",
+  cosmosdb_idle_containers: "Cosmos DB (Containers 0 Requests) 📊💰",
+  cosmosdb_hot_partitions_idle_others: "Cosmos DB (Hot Partitions - Poor Key Design) 📊💰",
+  postgres_mysql_stopped: "PostgreSQL/MySQL (Stopped >7 days) 💰",
+  postgres_mysql_idle_connections: "PostgreSQL/MySQL (0 Connections) 📊💰",
+  postgres_mysql_over_provisioned_vcores: "PostgreSQL/MySQL (vCores <20% - Downgrade) 📊💰",
+  postgres_mysql_burstable_always_bursting: "PostgreSQL/MySQL (Burstable Always Bursting) ⚠️📊",
+  synapse_sql_pool_paused: "Synapse SQL Pools (Paused >30 days) 💰",
+  synapse_sql_pool_idle_queries: "Synapse SQL Pools (0 Queries) 🚨📊💰",
+  redis_idle_cache: "Redis Cache (0 Connections) 📊💰",
+  redis_over_sized_tier: "Redis Cache (Memory <30% - Downgrade) 📊💰",
 };
 
 // Helper function to get provider from resource type

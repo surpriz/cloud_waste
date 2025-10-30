@@ -805,6 +805,154 @@ DEFAULT_DETECTION_RULES = {
         "monitoring_period_days": 30,  # Azure Monitor lookback period
         "description": "Azure Kubernetes Service (AKS) clusters: stopped, zero nodes, no user pods, no autoscaler, oversized VMs, orphaned PVs, unused LBs, low CPU/memory, or dev/test always on",
     },
+    # ===================================
+    # AZURE DATABASES (15 Scenarios)
+    # ===================================
+    # Azure SQL Database - 4 Scenarios
+    "sql_database_stopped": {
+        "enabled": True,
+        "min_age_days": 30,  # Paused for > 30 days
+        "confidence_threshold_days": 60,
+        "confidence_critical_days": 90,  # Critical after 90 days
+        "confidence_high_days": 60,  # High confidence after 60 days
+        "confidence_medium_days": 30,  # Medium confidence after 30 days
+        "exclude_system_databases": True,  # Exclude master, tempdb, model, msdb
+        "description": "Azure SQL Databases paused for extended periods ($147-15,699/month waste)",
+    },
+    "sql_database_idle_connections": {
+        "enabled": True,
+        "min_age_days": 30,  # Zero connections for > 30 days
+        "monitoring_days": 30,  # Azure Monitor lookback period
+        "max_connections_threshold": 0,  # 0 connections = idle
+        "confidence_critical_days": 90,
+        "confidence_high_days": 60,
+        "confidence_medium_days": 30,
+        "description": "Azure SQL Databases online but with zero connections over 30 days (Azure Monitor metrics) ($147-15,699/month waste)",
+    },
+    "sql_database_over_provisioned_dtu": {
+        "enabled": True,
+        "min_age_days": 14,  # Stable for > 14 days
+        "monitoring_days": 30,  # Azure Monitor lookback period
+        "max_dtu_utilization_percent": 30.0,  # < 30% DTU utilization = over-provisioned
+        "confidence_high_days": 30,
+        "confidence_medium_days": 14,
+        "description": "Azure SQL Databases with DTU utilization <30% over 30 days - downgrade recommended ($118-456/month savings)",
+    },
+    "sql_database_serverless_not_pausing": {
+        "enabled": True,
+        "min_age_days": 14,  # Stable for > 14 days
+        "monitoring_days": 30,  # Azure Monitor lookback period
+        "min_pause_events": 0,  # 0 auto-pause events = never pausing
+        "confidence_high_days": 30,
+        "confidence_medium_days": 14,
+        "description": "Azure SQL Serverless databases that never auto-pause - constant billing without idle periods ($286/month waste)",
+    },
+    # Azure Cosmos DB - 3 Scenarios
+    "cosmosdb_over_provisioned_ru": {
+        "enabled": True,
+        "min_age_days": 14,  # Stable for > 14 days
+        "monitoring_days": 30,  # Azure Monitor lookback period
+        "max_ru_utilization_percent": 30.0,  # < 30% RU utilization = over-provisioned
+        "confidence_high_days": 30,
+        "confidence_medium_days": 14,
+        "description": "Azure Cosmos DB with Request Units (RU) utilization <30% over 30 days - downscale recommended ($409/month savings)",
+    },
+    "cosmosdb_idle_containers": {
+        "enabled": True,
+        "min_age_days": 30,  # Zero requests for > 30 days
+        "monitoring_days": 30,  # Azure Monitor lookback period
+        "max_requests_threshold": 0,  # 0 requests = idle
+        "confidence_critical_days": 90,
+        "confidence_high_days": 60,
+        "confidence_medium_days": 30,
+        "description": "Azure Cosmos DB containers with zero requests over 30 days (Azure Monitor metrics) ($36/month per container)",
+    },
+    "cosmosdb_hot_partitions_idle_others": {
+        "enabled": True,
+        "min_age_days": 14,  # Stable for > 14 days
+        "monitoring_days": 30,  # Azure Monitor lookback period
+        "hot_partition_threshold_percent": 80.0,  # > 80% RU on single partition = hot
+        "idle_partitions_threshold": 2,  # ≥ 2 idle partitions = inefficient partition key
+        "confidence_high_days": 30,
+        "confidence_medium_days": 14,
+        "description": "Azure Cosmos DB with hot partitions (poor partition key design) - most RU unused ($409/month savings)",
+    },
+    # Azure PostgreSQL/MySQL - 4 Scenarios
+    "postgres_mysql_stopped": {
+        "enabled": True,
+        "min_stopped_days": 7,  # Stopped for > 7 days
+        "confidence_critical_days": 30,
+        "confidence_high_days": 14,
+        "confidence_medium_days": 7,
+        "description": "Azure Database for PostgreSQL/MySQL stopped for extended periods ($15-22/month waste)",
+    },
+    "postgres_mysql_idle_connections": {
+        "enabled": True,
+        "min_age_days": 14,  # Zero connections for > 14 days
+        "monitoring_days": 30,  # Azure Monitor lookback period
+        "max_connections_threshold": 0,  # 0 connections = idle
+        "confidence_critical_days": 90,
+        "confidence_high_days": 60,
+        "confidence_medium_days": 30,
+        "description": "Azure PostgreSQL/MySQL with zero connections over 30 days (Azure Monitor metrics) ($150-600/month waste)",
+    },
+    "postgres_mysql_over_provisioned_vcores": {
+        "enabled": True,
+        "min_age_days": 14,  # Stable for > 14 days
+        "monitoring_days": 30,  # Azure Monitor lookback period
+        "max_cpu_utilization_percent": 20.0,  # < 20% CPU = over-provisioned
+        "confidence_high_days": 30,
+        "confidence_medium_days": 14,
+        "description": "Azure PostgreSQL/MySQL with vCore utilization <20% over 30 days - downgrade recommended ($300/month savings)",
+    },
+    "postgres_mysql_burstable_always_bursting": {
+        "enabled": True,
+        "min_age_days": 7,  # Stable for > 7 days
+        "monitoring_days": 14,  # Azure Monitor lookback period
+        "burst_usage_threshold_percent": 90.0,  # > 90% time bursting = undersized
+        "confidence_high_days": 14,
+        "confidence_medium_days": 7,
+        "description": "Azure PostgreSQL/MySQL Burstable tier constantly bursting (>90% time) - performance issue + potential throttling",
+    },
+    # Azure Synapse Analytics - 2 Scenarios
+    "synapse_sql_pool_paused": {
+        "enabled": True,
+        "min_paused_days": 30,  # Paused for > 30 days
+        "confidence_critical_days": 90,
+        "confidence_high_days": 60,
+        "confidence_medium_days": 30,
+        "description": "Azure Synapse SQL pools paused for extended periods - cleanup recommended ($246-983/month waste)",
+    },
+    "synapse_sql_pool_idle_queries": {
+        "enabled": True,
+        "min_age_days": 30,  # Zero queries for > 30 days
+        "monitoring_days": 30,  # Azure Monitor lookback period
+        "max_queries_threshold": 0,  # 0 queries = idle
+        "confidence_critical_days": 90,  # CRITICAL - very expensive idle resource
+        "confidence_high_days": 60,
+        "confidence_medium_days": 30,
+        "description": "Azure Synapse SQL pools with zero queries over 30 days - CRITICAL waste ($4,503-9,006/month)",
+    },
+    # Azure Cache for Redis - 2 Scenarios
+    "redis_idle_cache": {
+        "enabled": True,
+        "min_age_days": 14,  # Zero connections for > 14 days
+        "monitoring_days": 30,  # Azure Monitor lookback period
+        "max_connections_threshold": 0,  # 0 connections = idle
+        "confidence_critical_days": 90,
+        "confidence_high_days": 60,
+        "confidence_medium_days": 30,
+        "description": "Azure Cache for Redis with zero connections over 30 days (Azure Monitor metrics) ($104-1,664/month waste)",
+    },
+    "redis_over_sized_tier": {
+        "enabled": True,
+        "min_age_days": 14,  # Stable for > 14 days
+        "monitoring_days": 30,  # Azure Monitor lookback period
+        "max_memory_utilization_percent": 30.0,  # < 30% memory used = over-sized
+        "confidence_high_days": 30,
+        "confidence_medium_days": 14,
+        "description": "Azure Cache for Redis with memory utilization <30% over 30 days - downgrade tier recommended ($312-3,976/month savings)",
+    },
 }
 
 
