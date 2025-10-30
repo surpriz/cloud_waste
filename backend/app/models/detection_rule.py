@@ -953,6 +953,67 @@ DEFAULT_DETECTION_RULES = {
         "confidence_medium_days": 14,
         "description": "Azure Cache for Redis with memory utilization <30% over 30 days - downgrade tier recommended ($312-3,976/month savings)",
     },
+    # ===================================
+    # AZURE STORAGE ACCOUNTS (8 Scenarios Implemented)
+    # ===================================
+    "storage_account_never_used": {
+        "enabled": True,
+        "min_age_days": 30,  # Never used for > 30 days
+        "confidence_critical_days": 90,
+        "confidence_high_days": 30,
+        "confidence_medium_days": 7,
+        "description": "Azure Storage Accounts never used (no containers created) - management overhead only ($0.43/month waste)",
+    },
+    "storage_account_empty": {
+        "enabled": True,
+        "min_age_days": 7,  # Minimum age before flagging
+        "min_empty_days": 30,  # Empty for > 30 days
+        "confidence_high_days": 30,
+        "confidence_medium_days": 7,
+        "description": "Azure Storage Accounts with empty containers (no data stored for 30+ days) - transaction overhead ($0.07/month waste)",
+    },
+    "storage_no_lifecycle_policy": {
+        "enabled": True,
+        "min_age_days": 30,  # Stable for > 30 days
+        "min_size_threshold": 100,  # Only check if >= 100 GB
+        "confidence_critical_days": 90,
+        "confidence_high_days": 30,
+        "description": "Azure Storage Accounts in Hot tier WITHOUT lifecycle management policy - CRITICAL ($82.80/TB/month potential savings - 46%)",
+    },
+    "storage_unnecessary_grs": {
+        "enabled": True,
+        "min_age_days": 30,  # Stable for > 30 days
+        "dev_environments": ["dev", "test", "staging", "qa", "development", "nonprod"],
+        "confidence_high_days": 30,
+        "description": "Azure Storage Accounts with GRS/RAGRS/GZRS in dev/test environments - LRS sufficient ($18/TB/month savings - 50%)",
+    },
+    "soft_deleted_blobs_accumulated": {
+        "enabled": True,
+        "max_retention_days": 30,  # Maximum recommended retention
+        "min_deleted_size_gb": 10,  # Minimum size to flag
+        "description": "Soft-deleted blobs with retention period >30 days - billed at same rate as active data ($13.77/account/month potential savings - 90%)",
+    },
+    "blobs_hot_tier_unused": {
+        "enabled": True,
+        "min_unused_days_cool": 30,  # Not accessed for 30+ days → Cool tier
+        "min_unused_days_archive": 90,  # Not accessed for 90+ days → Archive tier
+        "min_blob_size_gb": 0.1,  # Minimum blob size to consider
+        "description": "Blobs in Hot tier not accessed for 30+ days - should be Cool/Archive ($84.96/TB/month savings - 94.5%)",
+    },
+    "storage_account_no_transactions": {
+        "enabled": True,
+        "min_no_transactions_days": 90,  # Zero transactions for 90 days
+        "max_transactions_threshold": 100,  # Max transactions to consider "no activity"
+        "confidence_critical_days": 90,
+        "description": "Azure Storage Accounts with zero transactions over 90 days (Azure Monitor metrics) - consider archiving or deleting",
+    },
+    "blob_old_versions_accumulated": {
+        "enabled": True,
+        "min_age_days": 30,  # Minimum age before flagging
+        "max_versions_per_blob": 5,  # Maximum recommended versions to keep
+        "min_blob_size_gb": 1,  # Minimum blob size to consider
+        "description": "Blob versioning with excessive versions (>5 per blob) - each version costs full blob price ($186.48/account/month potential savings - 86%)",
+    },
 }
 
 

@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { User, Bell, Shield, Trash2, Save, Key, Sliders, RotateCcw, HardDrive, Globe, Camera, Server, Activity, Zap, Database, ArrowLeft, Network, AlertTriangle, TrendingDown } from "lucide-react";
+import { User, Bell, Shield, Trash2, Save, Key, Sliders, RotateCcw, HardDrive, Globe, Camera, Server, Activity, Zap, Database, ArrowLeft, Network, AlertTriangle, TrendingDown, Archive } from "lucide-react";
 import Link from "next/link";
 import { useNotifications } from "@/hooks/useNotifications";
 import { Toast } from "@/components/ui/Toast";
@@ -135,6 +135,15 @@ const AZURE_RESOURCE_ICONS: { [key: string]: any } = {
   synapse_sql_pool_idle_queries: Database,
   redis_idle_cache: Server,
   redis_over_sized_tier: TrendingDown,
+  // Azure Storage Accounts (8 scenarios)
+  storage_account_never_used: HardDrive,
+  storage_account_empty: HardDrive,
+  storage_no_lifecycle_policy: AlertTriangle,
+  storage_unnecessary_grs: TrendingDown,
+  soft_deleted_blobs_accumulated: AlertTriangle,
+  blobs_hot_tier_unused: Archive,
+  storage_account_no_transactions: Activity,
+  blob_old_versions_accumulated: AlertTriangle,
 };
 
 const AZURE_RESOURCE_LABELS: { [key: string]: string } = {
@@ -219,6 +228,15 @@ const AZURE_RESOURCE_LABELS: { [key: string]: string } = {
   synapse_sql_pool_idle_queries: "Synapse SQL Pools (0 Queries) 🚨📊💰",
   redis_idle_cache: "Redis Cache (0 Connections) 📊💰",
   redis_over_sized_tier: "Redis Cache (Memory <30% - Downgrade) 📊💰",
+  // Azure Storage Accounts (8 scenarios)
+  storage_account_never_used: "Storage Accounts (Never Used - No Containers)",
+  storage_account_empty: "Storage Accounts (Empty Containers - No Data)",
+  storage_no_lifecycle_policy: "Storage Accounts (No Lifecycle Policy - CRITICAL) 🚨💰",
+  storage_unnecessary_grs: "Storage Accounts (GRS in Dev/Test - Use LRS) 💰",
+  soft_deleted_blobs_accumulated: "Blob Storage (Soft Delete Retention >30 days) ⚠️💰",
+  blobs_hot_tier_unused: "Blob Storage (Hot Tier Unused 30+ days) 📊💰💰",
+  storage_account_no_transactions: "Storage Accounts (Zero Transactions 90 days) 📊💰",
+  blob_old_versions_accumulated: "Blob Storage (Excessive Versions >5) ⚠️💰💰",
 };
 
 // Helper function to get provider from resource type
