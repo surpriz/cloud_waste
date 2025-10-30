@@ -635,6 +635,66 @@ class AzureProvider(CloudProviderBase):
             print(f"Error querying AKS metrics for {cluster_id}: {str(e)}")
             return None
 
+    async def scan_unused_load_balancers(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scan for unused load balancers (abstract method implementation).
+
+        Note: For Azure, this method returns an empty list because we use more granular
+        detection scenarios (10 scenarios) that are called directly in scan_all_resources():
+        - load_balancer_no_backend_instances
+        - load_balancer_all_backends_unhealthy
+        - load_balancer_no_inbound_rules
+        - load_balancer_basic_sku_retired (CRITICAL)
+        - application_gateway_no_backend_targets
+        - application_gateway_stopped
+        - load_balancer_never_used
+        - load_balancer_no_traffic (Azure Monitor)
+        - application_gateway_no_requests (Azure Monitor)
+        - application_gateway_underutilized (Azure Monitor)
+
+        This method exists to satisfy the abstract method requirement from CloudProviderBase.
+
+        Args:
+            region: Azure region to scan
+            detection_rules: Optional detection configuration (not used)
+
+        Returns:
+            Empty list (granular scenarios are used instead)
+        """
+        return []
+
+    async def scan_unused_nat_gateways(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scan for unused NAT gateways (abstract method implementation).
+
+        Note: For Azure, this method returns an empty list because we use more granular
+        detection scenarios (10 scenarios) that are called directly in scan_all_resources():
+        - nat_gateway_no_subnet
+        - nat_gateway_never_used
+        - nat_gateway_no_public_ip
+        - nat_gateway_single_vm
+        - nat_gateway_redundant
+        - nat_gateway_dev_test_always_on
+        - nat_gateway_unnecessary_zones
+        - nat_gateway_no_traffic (Azure Monitor)
+        - nat_gateway_very_low_traffic (Azure Monitor)
+        - nat_gateway_private_link_alternative
+
+        This method exists to satisfy the abstract method requirement from CloudProviderBase.
+
+        Args:
+            region: Azure region to scan
+            detection_rules: Optional detection configuration (not used)
+
+        Returns:
+            Empty list (granular scenarios are used instead)
+        """
+        return []
+
     async def scan_all_resources(
         self, region: str, detection_rules: dict[str, dict] | None = None, scan_global_resources: bool = False
     ) -> list[OrphanResourceData]:
