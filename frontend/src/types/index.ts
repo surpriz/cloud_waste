@@ -231,7 +231,27 @@ export type ResourceType =
   | "ml_compute_instance_no_training_jobs"
   | "ml_compute_instance_low_memory_utilization"
   | "ml_compute_instance_network_idle"
-  | "ml_compute_instance_disk_io_near_zero";
+  | "ml_compute_instance_disk_io_near_zero"
+  // Azure App Service (Web Apps) - Phase 1 (10 scenarios)
+  | "app_service_plan_empty"
+  | "app_service_premium_in_dev"
+  | "app_service_no_auto_scale"
+  | "app_service_always_on_low_traffic"
+  | "app_service_unused_deployment_slots"
+  | "app_service_over_provisioned_plan"
+  | "app_service_stopped_apps_paid_plan"
+  | "app_service_multiple_plans_consolidation"
+  | "app_service_vnet_integration_unused"
+  | "app_service_old_runtime_version"
+  // Azure App Service (Web Apps) - Phase 2 (8 scenarios with Azure Monitor)
+  | "app_service_low_cpu_utilization"
+  | "app_service_low_memory_utilization"
+  | "app_service_low_request_count"
+  | "app_service_no_traffic_business_hours"
+  | "app_service_high_http_error_rate"
+  | "app_service_slow_response_time"
+  | "app_service_auto_scale_never_triggers"
+  | "app_service_cold_start_excessive";
 
 export type ConfidenceLevel = "critical" | "high" | "medium" | "low";
 

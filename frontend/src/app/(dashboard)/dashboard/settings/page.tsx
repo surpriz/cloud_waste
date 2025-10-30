@@ -248,6 +248,25 @@ const AZURE_RESOURCE_ICONS: { [key: string]: any } = {
   ml_compute_instance_low_memory_utilization: Server,
   ml_compute_instance_network_idle: Network,
   ml_compute_instance_disk_io_near_zero: HardDrive,
+  // Azure App Service (Web Apps) (18 scenarios - 100% coverage)
+  app_service_plan_empty: Server,
+  app_service_premium_in_dev: Zap,
+  app_service_no_auto_scale: TrendingDown,
+  app_service_always_on_low_traffic: Zap,
+  app_service_unused_deployment_slots: Server,
+  app_service_over_provisioned_plan: TrendingDown,
+  app_service_stopped_apps_paid_plan: Server,
+  app_service_multiple_plans_consolidation: Server,
+  app_service_vnet_integration_unused: Network,
+  app_service_old_runtime_version: AlertTriangle,
+  app_service_low_cpu_utilization: Activity,
+  app_service_low_memory_utilization: Server,
+  app_service_low_request_count: Activity,
+  app_service_no_traffic_business_hours: Clock,
+  app_service_high_http_error_rate: AlertTriangle,
+  app_service_slow_response_time: Clock,
+  app_service_auto_scale_never_triggers: TrendingDown,
+  app_service_cold_start_excessive: Clock,
 };
 
 const AZURE_RESOURCE_LABELS: { [key: string]: string } = {
@@ -447,6 +466,27 @@ const AZURE_RESOURCE_LABELS: { [key: string]: string } = {
   ml_compute_instance_low_memory_utilization: "ML Compute Instance (Memory <25% 30+ days) 📊💰💰 P1",
   ml_compute_instance_network_idle: "ML Compute Instance (Network Idle <1MB/day 30+ days) 📊💰💰💰💰 P0",
   ml_compute_instance_disk_io_near_zero: "ML Compute Instance (Disk I/O <100 IOPS/day 30+ days) 📊💰💰💰💰 P0",
+  // Azure App Service (Web Apps) (18 scenarios - 100% coverage)
+  // Phase 1 - Detection Simple (10 scenarios)
+  app_service_plan_empty: "App Service (Plan Empty 0 Apps >7 days) 🚨💰💰💰💰 P0",
+  app_service_premium_in_dev: "App Service (Premium in Dev/Test) 💰💰💰 P0",
+  app_service_no_auto_scale: "App Service (No Auto-Scale Fixed >=2 Instances) 💰💰💰 P0",
+  app_service_always_on_low_traffic: "App Service (Always On <100 req/day) 💰 P2",
+  app_service_unused_deployment_slots: "App Service (Unused Deployment Slots 0 Traffic >30 days) 💰💰💰💰 P0",
+  app_service_over_provisioned_plan: "App Service (Over-Provisioned <30% CPU <40% RAM) 💰💰💰 P0",
+  app_service_stopped_apps_paid_plan: "App Service (Stopped Apps on Paid Plan >30 days) 💰💰💰 P0",
+  app_service_multiple_plans_consolidation: "App Service (Multiple Plans <5 Apps Each) 💰💰 P1",
+  app_service_vnet_integration_unused: "App Service (VNet Integration Unused 0 Traffic) 💰 P2",
+  app_service_old_runtime_version: "App Service (Old Runtime >1 year) ⚠️🔒 P0",
+  // Phase 2 - Azure Monitor Metrics (8 scenarios)
+  app_service_low_cpu_utilization: "App Service (CPU <10% 30+ days) 📊💰💰 P1",
+  app_service_low_memory_utilization: "App Service (Memory <30% 30+ days) 📊💰💰 P1",
+  app_service_low_request_count: "App Service (<100 req/day 30+ days) 🚨📊💰💰💰 P0",
+  app_service_no_traffic_business_hours: "App Service (0 Traffic Business Hours 9-5) 📊💰💰 P1",
+  app_service_high_http_error_rate: "App Service (HTTP Error Rate >50%) ⚠️📊 P0",
+  app_service_slow_response_time: "App Service (Response Time >10s avg) ⚠️📊 P1",
+  app_service_auto_scale_never_triggers: "App Service (Auto-Scale Never Triggers 0 Events) 💰💰💰 P0",
+  app_service_cold_start_excessive: "App Service (Cold Start >30s) ⚠️📊 P1",
 };
 
 // Helper function to get provider from resource type

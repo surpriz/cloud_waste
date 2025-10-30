@@ -149,6 +149,26 @@ const resourceIcons: Record<ResourceType, any> = {
   ml_compute_instance_low_memory_utilization: Server,
   ml_compute_instance_network_idle: Network,
   ml_compute_instance_disk_io_near_zero: HardDrive,
+  // Azure App Service (Web Apps) - Phase 1 (10 scenarios)
+  app_service_plan_empty: Server,
+  app_service_premium_in_dev: Zap,
+  app_service_no_auto_scale: TrendingDown,
+  app_service_always_on_low_traffic: Zap,
+  app_service_unused_deployment_slots: Server,
+  app_service_over_provisioned_plan: TrendingDown,
+  app_service_stopped_apps_paid_plan: Server,
+  app_service_multiple_plans_consolidation: Server,
+  app_service_vnet_integration_unused: Network,
+  app_service_old_runtime_version: AlertTriangle,
+  // Azure App Service (Web Apps) - Phase 2 (8 scenarios)
+  app_service_low_cpu_utilization: Activity,
+  app_service_low_memory_utilization: Server,
+  app_service_low_request_count: Activity,
+  app_service_no_traffic_business_hours: Clock,
+  app_service_high_http_error_rate: AlertTriangle,
+  app_service_slow_response_time: Clock,
+  app_service_auto_scale_never_triggers: TrendingDown,
+  app_service_cold_start_excessive: Clock,
 };
 
 // Confidence level badge component
