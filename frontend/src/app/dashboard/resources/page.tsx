@@ -60,6 +60,10 @@ const resourceIcons: Record<ResourceType, any> = {
   virtual_machine_never_started: Server,
   virtual_machine_oversized_premium: Server,
   virtual_machine_untagged_orphan: Server,
+  // Azure Storage Accounts
+  storage_account_empty: HardDrive,
+  storage_account_never_used: HardDrive,
+  storage_account_no_transactions: HardDrive,
 };
 
 // Confidence level badge component
@@ -465,7 +469,7 @@ function ResourceCard({ resource, onIgnore, onMarkForDeletion, onDelete }: any) 
               </div>
 
               {/* Orphan reason - why is this resource orphaned? */}
-              {resource.resource_metadata?.orphan_reason && (
+              {(resource.resource_metadata?.orphan_reason || resource.resource_metadata?.why_orphaned) && (
                 <div className="rounded-lg bg-amber-50 border border-amber-200 p-3 space-y-2">
                   <div className="flex items-start gap-2">
                     <span className="text-amber-700 font-medium text-sm">⚠️ Why is this orphaned?</span>
@@ -2071,19 +2075,98 @@ function ResourceCard({ resource, onIgnore, onMarkForDeletion, onDelete }: any) 
                     </div>
                   )}
 
+                  {/* Azure Storage Account specific criteria */}
+                  {(resource.resource_type === 'storage_account_empty' ||
+                    resource.resource_type === 'storage_account_never_used' ||
+                    resource.resource_type === 'storage_account_no_transactions') && (
+                    <div className="space-y-2 text-sm">
+                      {/* Storage Account SKU and Replication */}
+                      {resource.resource_metadata?.sku && (
+                        <div className="flex items-center gap-2">
+                          <span className={`px-2 py-1 rounded text-xs font-semibold ${
+                            resource.resource_metadata.sku.includes('Premium') ? 'bg-purple-100 text-purple-700' :
+                            resource.resource_metadata.sku.includes('Standard') ? 'bg-blue-100 text-blue-700' :
+                            'bg-gray-100 text-gray-700'
+                          }`}>
+                            {resource.resource_metadata.sku}
+                          </span>
+                          {resource.resource_metadata?.replication && (
+                            <span className="text-xs text-gray-600">
+                              {resource.resource_metadata.replication}
+                            </span>
+                          )}
+                        </div>
+                      )}
+
+                      {/* Status */}
+                      {resource.resource_metadata?.status && (
+                        <div className="flex items-center gap-2 text-red-700">
+                          <span className="font-semibold">✗</span>
+                          <span className="font-semibold">Status: {resource.resource_metadata.status}</span>
+                        </div>
+                      )}
+
+                      {/* Container and blob info */}
+                      {resource.resource_metadata?.container_count !== undefined && (
+                        <div className="flex items-center gap-2 text-gray-700">
+                          <span className="font-semibold">📦</span>
+                          <span>
+                            {resource.resource_metadata.container_count} container(s),
+                            {' '}{resource.resource_metadata.blob_count || 0} blob(s)
+                            {resource.resource_metadata.total_size_gb !== undefined &&
+                              ` (${resource.resource_metadata.total_size_gb.toFixed(2)} GB)`
+                            }
+                          </span>
+                        </div>
+                      )}
+
+                      {/* Last accessed */}
+                      {resource.resource_metadata?.last_accessed && (
+                        <div className="flex items-center gap-2 text-orange-700">
+                          <span className="font-semibold">⏰</span>
+                          <span>Last accessed: {resource.resource_metadata.last_accessed}</span>
+                        </div>
+                      )}
+
+                      {/* Empty/Never used days */}
+                      {(resource.resource_metadata?.empty_days || resource.resource_metadata?.never_used_days) && (
+                        <div className="flex items-center gap-2 text-red-700">
+                          <span className="font-semibold">🔥</span>
+                          <span>
+                            {resource.resource_type === 'storage_account_never_used'
+                              ? `Never used for ${resource.resource_metadata.never_used_days || resource.resource_metadata.age_days} days`
+                              : `Empty for ${resource.resource_metadata.empty_days || resource.resource_metadata.age_days} days`
+                            }
+                          </span>
+                        </div>
+                      )}
+
+                      {/* Why orphaned message */}
+                      {resource.resource_metadata?.why_orphaned && (
+                        <div className="flex items-start gap-2 text-gray-600 mt-1 bg-gray-50 p-2 rounded">
+                          <span className="font-semibold">ℹ️</span>
+                          <span className="italic">{resource.resource_metadata.why_orphaned}</span>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
                   {/* Generic criteria for other resource types */}
-                  {!['ebs_volume', 'elastic_ip', 'rds_instance', 'ec2_instance', 'load_balancer', 'nat_gateway', 'ebs_snapshot', 'eks_cluster', 's3_bucket', 'lambda_function', 'dynamodb_table', 'elasticache_cluster', 'managed_disk_unattached', 'public_ip_unassociated', 'virtual_machine_deallocated', 'disk_snapshot_orphaned', 'managed_disk_on_stopped_vm', 'public_ip_on_stopped_resource'].includes(resource.resource_type) && (
+                  {!['ebs_volume', 'elastic_ip', 'rds_instance', 'ec2_instance', 'load_balancer', 'nat_gateway', 'ebs_snapshot', 'eks_cluster', 's3_bucket', 'lambda_function', 'dynamodb_table', 'elasticache_cluster', 'managed_disk_unattached', 'public_ip_unassociated', 'virtual_machine_deallocated', 'disk_snapshot_orphaned', 'managed_disk_on_stopped_vm', 'public_ip_on_stopped_resource', 'storage_account_empty', 'storage_account_never_used', 'storage_account_no_transactions'].includes(resource.resource_type) && (
                     <div className="text-sm">
                       <div className="flex items-center gap-2 text-gray-700">
                         <span className="font-semibold">ℹ️</span>
-                        <span className="italic">{resource.resource_metadata.orphan_reason}</span>
+                        <span className="italic">{resource.resource_metadata.why_orphaned || resource.resource_metadata.orphan_reason}</span>
                       </div>
                     </div>
                   )}
 
                   <div className="mt-2 pt-2 border-t border-amber-300">
                     <p className="text-xs text-amber-800">
-                      💡 <strong>What to do:</strong> Review this resource on your cloud console and delete it if no longer needed to stop wasting money.
+                      💡 <strong>What to do:</strong>{' '}
+                      {resource.resource_metadata?.recommendation ||
+                       resource.resource_metadata?.action_required ||
+                       'Review this resource on your cloud console and delete it if no longer needed to stop wasting money.'}
                     </p>
                   </div>
                 </div>

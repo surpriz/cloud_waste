@@ -155,6 +155,19 @@ const AZURE_RESOURCE_ICONS: { [key: string]: any } = {
   functions_low_invocation_rate_premium: Activity,
   functions_high_error_rate: AlertTriangle,
   functions_long_execution_time: Clock,
+  // Azure Cosmos DB Table API (12 scenarios - 100% coverage)
+  cosmosdb_table_api_low_traffic: Database,
+  cosmosdb_table_over_provisioned_ru: TrendingDown,
+  cosmosdb_table_high_storage_low_throughput: Archive,
+  cosmosdb_table_idle: Database,
+  cosmosdb_table_autoscale_not_scaling_down: AlertTriangle,
+  cosmosdb_table_unnecessary_multi_region: Globe,
+  cosmosdb_table_continuous_backup_unused: Camera,
+  cosmosdb_table_empty_tables: Database,
+  cosmosdb_table_throttled_need_autoscale: AlertTriangle,
+  cosmosdb_table_never_used: Database,
+  cosmosdb_table_unnecessary_zone_redundancy: Globe,
+  cosmosdb_table_analytical_storage_never_used: Archive,
 };
 
 const AZURE_RESOURCE_LABELS: { [key: string]: string } = {
@@ -259,6 +272,19 @@ const AZURE_RESOURCE_LABELS: { [key: string]: string } = {
   functions_low_invocation_rate_premium: "Azure Functions (Premium <1000 invocations) 💰💰💰 P0",
   functions_high_error_rate: "Azure Functions (High Error Rate >50%) ⚠️💰",
   functions_long_execution_time: "Azure Functions (Long Execution >5 min) 💰💰",
+  // Azure Cosmos DB Table API (12 scenarios - 100% coverage)
+  cosmosdb_table_api_low_traffic: "Cosmos DB Table API (<100 req/sec → Azure Table Storage) 💰💰💰 P0",
+  cosmosdb_table_over_provisioned_ru: "Cosmos DB Table API (RU <30% → Reduce RU/s) 💰💰💰 P0",
+  cosmosdb_table_high_storage_low_throughput: "Cosmos DB Table API (>500GB + <20% RU → Migrate) 💰💰💰 P0",
+  cosmosdb_table_idle: "Cosmos DB Table API (Idle - 0 Requests 30+ days) 🚨💰💰💰 P0",
+  cosmosdb_table_autoscale_not_scaling_down: "Cosmos DB Table API (Autoscale Stuck at Max >95%) 💰💰💰 P0",
+  cosmosdb_table_unnecessary_multi_region: "Cosmos DB Table API (Multi-Region in Dev/Test) 💰💰 P1",
+  cosmosdb_table_continuous_backup_unused: "Cosmos DB Table API (Continuous Backup Unused) 💰💰 P1",
+  cosmosdb_table_empty_tables: "Cosmos DB Table API (Empty Tables Provisioned) 💰💰 P1",
+  cosmosdb_table_throttled_need_autoscale: "Cosmos DB Table API (Throttling >5% → Enable Autoscale) ⚠️💰💰 P1",
+  cosmosdb_table_never_used: "Cosmos DB Table API (Never Used - 0 Tables) 💰 P2",
+  cosmosdb_table_unnecessary_zone_redundancy: "Cosmos DB Table API (Zone-Redundant in Dev/Test) 💰 P2",
+  cosmosdb_table_analytical_storage_never_used: "Cosmos DB Table API (Analytical Storage Never Used) 💰 P2",
 };
 
 // Helper function to get provider from resource type

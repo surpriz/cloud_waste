@@ -59,6 +59,11 @@ class User(Base):
     verification_token_expires_at: Mapped[datetime | None] = mapped_column(
         nullable=True,
     )
+    email_scan_notifications: Mapped[bool] = mapped_column(
+        Boolean,
+        default=True,
+        nullable=False,
+    )
     created_at: Mapped[datetime] = mapped_column(
         server_default=func.now(),
         nullable=False,

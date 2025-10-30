@@ -8401,7 +8401,7 @@ class AzureProvider(CloudProviderBase):
         from datetime import datetime, timezone, timedelta
         from azure.identity import ClientSecretCredential
         from azure.mgmt.sql import SqlManagementClient
-        from azure.monitor.query import MetricsQueryClient, MetricAggregationType
+        from azure.monitor.query import MetricsQueryClient, MetricAggregation
 
         orphans = []
         min_age_days = detection_rules.get("min_age_days", 30) if detection_rules else 30
@@ -8442,7 +8442,7 @@ class AzureProvider(CloudProviderBase):
                             db.id,
                             metric_names=["connection_successful"],
                             timespan=(start_time, end_time),
-                            aggregations=[MetricAggregationType.TOTAL]
+                            aggregations=[MetricAggregation.TOTAL]
                         )
 
                         total_connections = 0
@@ -8508,7 +8508,7 @@ class AzureProvider(CloudProviderBase):
         from datetime import datetime, timezone, timedelta
         from azure.identity import ClientSecretCredential
         from azure.mgmt.sql import SqlManagementClient
-        from azure.monitor.query import MetricsQueryClient, MetricAggregationType
+        from azure.monitor.query import MetricsQueryClient, MetricAggregation
 
         orphans = []
         min_age_days = detection_rules.get("min_age_days", 14) if detection_rules else 14
@@ -8549,7 +8549,7 @@ class AzureProvider(CloudProviderBase):
                             db.id,
                             metric_names=["dtu_consumption_percent"],
                             timespan=(start_time, end_time),
-                            aggregations=[MetricAggregationType.AVERAGE]
+                            aggregations=[MetricAggregation.AVERAGE]
                         )
 
                         avg_dtu = 0
@@ -8624,7 +8624,7 @@ class AzureProvider(CloudProviderBase):
         from datetime import datetime, timezone, timedelta
         from azure.identity import ClientSecretCredential
         from azure.mgmt.sql import SqlManagementClient
-        from azure.monitor.query import MetricsQueryClient, MetricAggregationType
+        from azure.monitor.query import MetricsQueryClient, MetricAggregation
 
         orphans = []
         min_age_days = detection_rules.get("min_age_days", 14) if detection_rules else 14
@@ -8666,7 +8666,7 @@ class AzureProvider(CloudProviderBase):
                             db.id,
                             metric_names=["app_cpu_percent"],
                             timespan=(start_time, end_time),
-                            aggregations=[MetricAggregationType.AVERAGE]
+                            aggregations=[MetricAggregation.AVERAGE]
                         )
 
                         # If we have continuous metrics, database never paused
@@ -8728,7 +8728,7 @@ class AzureProvider(CloudProviderBase):
         from datetime import datetime, timezone, timedelta
         from azure.identity import ClientSecretCredential
         from azure.mgmt.cosmosdb import CosmosDBManagementClient
-        from azure.monitor.query import MetricsQueryClient, MetricAggregationType
+        from azure.monitor.query import MetricsQueryClient, MetricAggregation
 
         orphans = []
         min_age_days = detection_rules.get("min_age_days", 14) if detection_rules else 14
@@ -8760,7 +8760,7 @@ class AzureProvider(CloudProviderBase):
                         account.id,
                         metric_names=["NormalizedRUConsumption"],
                         timespan=(start_time, end_time),
-                        aggregations=[MetricAggregationType.AVERAGE]
+                        aggregations=[MetricAggregation.AVERAGE]
                     )
 
                     avg_ru = 0
@@ -8824,7 +8824,7 @@ class AzureProvider(CloudProviderBase):
         from datetime import datetime, timezone, timedelta
         from azure.identity import ClientSecretCredential
         from azure.mgmt.cosmosdb import CosmosDBManagementClient
-        from azure.monitor.query import MetricsQueryClient, MetricAggregationType
+        from azure.monitor.query import MetricsQueryClient, MetricAggregation
 
         orphans = []
         min_age_days = detection_rules.get("min_age_days", 30) if detection_rules else 30
@@ -8855,7 +8855,7 @@ class AzureProvider(CloudProviderBase):
                         account.id,
                         metric_names=["TotalRequests"],
                         timespan=(start_time, end_time),
-                        aggregations=[MetricAggregationType.TOTAL]
+                        aggregations=[MetricAggregation.TOTAL]
                     )
 
                     total_requests = 0
@@ -8913,7 +8913,7 @@ class AzureProvider(CloudProviderBase):
         from datetime import datetime, timezone, timedelta
         from azure.identity import ClientSecretCredential
         from azure.mgmt.cosmosdb import CosmosDBManagementClient
-        from azure.monitor.query import MetricsQueryClient, MetricAggregationType
+        from azure.monitor.query import MetricsQueryClient, MetricAggregation
 
         orphans = []
         min_age_days = detection_rules.get("min_age_days", 14) if detection_rules else 14
@@ -8945,7 +8945,7 @@ class AzureProvider(CloudProviderBase):
                         account.id,
                         metric_names=["MaxPerPartitionKeyRUConsumption"],
                         timespan=(start_time, end_time),
-                        aggregations=[MetricAggregationType.MAXIMUM]
+                        aggregations=[MetricAggregation.MAXIMUM]
                     )
 
                     max_partition_ru = 0
@@ -9228,7 +9228,7 @@ class AzureProvider(CloudProviderBase):
         from datetime import datetime, timezone, timedelta
         from azure.identity import ClientSecretCredential
         from azure.mgmt.redis import RedisManagementClient
-        from azure.monitor.query import MetricsQueryClient, MetricAggregationType
+        from azure.monitor.query import MetricsQueryClient, MetricAggregation
 
         orphans = []
         min_age_days = detection_rules.get("min_age_days", 14) if detection_rules else 14
@@ -9259,7 +9259,7 @@ class AzureProvider(CloudProviderBase):
                         cache.id,
                         metric_names=["connectedclients"],
                         timespan=(start_time, end_time),
-                        aggregations=[MetricAggregationType.MAXIMUM]
+                        aggregations=[MetricAggregation.MAXIMUM]
                     )
 
                     max_connections = 0
@@ -9316,7 +9316,7 @@ class AzureProvider(CloudProviderBase):
         from datetime import datetime, timezone, timedelta
         from azure.identity import ClientSecretCredential
         from azure.mgmt.redis import RedisManagementClient
-        from azure.monitor.query import MetricsQueryClient, MetricAggregationType
+        from azure.monitor.query import MetricsQueryClient, MetricAggregation
 
         orphans = []
         min_age_days = detection_rules.get("min_age_days", 14) if detection_rules else 14
@@ -9348,7 +9348,7 @@ class AzureProvider(CloudProviderBase):
                         cache.id,
                         metric_names=["usedmemorypercentage"],
                         timespan=(start_time, end_time),
-                        aggregations=[MetricAggregationType.AVERAGE]
+                        aggregations=[MetricAggregation.AVERAGE]
                     )
 
                     avg_memory = 0
@@ -12754,27 +12754,19 @@ class AzureProvider(CloudProviderBase):
                     region=storage_account.location,
                     estimated_monthly_cost=monthly_cost,
                     resource_metadata={
-                        "scenario": "storage_account_never_used",
                         "account_name": storage_account.name,
                         "sku": storage_account.sku.name if storage_account.sku else "Unknown",
-                        "replication": storage_account.sku.name if storage_account.sku else "Unknown",
                         "kind": storage_account.kind if hasattr(storage_account, "kind") else "StorageV2",
                         "access_tier": storage_account.access_tier if hasattr(storage_account, "access_tier") else "Hot",
                         "container_count": 0,
                         "blob_count": 0,
                         "total_size_gb": 0.0,
                         "age_days": age_days,
-                        "never_used_days": age_days,
-                        "status": "Never Used",
-                        "why_orphaned": f"Storage Account created {age_days} days ago but has never been used. No containers or blobs have been created. Paying management overhead (~$0.43/month) for unused infrastructure.",
-                        "last_accessed": "Never",
                         "tags": tags,
-                        "recommendation": f"Delete this Storage Account immediately - it has never been used and wastes ${monthly_cost}/month in management overhead. Already wasted ${already_wasted} over {age_days} days.",
-                        "action_required": "Delete unused Storage Account",
+                        "recommendation": "Delete this Storage Account - it has never been used and generates management overhead",
                         "estimated_monthly_cost": monthly_cost,
                         "already_wasted": already_wasted,
                         "confidence_level": confidence_level,
-                        "monthly_savings_potential": monthly_cost,
                     },
                 )
 
@@ -13129,23 +13121,16 @@ class AzureProvider(CloudProviderBase):
                 region=storage_account.location,
                 estimated_monthly_cost=monthly_cost,
                 resource_metadata={
-                    "scenario": "storage_account_empty",
                     "account_name": storage_account.name,
                     "sku": storage_account.sku.name if storage_account.sku else "Unknown",
-                    "replication": storage_account.sku.name if storage_account.sku else "Unknown",
                     "container_count": container_count,
                     "blob_count": 0,
                     "total_size_gb": 0.0,
                     "empty_days": age_days,
                     "age_days": age_days,
-                    "why_orphaned": f"Storage Account created {age_days} days ago has {container_count} empty container(s) with no data stored. Paying transaction costs (~$0.07/month) for unused storage.",
-                    "status": "Empty",
-                    "last_accessed": "Never accessed" if age_days > 0 else "Unknown",
-                    "recommendation": f"Delete this Storage Account or its empty containers to stop wasting ${monthly_cost}/month. No data will be lost as containers are empty.",
-                    "action_required": "Review and delete if no longer needed",
+                    "recommendation": "Delete this Storage Account or its empty containers - no data stored",
                     "already_wasted": already_wasted,
                     "confidence_level": confidence_level,
-                    "monthly_savings_potential": monthly_cost,
                 },
             )
         except Exception as e:

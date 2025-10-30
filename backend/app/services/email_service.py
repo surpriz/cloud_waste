@@ -1,6 +1,7 @@
 """Email service for sending verification and welcome emails."""
 
 import smtplib
+import ssl
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from typing import Optional
@@ -55,13 +56,21 @@ def send_email(
         part2 = MIMEText(html_content, "html")
         msg.attach(part2)
 
-        # Send email
-        with smtplib.SMTP(settings.SMTP_HOST, settings.SMTP_PORT) as server:
-            server.ehlo()
-            server.starttls()
-            server.ehlo()
-            server.login(settings.SMTP_USER, settings.SMTP_PASSWORD)
-            server.sendmail(settings.EMAILS_FROM_EMAIL, to_email, msg.as_string())
+        # Send email with SSL/TLS
+        context = ssl.create_default_context()
+
+        # Use SMTP_SSL (port 465) if port is 465, otherwise use SMTP with STARTTLS (port 587)
+        if settings.SMTP_PORT == 465:
+            with smtplib.SMTP_SSL(settings.SMTP_HOST, settings.SMTP_PORT, context=context, timeout=30) as server:
+                server.set_debuglevel(0)  # Set to 1 for debugging
+                server.login(settings.SMTP_USER, settings.SMTP_PASSWORD)
+                server.sendmail(settings.EMAILS_FROM_EMAIL, to_email, msg.as_string())
+        else:
+            with smtplib.SMTP(settings.SMTP_HOST, settings.SMTP_PORT, timeout=30) as server:
+                server.set_debuglevel(0)  # Set to 1 for debugging
+                server.starttls(context=context)
+                server.login(settings.SMTP_USER, settings.SMTP_PASSWORD)
+                server.sendmail(settings.EMAILS_FROM_EMAIL, to_email, msg.as_string())
 
         logger.info(
             "email.sent",
@@ -407,6 +416,441 @@ def send_welcome_email(email: str, full_name: str) -> bool:
     return send_email(
         to_email=email,
         subject="🎉 Bienvenue sur CloudWaste - Votre compte est activé !",
+        html_content=html_content,
+        text_content=text_content,
+    )
+
+
+def get_scan_summary_email_html(
+    full_name: str,
+    account_name: str,
+    scan_type: str,
+    status: str,
+    started_at: str,
+    completed_at: str,
+    total_resources_scanned: int = 0,
+    orphan_resources_found: int = 0,
+    estimated_monthly_waste: float = 0.0,
+    regions_scanned: list[str] | None = None,
+    error_message: str | None = None,
+) -> str:
+    """
+    Get HTML template for scan summary email.
+
+    Args:
+        full_name: User's full name
+        account_name: Cloud account name
+        scan_type: Type of scan (manual or scheduled)
+        status: Scan status (completed or failed)
+        started_at: Scan start time (formatted string)
+        completed_at: Scan completion time (formatted string)
+        total_resources_scanned: Total resources scanned
+        orphan_resources_found: Number of orphan resources found
+        estimated_monthly_waste: Estimated monthly cost waste
+        regions_scanned: List of regions scanned
+        error_message: Error message if scan failed
+
+    Returns:
+        HTML email content
+    """
+    app_url = settings.FRONTEND_URL
+    scan_type_fr = "Manuel" if scan_type == "manual" else "Planifié"
+
+    # Success template
+    if status == "completed":
+        regions_list = ", ".join(regions_scanned) if regions_scanned else "N/A"
+
+        return f"""
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Résultat du scan - CloudWaste</title>
+</head>
+<body style="margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; background-color: #f3f4f6;">
+    <table width="100%" border="0" cellspacing="0" cellpadding="0" style="background-color: #f3f4f6;">
+        <tr>
+            <td align="center" style="padding: 40px 20px;">
+                <table width="600" border="0" cellspacing="0" cellpadding="0" style="background-color: #ffffff; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
+                    <!-- Header -->
+                    <tr>
+                        <td style="padding: 40px 40px 20px; text-align: center;">
+                            <h1 style="margin: 0; color: #1f2937; font-size: 28px; font-weight: 700;">
+                                🛡️ CloudWaste
+                            </h1>
+                            <p style="margin: 10px 0 0; color: #6b7280; font-size: 14px;">
+                                Optimisation des coûts Cloud
+                            </p>
+                        </td>
+                    </tr>
+
+                    <!-- Content -->
+                    <tr>
+                        <td style="padding: 20px 40px;">
+                            <h2 style="margin: 0 0 20px; color: #1f2937; font-size: 22px; font-weight: 600;">
+                                ✅ Scan terminé avec succès
+                            </h2>
+                            <p style="margin: 0 0 15px; color: #374151; font-size: 16px; line-height: 1.6;">
+                                Bonjour {full_name},
+                            </p>
+                            <p style="margin: 0 0 15px; color: #374151; font-size: 16px; line-height: 1.6;">
+                                Le scan de votre compte cloud <strong>{account_name}</strong> (scan {scan_type_fr.lower()}) est terminé.
+                            </p>
+
+                            <!-- Scan Info Box -->
+                            <div style="margin: 25px 0; padding: 20px; background-color: #f0f9ff; border-left: 4px solid #2563eb; border-radius: 4px;">
+                                <table width="100%" border="0" cellspacing="0" cellpadding="0">
+                                    <tr>
+                                        <td style="padding: 8px 0;">
+                                            <strong style="color: #1e40af; font-size: 15px;">Compte :</strong>
+                                            <span style="color: #1e3a8a; font-size: 15px; margin-left: 10px;">{account_name}</span>
+                                        </td>
+                                    </tr>
+                                    <tr>
+                                        <td style="padding: 8px 0;">
+                                            <strong style="color: #1e40af; font-size: 15px;">Type de scan :</strong>
+                                            <span style="color: #1e3a8a; font-size: 15px; margin-left: 10px;">{scan_type_fr}</span>
+                                        </td>
+                                    </tr>
+                                    <tr>
+                                        <td style="padding: 8px 0;">
+                                            <strong style="color: #1e40af; font-size: 15px;">Durée :</strong>
+                                            <span style="color: #1e3a8a; font-size: 15px; margin-left: 10px;">{started_at} → {completed_at}</span>
+                                        </td>
+                                    </tr>
+                                    <tr>
+                                        <td style="padding: 8px 0;">
+                                            <strong style="color: #1e40af; font-size: 15px;">Régions scannées :</strong>
+                                            <span style="color: #1e3a8a; font-size: 15px; margin-left: 10px;">{regions_list}</span>
+                                        </td>
+                                    </tr>
+                                </table>
+                            </div>
+
+                            <!-- Results Box -->
+                            <div style="margin: 25px 0; padding: 20px; background-color: #fef3c7; border-left: 4px solid #f59e0b; border-radius: 4px;">
+                                <p style="margin: 0 0 15px; color: #92400e; font-size: 16px; font-weight: 600;">
+                                    📊 Résultats du scan :
+                                </p>
+                                <table width="100%" border="0" cellspacing="0" cellpadding="0">
+                                    <tr>
+                                        <td style="padding: 8px 0;">
+                                            <strong style="color: #78350f; font-size: 15px;">Ressources scannées :</strong>
+                                            <span style="color: #92400e; font-size: 15px; margin-left: 10px;">{total_resources_scanned}</span>
+                                        </td>
+                                    </tr>
+                                    <tr>
+                                        <td style="padding: 8px 0;">
+                                            <strong style="color: #78350f; font-size: 15px;">Ressources orphelines trouvées :</strong>
+                                            <span style="color: #92400e; font-size: 15px; margin-left: 10px; font-weight: 700;">{orphan_resources_found}</span>
+                                        </td>
+                                    </tr>
+                                    <tr>
+                                        <td style="padding: 8px 0;">
+                                            <strong style="color: #78350f; font-size: 15px;">Coût mensuel estimé du gaspillage :</strong>
+                                            <span style="color: #92400e; font-size: 18px; margin-left: 10px; font-weight: 700;">${estimated_monthly_waste:.2f}</span>
+                                        </td>
+                                    </tr>
+                                </table>
+                            </div>
+
+                            <!-- CTA Button -->
+                            <table width="100%" border="0" cellspacing="0" cellpadding="0" style="margin: 30px 0;">
+                                <tr>
+                                    <td align="center">
+                                        <a href="{app_url}/dashboard/resources" style="display: inline-block; padding: 14px 32px; background-color: #2563eb; color: #ffffff; text-decoration: none; border-radius: 6px; font-size: 16px; font-weight: 600;">
+                                            📋 Voir les résultats détaillés
+                                        </a>
+                                    </td>
+                                </tr>
+                            </table>
+
+                            <p style="margin: 20px 0 0; color: #6b7280; font-size: 14px; line-height: 1.6;">
+                                Consultez le dashboard pour voir les détails de chaque ressource orpheline et optimiser vos coûts cloud.
+                            </p>
+                        </td>
+                    </tr>
+
+                    <!-- Footer -->
+                    <tr>
+                        <td style="padding: 30px 40px; background-color: #f9fafb; border-top: 1px solid #e5e7eb; border-radius: 0 0 8px 8px;">
+                            <p style="margin: 0; color: #9ca3af; font-size: 12px; text-align: center; line-height: 1.5;">
+                                Cet email a été envoyé par <strong>CloudWaste</strong><br>
+                                © 2025 CloudWaste. Tous droits réservés.
+                            </p>
+                        </td>
+                    </tr>
+                </table>
+            </td>
+        </tr>
+    </table>
+</body>
+</html>
+"""
+
+    # Failure template
+    else:
+        return f"""
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Échec du scan - CloudWaste</title>
+</head>
+<body style="margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; background-color: #f3f4f6;">
+    <table width="100%" border="0" cellspacing="0" cellpadding="0" style="background-color: #f3f4f6;">
+        <tr>
+            <td align="center" style="padding: 40px 20px;">
+                <table width="600" border="0" cellspacing="0" cellpadding="0" style="background-color: #ffffff; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
+                    <!-- Header -->
+                    <tr>
+                        <td style="padding: 40px 40px 20px; text-align: center;">
+                            <h1 style="margin: 0; color: #1f2937; font-size: 28px; font-weight: 700;">
+                                🛡️ CloudWaste
+                            </h1>
+                            <p style="margin: 10px 0 0; color: #6b7280; font-size: 14px;">
+                                Optimisation des coûts Cloud
+                            </p>
+                        </td>
+                    </tr>
+
+                    <!-- Content -->
+                    <tr>
+                        <td style="padding: 20px 40px;">
+                            <h2 style="margin: 0 0 20px; color: #1f2937; font-size: 22px; font-weight: 600;">
+                                ❌ Échec du scan
+                            </h2>
+                            <p style="margin: 0 0 15px; color: #374151; font-size: 16px; line-height: 1.6;">
+                                Bonjour {full_name},
+                            </p>
+                            <p style="margin: 0 0 15px; color: #374151; font-size: 16px; line-height: 1.6;">
+                                Le scan de votre compte cloud <strong>{account_name}</strong> (scan {scan_type_fr.lower()}) a échoué.
+                            </p>
+
+                            <!-- Error Box -->
+                            <div style="margin: 25px 0; padding: 20px; background-color: #fee2e2; border-left: 4px solid #dc2626; border-radius: 4px;">
+                                <p style="margin: 0 0 10px; color: #991b1b; font-size: 15px; font-weight: 600;">
+                                    🚨 Erreur rencontrée :
+                                </p>
+                                <p style="margin: 0; color: #7f1d1d; font-size: 14px; line-height: 1.6; font-family: monospace;">
+                                    {error_message or "Erreur inconnue"}
+                                </p>
+                            </div>
+
+                            <!-- Recommendations -->
+                            <div style="margin: 25px 0; padding: 20px; background-color: #f0f9ff; border-left: 4px solid #2563eb; border-radius: 4px;">
+                                <p style="margin: 0 0 10px; color: #1e40af; font-size: 15px; font-weight: 600;">
+                                    💡 Recommandations :
+                                </p>
+                                <ul style="margin: 10px 0 0; padding-left: 20px; color: #1e3a8a; font-size: 14px; line-height: 1.8;">
+                                    <li>Vérifiez que vos identifiants cloud sont toujours valides</li>
+                                    <li>Assurez-vous que les permissions IAM sont correctement configurées</li>
+                                    <li>Vérifiez la connectivité réseau de votre compte</li>
+                                    <li>Consultez la documentation pour résoudre les erreurs courantes</li>
+                                </ul>
+                            </div>
+
+                            <!-- CTA Button -->
+                            <table width="100%" border="0" cellspacing="0" cellpadding="0" style="margin: 30px 0;">
+                                <tr>
+                                    <td align="center">
+                                        <a href="{app_url}/dashboard/accounts" style="display: inline-block; padding: 14px 32px; background-color: #2563eb; color: #ffffff; text-decoration: none; border-radius: 6px; font-size: 16px; font-weight: 600;">
+                                            ⚙️ Vérifier mes comptes cloud
+                                        </a>
+                                    </td>
+                                </tr>
+                            </table>
+
+                            <p style="margin: 20px 0 0; color: #6b7280; font-size: 14px; line-height: 1.6;">
+                                Si le problème persiste, contactez notre support technique pour obtenir de l'aide.
+                            </p>
+                        </td>
+                    </tr>
+
+                    <!-- Footer -->
+                    <tr>
+                        <td style="padding: 30px 40px; background-color: #f9fafb; border-top: 1px solid #e5e7eb; border-radius: 0 0 8px 8px;">
+                            <p style="margin: 0; color: #9ca3af; font-size: 12px; text-align: center; line-height: 1.5;">
+                                Cet email a été envoyé par <strong>CloudWaste</strong><br>
+                                © 2025 CloudWaste. Tous droits réservés.
+                            </p>
+                        </td>
+                    </tr>
+                </table>
+            </td>
+        </tr>
+    </table>
+</body>
+</html>
+"""
+
+
+def get_scan_summary_email_text(
+    full_name: str,
+    account_name: str,
+    scan_type: str,
+    status: str,
+    started_at: str,
+    completed_at: str,
+    total_resources_scanned: int = 0,
+    orphan_resources_found: int = 0,
+    estimated_monthly_waste: float = 0.0,
+    regions_scanned: list[str] | None = None,
+    error_message: str | None = None,
+) -> str:
+    """
+    Get plain text version for scan summary email.
+
+    Args:
+        full_name: User's full name
+        account_name: Cloud account name
+        scan_type: Type of scan (manual or scheduled)
+        status: Scan status (completed or failed)
+        started_at: Scan start time (formatted string)
+        completed_at: Scan completion time (formatted string)
+        total_resources_scanned: Total resources scanned
+        orphan_resources_found: Number of orphan resources found
+        estimated_monthly_waste: Estimated monthly cost waste
+        regions_scanned: List of regions scanned
+        error_message: Error message if scan failed
+
+    Returns:
+        Plain text email content
+    """
+    app_url = settings.FRONTEND_URL
+    scan_type_fr = "Manuel" if scan_type == "manual" else "Planifié"
+
+    # Success template
+    if status == "completed":
+        regions_list = ", ".join(regions_scanned) if regions_scanned else "N/A"
+
+        return f"""
+✅ Scan terminé avec succès
+
+Bonjour {full_name},
+
+Le scan de votre compte cloud {account_name} (scan {scan_type_fr.lower()}) est terminé.
+
+📋 Informations du scan :
+- Compte : {account_name}
+- Type de scan : {scan_type_fr}
+- Durée : {started_at} → {completed_at}
+- Régions scannées : {regions_list}
+
+📊 Résultats du scan :
+- Ressources scannées : {total_resources_scanned}
+- Ressources orphelines trouvées : {orphan_resources_found}
+- Coût mensuel estimé du gaspillage : ${estimated_monthly_waste:.2f}
+
+Consultez le dashboard pour voir les détails de chaque ressource orpheline et optimiser vos coûts cloud.
+
+👉 Voir les résultats détaillés : {app_url}/dashboard/resources
+
+---
+Cet email a été envoyé par CloudWaste
+© 2025 CloudWaste. Tous droits réservés.
+"""
+
+    # Failure template
+    else:
+        return f"""
+❌ Échec du scan
+
+Bonjour {full_name},
+
+Le scan de votre compte cloud {account_name} (scan {scan_type_fr.lower()}) a échoué.
+
+🚨 Erreur rencontrée :
+{error_message or "Erreur inconnue"}
+
+💡 Recommandations :
+- Vérifiez que vos identifiants cloud sont toujours valides
+- Assurez-vous que les permissions IAM sont correctement configurées
+- Vérifiez la connectivité réseau de votre compte
+- Consultez la documentation pour résoudre les erreurs courantes
+
+Si le problème persiste, contactez notre support technique pour obtenir de l'aide.
+
+👉 Vérifier mes comptes cloud : {app_url}/dashboard/accounts
+
+---
+Cet email a été envoyé par CloudWaste
+© 2025 CloudWaste. Tous droits réservés.
+"""
+
+
+def send_scan_summary_email(
+    email: str,
+    full_name: str,
+    account_name: str,
+    scan_type: str,
+    status: str,
+    started_at: str,
+    completed_at: str,
+    total_resources_scanned: int = 0,
+    orphan_resources_found: int = 0,
+    estimated_monthly_waste: float = 0.0,
+    regions_scanned: list[str] | None = None,
+    error_message: str | None = None,
+) -> bool:
+    """
+    Send scan summary email to user after scan completion.
+
+    Args:
+        email: User email address
+        full_name: User's full name
+        account_name: Cloud account name
+        scan_type: Type of scan (manual or scheduled)
+        status: Scan status (completed or failed)
+        started_at: Scan start time (formatted string)
+        completed_at: Scan completion time (formatted string)
+        total_resources_scanned: Total resources scanned
+        orphan_resources_found: Number of orphan resources found
+        estimated_monthly_waste: Estimated monthly cost waste
+        regions_scanned: List of regions scanned
+        error_message: Error message if scan failed
+
+    Returns:
+        True if email sent successfully, False otherwise
+    """
+    html_content = get_scan_summary_email_html(
+        full_name=full_name,
+        account_name=account_name,
+        scan_type=scan_type,
+        status=status,
+        started_at=started_at,
+        completed_at=completed_at,
+        total_resources_scanned=total_resources_scanned,
+        orphan_resources_found=orphan_resources_found,
+        estimated_monthly_waste=estimated_monthly_waste,
+        regions_scanned=regions_scanned,
+        error_message=error_message,
+    )
+    text_content = get_scan_summary_email_text(
+        full_name=full_name,
+        account_name=account_name,
+        scan_type=scan_type,
+        status=status,
+        started_at=started_at,
+        completed_at=completed_at,
+        total_resources_scanned=total_resources_scanned,
+        orphan_resources_found=orphan_resources_found,
+        estimated_monthly_waste=estimated_monthly_waste,
+        regions_scanned=regions_scanned,
+        error_message=error_message,
+    )
+
+    # Determine subject based on status
+    if status == "completed":
+        subject = f"✅ Scan terminé - {account_name} - CloudWaste"
+    else:
+        subject = f"❌ Échec du scan - {account_name} - CloudWaste"
+
+    return send_email(
+        to_email=email,
+        subject=subject,
         html_content=html_content,
         text_content=text_content,
     )

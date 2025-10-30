@@ -15,8 +15,10 @@ from app.crud import cloud_account as cloud_account_crud
 from app.models.cloud_account import CloudAccount
 from app.models.orphan_resource import OrphanResource
 from app.models.scan import Scan, ScanStatus
+from app.models.user import User
 from app.providers.aws import AWSProvider
 from app.providers.azure import AzureProvider
+from app.services.email_service import send_scan_summary_email
 from app.workers.celery_app import celery_app
 
 # Create async engine for database operations
@@ -185,6 +187,24 @@ async def _scan_cloud_account_async(
 
                 await db.commit()
 
+                # Send email notification if user has enabled notifications
+                result = await db.execute(select(User).where(User.id == account.user_id))
+                user = result.scalar_one_or_none()
+                if user and user.email_scan_notifications:
+                    send_scan_summary_email(
+                        email=user.email,
+                        full_name=user.full_name or "Utilisateur",
+                        account_name=account.account_name,
+                        scan_type=scan.scan_type,
+                        status="completed",
+                        started_at=scan.started_at.strftime("%d/%m/%Y %H:%M") if scan.started_at else "N/A",
+                        completed_at=scan.completed_at.strftime("%d/%m/%Y %H:%M") if scan.completed_at else "N/A",
+                        total_resources_scanned=total_resources,
+                        orphan_resources_found=len(all_orphans),
+                        estimated_monthly_waste=total_waste,
+                        regions_scanned=regions_to_scan,
+                    )
+
                 return {
                     "scan_id": str(scan.id),
                     "status": "completed",
@@ -270,6 +290,24 @@ async def _scan_cloud_account_async(
 
                 await db.commit()
 
+                # Send email notification if user has enabled notifications
+                result = await db.execute(select(User).where(User.id == account.user_id))
+                user = result.scalar_one_or_none()
+                if user and user.email_scan_notifications:
+                    send_scan_summary_email(
+                        email=user.email,
+                        full_name=user.full_name or "Utilisateur",
+                        account_name=account.account_name,
+                        scan_type=scan.scan_type,
+                        status="completed",
+                        started_at=scan.started_at.strftime("%d/%m/%Y %H:%M") if scan.started_at else "N/A",
+                        completed_at=scan.completed_at.strftime("%d/%m/%Y %H:%M") if scan.completed_at else "N/A",
+                        total_resources_scanned=total_resources,
+                        orphan_resources_found=len(all_orphans),
+                        estimated_monthly_waste=total_waste,
+                        regions_scanned=regions_to_scan,
+                    )
+
                 return {
                     "scan_id": str(scan.id),
                     "status": "completed",
@@ -284,6 +322,22 @@ async def _scan_cloud_account_async(
                 scan.error_message = f"Unsupported provider: {account.provider}"
                 scan.completed_at = datetime.now()
                 await db.commit()
+
+                # Send error email notification if user has enabled notifications
+                result = await db.execute(select(User).where(User.id == account.user_id))
+                user = result.scalar_one_or_none()
+                if user and user.email_scan_notifications:
+                    send_scan_summary_email(
+                        email=user.email,
+                        full_name=user.full_name or "Utilisateur",
+                        account_name=account.account_name,
+                        scan_type=scan.scan_type,
+                        status="failed",
+                        started_at=scan.started_at.strftime("%d/%m/%Y %H:%M") if scan.started_at else "N/A",
+                        completed_at=scan.completed_at.strftime("%d/%m/%Y %H:%M") if scan.completed_at else "N/A",
+                        error_message=scan.error_message,
+                    )
+
                 return {"error": scan.error_message}
 
         except Exception as e:
@@ -296,6 +350,26 @@ async def _scan_cloud_account_async(
                     scan.error_message = str(e)[:500]  # Limit error message length
                     scan.completed_at = datetime.now()
                     await db.commit()
+
+                    # Send error email notification if user has enabled notifications
+                    result = await db.execute(
+                        select(CloudAccount).where(CloudAccount.id == cloud_account_id)
+                    )
+                    account = result.scalar_one_or_none()
+                    if account:
+                        result = await db.execute(select(User).where(User.id == account.user_id))
+                        user = result.scalar_one_or_none()
+                        if user and user.email_scan_notifications:
+                            send_scan_summary_email(
+                                email=user.email,
+                                full_name=user.full_name or "Utilisateur",
+                                account_name=account.account_name,
+                                scan_type=scan.scan_type,
+                                status="failed",
+                                started_at=scan.started_at.strftime("%d/%m/%Y %H:%M") if scan.started_at else "N/A",
+                                completed_at=scan.completed_at.strftime("%d/%m/%Y %H:%M") if scan.completed_at else "N/A",
+                                error_message=scan.error_message,
+                            )
             except Exception:
                 pass  # If we can't update the scan, just return the error
 

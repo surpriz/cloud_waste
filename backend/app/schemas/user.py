@@ -15,6 +15,7 @@ class UserBase(BaseModel):
     is_active: bool = True
     is_superuser: bool = False
     email_verified: bool = False
+    email_scan_notifications: bool = True
 
 
 # Properties to receive via API on creation
@@ -34,6 +35,7 @@ class UserUpdate(BaseModel):
     password: str | None = Field(None, min_length=8, max_length=100)
     full_name: str | None = None
     is_active: bool | None = None
+    email_scan_notifications: bool | None = None
 
 
 # Properties to receive via API on admin update

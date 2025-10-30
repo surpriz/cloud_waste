@@ -15,7 +15,7 @@ from app.crud import user as user_crud
 from app.models.user import User
 from app.schemas.token import RefreshTokenRequest, Token
 from app.schemas.user import User as UserSchema
-from app.schemas.user import UserCreate
+from app.schemas.user import UserCreate, UserUpdate
 from app.services import email_service
 
 router = APIRouter()
@@ -346,3 +346,45 @@ async def resend_verification_email(
     return {
         "message": "Verification email sent successfully",
     }
+
+
+@router.patch("/me", response_model=UserSchema)
+async def update_current_user(
+    user_update: UserUpdate,
+    current_user: Annotated[User, Depends(get_current_active_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> User:
+    """
+    Update current user information and preferences.
+
+    Args:
+        user_update: User update data (email, password, full_name, email_scan_notifications)
+        current_user: Current authenticated user
+        db: Database session
+
+    Returns:
+        Updated user
+
+    Raises:
+        HTTPException: If email is already taken by another user
+    """
+    # Check if email is being changed and is already taken
+    if user_update.email and user_update.email != current_user.email:
+        existing_user = await user_crud.get_user_by_email(db, user_update.email)
+        if existing_user:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Email already registered",
+            )
+
+    # Update user
+    updated_user = await user_crud.update_user(db, current_user, user_update)
+
+    logger.info(
+        "auth.user_updated",
+        user_id=str(updated_user.id),
+        email=updated_user.email,
+        email_scan_notifications=updated_user.email_scan_notifications,
+    )
+
+    return updated_user

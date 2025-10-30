@@ -30,11 +30,18 @@ azure-mgmt-resource==23.0.1
 azure-mgmt-compute==30.5.0
 azure-mgmt-network==25.2.0
 azure-mgmt-storage==21.1.0
+azure-storage-blob==12.27.1  # Azure Storage Blob client for blob operations
 azure-mgmt-monitor==6.0.2
 azure-monitor-query==1.3.0
 azure-mgmt-containerservice==30.0.0  # AKS management
 kubernetes==28.1.0  # Kubernetes Python client for AKS pod/PV detection
 pyyaml==6.0.1  # YAML parsing for kubeconfig
+azure-mgmt-sql==3.0.1  # Azure SQL Database management
+azure-mgmt-cosmosdb==9.3.0  # Azure Cosmos DB management (includes Table API)
+azure-mgmt-rdbms==10.1.0  # Azure PostgreSQL/MySQL management
+azure-mgmt-synapse==2.0.0  # Azure Synapse Analytics management
+azure-mgmt-redis==14.1.0  # Azure Cache for Redis management
+azure-mgmt-web==7.2.0  # Azure App Service / Functions management
 
 # Validation
 pydantic==2.6.1

@@ -1098,6 +1098,122 @@ DEFAULT_DETECTION_RULES = {
         "confidence_medium_days": 30,  # Medium if >3 min
         "description": "Function App with long execution time (>5 min avg) via Application Insights - optimize code ($72/month P1 savings, 15% frequency)",
     },
+    # ===================================
+    # AZURE COSMOS DB TABLE API (12 Scenarios - 100% Coverage)
+    # ===================================
+    # P0 Scenarios - Critical ROI ($31,177/year)
+    "cosmosdb_table_api_low_traffic": {
+        "enabled": True,
+        "min_age_days": 30,  # Minimum age before flagging
+        "max_requests_per_sec_threshold": 100,  # <100 req/sec = migrate to Azure Table Storage
+        "confidence_critical_days": 90,  # Critical after 90 days
+        "confidence_high_days": 60,  # High confidence after 60 days
+        "confidence_medium_days": 30,  # Medium confidence after 30 days
+        "description": "Cosmos DB Table API with low traffic (<100 req/sec) - migrate to Azure Table Storage ($291.60/account/month savings - 90%)",
+    },
+    "cosmosdb_table_over_provisioned_ru": {
+        "enabled": True,
+        "min_age_days": 14,  # Stable for > 14 days
+        "monitoring_days": 30,  # Azure Monitor lookback period
+        "over_provisioned_threshold": 30,  # <30% RU utilization = over-provisioned
+        "recommended_buffer": 1.3,  # 30% buffer above peak usage
+        "confidence_high_days": 30,
+        "confidence_medium_days": 14,
+        "description": "Cosmos DB Table API with RU utilization <30% over 30 days - reduce RU/s ($227-682/month savings - 70%)",
+    },
+    "cosmosdb_table_high_storage_low_throughput": {
+        "enabled": True,
+        "min_age_days": 30,  # Stable for > 30 days
+        "monitoring_days": 30,  # Azure Monitor lookback period
+        "min_storage_gb_threshold": 500,  # >500 GB storage
+        "max_ru_utilization_threshold": 20,  # <20% RU utilization
+        "confidence_critical_days": 90,
+        "confidence_high_days": 60,
+        "confidence_medium_days": 30,
+        "description": "Cosmos DB Table API with high storage (>500GB) + low RU (<20%) - migrate to Azure Table Storage ($850/month savings)",
+    },
+    "cosmosdb_table_idle": {
+        "enabled": True,
+        "min_age_days": 30,  # Zero requests for > 30 days
+        "monitoring_days": 30,  # Azure Monitor lookback period
+        "max_requests_threshold": 100,  # <100 total requests = idle
+        "confidence_critical_days": 90,  # CRITICAL - very expensive idle resource
+        "confidence_high_days": 60,
+        "confidence_medium_days": 30,
+        "description": "Cosmos DB Table API idle (0 requests over 30 days) - CRITICAL waste ($324/month per account)",
+    },
+    "cosmosdb_table_autoscale_not_scaling_down": {
+        "enabled": True,
+        "min_age_days": 14,  # Stable for > 14 days
+        "monitoring_days": 30,  # Azure Monitor lookback period
+        "autoscale_stuck_threshold": 95,  # >95% time at max RU/s
+        "confidence_high_days": 30,
+        "confidence_medium_days": 14,
+        "description": "Cosmos DB Table API autoscale stuck at max (>95% time) - switch to manual provisioned ($129/month savings - 33%)",
+    },
+    # P1 Scenarios - High ROI ($15,912/year)
+    "cosmosdb_table_unnecessary_multi_region": {
+        "enabled": True,
+        "min_age_days": 30,  # Stable for > 30 days
+        "dev_environments": ["dev", "test", "staging", "qa", "development", "nonprod"],
+        "min_regions": 2,  # Flag if >= 2 regions
+        "confidence_critical_days": 90,
+        "confidence_high_days": 60,
+        "confidence_medium_days": 30,
+        "description": "Cosmos DB Table API multi-region in dev/test - use single-region ($324/month per extra region - 50%)",
+    },
+    "cosmosdb_table_continuous_backup_unused": {
+        "enabled": True,
+        "min_age_days": 30,  # Stable for > 30 days
+        "lookback_days": 90,  # Check restore history over 90 days
+        "compliance_tags": ["compliance", "hipaa", "pci", "sox", "gdpr", "regulated"],
+        "confidence_high_days": 90,
+        "confidence_medium_days": 30,
+        "description": "Cosmos DB Table API continuous backup without compliance tags - switch to periodic ($156/TB/month savings - 44%)",
+    },
+    "cosmosdb_table_empty_tables": {
+        "enabled": True,
+        "min_age_days": 30,  # Empty for > 30 days
+        "min_provisioned_ru": 400,  # Minimum RU/s per table
+        "confidence_critical_days": 90,
+        "confidence_high_days": 60,
+        "confidence_medium_days": 30,
+        "description": "Cosmos DB Table API with empty tables provisioned - delete empty tables ($25.92/table/month waste)",
+    },
+    "cosmosdb_table_throttled_need_autoscale": {
+        "enabled": True,
+        "min_age_days": 7,  # Stable for > 7 days
+        "monitoring_days": 14,  # Azure Monitor lookback period
+        "throttling_threshold": 5,  # >5% throttling rate
+        "confidence_high_days": 14,
+        "confidence_medium_days": 7,
+        "description": "Cosmos DB Table API manual provisioned with throttling (>5%) - enable autoscale to prevent errors",
+    },
+    # P2 Scenarios - Medium ROI ($3,448/year)
+    "cosmosdb_table_never_used": {
+        "enabled": True,
+        "min_age_days": 30,  # Never used for > 30 days
+        "confidence_critical_days": 90,
+        "confidence_high_days": 60,
+        "confidence_medium_days": 30,
+        "description": "Cosmos DB Table API never used (0 tables created) - cleanup recommended ($324/month waste)",
+    },
+    "cosmosdb_table_unnecessary_zone_redundancy": {
+        "enabled": True,
+        "min_age_days": 30,  # Stable for > 30 days
+        "dev_environments": ["dev", "test", "staging", "qa", "development", "nonprod"],
+        "confidence_high_days": 60,
+        "confidence_medium_days": 30,
+        "description": "Cosmos DB Table API zone-redundant in dev/test - disable zone redundancy ($37/month savings - 15%)",
+    },
+    "cosmosdb_table_analytical_storage_never_used": {
+        "enabled": True,
+        "min_age_days": 30,  # Stable for > 30 days
+        "lookback_days": 90,  # Check analytical query history over 90 days
+        "confidence_high_days": 90,
+        "confidence_medium_days": 30,
+        "description": "Cosmos DB Table API analytical storage never used - disable analytical store ($30/TB/month savings)",
+    },
 }
 
 
