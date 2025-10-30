@@ -149,7 +149,11 @@ export type ResourceType =
   | "virtual_machine_stopped_not_deallocated"
   | "virtual_machine_never_started"
   | "virtual_machine_oversized_premium"
-  | "virtual_machine_untagged_orphan";
+  | "virtual_machine_untagged_orphan"
+  // Azure Storage Accounts
+  | "storage_account_empty"
+  | "storage_account_never_used"
+  | "storage_account_no_transactions";
 
 export type ConfidenceLevel = "critical" | "high" | "medium" | "low";
 
