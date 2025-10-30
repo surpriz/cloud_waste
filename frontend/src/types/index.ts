@@ -211,7 +211,27 @@ export type ResourceType =
   | "hdinsight_spark_excessive_shuffle_data"
   | "hdinsight_spark_autoscale_not_working"
   | "hdinsight_spark_low_memory_utilization"
-  | "hdinsight_spark_high_job_failure_rate";
+  | "hdinsight_spark_high_job_failure_rate"
+  // Azure Machine Learning Compute Instance - Phase 1 (10 scenarios)
+  | "ml_compute_instance_no_auto_shutdown"
+  | "ml_compute_instance_gpu_for_cpu_workload"
+  | "ml_compute_instance_stopped_30_days"
+  | "ml_compute_instance_over_provisioned"
+  | "ml_compute_instance_never_accessed"
+  | "ml_compute_instance_multiple_per_user"
+  | "ml_compute_instance_premium_ssd_unnecessary"
+  | "ml_compute_instance_no_idle_shutdown"
+  | "ml_compute_instance_dev_high_performance_sku"
+  | "ml_compute_instance_old_sdk_deprecated_image"
+  // Azure Machine Learning Compute Instance - Phase 2 (8 scenarios with Azure Monitor)
+  | "ml_compute_instance_low_cpu_utilization"
+  | "ml_compute_instance_low_gpu_utilization"
+  | "ml_compute_instance_idle_business_hours"
+  | "ml_compute_instance_no_jupyter_activity"
+  | "ml_compute_instance_no_training_jobs"
+  | "ml_compute_instance_low_memory_utilization"
+  | "ml_compute_instance_network_idle"
+  | "ml_compute_instance_disk_io_near_zero";
 
 export type ConfidenceLevel = "critical" | "high" | "medium" | "low";
 

@@ -17,6 +17,13 @@ import {
   Network,
   Database,
   Zap,
+  Activity,
+  AlertTriangle,
+  TrendingDown,
+  Users,
+  Clock,
+  FileText,
+  Cpu,
 } from "lucide-react";
 import type { ResourceStatus, ResourceType } from "@/types";
 import { ResourceChartsSection } from "@/components/dashboard/ResourceChartsSection";
@@ -122,6 +129,26 @@ const resourceIcons: Record<ResourceType, any> = {
   hdinsight_spark_autoscale_not_working: Server,
   hdinsight_spark_low_memory_utilization: Server,
   hdinsight_spark_high_job_failure_rate: Server,
+  // Azure Machine Learning Compute Instance - Phase 1 (10 scenarios)
+  ml_compute_instance_no_auto_shutdown: Server,
+  ml_compute_instance_gpu_for_cpu_workload: Cpu,
+  ml_compute_instance_stopped_30_days: Server,
+  ml_compute_instance_over_provisioned: TrendingDown,
+  ml_compute_instance_never_accessed: AlertTriangle,
+  ml_compute_instance_multiple_per_user: Users,
+  ml_compute_instance_premium_ssd_unnecessary: HardDrive,
+  ml_compute_instance_no_idle_shutdown: Clock,
+  ml_compute_instance_dev_high_performance_sku: Zap,
+  ml_compute_instance_old_sdk_deprecated_image: AlertTriangle,
+  // Azure Machine Learning Compute Instance - Phase 2 (8 scenarios)
+  ml_compute_instance_low_cpu_utilization: Activity,
+  ml_compute_instance_low_gpu_utilization: Cpu,
+  ml_compute_instance_idle_business_hours: Clock,
+  ml_compute_instance_no_jupyter_activity: FileText,
+  ml_compute_instance_no_training_jobs: Activity,
+  ml_compute_instance_low_memory_utilization: Server,
+  ml_compute_instance_network_idle: Network,
+  ml_compute_instance_disk_io_near_zero: HardDrive,
 };
 
 // Confidence level badge component

@@ -45,6 +45,8 @@ azure-mgmt-web==7.2.0  # Azure App Service / Functions management
 azure-mgmt-appcontainers==4.0.0  # Azure Container Apps management
 azure-mgmt-desktopvirtualization==1.1.0  # Azure Virtual Desktop (AVD) management
 azure-mgmt-hdinsight==9.0.0  # Azure HDInsight Spark cluster management
+azure-ai-ml==1.19.0  # Azure Machine Learning SDK for Compute Instances
+azure-mgmt-machinelearningservices==2.0.0  # Azure ML Services management
 
 # Validation
 pydantic==2.6.1

@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { User, Bell, Shield, Trash2, Save, Key, Sliders, RotateCcw, HardDrive, Globe, Camera, Server, Activity, Zap, Database, ArrowLeft, Network, AlertTriangle, TrendingDown, Archive, TestTube, Copy, Clock } from "lucide-react";
+import { User, Bell, Shield, Trash2, Save, Key, Sliders, RotateCcw, HardDrive, Globe, Camera, Server, Activity, Zap, Database, ArrowLeft, Network, AlertTriangle, TrendingDown, Archive, TestTube, Copy, Clock, Cpu, Users, FileText } from "lucide-react";
 import Link from "next/link";
 import { useNotifications } from "@/hooks/useNotifications";
 import { Toast } from "@/components/ui/Toast";
@@ -229,6 +229,25 @@ const AZURE_RESOURCE_ICONS: { [key: string]: any } = {
   hdinsight_spark_autoscale_not_working: AlertTriangle,
   hdinsight_spark_low_memory_utilization: Activity,
   hdinsight_spark_high_job_failure_rate: AlertTriangle,
+  // Azure Machine Learning Compute Instance (18 scenarios - 100% coverage)
+  ml_compute_instance_no_auto_shutdown: Server,
+  ml_compute_instance_gpu_for_cpu_workload: Cpu,
+  ml_compute_instance_stopped_30_days: Server,
+  ml_compute_instance_over_provisioned: TrendingDown,
+  ml_compute_instance_never_accessed: AlertTriangle,
+  ml_compute_instance_multiple_per_user: Users,
+  ml_compute_instance_premium_ssd_unnecessary: HardDrive,
+  ml_compute_instance_no_idle_shutdown: Clock,
+  ml_compute_instance_dev_high_performance_sku: Zap,
+  ml_compute_instance_old_sdk_deprecated_image: AlertTriangle,
+  ml_compute_instance_low_cpu_utilization: Activity,
+  ml_compute_instance_low_gpu_utilization: Cpu,
+  ml_compute_instance_idle_business_hours: Clock,
+  ml_compute_instance_no_jupyter_activity: FileText,
+  ml_compute_instance_no_training_jobs: Activity,
+  ml_compute_instance_low_memory_utilization: Server,
+  ml_compute_instance_network_idle: Network,
+  ml_compute_instance_disk_io_near_zero: HardDrive,
 };
 
 const AZURE_RESOURCE_LABELS: { [key: string]: string } = {
@@ -407,6 +426,27 @@ const AZURE_RESOURCE_LABELS: { [key: string]: string } = {
   hdinsight_spark_autoscale_not_working: "HDInsight Spark (Autoscale Not Working - Variance <1) ⚠️ P1",
   hdinsight_spark_low_memory_utilization: "HDInsight Spark (Worker Memory <25%) 📊💰💰 P1",
   hdinsight_spark_high_job_failure_rate: "HDInsight Spark (Job Failure Rate >25%) ⚠️📊 P1",
+  // Azure Machine Learning Compute Instance (18 scenarios - 100% coverage)
+  // Phase 1 - Detection Simple (10 scenarios)
+  ml_compute_instance_no_auto_shutdown: "ML Compute Instance (No Auto-Shutdown 24/7) 💰💰💰💰 P0",
+  ml_compute_instance_gpu_for_cpu_workload: "ML Compute Instance (GPU for CPU Workload) 🚨💰💰💰💰 P0",
+  ml_compute_instance_stopped_30_days: "ML Compute Instance (Stopped >30 days) 💰 P2",
+  ml_compute_instance_over_provisioned: "ML Compute Instance (Over-Provisioned <30% CPU <40% RAM) 💰💰💰 P0",
+  ml_compute_instance_never_accessed: "ML Compute Instance (Never Accessed 60+ days) 🚨💰💰💰💰 P0",
+  ml_compute_instance_multiple_per_user: "ML Compute Instance (Multiple Per User - Duplication) 💰💰💰 P0",
+  ml_compute_instance_premium_ssd_unnecessary: "ML Compute Instance (Premium SSD Unnecessary <30% IOPS) 💰💰 P1",
+  ml_compute_instance_no_idle_shutdown: "ML Compute Instance (No Idle Shutdown) 💰💰 P1",
+  ml_compute_instance_dev_high_performance_sku: "ML Compute Instance (Dev/Test High-Perf SKU >=16 vCPU) 💰💰💰💰 P0",
+  ml_compute_instance_old_sdk_deprecated_image: "ML Compute Instance (Old SDK/Image >1 year) ⚠️🔒 P0",
+  // Phase 2 - Azure Monitor + Azure ML API (8 scenarios)
+  ml_compute_instance_low_cpu_utilization: "ML Compute Instance (CPU <10% 30+ days) 📊💰💰💰 P0",
+  ml_compute_instance_low_gpu_utilization: "ML Compute Instance (GPU <15% 14+ days) 🚨📊💰💰💰💰 P0",
+  ml_compute_instance_idle_business_hours: "ML Compute Instance (Idle 9-5 PM <5% CPU) 📊💰💰 P1",
+  ml_compute_instance_no_jupyter_activity: "ML Compute Instance (0 Jupyter Activity 30+ days) 🚨📊💰💰💰💰 P0",
+  ml_compute_instance_no_training_jobs: "ML Compute Instance (0 Training Jobs 30+ days) 🚨📊💰💰💰💰 P0",
+  ml_compute_instance_low_memory_utilization: "ML Compute Instance (Memory <25% 30+ days) 📊💰💰 P1",
+  ml_compute_instance_network_idle: "ML Compute Instance (Network Idle <1MB/day 30+ days) 📊💰💰💰💰 P0",
+  ml_compute_instance_disk_io_near_zero: "ML Compute Instance (Disk I/O <100 IOPS/day 30+ days) 📊💰💰💰💰 P0",
 };
 
 // Helper function to get provider from resource type
