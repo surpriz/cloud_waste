@@ -102,6 +102,26 @@ const resourceIcons: Record<ResourceType, any> = {
   avd_high_host_count_low_users: Server,
   avd_disconnected_sessions_waste: Server,
   avd_peak_hours_mismatch: Server,
+  // Azure HDInsight Spark Cluster - Phase 1 (10 scenarios)
+  hdinsight_spark_cluster_stopped: Server,
+  hdinsight_spark_cluster_never_used: Server,
+  hdinsight_spark_premium_storage_dev: HardDrive,
+  hdinsight_spark_no_autoscale: Server,
+  hdinsight_spark_outdated_version: Server,
+  hdinsight_spark_external_metastore_unused: Database,
+  hdinsight_spark_empty_cluster: Server,
+  hdinsight_spark_oversized_head_nodes: Server,
+  hdinsight_spark_unnecessary_edge_node: Server,
+  hdinsight_spark_undersized_disks: HardDrive,
+  // Azure HDInsight Spark Cluster - Phase 2 (8 scenarios with Azure Monitor + Ambari)
+  hdinsight_spark_low_cpu_utilization: Server,
+  hdinsight_spark_zero_jobs_metrics: Server,
+  hdinsight_spark_idle_business_hours: Server,
+  hdinsight_spark_high_yarn_memory_waste: Server,
+  hdinsight_spark_excessive_shuffle_data: Server,
+  hdinsight_spark_autoscale_not_working: Server,
+  hdinsight_spark_low_memory_utilization: Server,
+  hdinsight_spark_high_job_failure_rate: Server,
 };
 
 // Confidence level badge component

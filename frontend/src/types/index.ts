@@ -191,7 +191,27 @@ export type ResourceType =
   | "avd_zero_user_sessions"
   | "avd_high_host_count_low_users"
   | "avd_disconnected_sessions_waste"
-  | "avd_peak_hours_mismatch";
+  | "avd_peak_hours_mismatch"
+  // Azure HDInsight Spark Cluster - Phase 1 (10 scenarios)
+  | "hdinsight_spark_cluster_stopped"
+  | "hdinsight_spark_cluster_never_used"
+  | "hdinsight_spark_premium_storage_dev"
+  | "hdinsight_spark_no_autoscale"
+  | "hdinsight_spark_outdated_version"
+  | "hdinsight_spark_external_metastore_unused"
+  | "hdinsight_spark_empty_cluster"
+  | "hdinsight_spark_oversized_head_nodes"
+  | "hdinsight_spark_unnecessary_edge_node"
+  | "hdinsight_spark_undersized_disks"
+  // Azure HDInsight Spark Cluster - Phase 2 (8 scenarios with Azure Monitor + Ambari)
+  | "hdinsight_spark_low_cpu_utilization"
+  | "hdinsight_spark_zero_jobs_metrics"
+  | "hdinsight_spark_idle_business_hours"
+  | "hdinsight_spark_high_yarn_memory_waste"
+  | "hdinsight_spark_excessive_shuffle_data"
+  | "hdinsight_spark_autoscale_not_working"
+  | "hdinsight_spark_low_memory_utilization"
+  | "hdinsight_spark_high_job_failure_rate";
 
 export type ConfidenceLevel = "critical" | "high" | "medium" | "low";
 

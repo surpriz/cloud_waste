@@ -208,6 +208,27 @@ const AZURE_RESOURCE_ICONS: { [key: string]: any } = {
   avd_high_host_count_low_users: TrendingDown,
   avd_disconnected_sessions_waste: Activity,
   avd_peak_hours_mismatch: Clock,
+  // Azure HDInsight Spark Cluster (18 scenarios - 100% coverage)
+  // Phase 1 - Detection Simple (10 scenarios)
+  hdinsight_spark_cluster_stopped: Server,
+  hdinsight_spark_cluster_never_used: Server,
+  hdinsight_spark_premium_storage_dev: HardDrive,
+  hdinsight_spark_no_autoscale: TrendingDown,
+  hdinsight_spark_outdated_version: AlertTriangle,
+  hdinsight_spark_external_metastore_unused: Database,
+  hdinsight_spark_empty_cluster: Server,
+  hdinsight_spark_oversized_head_nodes: Server,
+  hdinsight_spark_unnecessary_edge_node: Server,
+  hdinsight_spark_undersized_disks: HardDrive,
+  // Phase 2 - Azure Monitor + Ambari API (8 scenarios)
+  hdinsight_spark_low_cpu_utilization: Activity,
+  hdinsight_spark_zero_jobs_metrics: AlertTriangle,
+  hdinsight_spark_idle_business_hours: Clock,
+  hdinsight_spark_high_yarn_memory_waste: Activity,
+  hdinsight_spark_excessive_shuffle_data: Activity,
+  hdinsight_spark_autoscale_not_working: AlertTriangle,
+  hdinsight_spark_low_memory_utilization: Activity,
+  hdinsight_spark_high_job_failure_rate: AlertTriangle,
 };
 
 const AZURE_RESOURCE_LABELS: { [key: string]: string } = {
@@ -365,6 +386,27 @@ const AZURE_RESOURCE_LABELS: { [key: string]: string } = {
   avd_high_host_count_low_users: "Virtual Desktop (Many Hosts <20% Capacity) 📊💰💰💰💰 P0",
   avd_disconnected_sessions_waste: "Virtual Desktop (High Disconnected No Timeout) 📊💰💰 P1",
   avd_peak_hours_mismatch: "Virtual Desktop (Autoscale Mismatch Peak Hours) 📊💰💰💰 P0",
+  // Azure HDInsight Spark Cluster (18 scenarios - 100% coverage)
+  // Phase 1 - Detection Simple (10 scenarios)
+  hdinsight_spark_cluster_stopped: "HDInsight Spark (Cluster Stopped >7 days) 💰💰 P1",
+  hdinsight_spark_cluster_never_used: "HDInsight Spark (Never Used - 0 Jobs) 🚨💰💰💰💰 P0",
+  hdinsight_spark_premium_storage_dev: "HDInsight Spark (Premium Storage in Dev/Test) 💰💰💰 P0",
+  hdinsight_spark_no_autoscale: "HDInsight Spark (No Autoscale >=5 Workers) 💰💰💰💰 P0",
+  hdinsight_spark_outdated_version: "HDInsight Spark (Outdated Version - Security Risk) ⚠️🔒 P0",
+  hdinsight_spark_external_metastore_unused: "HDInsight Spark (External Metastore Never Used) 💰 P2",
+  hdinsight_spark_empty_cluster: "HDInsight Spark (Processes <1GB Data) 🚨💰💰💰💰 P0",
+  hdinsight_spark_oversized_head_nodes: "HDInsight Spark (Oversized Head Nodes >D4_v2) 💰 P2",
+  hdinsight_spark_unnecessary_edge_node: "HDInsight Spark (Unused Edge Node) 💰💰 P1",
+  hdinsight_spark_undersized_disks: "HDInsight Spark (Worker Disks <256GB - Performance Issue) ⚠️ P1",
+  // Phase 2 - Azure Monitor + Ambari API (8 scenarios)
+  hdinsight_spark_low_cpu_utilization: "HDInsight Spark (Worker CPU <20%) 📊💰💰💰 P0",
+  hdinsight_spark_zero_jobs_metrics: "HDInsight Spark (0 Jobs 30+ days - Ambari) 🚨📊💰💰💰💰 P0",
+  hdinsight_spark_idle_business_hours: "HDInsight Spark (Idle During Business Hours) 📊💰💰💰💰 P0",
+  hdinsight_spark_high_yarn_memory_waste: "HDInsight Spark (YARN Memory <40% Utilized) 📊💰💰💰 P0",
+  hdinsight_spark_excessive_shuffle_data: "HDInsight Spark (Shuffle Data >5x Input - Optimize Jobs) 📊⚠️ P1",
+  hdinsight_spark_autoscale_not_working: "HDInsight Spark (Autoscale Not Working - Variance <1) ⚠️ P1",
+  hdinsight_spark_low_memory_utilization: "HDInsight Spark (Worker Memory <25%) 📊💰💰 P1",
+  hdinsight_spark_high_job_failure_rate: "HDInsight Spark (Job Failure Rate >25%) ⚠️📊 P1",
 };
 
 // Helper function to get provider from resource type

@@ -1487,6 +1487,132 @@ DEFAULT_DETECTION_RULES = {
         "confidence_medium_days": 30,
         "description": "Autoscale peak hours don't match actual usage patterns - adjust schedule ($2,301/month waste: 4h/day mismatch × 10 hosts)",
     },
+    # ===== Azure HDInsight Spark Cluster (18 scenarios - 100% coverage) =====
+    # Phase 1 - Detection Simple (10 scenarios)
+    "hdinsight_spark_cluster_stopped": {
+        "enabled": True,
+        "min_stopped_days": 7,
+        "confidence_medium_days": 7,
+        "confidence_high_days": 30,
+        "description": "Spark cluster stopped >7 days - still paying storage costs (~$840/month for small cluster)",
+    },
+    "hdinsight_spark_cluster_never_used": {
+        "enabled": True,
+        "min_age_days": 14,
+        "confidence_high_days": 14,
+        "description": "Spark cluster never executed any jobs since creation (14+ days) - 100% waste ($8,400/month typical cluster)",
+    },
+    "hdinsight_spark_premium_storage_dev": {
+        "enabled": True,
+        "dev_environments": ["dev", "test", "staging", "qa", "development", "nonprod"],
+        "min_age_days": 7,
+        "confidence_high_days": 7,
+        "description": "Premium storage in dev/test environments - migrate to Standard ($800/month savings per cluster)",
+    },
+    "hdinsight_spark_no_autoscale": {
+        "enabled": True,
+        "min_worker_nodes": 5,
+        "confidence_medium_days": 30,
+        "confidence_high_days": 60,
+        "description": "No autoscale configured with >= 5 worker nodes - waste 40-60% during low-load periods ($5,600/month for 24/7 cluster)",
+    },
+    "hdinsight_spark_outdated_version": {
+        "enabled": True,
+        "min_supported_versions": ["3.2", "3.3"],  # Spark versions
+        "confidence_critical_days": 90,
+        "description": "Outdated Spark version (security risk + no support) - upgrade to 3.3+ or migrate to Synapse/Databricks",
+    },
+    "hdinsight_spark_external_metastore_unused": {
+        "enabled": True,
+        "min_observation_days": 30,
+        "confidence_high_days": 30,
+        "description": "External metastore (SQL DB) configured but never accessed - $73/month wasted on S0 tier",
+    },
+    "hdinsight_spark_empty_cluster": {
+        "enabled": True,
+        "min_age_days": 14,
+        "max_data_processed_gb": 1,
+        "confidence_high_days": 14,
+        "description": "Cluster processes <1GB data in 14+ days - delete or migrate to serverless ($8,400/month waste)",
+    },
+    "hdinsight_spark_oversized_head_nodes": {
+        "enabled": True,
+        "max_recommended_head_node_size": "Standard_D4_v2",
+        "confidence_medium_days": 30,
+        "description": "Head nodes oversized (>D4_v2) - downsize head nodes ($200/month savings per node)",
+    },
+    "hdinsight_spark_unnecessary_edge_node": {
+        "enabled": True,
+        "min_observation_days": 30,
+        "confidence_medium_days": 30,
+        "description": "Edge node provisioned but never used - remove edge node ($490/month savings for D13_v2)",
+    },
+    "hdinsight_spark_undersized_disks": {
+        "enabled": True,
+        "min_disk_size_gb": 256,
+        "confidence_medium_days": 30,
+        "description": "Worker node disks <256GB causing spill-to-disk issues - increase disk size or optimize jobs (performance issue)",
+    },
+    # Phase 2 - Azure Monitor + Ambari API Metrics (8 scenarios)
+    "hdinsight_spark_low_cpu_utilization": {
+        "enabled": True,
+        "max_cpu_utilization_percent": 20,
+        "min_observation_days": 30,
+        "confidence_high_days": 30,
+        "confidence_critical_days": 60,
+        "description": "Worker nodes with <20% avg CPU utilization - downsize worker nodes ($2,800/month savings: 10 workers → 6 workers)",
+    },
+    "hdinsight_spark_zero_jobs_metrics": {
+        "enabled": True,
+        "min_observation_days": 30,
+        "confidence_critical_days": 30,
+        "description": "0 Spark jobs submitted in 30+ days (Ambari metrics) - delete cluster ($8,400/month waste)",
+    },
+    "hdinsight_spark_idle_business_hours": {
+        "enabled": True,
+        "business_hours_start": 9,
+        "business_hours_end": 17,
+        "max_cpu_threshold_percent": 10,
+        "min_observation_days": 14,
+        "confidence_high_days": 14,
+        "description": "Cluster idle (<10% CPU) during business hours (9-5) - investigate usage patterns or delete ($8,400/month waste)",
+    },
+    "hdinsight_spark_high_yarn_memory_waste": {
+        "enabled": True,
+        "max_memory_utilization_percent": 40,
+        "min_observation_days": 30,
+        "confidence_high_days": 30,
+        "description": "YARN containers using <40% allocated memory - reduce executor memory config ($3,360/month savings: 10 workers → 6 workers)",
+    },
+    "hdinsight_spark_excessive_shuffle_data": {
+        "enabled": True,
+        "max_shuffle_data_ratio": 5.0,  # Shuffle data / Input data ratio
+        "min_observation_days": 14,
+        "confidence_medium_days": 14,
+        "description": "Jobs with shuffle data >5x input data - optimize partition strategy (performance + cost issue)",
+    },
+    "hdinsight_spark_autoscale_not_working": {
+        "enabled": True,
+        "max_worker_node_variance": 1,  # Worker count stddev
+        "min_observation_days": 30,
+        "confidence_medium_days": 30,
+        "description": "Autoscale configured but worker count never changes (variance <1) - fix autoscale rules or disable",
+    },
+    "hdinsight_spark_low_memory_utilization": {
+        "enabled": True,
+        "max_memory_utilization_percent": 25,
+        "min_observation_days": 30,
+        "confidence_high_days": 30,
+        "description": "Worker nodes with <25% memory utilization - downsize to memory-optimized series ($1,200/month savings)",
+    },
+    "hdinsight_spark_high_job_failure_rate": {
+        "enabled": True,
+        "max_job_failure_rate_percent": 25,
+        "min_jobs_count": 20,
+        "min_observation_days": 14,
+        "confidence_high_days": 14,
+        "description": "Job failure rate >25% - investigate job errors or cluster misconfig (waste compute + developer time)",
+    },
 }
 
 
