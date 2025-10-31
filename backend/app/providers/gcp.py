@@ -442,3 +442,16 @@ class GCPProvider(CloudProviderBase):
     ) -> list[OrphanResourceData]:
         """Not applicable for GCP (AWS NAT Gateway-specific)."""
         return []
+
+    # AWS-specific Load Balancer methods (not applicable to GCP)
+    async def scan_load_balancer_cross_zone_disabled(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """Not applicable for GCP (AWS Load Balancer-specific)."""
+        return []
+
+    async def scan_load_balancer_idle_patterns(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """Not applicable for GCP (AWS Load Balancer-specific)."""
+        return []
