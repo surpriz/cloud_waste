@@ -17912,3 +17912,219 @@ class AzureProvider(CloudProviderBase):
         - Accelerated Networking: No additional cost
         """
         return []
+
+    # =====================================================================
+    # AWS-SPECIFIC METHODS (Not applicable to Azure)
+    # =====================================================================
+    # These methods are specific to AWS resources and have no Azure equivalent.
+    # They are implemented as stubs to satisfy the abstract base class interface.
+
+    async def scan_volumes_on_stopped_instances(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """Not applicable for Azure (AWS EBS-specific)."""
+        return []
+
+    async def scan_gp2_migration_opportunities(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """Not applicable for Azure (AWS EBS-specific)."""
+        return []
+
+    async def scan_unnecessary_io2_volumes(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """Not applicable for Azure (AWS EBS-specific)."""
+        return []
+
+    async def scan_overprovisioned_iops_volumes(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """Not applicable for Azure (AWS EBS-specific)."""
+        return []
+
+    async def scan_overprovisioned_throughput_volumes(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """Not applicable for Azure (AWS EBS-specific)."""
+        return []
+
+    async def scan_low_iops_usage_volumes(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """Not applicable for Azure (AWS EBS-specific)."""
+        return []
+
+    async def scan_low_throughput_usage_volumes(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """Not applicable for Azure (AWS EBS-specific)."""
+        return []
+
+    async def scan_volume_type_downgrade_opportunities(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """Not applicable for Azure (AWS EBS-specific)."""
+        return []
+
+    async def scan_additional_eips_per_instance(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """Not applicable for Azure (AWS Elastic IP-specific)."""
+        return []
+
+    async def scan_eips_on_detached_enis(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """Not applicable for Azure (AWS Elastic IP-specific)."""
+        return []
+
+    async def scan_never_used_eips(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """Not applicable for Azure (AWS Elastic IP-specific)."""
+        return []
+
+    async def scan_eips_on_unused_nat_gateways(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """Not applicable for Azure (AWS Elastic IP-specific)."""
+        return []
+
+    async def scan_idle_eips(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """Not applicable for Azure (AWS Elastic IP-specific)."""
+        return []
+
+    async def scan_low_traffic_eips(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """Not applicable for Azure (AWS Elastic IP-specific)."""
+        return []
+
+    async def scan_unused_nat_gateway_eips(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """Not applicable for Azure (AWS Elastic IP-specific)."""
+        return []
+
+    async def scan_eips_on_failed_instances(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """Not applicable for Azure (AWS Elastic IP-specific)."""
+        return []
+
+    async def scan_redundant_snapshots(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """Not applicable for Azure (AWS EBS-specific)."""
+        return []
+
+    async def scan_old_unused_snapshots(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """Not applicable for Azure (AWS EBS-specific)."""
+        return []
+
+    async def scan_snapshots_from_deleted_instances(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """Not applicable for Azure (AWS EBS-specific)."""
+        return []
+
+    async def scan_incomplete_failed_snapshots(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """Not applicable for Azure (AWS EBS-specific)."""
+        return []
+
+    async def scan_untagged_snapshots(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """Not applicable for Azure (AWS EBS-specific)."""
+        return []
+
+    async def scan_excessive_retention_snapshots(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """Not applicable for Azure (AWS EBS-specific)."""
+        return []
+
+    async def scan_duplicate_snapshots(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """Not applicable for Azure (AWS EBS-specific)."""
+        return []
+
+    async def scan_unused_ami_snapshots(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """Not applicable for Azure (AWS AMI-specific)."""
+        return []
+
+    async def scan_oversized_instances(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """Not applicable for Azure (AWS EC2-specific)."""
+        return []
+
+    async def scan_old_generation_instances(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """Not applicable for Azure (AWS EC2-specific)."""
+        return []
+
+    async def scan_burstable_credit_waste(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """Not applicable for Azure (AWS T2/T3/T4-specific)."""
+        return []
+
+    async def scan_dev_test_24_7_instances(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """Not applicable for Azure (AWS EC2-specific)."""
+        return []
+
+    async def scan_untagged_ec2_instances(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """Not applicable for Azure (AWS EC2-specific)."""
+        return []
+
+    async def scan_right_sizing_opportunities(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """Not applicable for Azure (AWS EC2-specific)."""
+        return []
+
+    async def scan_spot_eligible_workloads(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """Not applicable for Azure (AWS Spot-specific)."""
+        return []
+
+    async def scan_scheduled_unused_instances(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """Not applicable for Azure (AWS EC2-specific)."""
+        return []
+
+    async def scan_nat_gateway_vpc_endpoint_candidates(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """Not applicable for Azure (AWS NAT Gateway-specific)."""
+        return []
+
+    async def scan_nat_gateway_dev_test_unused_hours(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """Not applicable for Azure (AWS NAT Gateway-specific)."""
+        return []
+
+    async def scan_nat_gateway_obsolete_migration(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """Not applicable for Azure (AWS NAT Gateway-specific)."""
+        return []
