@@ -59,9 +59,10 @@ print_error() {
 
 # Rollback function
 rollback() {
-    print_error "Déploiement échoué ! Lancement du rollback automatique..."
+    print_error "Déploiement échoué !"
 
     if [ -f "$STABLE_COMMIT_FILE" ]; then
+        print_warning "Lancement du rollback automatique..."
         STABLE_COMMIT=$(cat "$STABLE_COMMIT_FILE")
         print_warning "Retour au commit stable: $STABLE_COMMIT"
 
@@ -76,8 +77,17 @@ rollback() {
         print_success "Rollback terminé - Application restaurée à la version stable"
         exit 1
     else
-        print_error "Aucun commit stable trouvé - Impossible de faire un rollback"
-        print_warning "Les conteneurs actuels restent actifs"
+        print_warning "Aucun commit stable trouvé (premier déploiement?)"
+        print_warning "Le rollback automatique est désactivé pour ce déploiement"
+        print_error "Les conteneurs actuels restent dans leur état actuel"
+
+        echo ""
+        echo -e "${YELLOW}📋 Actions recommandées:${NC}"
+        echo "  1. Consultez les logs: docker logs cloudwaste_backend"
+        echo "  2. Vérifiez l'état: docker compose -f $COMPOSE_FILE ps"
+        echo "  3. Utilisez le script de diagnostic: bash deployment/diagnose.sh"
+        echo ""
+
         exit 1
     fi
 }
