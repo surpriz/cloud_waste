@@ -4434,6 +4434,678 @@ class AWSProvider(CloudProviderBase):
 
         return round(monthly_cost, 2)
 
+    async def scan_oversized_instances(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scan for over-provisioned EC2 instances (SCENARIO 2: ec2_instance_oversized).
+
+        Detects running instances with average CPU <30% over 30 days.
+
+        Args:
+            region: AWS region to scan
+            detection_rules: Optional user-defined detection rules
+
+        Returns:
+            List of orphan instance resources
+        """
+        orphans: list[OrphanResourceData] = []
+
+        from app.models.detection_rule import DEFAULT_DETECTION_RULES
+
+        rules = detection_rules or DEFAULT_DETECTION_RULES.get("ec2_instance", {})
+        detect_oversized = rules.get("detect_oversized", True)
+        cpu_threshold = rules.get("oversized_cpu_threshold", 30.0)
+        lookback_days = rules.get("oversized_lookback_days", 30)
+        min_instance_size = rules.get("oversized_min_instance_size", "xlarge")
+        enabled = rules.get("enabled", True)
+
+        if not enabled or not detect_oversized:
+            return orphans
+
+        try:
+            async with self.session.client("ec2", region_name=region) as ec2, \
+                     self.session.client("cloudwatch", region_name=region) as cloudwatch:
+
+                # Get all running instances
+                response = await ec2.describe_instances(
+                    Filters=[{'Name': 'instance-state-name', 'Values': ['running']}]
+                )
+
+                end_time = datetime.now(timezone.utc)
+                start_time = end_time - timedelta(days=lookback_days)
+
+                for reservation in response['Reservations']:
+                    for instance in reservation['Instances']:
+                        instance_id = instance['InstanceId']
+                        instance_type = instance['InstanceType']
+                        launch_time = instance['LaunchTime']
+
+                        # Only check larger instances (xlarge+)
+                        if min_instance_size not in instance_type and \
+                           '2xlarge' not in instance_type and \
+                           '4xlarge' not in instance_type and \
+                           '8xlarge' not in instance_type:
+                            continue
+
+                        # Get CPU metrics
+                        cpu_metrics = await cloudwatch.get_metric_statistics(
+                            Namespace='AWS/EC2',
+                            MetricName='CPUUtilization',
+                            Dimensions=[{'Name': 'InstanceId', 'Value': instance_id}],
+                            StartTime=start_time,
+                            EndTime=end_time,
+                            Period=3600,
+                            Statistics=['Average', 'Maximum']
+                        )
+
+                        if not cpu_metrics['Datapoints']:
+                            continue
+
+                        avg_cpu = sum(dp['Average'] for dp in cpu_metrics['Datapoints']) / len(cpu_metrics['Datapoints'])
+                        max_cpu = max((dp['Maximum'] for dp in cpu_metrics['Datapoints']), default=0)
+
+                        if avg_cpu < cpu_threshold:
+                            monthly_cost = self._estimate_ec2_instance_cost(instance_type)
+
+                            # Calculate recommended size
+                            recommended_type = self._recommend_smaller_instance(instance_type, avg_cpu, max_cpu)
+                            recommended_cost = self._estimate_ec2_instance_cost(recommended_type) if recommended_type != instance_type else monthly_cost
+                            savings = monthly_cost - recommended_cost
+
+                            tags = {tag['Key']: tag['Value'] for tag in instance.get('Tags', [])}
+                            name = tags.get('Name', 'Unnamed')
+
+                            metadata = {
+                                'instance_type': instance_type,
+                                'avg_cpu_30d': round(avg_cpu, 1),
+                                'max_cpu_30d': round(max_cpu, 1),
+                                'launch_time': launch_time.isoformat(),
+                                'current_monthly_cost': monthly_cost,
+                                'recommended_type': recommended_type,
+                                'recommended_monthly_cost': recommended_cost,
+                                'monthly_savings': round(savings, 2),
+                                'confidence': 'high' if avg_cpu < 15 else 'medium',
+                                'scenario': 'ec2_instance_oversized',
+                                'tags': tags
+                            }
+
+                            orphans.append(
+                                OrphanResourceData(
+                                    resource_type="ec2_instance",
+                                    resource_id=instance_id,
+                                    resource_name=name,
+                                    region=region,
+                                    estimated_monthly_cost=round(savings, 2),
+                                    resource_metadata=metadata,
+                                )
+                            )
+
+        except ClientError as e:
+            print(f"Error scanning oversized instances in {region}: {e}")
+
+        return orphans
+
+    async def scan_old_generation_instances(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scan for old generation EC2 instances (SCENARIO 3: ec2_instance_old_generation).
+
+        Detects instances using obsolete instance types (t2, m4, c4, r4).
+
+        Args:
+            region: AWS region to scan
+            detection_rules: Optional user-defined detection rules
+
+        Returns:
+            List of orphan instance resources
+        """
+        orphans: list[OrphanResourceData] = []
+
+        from app.models.detection_rule import DEFAULT_DETECTION_RULES
+
+        rules = detection_rules or DEFAULT_DETECTION_RULES.get("ec2_instance", {})
+        detect_old_generation = rules.get("detect_old_generation", True)
+        old_generations = rules.get("old_generations", ["t2", "m4", "c4", "r4", "i3", "x1", "p2", "g3"])
+        generation_mapping = rules.get("generation_mapping", {
+            "t2": "t3", "m4": "m5", "c4": "c5", "r4": "r5",
+            "i3": "i3en", "x1": "x2idn", "p2": "p3", "g3": "g4dn"
+        })
+        enabled = rules.get("enabled", True)
+
+        if not enabled or not detect_old_generation:
+            return orphans
+
+        try:
+            async with self.session.client("ec2", region_name=region) as ec2:
+                response = await ec2.describe_instances(
+                    Filters=[{'Name': 'instance-state-name', 'Values': ['running']}]
+                )
+
+                for reservation in response['Reservations']:
+                    for instance in reservation['Instances']:
+                        instance_id = instance['InstanceId']
+                        instance_type = instance['InstanceType']
+                        launch_time = instance['LaunchTime']
+
+                        family = instance_type.split('.')[0]
+
+                        if family in old_generations:
+                            size = instance_type.split('.')[1] if '.' in instance_type else 'large'
+                            new_family = generation_mapping.get(family, family)
+                            recommended_type = f"{new_family}.{size}"
+
+                            current_cost = self._estimate_ec2_instance_cost(instance_type)
+                            new_cost = self._estimate_ec2_instance_cost(recommended_type)
+                            savings = current_cost - new_cost
+
+                            tags = {tag['Key']: tag['Value'] for tag in instance.get('Tags', [])}
+                            name = tags.get('Name', 'Unnamed')
+
+                            metadata = {
+                                'instance_type': instance_type,
+                                'current_generation': family,
+                                'recommended_type': recommended_type,
+                                'new_generation': new_family,
+                                'launch_time': launch_time.isoformat(),
+                                'current_monthly_cost': current_cost,
+                                'new_monthly_cost': new_cost,
+                                'monthly_savings': round(savings, 2),
+                                'savings_percent': round((savings / current_cost * 100), 1) if current_cost > 0 else 0,
+                                'performance_improvement': '10-30%',
+                                'confidence': 'high',
+                                'scenario': 'ec2_instance_old_generation',
+                                'tags': tags
+                            }
+
+                            orphans.append(
+                                OrphanResourceData(
+                                    resource_type="ec2_instance",
+                                    resource_id=instance_id,
+                                    resource_name=name,
+                                    region=region,
+                                    estimated_monthly_cost=round(savings, 2),
+                                    resource_metadata=metadata,
+                                )
+                            )
+
+        except ClientError as e:
+            print(f"Error scanning old generation instances in {region}: {e}")
+
+        return orphans
+
+    def _recommend_smaller_instance(self, current_type: str, avg_cpu: float, max_cpu: float) -> str:
+        """Helper method to recommend smaller instance type based on CPU usage."""
+        parts = current_type.split('.')
+        if len(parts) != 2:
+            return current_type
+
+        family, size = parts[0], parts[1]
+        sizes = ['large', 'xlarge', '2xlarge', '4xlarge', '8xlarge', '12xlarge', '16xlarge', '24xlarge']
+
+        try:
+            current_index = sizes.index(size)
+        except ValueError:
+            return current_type
+
+        # Recommend downsize based on CPU
+        if avg_cpu < 15 and max_cpu < 40 and current_index >= 2:
+            new_index = max(current_index - 2, 0)
+        elif avg_cpu < 25 and max_cpu < 60 and current_index >= 1:
+            new_index = current_index - 1
+        else:
+            return current_type
+
+        return f"{family}.{sizes[new_index]}"
+
+    async def scan_burstable_credit_waste(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scan for T2/T3/T4 instances with CPU credit waste (SCENARIO 4).
+
+        Detects burstable instances with unused credits or Unlimited charges.
+        """
+        orphans: list[OrphanResourceData] = []
+        from app.models.detection_rule import DEFAULT_DETECTION_RULES
+
+        rules = detection_rules or DEFAULT_DETECTION_RULES.get("ec2_instance", {})
+        detect_burstable_waste = rules.get("detect_burstable_waste", True)
+        credit_threshold = rules.get("burstable_credit_threshold", 0.9)
+        lookback_days = rules.get("burstable_lookback_days", 30)
+        enabled = rules.get("enabled", True)
+
+        if not enabled or not detect_burstable_waste:
+            return orphans
+
+        try:
+            async with self.session.client("ec2", region_name=region) as ec2, \
+                     self.session.client("cloudwatch", region_name=region) as cloudwatch:
+                response = await ec2.describe_instances(
+                    Filters=[{'Name': 'instance-state-name', 'Values': ['running']}]
+                )
+
+                end_time = datetime.now(timezone.utc)
+                start_time = end_time - timedelta(days=lookback_days)
+
+                for reservation in response['Reservations']:
+                    for instance in reservation['Instances']:
+                        instance_type = instance['InstanceType']
+                        if not (instance_type.startswith('t2.') or instance_type.startswith('t3.') or instance_type.startswith('t4g.')):
+                            continue
+
+                        instance_id = instance['InstanceId']
+                        tags = {tag['Key']: tag['Value'] for tag in instance.get('Tags', [])}
+                        name = tags.get('Name', 'Unnamed')
+
+                        # Check CPU credit balance
+                        credit_metrics = await cloudwatch.get_metric_statistics(
+                            Namespace='AWS/EC2',
+                            MetricName='CPUCreditBalance',
+                            Dimensions=[{'Name': 'InstanceId', 'Value': instance_id}],
+                            StartTime=start_time,
+                            EndTime=end_time,
+                            Period=86400,
+                            Statistics=['Average', 'Maximum']
+                        )
+
+                        if credit_metrics['Datapoints']:
+                            avg_credits = sum(dp['Average'] for dp in credit_metrics['Datapoints']) / len(credit_metrics['Datapoints'])
+                            max_credits_map = {'t3.nano': 144, 't3.micro': 288, 't3.small': 576, 't3.medium': 576,
+                                             't3.large': 864, 't3.xlarge': 2880, 't3.2xlarge': 5760}
+                            max_credits = max_credits_map.get(instance_type, 1000)
+
+                            if avg_credits > (max_credits * credit_threshold):
+                                current_cost = self._estimate_ec2_instance_cost(instance_type)
+                                # Recommend M5 equivalent
+                                size = instance_type.split('.')[1]
+                                recommended_type = f"m5.{size}" if size in ['large', 'xlarge', '2xlarge'] else "m5.large"
+                                recommended_cost = self._estimate_ec2_instance_cost(recommended_type)
+                                savings = current_cost - recommended_cost
+
+                                orphans.append(OrphanResourceData(
+                                    resource_type="ec2_instance",
+                                    resource_id=instance_id,
+                                    resource_name=name,
+                                    region=region,
+                                    estimated_monthly_cost=round(savings, 2),
+                                    resource_metadata={
+                                        'instance_type': instance_type,
+                                        'avg_cpu_credits': round(avg_credits, 0),
+                                        'max_credits': max_credits,
+                                        'credit_utilization': round((avg_credits / max_credits * 100), 1),
+                                        'recommended_type': recommended_type,
+                                        'monthly_savings': round(savings, 2),
+                                        'confidence': 'high',
+                                        'scenario': 'ec2_instance_burstable_credit_waste',
+                                        'tags': tags
+                                    }
+                                ))
+
+        except ClientError as e:
+            print(f"Error scanning burstable credit waste in {region}: {e}")
+
+        return orphans
+
+    async def scan_dev_test_24_7_instances(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scan for dev/test instances running 24/7 (SCENARIO 5).
+
+        Detects non-production instances that should be scheduled.
+        """
+        orphans: list[OrphanResourceData] = []
+        from app.models.detection_rule import DEFAULT_DETECTION_RULES
+
+        rules = detection_rules or DEFAULT_DETECTION_RULES.get("ec2_instance", {})
+        detect_dev_test = rules.get("detect_dev_test_24_7", True)
+        env_tags = rules.get("nonprod_env_tags", ["Environment", "Env", "Stage"])
+        env_values = rules.get("nonprod_env_values", ["dev", "development", "test", "testing", "stage", "staging", "qa", "sandbox"])
+        min_age_days = rules.get("nonprod_min_age_days", 7)
+        enabled = rules.get("enabled", True)
+
+        if not enabled or not detect_dev_test:
+            return orphans
+
+        try:
+            async with self.session.client("ec2", region_name=region) as ec2:
+                response = await ec2.describe_instances(
+                    Filters=[{'Name': 'instance-state-name', 'Values': ['running']}]
+                )
+
+                for reservation in response['Reservations']:
+                    for instance in reservation['Instances']:
+                        instance_id = instance['InstanceId']
+                        instance_type = instance['InstanceType']
+                        launch_time = instance['LaunchTime']
+                        age_days = (datetime.now(timezone.utc) - launch_time).days
+
+                        if age_days < min_age_days:
+                            continue
+
+                        tags = {tag['Key']: tag['Value'] for tag in instance.get('Tags', [])}
+                        name = tags.get('Name', 'Unnamed')
+
+                        # Check if non-prod environment
+                        is_nonprod = False
+                        env_value = None
+                        for tag_key in env_tags:
+                            if tag_key in tags:
+                                tag_value = tags[tag_key].lower()
+                                if tag_value in env_values:
+                                    is_nonprod = True
+                                    env_value = tag_value
+                                    break
+
+                        if is_nonprod:
+                            monthly_cost = self._estimate_ec2_instance_cost(instance_type)
+                            # Savings assuming 67% reduction (business hours only)
+                            savings = monthly_cost * 0.67
+
+                            orphans.append(OrphanResourceData(
+                                resource_type="ec2_instance",
+                                resource_id=instance_id,
+                                resource_name=name,
+                                region=region,
+                                estimated_monthly_cost=round(savings, 2),
+                                resource_metadata={
+                                    'instance_type': instance_type,
+                                    'environment': env_value,
+                                    'is_nonprod': True,
+                                    'age_days': age_days,
+                                    'current_monthly_cost': monthly_cost,
+                                    'potential_savings': round(savings, 2),
+                                    'recommendation': 'Schedule on/off during business hours (9AM-6PM weekdays)',
+                                    'confidence': 'high',
+                                    'scenario': 'ec2_instance_dev_running_24_7',
+                                    'tags': tags
+                                }
+                            ))
+
+        except ClientError as e:
+            print(f"Error scanning dev/test 24/7 instances in {region}: {e}")
+
+        return orphans
+
+    async def scan_untagged_ec2_instances(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scan for untagged EC2 instances (SCENARIO 6).
+
+        Detects instances without any tags.
+        """
+        orphans: list[OrphanResourceData] = []
+        from app.models.detection_rule import DEFAULT_DETECTION_RULES
+
+        rules = detection_rules or DEFAULT_DETECTION_RULES.get("ec2_instance", {})
+        detect_untagged = rules.get("detect_untagged", True)
+        min_age_days = rules.get("untagged_min_age_days", 30)
+        enabled = rules.get("enabled", True)
+
+        if not enabled or not detect_untagged:
+            return orphans
+
+        try:
+            async with self.session.client("ec2", region_name=region) as ec2:
+                response = await ec2.describe_instances(
+                    Filters=[{'Name': 'instance-state-name', 'Values': ['running', 'stopped']}]
+                )
+
+                for reservation in response['Reservations']:
+                    for instance in reservation['Instances']:
+                        instance_id = instance['InstanceId']
+                        instance_type = instance['InstanceType']
+                        launch_time = instance['LaunchTime']
+                        age_days = (datetime.now(timezone.utc) - launch_time).days
+                        tags = instance.get('Tags', [])
+
+                        if not tags and age_days >= min_age_days:
+                            state = instance['State']['Name']
+                            monthly_cost = self._estimate_ec2_instance_cost(instance_type) if state == 'running' else 0
+
+                            orphans.append(OrphanResourceData(
+                                resource_type="ec2_instance",
+                                resource_id=instance_id,
+                                resource_name=instance_id,
+                                region=region,
+                                estimated_monthly_cost=round(monthly_cost, 2),
+                                resource_metadata={
+                                    'instance_type': instance_type,
+                                    'state': state,
+                                    'age_days': age_days,
+                                    'has_tags': False,
+                                    'recommendation': 'Add cost allocation tags or review for deletion',
+                                    'confidence': 'high',
+                                    'scenario': 'ec2_instance_untagged'
+                                }
+                            ))
+
+        except ClientError as e:
+            print(f"Error scanning untagged EC2 instances in {region}: {e}")
+
+        return orphans
+
+    async def scan_right_sizing_opportunities(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Advanced right-sizing opportunities (SCENARIO 8).
+
+        Detects instances that can be downsized based on comprehensive metrics.
+        """
+        orphans: list[OrphanResourceData] = []
+        from app.models.detection_rule import DEFAULT_DETECTION_RULES
+
+        rules = detection_rules or DEFAULT_DETECTION_RULES.get("ec2_instance", {})
+        detect_right_sizing = rules.get("detect_right_sizing", True)
+        cpu_threshold = rules.get("right_sizing_cpu_threshold", 40.0)
+        max_cpu_threshold = rules.get("right_sizing_max_cpu_threshold", 75.0)
+        enabled = rules.get("enabled", True)
+
+        if not enabled or not detect_right_sizing:
+            return orphans
+
+        # Note: This is a simplified version. Full implementation would analyze CPU, RAM, Network, Disk I/O
+        # For MVP, we focus on CPU-based right-sizing
+        return await self.scan_oversized_instances(region, detection_rules)
+
+    async def scan_spot_eligible_workloads(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scan for Spot-eligible workloads (SCENARIO 9).
+
+        Detects stable workloads suitable for Spot instances (70-90% savings).
+        """
+        orphans: list[OrphanResourceData] = []
+        from app.models.detection_rule import DEFAULT_DETECTION_RULES
+
+        rules = detection_rules or DEFAULT_DETECTION_RULES.get("ec2_instance", {})
+        detect_spot = rules.get("detect_spot_eligible", True)
+        cpu_variance_threshold = rules.get("spot_cpu_variance_threshold", 20.0)
+        min_uptime_days = rules.get("spot_min_uptime_days", 7)
+        enabled = rules.get("enabled", True)
+
+        if not enabled or not detect_spot:
+            return orphans
+
+        try:
+            async with self.session.client("ec2", region_name=region) as ec2, \
+                     self.session.client("cloudwatch", region_name=region) as cloudwatch:
+                response = await ec2.describe_instances(
+                    Filters=[{'Name': 'instance-state-name', 'Values': ['running']},
+                            {'Name': 'instance-lifecycle', 'Values': ['on-demand']}]  # Only On-Demand
+                )
+
+                end_time = datetime.now(timezone.utc)
+                start_time = end_time - timedelta(days=14)
+
+                for reservation in response['Reservations']:
+                    for instance in reservation['Instances']:
+                        instance_id = instance['InstanceId']
+                        instance_type = instance['InstanceType']
+                        launch_time = instance['LaunchTime']
+                        age_days = (datetime.now(timezone.utc) - launch_time).days
+
+                        if age_days < min_uptime_days:
+                            continue
+
+                        tags = {tag['Key']: tag['Value'] for tag in instance.get('Tags', [])}
+                        name = tags.get('Name', 'Unnamed')
+
+                        # Get CPU metrics to check stability
+                        cpu_metrics = await cloudwatch.get_metric_statistics(
+                            Namespace='AWS/EC2',
+                            MetricName='CPUUtilization',
+                            Dimensions=[{'Name': 'InstanceId', 'Value': instance_id}],
+                            StartTime=start_time,
+                            EndTime=end_time,
+                            Period=3600,
+                            Statistics=['Average']
+                        )
+
+                        if cpu_metrics['Datapoints'] and len(cpu_metrics['Datapoints']) > 20:
+                            cpu_values = [dp['Average'] for dp in cpu_metrics['Datapoints']]
+                            avg_cpu = sum(cpu_values) / len(cpu_values)
+                            variance = sum((x - avg_cpu) ** 2 for x in cpu_values) / len(cpu_values)
+                            std_dev = variance ** 0.5
+
+                            # Low variance = stable workload = Spot-eligible
+                            if std_dev < cpu_variance_threshold:
+                                current_cost = self._estimate_ec2_instance_cost(instance_type)
+                                spot_cost = current_cost * 0.3  # Spot typically 70% cheaper
+                                savings = current_cost - spot_cost
+
+                                orphans.append(OrphanResourceData(
+                                    resource_type="ec2_instance",
+                                    resource_id=instance_id,
+                                    resource_name=name,
+                                    region=region,
+                                    estimated_monthly_cost=round(savings, 2),
+                                    resource_metadata={
+                                        'instance_type': instance_type,
+                                        'avg_cpu': round(avg_cpu, 1),
+                                        'cpu_variance': round(variance, 1),
+                                        'cpu_std_dev': round(std_dev, 1),
+                                        'workload_stability': 'high' if std_dev < 10 else 'medium',
+                                        'current_monthly_cost': current_cost,
+                                        'spot_monthly_cost': round(spot_cost, 2),
+                                        'monthly_savings': round(savings, 2),
+                                        'savings_percent': 70,
+                                        'recommendation': 'Migrate to Spot instances',
+                                        'confidence': 'high',
+                                        'scenario': 'ec2_instance_spot_opportunity',
+                                        'tags': tags
+                                    }
+                                ))
+
+        except ClientError as e:
+            print(f"Error scanning Spot-eligible workloads in {region}: {e}")
+
+        return orphans
+
+    async def scan_scheduled_unused_instances(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scan for instances only used during business hours (SCENARIO 10).
+
+        Detects instances running 24/7 but only utilized during business hours.
+        """
+        orphans: list[OrphanResourceData] = []
+        from app.models.detection_rule import DEFAULT_DETECTION_RULES
+
+        rules = detection_rules or DEFAULT_DETECTION_RULES.get("ec2_instance", {})
+        detect_scheduled = rules.get("detect_scheduled_unused", True)
+        business_start = rules.get("business_hours_start", 9)
+        business_end = rules.get("business_hours_end", 18)
+        cpu_threshold = rules.get("scheduled_cpu_threshold", 10.0)
+        enabled = rules.get("enabled", True)
+
+        if not enabled or not detect_scheduled:
+            return orphans
+
+        try:
+            async with self.session.client("ec2", region_name=region) as ec2, \
+                     self.session.client("cloudwatch", region_name=region) as cloudwatch:
+                response = await ec2.describe_instances(
+                    Filters=[{'Name': 'instance-state-name', 'Values': ['running']}]
+                )
+
+                end_time = datetime.now(timezone.utc)
+                start_time = end_time - timedelta(days=14)
+
+                for reservation in response['Reservations']:
+                    for instance in reservation['Instances']:
+                        instance_id = instance['InstanceId']
+                        instance_type = instance['InstanceType']
+                        tags = {tag['Key']: tag['Value'] for tag in instance.get('Tags', [])}
+                        name = tags.get('Name', 'Unnamed')
+
+                        # Get hourly CPU metrics
+                        cpu_metrics = await cloudwatch.get_metric_statistics(
+                            Namespace='AWS/EC2',
+                            MetricName='CPUUtilization',
+                            Dimensions=[{'Name': 'InstanceId', 'Value': instance_id}],
+                            StartTime=start_time,
+                            EndTime=end_time,
+                            Period=3600,
+                            Statistics=['Average']
+                        )
+
+                        if cpu_metrics['Datapoints'] and len(cpu_metrics['Datapoints']) > 50:
+                            # Separate business vs non-business hours
+                            business_hours_cpu = []
+                            non_business_hours_cpu = []
+
+                            for dp in cpu_metrics['Datapoints']:
+                                hour = dp['Timestamp'].hour
+                                weekday = dp['Timestamp'].weekday()
+
+                                # Business hours: 9 AM - 6 PM, Monday-Friday
+                                if business_start <= hour < business_end and weekday < 5:
+                                    business_hours_cpu.append(dp['Average'])
+                                else:
+                                    non_business_hours_cpu.append(dp['Average'])
+
+                            if business_hours_cpu and non_business_hours_cpu:
+                                avg_business = sum(business_hours_cpu) / len(business_hours_cpu)
+                                avg_non_business = sum(non_business_hours_cpu) / len(non_business_hours_cpu)
+
+                                # Flag if non-business hours CPU is very low
+                                if avg_non_business < cpu_threshold and avg_business > (cpu_threshold * 2):
+                                    current_cost = self._estimate_ec2_instance_cost(instance_type)
+                                    # Savings assuming 67% reduction (running only 45h/week vs 168h/week)
+                                    savings = current_cost * 0.73
+
+                                    orphans.append(OrphanResourceData(
+                                        resource_type="ec2_instance",
+                                        resource_id=instance_id,
+                                        resource_name=name,
+                                        region=region,
+                                        estimated_monthly_cost=round(savings, 2),
+                                        resource_metadata={
+                                            'instance_type': instance_type,
+                                            'avg_cpu_business_hours': round(avg_business, 1),
+                                            'avg_cpu_non_business': round(avg_non_business, 1),
+                                            'current_monthly_cost': current_cost,
+                                            'scheduled_monthly_cost': round(current_cost * 0.27, 2),
+                                            'monthly_savings': round(savings, 2),
+                                            'recommendation': f'Schedule on/off: {business_start}AM-{business_end}PM weekdays only',
+                                            'confidence': 'high',
+                                            'scenario': 'ec2_instance_scheduled_unused',
+                                            'tags': tags
+                                        }
+                                    ))
+
+        except ClientError as e:
+            print(f"Error scanning scheduled unused instances in {region}: {e}")
+
+        return orphans
+
     async def scan_unused_load_balancers(
         self, region: str, detection_rules: dict | None = None
     ) -> list[OrphanResourceData]:

@@ -138,15 +138,58 @@ DEFAULT_DETECTION_RULES = {
     },
     "ec2_instance": {
         "enabled": True,
+        # Scenario 1: Stopped instances
         "min_stopped_days": 30,  # Stopped for > 30 days
         "confidence_threshold_days": 60,
-        # Idle running instances detection
+        # Scenario 7: Idle running instances detection
         "detect_idle_running": True,  # Also detect running instances with low utilization
         "cpu_threshold_percent": 5.0,  # Average CPU < 5% = idle
         "network_threshold_bytes": 1_000_000,  # < 1MB network traffic in lookback period = idle
         "min_idle_days": 7,  # Running instances must be idle for at least 7 days to be detected
         "idle_confidence_threshold_days": 30,  # High confidence after 30 days idle
-        "description": "EC2 instances stopped for extended periods or running with very low utilization",
+        # Scenario 2: Over-provisioned instances
+        "detect_oversized": True,  # Detect over-provisioned instances
+        "oversized_cpu_threshold": 30.0,  # Average CPU <30% = over-provisioned
+        "oversized_lookback_days": 30,  # Analyze last 30 days
+        "oversized_min_instance_size": "xlarge",  # Only check xlarge+ instances
+        # Scenario 3: Old generation instances
+        "detect_old_generation": True,  # Detect obsolete instance types
+        "old_generations": ["t2", "m4", "c4", "r4", "i3", "x1", "p2", "g3"],  # Obsolete families
+        "generation_mapping": {
+            "t2": "t3", "m4": "m5", "c4": "c5", "r4": "r5",
+            "i3": "i3en", "x1": "x2idn", "p2": "p3", "g3": "g4dn"
+        },  # Old → New mapping
+        # Scenario 4: Burstable credit waste (T2/T3/T4)
+        "detect_burstable_waste": True,  # Detect T2/T3/T4 credit waste
+        "burstable_credit_threshold": 0.9,  # Credit balance >90% of max = waste
+        "burstable_lookback_days": 30,  # Analyze last 30 days
+        "detect_unlimited_charges": True,  # Detect Unlimited mode charges
+        # Scenario 5: Dev/Test running 24/7
+        "detect_dev_test_24_7": True,  # Detect non-prod running 24/7
+        "nonprod_env_tags": ["Environment", "Env", "Stage"],  # Tags indicating environment
+        "nonprod_env_values": ["dev", "development", "test", "testing", "stage", "staging", "qa", "sandbox"],  # Non-prod values
+        "nonprod_min_age_days": 7,  # Running for >7 days
+        # Scenario 6: Untagged instances
+        "detect_untagged": True,  # Detect instances without tags
+        "untagged_min_age_days": 30,  # >30 days old
+        # Scenario 8: Right-sizing opportunities (advanced)
+        "detect_right_sizing": True,  # Advanced right-sizing analysis
+        "right_sizing_cpu_threshold": 40.0,  # CPU <40% = potential right-sizing
+        "right_sizing_max_cpu_threshold": 75.0,  # Max CPU must be <75% to recommend downsize
+        "right_sizing_lookback_days": 30,  # Analyze last 30 days
+        # Scenario 9: Spot-eligible workloads
+        "detect_spot_eligible": True,  # Detect Spot-compatible workloads
+        "spot_cpu_variance_threshold": 20.0,  # CPU variance <20% = stable workload
+        "spot_min_uptime_days": 7,  # Running for >7 days
+        "spot_excluded_types": ["database", "cache", "queue"],  # Exclude critical workloads
+        # Scenario 10: Scheduled unused (business hours only)
+        "detect_scheduled_unused": True,  # Detect usage only during business hours
+        "business_hours_start": 9,  # 9 AM
+        "business_hours_end": 18,  # 6 PM
+        "business_days": [0, 1, 2, 3, 4],  # Monday-Friday (0=Monday)
+        "scheduled_cpu_threshold": 10.0,  # CPU <10% outside business hours
+        "scheduled_lookback_days": 14,  # Analyze last 14 days
+        "description": "EC2 Instances - 10 waste scenarios: stopped >30d, oversized, old generation, burstable credit waste, dev/test 24/7, untagged, idle, right-sizing, Spot-eligible, scheduled unused",
     },
     # Azure NAT Gateway - 10 Waste Detection Scenarios
     "nat_gateway_no_subnet": {

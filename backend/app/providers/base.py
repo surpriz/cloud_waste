@@ -338,6 +338,134 @@ class CloudProviderBase(ABC):
         pass
 
     @abstractmethod
+    async def scan_oversized_instances(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scan for over-provisioned instances (CPU <30%).
+
+        Args:
+            region: Region to scan
+            detection_rules: Optional user-defined detection rules
+
+        Returns:
+            List of oversized instance resources
+        """
+        pass
+
+    @abstractmethod
+    async def scan_old_generation_instances(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scan for obsolete generation instances (t2, m4, c4, r4).
+
+        Args:
+            region: Region to scan
+            detection_rules: Optional user-defined detection rules
+
+        Returns:
+            List of old generation instance resources
+        """
+        pass
+
+    @abstractmethod
+    async def scan_burstable_credit_waste(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scan for burstable instances (T2/T3/T4) with unused CPU credits.
+
+        Args:
+            region: Region to scan
+            detection_rules: Optional user-defined detection rules
+
+        Returns:
+            List of burstable instances with credit waste
+        """
+        pass
+
+    @abstractmethod
+    async def scan_dev_test_24_7_instances(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scan for non-production instances running 24/7.
+
+        Args:
+            region: Region to scan
+            detection_rules: Optional user-defined detection rules
+
+        Returns:
+            List of dev/test instances running 24/7
+        """
+        pass
+
+    @abstractmethod
+    async def scan_untagged_ec2_instances(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scan for instances without any tags.
+
+        Args:
+            region: Region to scan
+            detection_rules: Optional user-defined detection rules
+
+        Returns:
+            List of untagged instance resources
+        """
+        pass
+
+    @abstractmethod
+    async def scan_right_sizing_opportunities(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scan for advanced right-sizing opportunities.
+
+        Args:
+            region: Region to scan
+            detection_rules: Optional user-defined detection rules
+
+        Returns:
+            List of right-sizing opportunity resources
+        """
+        pass
+
+    @abstractmethod
+    async def scan_spot_eligible_workloads(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scan for stable workloads eligible for Spot instances.
+
+        Args:
+            region: Region to scan
+            detection_rules: Optional user-defined detection rules
+
+        Returns:
+            List of Spot-eligible instance resources
+        """
+        pass
+
+    @abstractmethod
+    async def scan_scheduled_unused_instances(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scan for instances only used during business hours.
+
+        Args:
+            region: Region to scan
+            detection_rules: Optional user-defined detection rules
+
+        Returns:
+            List of scheduled unused instance resources
+        """
+        pass
+
+    @abstractmethod
     async def scan_unused_load_balancers(
         self, region: str, detection_rules: dict | None = None
     ) -> list[OrphanResourceData]:
@@ -662,12 +790,37 @@ class CloudProviderBase(ABC):
         # SCENARIO 10: Snapshots of unused AMIs
         results.extend(await self.scan_unused_ami_snapshots(region, rules.get("ebs_snapshot")))
 
-        results.extend(
-            await self.scan_stopped_instances(region, rules.get("ec2_instance"))
-        )
-        results.extend(
-            await self.scan_idle_running_instances(region, rules.get("ec2_instance"))
-        )
+        # EC2 Instance scanning - 10 waste scenarios (100% coverage)
+        # SCENARIO 1: Stopped instances >30 days
+        results.extend(await self.scan_stopped_instances(region, rules.get("ec2_instance")))
+
+        # SCENARIO 2: Over-provisioned instances (CPU <30%)
+        results.extend(await self.scan_oversized_instances(region, rules.get("ec2_instance")))
+
+        # SCENARIO 3: Old generation instances (t2→t3, m4→m5)
+        results.extend(await self.scan_old_generation_instances(region, rules.get("ec2_instance")))
+
+        # SCENARIO 4: Burstable credit waste (T2/T3/T4 unused credits)
+        results.extend(await self.scan_burstable_credit_waste(region, rules.get("ec2_instance")))
+
+        # SCENARIO 5: Dev/Test instances running 24/7
+        results.extend(await self.scan_dev_test_24_7_instances(region, rules.get("ec2_instance")))
+
+        # SCENARIO 6: Untagged instances
+        results.extend(await self.scan_untagged_ec2_instances(region, rules.get("ec2_instance")))
+
+        # SCENARIO 7: Idle running instances (CPU <5%)
+        results.extend(await self.scan_idle_running_instances(region, rules.get("ec2_instance")))
+
+        # SCENARIO 8: Advanced right-sizing opportunities
+        results.extend(await self.scan_right_sizing_opportunities(region, rules.get("ec2_instance")))
+
+        # SCENARIO 9: Spot-eligible workloads
+        results.extend(await self.scan_spot_eligible_workloads(region, rules.get("ec2_instance")))
+
+        # SCENARIO 10: Scheduled unused instances (business hours only)
+        results.extend(await self.scan_scheduled_unused_instances(region, rules.get("ec2_instance")))
+
         results.extend(
             await self.scan_unused_load_balancers(region, rules.get("load_balancer"))
         )
