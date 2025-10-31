@@ -482,6 +482,38 @@ class CloudProviderBase(ABC):
         pass
 
     @abstractmethod
+    async def scan_load_balancer_cross_zone_disabled(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scan for load balancers with cross-zone load balancing disabled.
+
+        Args:
+            region: Region to scan
+            detection_rules: Optional user-defined detection rules
+
+        Returns:
+            List of load balancers with cross-zone disabled causing data transfer costs
+        """
+        pass
+
+    @abstractmethod
+    async def scan_load_balancer_idle_patterns(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scan for load balancers with idle connection patterns during business hours.
+
+        Args:
+            region: Region to scan
+            detection_rules: Optional user-defined detection rules
+
+        Returns:
+            List of load balancers with predictable idle patterns
+        """
+        pass
+
+    @abstractmethod
     async def scan_stopped_databases(
         self, region: str, detection_rules: dict | None = None
     ) -> list[OrphanResourceData]:
@@ -869,9 +901,22 @@ class CloudProviderBase(ABC):
         # SCENARIO 10: Scheduled unused instances (business hours only)
         results.extend(await self.scan_scheduled_unused_instances(region, rules.get("ec2_instance")))
 
+        # Load Balancer scanning - 10 waste scenarios (100% coverage)
+        # Scenarios 1-7 + 10: Basic detection (no listeners, no targets, unhealthy, CLB migration)
         results.extend(
             await self.scan_unused_load_balancers(region, rules.get("load_balancer"))
         )
+
+        # Scenario 8: Cross-zone load balancing disabled
+        results.extend(
+            await self.scan_load_balancer_cross_zone_disabled(region, rules.get("load_balancer"))
+        )
+
+        # Scenario 9: Idle connection patterns (business hours only)
+        results.extend(
+            await self.scan_load_balancer_idle_patterns(region, rules.get("load_balancer"))
+        )
+
         results.extend(
             await self.scan_stopped_databases(region, rules.get("rds_instance"))
         )

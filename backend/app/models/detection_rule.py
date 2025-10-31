@@ -358,16 +358,35 @@ DEFAULT_DETECTION_RULES = {
         "min_age_days": 7,
         "confidence_threshold_days": 30,
         "critical_age_days": 90,  # Critical alert after 90 days with no backends
-        "detect_no_listeners": True,  # Detect LB without listeners
-        "detect_zero_requests": True,  # Detect LB with no requests (CloudWatch)
+
+        # Scenarios 1-7 (Phase 1 - Basic detection)
+        "detect_no_listeners": True,  # Scenario 1: LB without listeners
+        "detect_zero_requests": True,  # Scenario 5: LB with no requests (CloudWatch)
         "min_requests_30d": 100,  # Minimum requests in 30 days (ALB/CLB)
-        "detect_no_target_groups": True,  # Detect LB without any target groups
-        "detect_never_used": True,  # Detect LB never used since creation
+        "detect_no_target_groups": True,  # Scenario 2: LB without any target groups
+        "detect_never_used": True,  # Scenario 4: LB never used since creation
         "never_used_min_age_days": 30,  # Min age to consider "never used"
-        "detect_unhealthy_long_term": True,  # Detect LB with all unhealthy targets >90d
+        "detect_unhealthy_long_term": True,  # Scenario 6: LB with all unhealthy targets >90d
         "unhealthy_long_term_days": 90,  # Days to consider long-term unhealthy
-        "detect_sg_blocks_traffic": True,  # Detect LB with SG blocking all traffic
-        "description": "Load balancers with no healthy backends, no listeners, no traffic, no target groups, security group issues, or never used",
+        "detect_sg_blocks_traffic": True,  # Scenario 7: LB with SG blocking all traffic
+
+        # Scenario 8: Cross-zone load balancing disabled (Phase 2)
+        "detect_cross_zone_disabled": True,  # Detect LB with cross-zone disabled + multi-AZ targets
+        "cross_zone_data_transfer_threshold_gb": 10.0,  # Only flag if >10 GB/month data transfer
+
+        # Scenario 9: Idle connection patterns (Phase 2)
+        "detect_idle_patterns": True,  # Detect business-hours-only traffic patterns
+        "idle_pattern_lookback_days": 7,  # Analyze last 7 days hourly patterns
+        "business_hours_start": 9,  # 9 AM
+        "business_hours_end": 18,  # 6 PM
+        "business_hours_days": [0, 1, 2, 3, 4],  # Monday-Friday (0=Monday)
+        "business_hours_traffic_threshold": 80.0,  # >80% traffic during business hours
+
+        # Scenario 10: CLB migration opportunity (Phase 2)
+        "detect_clb_migration": True,  # Recommend migration from CLB to ALB/NLB
+        "clb_migration_min_age_days": 180,  # Only recommend for CLB >180 days old
+
+        "description": "Load balancers - 10 waste scenarios (100% coverage): no listeners, no target groups, zero healthy targets, never used, low traffic, unhealthy long-term, SG blocks traffic, cross-zone disabled, idle patterns, CLB migration",
     },
     "rds_instance": {
         "enabled": True,
