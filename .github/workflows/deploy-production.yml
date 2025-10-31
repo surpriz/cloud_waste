@@ -38,10 +38,12 @@ jobs:
             echo ""
             
             cd /opt/cloudwaste
-            
+
             # Pull latest changes
             echo "📥 Récupération des modifications..."
-            git pull origin master
+            git fetch origin master
+            git reset --hard origin/master
+            echo "✓ Code mis à jour vers commit: $(git rev-parse --short HEAD)"
             
             # Run quick deploy script
             echo ""
