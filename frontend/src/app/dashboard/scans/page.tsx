@@ -14,14 +14,18 @@ import {
   AlertTriangle,
   Trash2,
   Info,
+  CheckSquare,
+  Square,
+  Zap,
 } from "lucide-react";
 
 export default function ScansPage() {
   const { accounts, fetchAccounts } = useAccountStore();
   const { scans, fetchScans, createScan, deleteAllScans, summary, fetchSummary, isLoading } =
     useScanStore();
-  const [selectedAccountId, setSelectedAccountId] = useState<string>("");
+  const [selectedAccountIds, setSelectedAccountIds] = useState<string[]>([]);
   const [isDeletingAll, setIsDeletingAll] = useState(false);
+  const [isScanning, setIsScanning] = useState(false);
 
   useEffect(() => {
     fetchAccounts();
@@ -46,21 +50,77 @@ export default function ScansPage() {
     return () => clearInterval(interval);
   }, [scans, fetchScans, fetchSummary]);
 
-  const handleStartScan = async () => {
-    if (!selectedAccountId) {
-      alert("Please select an account");
+  const toggleAccountSelection = (accountId: string) => {
+    setSelectedAccountIds((prev) =>
+      prev.includes(accountId)
+        ? prev.filter((id) => id !== accountId)
+        : [...prev, accountId]
+    );
+  };
+
+  const toggleSelectAll = () => {
+    if (selectedAccountIds.length === accounts.length) {
+      setSelectedAccountIds([]);
+    } else {
+      setSelectedAccountIds(accounts.map((acc) => acc.id));
+    }
+  };
+
+  const handleScanSelected = async () => {
+    if (selectedAccountIds.length === 0) {
+      alert("Please select at least one account");
       return;
     }
 
+    setIsScanning(true);
     try {
-      await createScan({
-        cloud_account_id: selectedAccountId,
-        scan_type: "manual",
-      });
+      // Launch scans for all selected accounts
+      const scanPromises = selectedAccountIds.map((accountId) =>
+        createScan({
+          cloud_account_id: accountId,
+          scan_type: "manual",
+        })
+      );
+      await Promise.all(scanPromises);
+
+      // Clear selection
+      setSelectedAccountIds([]);
+
       // Refresh scans list
       setTimeout(() => fetchScans(), 1000);
     } catch (err) {
-      // Error handled by store
+      console.error("Failed to start scans:", err);
+    } finally {
+      setIsScanning(false);
+    }
+  };
+
+  const handleScanAll = async () => {
+    if (accounts.length === 0) {
+      alert("No accounts available to scan");
+      return;
+    }
+
+    if (!confirm(`Start scanning all ${accounts.length} accounts?`)) {
+      return;
+    }
+
+    setIsScanning(true);
+    try {
+      const scanPromises = accounts.map((account) =>
+        createScan({
+          cloud_account_id: account.id,
+          scan_type: "manual",
+        })
+      );
+      await Promise.all(scanPromises);
+
+      // Refresh scans list
+      setTimeout(() => fetchScans(), 1000);
+    } catch (err) {
+      console.error("Failed to start all scans:", err);
+    } finally {
+      setIsScanning(false);
     }
   };
 
@@ -121,30 +181,136 @@ export default function ScansPage() {
       )}
 
       {/* Start New Scan */}
-      <div className="rounded-lg border bg-white p-6 shadow-sm">
-        <h2 className="text-xl font-semibold text-gray-900">Start New Scan</h2>
-        <div className="mt-4 flex gap-4">
-          <select
-            value={selectedAccountId}
-            onChange={(e) => setSelectedAccountId(e.target.value)}
-            className="flex-1 rounded-lg border border-gray-300 px-3 py-2"
-          >
-            <option value="">Select a cloud account</option>
-            {accounts.map((account) => (
-              <option key={account.id} value={account.id}>
-                {account.account_name} ({account.provider.toUpperCase()})
-              </option>
-            ))}
-          </select>
-          <button
-            onClick={handleStartScan}
-            disabled={!selectedAccountId || isLoading}
-            className="flex items-center gap-2 rounded-lg bg-blue-600 px-6 py-2 font-medium text-white hover:bg-blue-700 disabled:bg-blue-300"
-          >
-            <Play className="h-5 w-5" />
-            Start Scan
-          </button>
+      <div className="rounded-lg border bg-white shadow-sm">
+        <div className="border-b p-6">
+          <div className="flex items-center justify-between">
+            <div>
+              <h2 className="text-xl font-semibold text-gray-900">Start New Scan</h2>
+              <p className="mt-1 text-sm text-gray-600">
+                Select accounts to scan for orphaned resources
+              </p>
+            </div>
+            <div className="flex gap-3">
+              <button
+                onClick={toggleSelectAll}
+                disabled={accounts.length === 0 || isScanning}
+                className="flex items-center gap-2 rounded-lg border-2 border-blue-600 bg-white px-4 py-2 text-sm font-medium text-blue-600 hover:bg-blue-50 disabled:border-blue-300 disabled:text-blue-300 transition-colors"
+              >
+                {selectedAccountIds.length === accounts.length ? (
+                  <>
+                    <CheckSquare className="h-4 w-4" />
+                    Deselect All
+                  </>
+                ) : (
+                  <>
+                    <Square className="h-4 w-4" />
+                    Select All
+                  </>
+                )}
+              </button>
+              <button
+                onClick={handleScanAll}
+                disabled={accounts.length === 0 || isScanning}
+                className="flex items-center gap-2 rounded-lg bg-gradient-to-r from-purple-600 to-blue-600 px-6 py-2 font-medium text-white hover:from-purple-700 hover:to-blue-700 disabled:from-purple-300 disabled:to-blue-300 transition-all shadow-md"
+              >
+                {isScanning ? (
+                  <>
+                    <Loader2 className="h-5 w-5 animate-spin" />
+                    Scanning...
+                  </>
+                ) : (
+                  <>
+                    <Zap className="h-5 w-5" />
+                    Scan All ({accounts.length})
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
         </div>
+
+        {accounts.length === 0 ? (
+          <div className="p-12 text-center">
+            <Info className="mx-auto h-12 w-12 text-gray-400" />
+            <p className="mt-4 text-gray-600">
+              No cloud accounts configured yet.
+            </p>
+            <p className="mt-2 text-sm text-gray-500">
+              Add a cloud account to start scanning for orphaned resources.
+            </p>
+          </div>
+        ) : (
+          <>
+            <div className="p-6 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+              {accounts.map((account) => (
+                <div
+                  key={account.id}
+                  onClick={() => toggleAccountSelection(account.id)}
+                  className={`cursor-pointer rounded-lg border-2 p-4 transition-all hover:shadow-md ${
+                    selectedAccountIds.includes(account.id)
+                      ? "border-blue-600 bg-blue-50"
+                      : "border-gray-200 bg-white hover:border-blue-300"
+                  }`}
+                >
+                  <div className="flex items-start gap-3">
+                    <div className="flex-shrink-0 pt-0.5">
+                      {selectedAccountIds.includes(account.id) ? (
+                        <CheckSquare className="h-5 w-5 text-blue-600" />
+                      ) : (
+                        <Square className="h-5 w-5 text-gray-400" />
+                      )}
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <h3 className="font-semibold text-gray-900 truncate">
+                        {account.account_name}
+                      </h3>
+                      <p className="mt-1 text-sm text-gray-600">
+                        {account.provider.toUpperCase()}
+                      </p>
+                      {account.last_scan_at && (
+                        <p className="mt-1 text-xs text-gray-500">
+                          Last scan:{" "}
+                          {new Date(account.last_scan_at).toLocaleDateString()}
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+            <div className="border-t p-6 bg-gray-50">
+              <div className="flex items-center justify-between">
+                <div className="text-sm text-gray-600">
+                  {selectedAccountIds.length > 0 ? (
+                    <span className="font-semibold">
+                      {selectedAccountIds.length} account
+                      {selectedAccountIds.length > 1 ? "s" : ""} selected
+                    </span>
+                  ) : (
+                    <span>No accounts selected</span>
+                  )}
+                </div>
+                <button
+                  onClick={handleScanSelected}
+                  disabled={selectedAccountIds.length === 0 || isScanning}
+                  className="flex items-center gap-2 rounded-lg bg-blue-600 px-6 py-2.5 font-medium text-white hover:bg-blue-700 disabled:bg-blue-300 transition-colors shadow-md"
+                >
+                  {isScanning ? (
+                    <>
+                      <Loader2 className="h-5 w-5 animate-spin" />
+                      Scanning...
+                    </>
+                  ) : (
+                    <>
+                      <Play className="h-5 w-5" />
+                      Scan Selected ({selectedAccountIds.length})
+                    </>
+                  )}
+                </button>
+              </div>
+            </div>
+          </>
+        )}
       </div>
 
       {/* Scans List */}
