@@ -25,12 +25,16 @@ Local Dev → git push → GitHub Actions → VPS → Production Live
 
 ```
 deployment/
-├── docker-compose.prod.yml    # Production Docker stack
-├── nginx.conf                 # Reverse proxy + SSL config
-├── setup-server.sh            # Initial VPS setup (run once)
-├── quick-deploy.sh            # Fast deployment script
-├── backup-db.sh               # Database backup automation
-└── README.md                  # This file
+├── docker-compose.prod.yml       # Production Docker stack
+├── nginx.conf                    # Reverse proxy + SSL config
+├── setup-server.sh               # Initial VPS setup (run once)
+├── zero-downtime-deploy.sh       # Blue-green deployment with auto-rollback
+├── backup-full.sh                # Full system backup automation
+├── backup-db.sh                  # Database-only backup (legacy)
+├── restore-full.sh               # Interactive restore utility
+├── setup-backup-cron.sh          # Configure automated backups
+├── BACKUP_GUIDE.md               # Comprehensive backup documentation
+└── README.md                     # This file
 ```
 
 ---
@@ -115,7 +119,7 @@ deployment/
 5. **Initial deployment:**
    ```bash
    cd /opt/cloudwaste
-   bash deployment/quick-deploy.sh
+   bash deployment/zero-downtime-deploy.sh
    ```
 
 6. **Verify deployment:**
@@ -128,7 +132,17 @@ deployment/
 
 ## 🔄 Automated Deployments (GitHub Actions)
 
-Once initial setup is complete, every `git push` to the `master` branch triggers automatic deployment.
+Once initial setup is complete, every `git push` to the `master` branch triggers automatic **zero-downtime deployment**.
+
+### 🔵🟢 Blue-Green Deployment Strategy:
+
+CloudWaste uses a sophisticated deployment strategy that ensures **zero service interruption**:
+
+1. **Build Phase** - New Docker images are built while old containers keep running
+2. **Health Check Phase** - New containers are tested before switching traffic
+3. **Switch Phase** - Traffic is switched to new containers only if healthy
+4. **Cleanup Phase** - Old containers are removed after successful deployment
+5. **Rollback Phase** - If anything fails, automatic rollback to last stable version
 
 ### Workflow:
 
@@ -140,11 +154,23 @@ git push origin master
 
 # GitHub Actions automatically:
 # 1. Connects to VPS via SSH
-# 2. Pulls latest code
-# 3. Runs deployment/quick-deploy.sh
-# 4. Performs health checks
-# 5. Reports success/failure
+# 2. Pulls latest code (git reset --hard)
+# 3. Runs deployment/zero-downtime-deploy.sh
+# 4. Builds new images (site stays online)
+# 5. Starts new containers alongside old ones
+# 6. Performs health checks on NEW containers
+# 7. Switches traffic if healthy
+# 8. Saves commit as stable version
+# 9. OR performs automatic rollback if any step fails
 ```
+
+### 🔒 Safety Features:
+
+- ✅ **No downtime** - Site stays online during entire deployment
+- ✅ **Health checks** - Backend, frontend, and public URL verification
+- ✅ **Auto-rollback** - Automatic restoration to last stable version on failure
+- ✅ **Version tracking** - Last stable commit saved in `.last_stable_commit`
+- ✅ **Error handling** - Any script error triggers rollback
 
 ### Manual Trigger:
 
@@ -163,8 +189,10 @@ If you need to deploy manually from the VPS:
 ssh administrator@155.117.43.17
 cd /opt/cloudwaste
 git pull origin master
-bash deployment/quick-deploy.sh
+bash deployment/zero-downtime-deploy.sh
 ```
+
+**Note:** Manual deployments also benefit from zero-downtime strategy and automatic rollback protection.
 
 ---
 
@@ -517,14 +545,43 @@ docker compose -f deployment/docker-compose.prod.yml restart postgres
 
 ## 🔄 Rollback to Previous Version
 
-If deployment fails, rollback to previous commit:
+### Automatic Rollback (Recommended)
+
+**Rollback happens automatically** when deployment fails! The system:
+- Detects any deployment failure (build error, health check failure, etc.)
+- Reads the last stable commit from `.last_stable_commit`
+- Resets code to that commit
+- Rebuilds and restarts with the stable version
+- Your site stays online throughout the process
+
+**No manual intervention required!**
+
+### Manual Rollback (Edge Cases)
+
+If you need to manually rollback for any reason:
 
 ```bash
 # On VPS
 cd /opt/cloudwaste
-git log --oneline  # Find previous commit hash
+
+# Check last stable commit
+cat .last_stable_commit
+
+# View recent commits
+git log --oneline -10
+
+# Manual rollback to specific commit
 git reset --hard COMMIT_HASH
-bash deployment/quick-deploy.sh
+bash deployment/zero-downtime-deploy.sh
+```
+
+### Check Rollback Status
+
+```bash
+# View current commit vs stable commit
+cd /opt/cloudwaste
+echo "Current: $(git rev-parse --short HEAD)"
+echo "Stable:  $(cat .last_stable_commit | cut -c1-7)"
 ```
 
 ---
@@ -587,5 +644,5 @@ docker exec cloudwaste_postgres psql -U cloudwaste -d cloudwaste -c "VACUUM ANAL
 
 ---
 
-**Last Updated:** 2025-10-29
-**Deployment Version:** 1.2.0 (Added Portainer + Automated Backups)
+**Last Updated:** 2025-10-31
+**Deployment Version:** 2.0.0 (Zero-Downtime Blue-Green Deployment + Auto-Rollback)

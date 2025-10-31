@@ -6,16 +6,23 @@ Tous les fichiers de déploiement ont été générés avec succès :
 
 ```
 deployment/
-├── docker-compose.prod.yml    ✅ Stack Docker optimisée pour production
-├── nginx.conf                 ✅ Configuration reverse proxy + SSL
-├── setup-server.sh            ✅ Script d'installation initiale du VPS
-├── quick-deploy.sh            ✅ Script de déploiement rapide
-├── backup-db.sh               ✅ Script de backup automatique
-└── README.md                  ✅ Documentation complète
+├── docker-compose.prod.yml       ✅ Stack Docker optimisée pour production
+├── nginx.conf                    ✅ Configuration reverse proxy + SSL
+├── setup-server.sh               ✅ Script d'installation initiale du VPS
+├── zero-downtime-deploy.sh       ✅ Script de déploiement blue-green avec rollback
+├── backup-full.sh                ✅ Script de backup complet automatisé
+├── backup-db.sh                  ✅ Script de backup base de données (legacy)
+├── restore-full.sh               ✅ Script de restauration interactif
+├── setup-backup-cron.sh          ✅ Configuration backups automatiques
+├── BACKUP_GUIDE.md               ✅ Documentation backups complète
+└── README.md                     ✅ Documentation complète
 
 backend/Dockerfile.prod        ✅ Dockerfile multi-stage optimisé
 frontend/Dockerfile.prod       ✅ Dockerfile multi-stage optimisé
 .env.prod.example              ✅ Template variables d'environnement
+
+.github/workflows/
+└── deploy-production.yml      ✅ CI/CD automatisé avec zero-downtime + rollback
 ```
 
 ---
@@ -156,12 +163,14 @@ EMAILS_FROM_EMAIL=noreply@cutcosts.tech
 ```bash
 # Sur le VPS
 cd /opt/cloudwaste
-bash deployment/quick-deploy.sh
+bash deployment/zero-downtime-deploy.sh
 ```
 
 **✅ Si tout se passe bien, après 2-3 minutes :**
 - Frontend : https://cutcosts.tech
 - API Docs : https://cutcosts.tech/api/docs
+
+**Note:** Le premier déploiement créera le fichier `.last_stable_commit` qui permet le rollback automatique pour les déploiements futurs.
 
 ---
 
