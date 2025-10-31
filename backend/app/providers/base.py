@@ -514,6 +514,54 @@ class CloudProviderBase(ABC):
         pass
 
     @abstractmethod
+    async def scan_nat_gateway_vpc_endpoint_candidates(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scan for NAT gateways that could benefit from VPC Endpoints (Scenario 8).
+
+        Args:
+            region: Region to scan
+            detection_rules: Optional detection configuration
+
+        Returns:
+            List of NAT gateways with VPC Endpoint opportunities
+        """
+        pass
+
+    @abstractmethod
+    async def scan_nat_gateway_dev_test_unused_hours(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scan for dev/test NAT gateways with business-hours-only traffic (Scenario 9).
+
+        Args:
+            region: Region to scan
+            detection_rules: Optional detection configuration
+
+        Returns:
+            List of dev/test NAT gateways with scheduling opportunities
+        """
+        pass
+
+    @abstractmethod
+    async def scan_nat_gateway_obsolete_migration(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scan for obsolete NAT gateways after migration (Scenario 10).
+
+        Args:
+            region: Region to scan
+            detection_rules: Optional detection configuration
+
+        Returns:
+            List of NAT gateways likely obsolete after migration
+        """
+        pass
+
+    @abstractmethod
     async def scan_unused_fsx_file_systems(
         self, region: str, detection_rules: dict | None = None
     ) -> list[OrphanResourceData]:
@@ -827,8 +875,26 @@ class CloudProviderBase(ABC):
         results.extend(
             await self.scan_stopped_databases(region, rules.get("rds_instance"))
         )
+
+        # NAT Gateway scanning - 10 waste scenarios (100% coverage)
+        # Scenario 1-7: Basic detection (no routes, zero traffic, etc.)
         results.extend(
             await self.scan_unused_nat_gateways(region, rules.get("nat_gateway"))
+        )
+
+        # Scenario 8: VPC Endpoint candidates
+        results.extend(
+            await self.scan_nat_gateway_vpc_endpoint_candidates(region, rules.get("nat_gateway"))
+        )
+
+        # Scenario 9: Dev/Test business hours only
+        results.extend(
+            await self.scan_nat_gateway_dev_test_unused_hours(region, rules.get("nat_gateway"))
+        )
+
+        # Scenario 10: Obsolete after migration
+        results.extend(
+            await self.scan_nat_gateway_obsolete_migration(region, rules.get("nat_gateway"))
         )
 
         # TOP 15 high-cost idle resources

@@ -41,6 +41,7 @@ const AWS_RESOURCE_ICONS: { [key: string]: any } = {
   ec2_instance: Server,
   load_balancer: Zap,
   rds_instance: Database,
+  nat_gateway: Network,
 };
 
 const AWS_RESOURCE_LABELS: { [key: string]: string } = {
@@ -50,6 +51,7 @@ const AWS_RESOURCE_LABELS: { [key: string]: string } = {
   ec2_instance: "EC2 Instances (Stopped)",
   load_balancer: "Load Balancers",
   rds_instance: "RDS Instances",
+  nat_gateway: "NAT Gateways",
 };
 
 // Azure Resources

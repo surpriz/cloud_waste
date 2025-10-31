@@ -246,6 +246,56 @@ DEFAULT_DETECTION_RULES = {
         "min_age_days": 30,
         "description": "NAT Gateways for Azure services traffic - Private Link/Service Endpoints eliminate need ($32.40/month savings)",
     },
+    # AWS NAT Gateway - 10 Waste Detection Scenarios (Phase 1: 7 scenarios, Phase 2: 3 scenarios)
+    "nat_gateway": {
+        "enabled": True,
+        "min_age_days": 7,  # Minimum age before flagging (avoid false positives during setup)
+        "confidence_threshold_days": 30,  # High confidence after 30 days
+        "critical_age_days": 90,  # Critical alert after 90 days unused
+
+        # Scenario 1: No route tables reference
+        "detect_no_routes": True,  # Detect NAT GW not referenced in any route table
+
+        # Scenario 2 & 7: Traffic-based detection
+        "max_bytes_30d": 1_000_000,  # < 1 MB = zero traffic (Scenario 2)
+        "low_traffic_threshold_gb": 10.0,  # < 10 GB/month = low traffic (Scenario 7)
+
+        # Scenario 3: Routes not associated with subnets
+        "detect_unassociated_routes": True,  # Route tables without subnet associations
+
+        # Scenario 4: VPC without Internet Gateway
+        "detect_no_igw": True,  # NAT GW in VPC without IGW (broken config)
+
+        # Scenario 5: NAT Gateway in public subnet (Phase 1 - NEW)
+        "detect_public_subnet": True,  # NAT GW in subnet with route to IGW
+
+        # Scenario 6: Redundant NAT Gateways in same AZ (Phase 1 - NEW)
+        "detect_redundant_same_az": True,  # Multiple NAT GW in same VPC+AZ
+
+        # Scenario 8: VPC Endpoint candidates (simplified MVP version without VPC Flow Logs)
+        "detect_vpc_endpoint_candidates": True,  # Recommend VPC Endpoints for S3/DynamoDB
+        "vpc_endpoint_traffic_threshold_gb": 50.0,  # Only recommend if traffic <50 GB (low enough for savings)
+        "detect_missing_s3_endpoint": True,  # Flag if S3 VPC Endpoint missing
+        "detect_missing_dynamodb_endpoint": True,  # Flag if DynamoDB VPC Endpoint missing
+
+        # Scenario 9: Dev/Test unused hours (CloudWatch hourly pattern)
+        "detect_dev_test_unused_hours": True,  # Analyze hourly traffic patterns for dev/test NAT GW
+        "business_hours_start": 8,  # 8 AM
+        "business_hours_end": 18,  # 6 PM
+        "business_days": [0, 1, 2, 3, 4],  # Monday-Friday (0=Monday)
+        "business_hours_traffic_threshold": 90.0,  # >90% traffic during business hours = scheduling candidate
+        "dev_test_pattern_lookback_days": 7,  # Analyze last 7 days of hourly patterns
+        "nonprod_env_tags": ["Environment", "Env", "Stage"],  # Tags to check
+        "nonprod_env_values": ["dev", "development", "test", "testing", "staging", "qa"],  # Non-prod values
+
+        # Scenario 10: Obsolete after migration (CloudWatch trend analysis)
+        "detect_obsolete_migration": True,  # Detect NAT GW with traffic drop >90%
+        "traffic_drop_threshold_percent": 90.0,  # >90% traffic drop = likely obsolete
+        "migration_baseline_days": 90,  # Compare J-90 to J-60 (baseline) vs J-7 to J-0 (current)
+        "migration_min_age_days": 90,  # Only analyze NAT GW older than 90 days
+
+        "description": "AWS NAT Gateways - 10 waste scenarios (100% coverage): no routes, zero traffic, unassociated routes, no IGW, public subnet, redundant same AZ, low traffic, VPC Endpoint candidates, dev/test business hours, obsolete after migration",
+    },
     # Azure Load Balancer & Application Gateway - 10 Waste Detection Scenarios
     "load_balancer_no_backend_instances": {
         "enabled": True,

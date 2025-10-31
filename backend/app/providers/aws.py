@@ -5790,11 +5790,14 @@ class AWSProvider(CloudProviderBase):
         """
         Scan for NAT gateways with no outbound traffic or misconfigured routing.
 
-        Detection scenarios:
-        1. Zero or very low traffic (BytesOutToDestination < threshold)
-        2. No route table references (orphaned)
+        Detection scenarios (Phase 1 - MVP: 7/10):
+        1. No route table references (orphaned)
+        2. Zero traffic (BytesOutToDestination = 0)
         3. Route tables not associated with any subnet
         4. VPC without Internet Gateway (broken config)
+        5. NAT Gateway in public subnet (misconfigured)
+        6. Redundant NAT Gateways in same AZ (unnecessary HA cost)
+        7. Low traffic < 10 GB/month (NAT Instance alternative)
 
         Args:
             region: AWS region to scan
@@ -5816,11 +5819,14 @@ class AWSProvider(CloudProviderBase):
             return orphans
 
         min_age_days = detection_rules.get("min_age_days", 7)
-        max_bytes_30d = detection_rules.get("max_bytes_30d", 1_000_000)
+        max_bytes_30d = detection_rules.get("max_bytes_30d", 1_000_000)  # Scenario 2: zero traffic
+        low_traffic_threshold_gb = detection_rules.get("low_traffic_threshold_gb", 10.0)  # Scenario 7: low traffic
         confidence_threshold_days = detection_rules.get("confidence_threshold_days", 30)
         critical_age_days = detection_rules.get("critical_age_days", 90)
         detect_no_routes = detection_rules.get("detect_no_routes", True)
         detect_no_igw = detection_rules.get("detect_no_igw", True)
+        detect_public_subnet = detection_rules.get("detect_public_subnet", True)
+        detect_redundant_same_az = detection_rules.get("detect_redundant_same_az", True)
 
         try:
             async with self.session.client("ec2", region_name=region) as ec2:
@@ -5841,6 +5847,24 @@ class AWSProvider(CloudProviderBase):
                         if attachment.get("State") == "available":
                             vpcs_with_igw.add(attachment.get("VpcId"))
 
+                # Get all subnets to determine AZs and public/private status
+                subnets_response = await ec2.describe_subnets()
+                subnets_by_id = {}
+                for subnet in subnets_response.get("Subnets", []):
+                    subnets_by_id[subnet["SubnetId"]] = subnet
+
+                # Build VPC+AZ grouping for redundancy detection (Scenario 6)
+                nat_gw_by_vpc_az: dict[str, list[dict]] = {}
+                for nat_gw in nat_response.get("NatGateways", []):
+                    subnet_id = nat_gw.get("SubnetId")
+                    vpc_id = nat_gw.get("VpcId")
+                    if subnet_id in subnets_by_id:
+                        az = subnets_by_id[subnet_id]["AvailabilityZone"]
+                        key = f"{vpc_id}_{az}"
+                        if key not in nat_gw_by_vpc_az:
+                            nat_gw_by_vpc_az[key] = []
+                        nat_gw_by_vpc_az[key].append(nat_gw)
+
                 async with self.session.client("cloudwatch", region_name=region) as cw:
                     end_time = datetime.now(timezone.utc)
                     start_time = end_time - timedelta(days=30)
@@ -5848,6 +5872,7 @@ class AWSProvider(CloudProviderBase):
                     for nat_gw in nat_response.get("NatGateways", []):
                         nat_gw_id = nat_gw["NatGatewayId"]
                         vpc_id = nat_gw.get("VpcId", "Unknown")
+                        subnet_id = nat_gw.get("SubnetId", "Unknown")
                         created_at = nat_gw["CreateTime"]
                         age_days = (end_time - created_at).days
 
@@ -5855,9 +5880,15 @@ class AWSProvider(CloudProviderBase):
                         if age_days < min_age_days:
                             continue
 
+                        # Get AZ and subnet info
+                        availability_zone = "Unknown"
+                        if subnet_id in subnets_by_id:
+                            availability_zone = subnets_by_id[subnet_id]["AvailabilityZone"]
+
                         # Analyze routing configuration
                         route_tables_with_nat = []
                         associated_subnets_count = 0
+                        nat_gw_subnet_is_public = False
 
                         for rt in all_route_tables:
                             if rt.get("VpcId") != vpc_id:
@@ -5875,9 +5906,32 @@ class AWSProvider(CloudProviderBase):
                                 # Count associated subnets
                                 associated_subnets_count += len(rt.get("Associations", []))
 
+                            # Scenario 5: Check if NAT GW is in public subnet
+                            # A subnet is public if its route table has a route to an IGW
+                            if detect_public_subnet:
+                                # Check if this route table is associated with the NAT GW's subnet
+                                for association in rt.get("Associations", []):
+                                    if association.get("SubnetId") == subnet_id:
+                                        # Check if route table has IGW route
+                                        for route in rt.get("Routes", []):
+                                            if route.get("GatewayId", "").startswith("igw-"):
+                                                nat_gw_subnet_is_public = True
+                                                break
+
                         has_routes = len(route_tables_with_nat) > 0
                         has_associated_subnets = associated_subnets_count > 0
                         vpc_has_igw = vpc_id in vpcs_with_igw
+
+                        # Scenario 6: Check for redundancy in same AZ
+                        is_redundant_same_az = False
+                        redundant_nat_gw_count = 0
+                        redundant_nat_gw_ids = []
+                        if detect_redundant_same_az:
+                            vpc_az_key = f"{vpc_id}_{availability_zone}"
+                            if vpc_az_key in nat_gw_by_vpc_az and len(nat_gw_by_vpc_az[vpc_az_key]) > 1:
+                                is_redundant_same_az = True
+                                redundant_nat_gw_count = len(nat_gw_by_vpc_az[vpc_az_key])
+                                redundant_nat_gw_ids = [gw["NatGatewayId"] for gw in nat_gw_by_vpc_az[vpc_az_key]]
 
                         # Query CloudWatch for BytesOutToDestination metric
                         metrics_response = await cw.get_metric_statistics(
@@ -5894,41 +5948,77 @@ class AWSProvider(CloudProviderBase):
                             dp["Sum"]
                             for dp in metrics_response.get("Datapoints", [])
                         )
+                        total_gb = total_bytes / (1024 ** 3)
 
                         # Determine if orphaned based on multiple criteria
                         is_orphaned = False
                         orphan_reasons = []
                         orphan_type = None
+                        scenario_id = None
 
                         # Scenario 1: No route tables reference this NAT Gateway
                         if detect_no_routes and not has_routes:
                             is_orphaned = True
                             orphan_type = "no_routes"
+                            scenario_id = "nat_gateway_no_route_table"
                             orphan_reasons.append("Not referenced in any route table")
 
-                        # Scenario 2: Has routes but none are associated with subnets
+                        # Scenario 3: Has routes but none are associated with subnets
                         elif has_routes and not has_associated_subnets:
                             is_orphaned = True
                             orphan_type = "routes_not_associated"
+                            scenario_id = "nat_gateway_routes_not_associated"
                             orphan_reasons.append(
                                 f"Referenced in {len(route_tables_with_nat)} route table(s) but none associated with subnets"
                             )
 
-                        # Scenario 3: VPC has no Internet Gateway (broken config)
+                        # Scenario 4: VPC has no Internet Gateway (broken config)
                         if detect_no_igw and not vpc_has_igw:
                             is_orphaned = True
                             if not orphan_type:
                                 orphan_type = "no_igw"
+                                scenario_id = "nat_gateway_no_igw"
                             orphan_reasons.append(
                                 "VPC has no Internet Gateway (NAT Gateway cannot route to internet)"
                             )
 
-                        # Scenario 4: Low/zero traffic
+                        # Scenario 5: NAT Gateway in public subnet
+                        if detect_public_subnet and nat_gw_subnet_is_public:
+                            is_orphaned = True
+                            if not orphan_type:
+                                orphan_type = "public_subnet"
+                                scenario_id = "nat_gateway_in_public_subnet"
+                            orphan_reasons.append(
+                                "NAT Gateway in public subnet (subnet has route to IGW - misconfigured)"
+                            )
+
+                        # Scenario 6: Redundant NAT Gateway in same AZ
+                        if detect_redundant_same_az and is_redundant_same_az:
+                            is_orphaned = True
+                            if not orphan_type:
+                                orphan_type = "redundant_same_az"
+                                scenario_id = "nat_gateway_redundant_same_az"
+                            orphan_reasons.append(
+                                f"{redundant_nat_gw_count} NAT Gateways in same VPC+AZ (no HA benefit, only 1 needed)"
+                            )
+
+                        # Scenario 2: Zero traffic
                         if total_bytes < max_bytes_30d:
                             if not is_orphaned:
-                                orphan_type = "low_traffic"
+                                orphan_type = "zero_traffic"
+                                scenario_id = "nat_gateway_zero_traffic"
                             orphan_reasons.append(
-                                f"Only {(total_bytes / 1024):.2f} KB traffic in 30 days"
+                                f"Only {(total_bytes / 1024):.2f} KB traffic in 30 days (zero usage)"
+                            )
+                            is_orphaned = True
+
+                        # Scenario 7: Low traffic (< 10 GB/month default)
+                        elif total_gb < low_traffic_threshold_gb:
+                            if not is_orphaned:
+                                orphan_type = "low_traffic"
+                                scenario_id = "nat_gateway_low_traffic"
+                            orphan_reasons.append(
+                                f"Only {total_gb:.2f} GB traffic in 30 days (< {low_traffic_threshold_gb} GB threshold - NAT Instance more cost-effective)"
                             )
                             is_orphaned = True
 
@@ -5967,19 +6057,26 @@ class AWSProvider(CloudProviderBase):
                                 estimated_monthly_cost=self.PRICING["nat_gateway"],
                                 resource_metadata={
                                     "vpc_id": vpc_id,
-                                    "subnet_id": nat_gw.get("SubnetId", "Unknown"),
+                                    "subnet_id": subnet_id,
+                                    "availability_zone": availability_zone,
                                     "created_at": created_at.isoformat(),
                                     "age_days": age_days,
                                     "bytes_out_30d": int(total_bytes),
+                                    "traffic_gb_30d": round(total_gb, 2),
                                     "confidence": confidence,
                                     "confidence_level": self._calculate_confidence_level(age_days, detection_rules),
                                     "orphan_reason": orphan_reason,
                                     "orphan_type": orphan_type,
+                                    "scenario_id": scenario_id,
                                     # Enhanced metadata
                                     "has_routes": has_routes,
                                     "route_tables_count": len(route_tables_with_nat),
                                     "associated_subnets_count": associated_subnets_count,
                                     "vpc_has_igw": vpc_has_igw,
+                                    "nat_gw_subnet_is_public": nat_gw_subnet_is_public,
+                                    "is_redundant_same_az": is_redundant_same_az,
+                                    "redundant_nat_gw_count": redundant_nat_gw_count,
+                                    "redundant_nat_gw_ids": redundant_nat_gw_ids if is_redundant_same_az else [],
                                     "orphan_reasons": orphan_reasons,
                                 },
                             )
@@ -5987,6 +6084,473 @@ class AWSProvider(CloudProviderBase):
 
         except ClientError as e:
             print(f"Error scanning unused NAT gateways in {region}: {e}")
+
+        return orphans
+
+    async def scan_nat_gateway_vpc_endpoint_candidates(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scan for NAT Gateways that could benefit from VPC Endpoints (Scenario 8).
+
+        Simplified MVP version without VPC Flow Logs:
+        - Detects NAT GW in VPCs without S3/DynamoDB VPC Endpoints
+        - Recommends VPC Endpoints (free) to eliminate data processing costs
+        - Flags candidates with traffic <50 GB/month (high ROI)
+
+        Args:
+            region: AWS region to scan
+            detection_rules: Optional detection configuration
+
+        Returns:
+            List of NAT gateways that could benefit from VPC Endpoints
+        """
+        orphans: list[OrphanResourceData] = []
+
+        # Use provided rules or defaults
+        if detection_rules is None:
+            from app.models.detection_rule import DEFAULT_DETECTION_RULES
+
+            detection_rules = DEFAULT_DETECTION_RULES.get("nat_gateway", {})
+
+        # Check if detection is enabled
+        if not detection_rules.get("detect_vpc_endpoint_candidates", True):
+            return orphans
+
+        min_age_days = detection_rules.get("min_age_days", 7)
+        vpc_endpoint_traffic_threshold_gb = detection_rules.get("vpc_endpoint_traffic_threshold_gb", 50.0)
+        detect_missing_s3_endpoint = detection_rules.get("detect_missing_s3_endpoint", True)
+        detect_missing_dynamodb_endpoint = detection_rules.get("detect_missing_dynamodb_endpoint", True)
+
+        try:
+            async with self.session.client("ec2", region_name=region) as ec2:
+                # Get all NAT Gateways
+                nat_response = await ec2.describe_nat_gateways(
+                    Filters=[{"Name": "state", "Values": ["available"]}]
+                )
+
+                # Get all VPC Endpoints to check which VPCs already have them
+                vpc_endpoints_response = await ec2.describe_vpc_endpoints()
+                vpcs_with_s3_endpoint = set()
+                vpcs_with_dynamodb_endpoint = set()
+
+                for endpoint in vpc_endpoints_response.get("VpcEndpoints", []):
+                    service_name = endpoint.get("ServiceName", "")
+                    vpc_id = endpoint.get("VpcId")
+
+                    if f"com.amazonaws.{region}.s3" in service_name:
+                        vpcs_with_s3_endpoint.add(vpc_id)
+                    elif f"com.amazonaws.{region}.dynamodb" in service_name:
+                        vpcs_with_dynamodb_endpoint.add(vpc_id)
+
+                async with self.session.client("cloudwatch", region_name=region) as cw:
+                    end_time = datetime.now(timezone.utc)
+                    start_time = end_time - timedelta(days=30)
+
+                    for nat_gw in nat_response.get("NatGateways", []):
+                        nat_gw_id = nat_gw["NatGatewayId"]
+                        vpc_id = nat_gw.get("VpcId", "Unknown")
+                        created_at = nat_gw["CreateTime"]
+                        age_days = (end_time - created_at).days
+
+                        # Skip if too young
+                        if age_days < min_age_days:
+                            continue
+
+                        # Query CloudWatch for traffic
+                        metrics_response = await cw.get_metric_statistics(
+                            Namespace="AWS/NATGateway",
+                            MetricName="BytesOutToDestination",
+                            Dimensions=[{"Name": "NatGatewayId", "Value": nat_gw_id}],
+                            StartTime=start_time,
+                            EndTime=end_time,
+                            Period=86400,
+                            Statistics=["Sum"],
+                        )
+
+                        total_bytes = sum(dp["Sum"] for dp in metrics_response.get("Datapoints", []))
+                        total_gb = total_bytes / (1024 ** 3)
+
+                        # Only flag if traffic is low enough for VPC Endpoints to be beneficial
+                        if total_gb > vpc_endpoint_traffic_threshold_gb:
+                            continue
+
+                        # Check for missing VPC Endpoints
+                        missing_endpoints = []
+                        if detect_missing_s3_endpoint and vpc_id not in vpcs_with_s3_endpoint:
+                            missing_endpoints.append("S3")
+                        if detect_missing_dynamodb_endpoint and vpc_id not in vpcs_with_dynamodb_endpoint:
+                            missing_endpoints.append("DynamoDB")
+
+                        # Skip if no missing endpoints
+                        if not missing_endpoints:
+                            continue
+
+                        # Calculate potential savings
+                        # VPC Endpoints are free, so savings = data processing cost
+                        # Conservative estimate: assume 20-50% of traffic could use VPC Endpoints
+                        estimated_vpc_endpoint_traffic_percent = 30.0  # Conservative estimate
+                        data_processing_cost = total_gb * 0.045  # NAT GW data processing
+                        potential_monthly_savings = data_processing_cost * (estimated_vpc_endpoint_traffic_percent / 100)
+
+                        # Extract name from tags
+                        name = None
+                        for tag in nat_gw.get("Tags", []):
+                            if tag["Key"] == "Name":
+                                name = tag["Value"]
+                                break
+
+                        orphan_reason = f"VPC missing {' and '.join(missing_endpoints)} VPC Endpoint(s) - could eliminate data processing costs"
+
+                        orphans.append(
+                            OrphanResourceData(
+                                resource_type="nat_gateway",
+                                resource_id=nat_gw_id,
+                                resource_name=name,
+                                region=region,
+                                estimated_monthly_cost=potential_monthly_savings,
+                                resource_metadata={
+                                    "vpc_id": vpc_id,
+                                    "subnet_id": nat_gw.get("SubnetId", "Unknown"),
+                                    "created_at": created_at.isoformat(),
+                                    "age_days": age_days,
+                                    "traffic_gb_30d": round(total_gb, 2),
+                                    "confidence_level": "medium",
+                                    "orphan_reason": orphan_reason,
+                                    "orphan_type": "vpc_endpoint_candidate",
+                                    "scenario_id": "nat_gateway_s3_dynamodb_vpc_endpoints",
+                                    # VPC Endpoint metadata
+                                    "missing_vpc_endpoints": missing_endpoints,
+                                    "has_s3_vpc_endpoint": vpc_id in vpcs_with_s3_endpoint,
+                                    "has_dynamodb_vpc_endpoint": vpc_id in vpcs_with_dynamodb_endpoint,
+                                    "data_processing_cost_30d": round(data_processing_cost, 2),
+                                    "estimated_savings_potential": round(potential_monthly_savings, 2),
+                                    "recommendation": f"Create FREE VPC Endpoint(s) for {', '.join(missing_endpoints)} to eliminate data processing costs. VPC Endpoints are free and could save ~${potential_monthly_savings:.2f}/month (conservative estimate).",
+                                },
+                            )
+                        )
+
+        except ClientError as e:
+            print(f"Error scanning NAT Gateway VPC Endpoint candidates in {region}: {e}")
+
+        return orphans
+
+    async def scan_nat_gateway_dev_test_unused_hours(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scan for dev/test NAT Gateways with traffic only during business hours (Scenario 9).
+
+        Analyzes hourly traffic patterns to detect NAT GW that could be scheduled:
+        - Checks for Environment=dev/test/staging tags
+        - Analyzes CloudWatch hourly metrics over 7 days
+        - Calculates % of traffic during business hours (8AM-6PM Mon-Fri)
+        - Flags if >90% traffic during business hours (scheduling opportunity)
+
+        Args:
+            region: AWS region to scan
+            detection_rules: Optional detection configuration
+
+        Returns:
+            List of dev/test NAT gateways with business-hours-only traffic
+        """
+        orphans: list[OrphanResourceData] = []
+
+        # Use provided rules or defaults
+        if detection_rules is None:
+            from app.models.detection_rule import DEFAULT_DETECTION_RULES
+
+            detection_rules = DEFAULT_DETECTION_RULES.get("nat_gateway", {})
+
+        # Check if detection is enabled
+        if not detection_rules.get("detect_dev_test_unused_hours", True):
+            return orphans
+
+        min_age_days = detection_rules.get("min_age_days", 7)
+        business_hours_start = detection_rules.get("business_hours_start", 8)
+        business_hours_end = detection_rules.get("business_hours_end", 18)
+        business_days = detection_rules.get("business_days", [0, 1, 2, 3, 4])  # Mon-Fri
+        business_hours_traffic_threshold = detection_rules.get("business_hours_traffic_threshold", 90.0)
+        dev_test_pattern_lookback_days = detection_rules.get("dev_test_pattern_lookback_days", 7)
+        nonprod_env_tags = detection_rules.get("nonprod_env_tags", ["Environment", "Env", "Stage"])
+        nonprod_env_values = detection_rules.get("nonprod_env_values", ["dev", "development", "test", "testing", "staging", "qa"])
+
+        try:
+            async with self.session.client("ec2", region_name=region) as ec2:
+                # Get all NAT Gateways
+                nat_response = await ec2.describe_nat_gateways(
+                    Filters=[{"Name": "state", "Values": ["available"]}]
+                )
+
+                async with self.session.client("cloudwatch", region_name=region) as cw:
+                    end_time = datetime.now(timezone.utc)
+                    start_time = end_time - timedelta(days=dev_test_pattern_lookback_days)
+
+                    for nat_gw in nat_response.get("NatGateways", []):
+                        nat_gw_id = nat_gw["NatGatewayId"]
+                        vpc_id = nat_gw.get("VpcId", "Unknown")
+                        created_at = nat_gw["CreateTime"]
+                        age_days = (end_time - created_at).days
+
+                        # Skip if too young
+                        if age_days < min_age_days:
+                            continue
+
+                        # Check if this is a dev/test environment
+                        tags = {tag["Key"]: tag["Value"] for tag in nat_gw.get("Tags", [])}
+                        is_nonprod = False
+                        environment_value = None
+
+                        for tag_key in nonprod_env_tags:
+                            if tag_key in tags:
+                                env_value = tags[tag_key].lower()
+                                if env_value in [v.lower() for v in nonprod_env_values]:
+                                    is_nonprod = True
+                                    environment_value = env_value
+                                    break
+
+                        # Skip if not non-prod
+                        if not is_nonprod:
+                            continue
+
+                        # Get hourly metrics (Period=3600 seconds = 1 hour)
+                        metrics_response = await cw.get_metric_statistics(
+                            Namespace="AWS/NATGateway",
+                            MetricName="BytesOutToDestination",
+                            Dimensions=[{"Name": "NatGatewayId", "Value": nat_gw_id}],
+                            StartTime=start_time,
+                            EndTime=end_time,
+                            Period=3600,  # 1 hour periods
+                            Statistics=["Sum"],
+                        )
+
+                        # Group traffic by hour of day and day of week
+                        from collections import defaultdict
+                        traffic_by_hour = defaultdict(list)
+                        business_hours_traffic = 0
+                        total_traffic = 0
+
+                        for dp in metrics_response.get("Datapoints", []):
+                            timestamp = dp["Timestamp"]
+                            bytes_value = dp["Sum"]
+                            total_traffic += bytes_value
+
+                            hour = timestamp.hour
+                            day_of_week = timestamp.weekday()  # 0=Monday, 6=Sunday
+
+                            traffic_by_hour[hour].append(bytes_value)
+
+                            # Check if this is business hours
+                            if day_of_week in business_days and business_hours_start <= hour < business_hours_end:
+                                business_hours_traffic += bytes_value
+
+                        # Skip if no traffic
+                        if total_traffic == 0:
+                            continue
+
+                        # Calculate business hours percentage
+                        business_hours_percent = (business_hours_traffic / total_traffic) * 100
+
+                        # Skip if not concentrated in business hours
+                        if business_hours_percent < business_hours_traffic_threshold:
+                            continue
+
+                        # Calculate potential savings
+                        # NAT GW charged 24/7 ($32.40/month)
+                        # Business hours only: 50 hours/week = ~30% of time
+                        monthly_cost_current = self.PRICING["nat_gateway"]
+                        business_hours_per_week = (business_hours_end - business_hours_start) * len(business_days)
+                        hours_per_week = 168
+                        business_hours_ratio = business_hours_per_week / hours_per_week
+                        monthly_cost_if_scheduled = monthly_cost_current * business_hours_ratio
+                        monthly_savings = monthly_cost_current - monthly_cost_if_scheduled
+
+                        # Extract name from tags
+                        name = tags.get("Name", None)
+
+                        orphan_reason = f"Dev/Test NAT Gateway with {business_hours_percent:.1f}% traffic during business hours - scheduling opportunity"
+
+                        orphans.append(
+                            OrphanResourceData(
+                                resource_type="nat_gateway",
+                                resource_id=nat_gw_id,
+                                resource_name=name,
+                                region=region,
+                                estimated_monthly_cost=monthly_savings,
+                                resource_metadata={
+                                    "vpc_id": vpc_id,
+                                    "subnet_id": nat_gw.get("SubnetId", "Unknown"),
+                                    "created_at": created_at.isoformat(),
+                                    "age_days": age_days,
+                                    "environment": environment_value,
+                                    "confidence_level": "medium",
+                                    "orphan_reason": orphan_reason,
+                                    "orphan_type": "dev_test_unused_hours",
+                                    "scenario_id": "nat_gateway_dev_test_unused_hours",
+                                    # Business hours pattern metadata
+                                    "business_hours_percent": round(business_hours_percent, 1),
+                                    "total_traffic_7d_gb": round(total_traffic / (1024 ** 3), 2),
+                                    "business_hours_traffic_gb": round(business_hours_traffic / (1024 ** 3), 2),
+                                    "business_hours_definition": f"{business_hours_start}h-{business_hours_end}h Mon-Fri",
+                                    "monthly_cost_current": round(monthly_cost_current, 2),
+                                    "monthly_savings_if_scheduled": round(monthly_savings, 2),
+                                    "annual_savings": round(monthly_savings * 12, 2),
+                                    "recommendation": f"Dev/Test NAT Gateway with {business_hours_percent:.1f}% traffic during business hours. Options: 1) Delete/recreate via Lambda (save ${monthly_savings:.2f}/month), 2) Migrate to NAT Instance (can be stopped), 3) Accept 24/7 cost. Annual savings potential: ${monthly_savings * 12:.2f}/year.",
+                                },
+                            )
+                        )
+
+        except ClientError as e:
+            print(f"Error scanning NAT Gateway dev/test unused hours in {region}: {e}")
+
+        return orphans
+
+    async def scan_nat_gateway_obsolete_migration(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scan for obsolete NAT Gateways after architecture migration (Scenario 10).
+
+        Detects NAT GW with dramatic traffic drop (>90%) over 90 days:
+        - Compares baseline traffic (J-90 to J-60) vs current (J-7 to J-0)
+        - Flags NAT GW with >90% traffic drop
+        - Indicates likely obsolescence due to migration to serverless, containers, or VPC Endpoints
+
+        Args:
+            region: AWS region to scan
+            detection_rules: Optional detection configuration
+
+        Returns:
+            List of NAT gateways likely obsolete after migration
+        """
+        orphans: list[OrphanResourceData] = []
+
+        # Use provided rules or defaults
+        if detection_rules is None:
+            from app.models.detection_rule import DEFAULT_DETECTION_RULES
+
+            detection_rules = DEFAULT_DETECTION_RULES.get("nat_gateway", {})
+
+        # Check if detection is enabled
+        if not detection_rules.get("detect_obsolete_migration", True):
+            return orphans
+
+        migration_min_age_days = detection_rules.get("migration_min_age_days", 90)
+        traffic_drop_threshold_percent = detection_rules.get("traffic_drop_threshold_percent", 90.0)
+
+        try:
+            async with self.session.client("ec2", region_name=region) as ec2:
+                # Get all NAT Gateways
+                nat_response = await ec2.describe_nat_gateways(
+                    Filters=[{"Name": "state", "Values": ["available"]}]
+                )
+
+                async with self.session.client("cloudwatch", region_name=region) as cw:
+                    now = datetime.now(timezone.utc)
+
+                    for nat_gw in nat_response.get("NatGateways", []):
+                        nat_gw_id = nat_gw["NatGatewayId"]
+                        vpc_id = nat_gw.get("VpcId", "Unknown")
+                        created_at = nat_gw["CreateTime"]
+                        age_days = (now - created_at).days
+
+                        # Skip if not old enough
+                        if age_days < migration_min_age_days:
+                            continue
+
+                        # Define 4 comparison periods
+                        periods = {
+                            "baseline_90_60d": (now - timedelta(days=90), now - timedelta(days=60)),
+                            "period_60_30d": (now - timedelta(days=60), now - timedelta(days=30)),
+                            "period_30_7d": (now - timedelta(days=30), now - timedelta(days=7)),
+                            "current_7d": (now - timedelta(days=7), now),
+                        }
+
+                        traffic_by_period = {}
+
+                        # Query CloudWatch for each period
+                        for period_name, (start, end) in periods.items():
+                            period_seconds = int((end - start).total_seconds())
+
+                            metrics_response = await cw.get_metric_statistics(
+                                Namespace="AWS/NATGateway",
+                                MetricName="BytesOutToDestination",
+                                Dimensions=[{"Name": "NatGatewayId", "Value": nat_gw_id}],
+                                StartTime=start,
+                                EndTime=end,
+                                Period=period_seconds,  # Single period covering entire range
+                                Statistics=["Sum"],
+                            )
+
+                            total_bytes = sum(dp["Sum"] for dp in metrics_response.get("Datapoints", []))
+                            traffic_by_period[period_name] = total_bytes
+
+                        baseline = traffic_by_period["baseline_90_60d"]
+                        current = traffic_by_period["current_7d"]
+
+                        # Skip if baseline is zero (can't calculate drop %)
+                        if baseline == 0:
+                            continue
+
+                        # Normalize to same time period (30 days for baseline, 7 days for current)
+                        # Multiply current by (30/7) to extrapolate to 30-day equivalent
+                        current_30d_equivalent = current * (30 / 7)
+
+                        # Calculate traffic drop percentage
+                        drop_percent = ((baseline - current_30d_equivalent) / baseline) * 100
+
+                        # Skip if drop is not significant
+                        if drop_percent < traffic_drop_threshold_percent:
+                            continue
+
+                        # Calculate savings
+                        monthly_cost = self.PRICING["nat_gateway"]
+
+                        # Extract name from tags
+                        name = None
+                        for tag in nat_gw.get("Tags", []):
+                            if tag["Key"] == "Name":
+                                name = tag["Value"]
+                                break
+
+                        baseline_gb = baseline / (1024 ** 3)
+                        current_gb = current / (1024 ** 3)
+                        current_30d_gb = current_30d_equivalent / (1024 ** 3)
+
+                        orphan_reason = f"Traffic dropped {drop_percent:.1f}% in 90 days (from {baseline_gb:.2f} GB to {current_30d_gb:.2f} GB/month) - likely obsolete after migration"
+
+                        orphans.append(
+                            OrphanResourceData(
+                                resource_type="nat_gateway",
+                                resource_id=nat_gw_id,
+                                resource_name=name,
+                                region=region,
+                                estimated_monthly_cost=monthly_cost,
+                                resource_metadata={
+                                    "vpc_id": vpc_id,
+                                    "subnet_id": nat_gw.get("SubnetId", "Unknown"),
+                                    "created_at": created_at.isoformat(),
+                                    "age_days": age_days,
+                                    "confidence_level": "high",
+                                    "orphan_reason": orphan_reason,
+                                    "orphan_type": "obsolete_migration",
+                                    "scenario_id": "nat_gateway_obsolete_migration",
+                                    # Traffic trend metadata
+                                    "baseline_traffic_gb_30d": round(baseline_gb, 2),
+                                    "period_60_30d_gb": round(traffic_by_period["period_60_30d"] / (1024 ** 3), 2),
+                                    "period_30_7d_gb": round(traffic_by_period["period_30_7d"] / (1024 ** 3), 2),
+                                    "current_traffic_gb_7d": round(current_gb, 2),
+                                    "current_traffic_gb_30d_projected": round(current_30d_gb, 2),
+                                    "traffic_drop_percent": round(drop_percent, 1),
+                                    "monthly_savings": round(monthly_cost, 2),
+                                    "annual_savings": round(monthly_cost * 12, 2),
+                                    "recommendation": f"Traffic dropped {drop_percent:.1f}% in 90 days (from {baseline_gb:.2f} GB to {current_30d_gb:.2f} GB/month). NAT Gateway likely obsolete after architecture migration (serverless, containers, or VPC Endpoints). Delete to save ${monthly_cost:.2f}/month (${monthly_cost * 12:.2f}/year).",
+                                },
+                            )
+                        )
+
+        except ClientError as e:
+            print(f"Error scanning NAT Gateway obsolete migration in {region}: {e}")
 
         return orphans
 
