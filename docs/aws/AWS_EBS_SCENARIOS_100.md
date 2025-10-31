@@ -256,7 +256,7 @@ CloudWaste détecte maintenant **100% des scénarios de gaspillage** pour AWS EB
 4. **Variables d'environnement** :
    ```bash
    export AWS_REGION="us-east-1"
-   export AWS_ACCOUNT_ID="123456789012"
+   export AWS_ACCOUNT_ID="852815611543"
    export AWS_ACCESS_KEY_ID="your-access-key"
    export AWS_SECRET_ACCESS_KEY="your-secret-key"
    ```
