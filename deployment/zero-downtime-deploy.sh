@@ -232,6 +232,26 @@ else
 fi
 
 # ============================================================================
+# Step 4.5: Restart Nginx to refresh DNS cache
+# ============================================================================
+
+print_step "Redémarrage de Nginx pour rafraîchir le cache DNS..."
+docker compose -f "$COMPOSE_FILE" restart nginx
+
+print_step "Attente du redémarrage de Nginx..."
+sleep 5
+
+# Verify Nginx can reach backend with new IPs
+print_step "Vérification finale de la connexion Nginx → Backend..."
+FINAL_API_CHECK=$(curl -s -o /dev/null -w "%{http_code}" https://cutcosts.tech/api/v1/health || echo "000")
+if [ "$FINAL_API_CHECK" == "200" ]; then
+    print_success "Nginx → Backend: OK (HTTP $FINAL_API_CHECK)"
+else
+    print_warning "Nginx → Backend: Problème potentiel (HTTP $FINAL_API_CHECK)"
+    print_warning "Cela peut être normal si Nginx prend plus de temps à redémarrer"
+fi
+
+# ============================================================================
 # Step 5: Deployment Success - Save Stable Commit
 # ============================================================================
 
