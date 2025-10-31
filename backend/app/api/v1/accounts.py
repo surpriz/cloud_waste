@@ -12,6 +12,7 @@ from app.models.user import User
 from app.schemas.cloud_account import (
     AWSCredentials,
     AzureCredentials,
+    GCPCredentials,
     CloudAccount,
     CloudAccountCreate,
     CloudAccountUpdate,
@@ -105,6 +106,18 @@ async def create_cloud_account(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Azure credentials validation failed: {str(e)}",
             )
+
+    elif account_in.provider == "gcp":
+        if not account_in.gcp_project_id or not account_in.gcp_service_account_json:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="GCP Project ID and Service Account JSON are required for GCP accounts",
+            )
+
+        # For MVP, we skip validation and directly create the account
+        # GCP validation will be implemented in Phase 2
+        if not account_in.account_identifier:
+            account_in.account_identifier = account_in.gcp_project_id
 
     # Create cloud account with encrypted credentials
     try:
@@ -200,6 +213,37 @@ async def validate_credentials_before_creation(
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"❌ Azure validation failed: {str(e)}",
+            )
+
+    elif credentials_data.provider == "gcp":
+        if not credentials_data.gcp_project_id or not credentials_data.gcp_service_account_json:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="GCP Project ID and Service Account JSON are required",
+            )
+
+        # For MVP, we skip actual validation and return success
+        # GCP validation will be implemented in Phase 2
+        try:
+            import json
+            json_data = json.loads(credentials_data.gcp_service_account_json)
+            project_id = json_data.get("project_id", credentials_data.gcp_project_id)
+
+            return {
+                "valid": True,
+                "provider": "gcp",
+                "project_id": project_id,
+                "message": f"✅ GCP credentials format is valid! Project ID: {project_id}",
+            }
+        except json.JSONDecodeError as e:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"❌ Invalid JSON format for Service Account: {str(e)}",
+            )
+        except Exception as e:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"❌ GCP validation failed: {str(e)}",
             )
 
     else:

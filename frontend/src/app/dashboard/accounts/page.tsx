@@ -3,19 +3,19 @@
 import { useEffect, useState } from "react";
 import { useAccountStore } from "@/stores/useAccountStore";
 import { accountsAPI } from "@/lib/api";
-import { Plus, Trash2, RefreshCw, CheckCircle, XCircle, HelpCircle, ChevronDown, ChevronUp, Copy, ExternalLink, Edit } from "lucide-react";
+import { Plus, Trash2, RefreshCw, CheckCircle, XCircle, HelpCircle, ChevronDown, ChevronUp, Copy, ExternalLink, Edit, Info, AlertCircle } from "lucide-react";
 
 export default function AccountsPage() {
   const { accounts, fetchAccounts, deleteAccount, isLoading } = useAccountStore();
   const [showProviderSelector, setShowProviderSelector] = useState(false);
-  const [selectedProvider, setSelectedProvider] = useState<"aws" | "azure" | null>(null);
+  const [selectedProvider, setSelectedProvider] = useState<"aws" | "azure" | "gcp" | null>(null);
   const [editingAccount, setEditingAccount] = useState<any>(null);
 
   useEffect(() => {
     fetchAccounts();
   }, [fetchAccounts]);
 
-  const handleAddAccount = (provider: "aws" | "azure") => {
+  const handleAddAccount = (provider: "aws" | "azure" | "gcp") => {
     setSelectedProvider(provider);
     setShowProviderSelector(false);
   };
@@ -56,6 +56,9 @@ export default function AccountsPage() {
 
       {/* Add Azure Account Form */}
       {selectedProvider === "azure" && <AddAzureAccountForm onClose={closeAddForm} />}
+
+      {/* Add GCP Account Form */}
+      {selectedProvider === "gcp" && <AddGCPAccountForm onClose={closeAddForm} />}
 
       {/* Edit Account Form */}
       {editingAccount && (
@@ -343,7 +346,7 @@ function AWSCredentialsHelp() {
   );
 }
 
-function ProviderSelector({ onSelectProvider, onClose }: { onSelectProvider: (provider: "aws" | "azure") => void; onClose: () => void }) {
+function ProviderSelector({ onSelectProvider, onClose }: { onSelectProvider: (provider: "aws" | "azure" | "gcp") => void; onClose: () => void }) {
   return (
     <div className="rounded-2xl border-2 border-blue-200 bg-white p-8 shadow-xl">
       <div className="flex items-center justify-between mb-6">
@@ -378,6 +381,20 @@ function ProviderSelector({ onSelectProvider, onClose }: { onSelectProvider: (pr
           <div className="text-center">
             <h3 className="text-lg font-bold text-gray-900">Microsoft Azure</h3>
             <p className="mt-1 text-sm text-gray-600">Connect your Azure subscription</p>
+          </div>
+        </button>
+
+        {/* GCP Card */}
+        <button
+          onClick={() => onSelectProvider("gcp")}
+          className="flex flex-col items-center gap-4 rounded-xl border-2 border-red-200 bg-red-50 p-6 transition-all hover:border-red-400 hover:bg-red-100 hover:shadow-lg"
+        >
+          <div className="flex h-16 w-16 items-center justify-center rounded-full bg-red-600 text-white shadow-md">
+            <span className="text-xl font-bold">GCP</span>
+          </div>
+          <div className="text-center">
+            <h3 className="text-lg font-bold text-gray-900">Google Cloud Platform</h3>
+            <p className="mt-1 text-sm text-gray-600">Connect your GCP project</p>
           </div>
         </button>
       </div>
@@ -1512,6 +1529,426 @@ function AddAzureAccountForm({ onClose }: { onClose: () => void }) {
           </button>
         </div>
       </form>
+    </div>
+  );
+}
+
+// GCP Account Form Component
+function AddGCPAccountForm({ onClose }: { onClose: () => void }) {
+  const { createAccount, isLoading, error } = useAccountStore();
+  const [showHelp, setShowHelp] = useState(false);
+  const [isValidating, setIsValidating] = useState(false);
+  const [validationResult, setValidationResult] = useState<{
+    status: 'idle' | 'success' | 'error';
+    message: string;
+  } | null>(null);
+  const [jsonError, setJsonError] = useState<string>("");
+  const [formData, setFormData] = useState({
+    account_name: "",
+    gcp_project_id: "",
+    gcp_service_account_json: "",
+    regions: "us-central1,us-east1,europe-west1",
+    description: "",
+  });
+
+  const isFormValid = () => {
+    return !!(
+      formData.account_name &&
+      formData.gcp_project_id &&
+      formData.gcp_service_account_json &&
+      !jsonError
+    );
+  };
+
+  const handleJsonChange = (value: string) => {
+    setFormData({ ...formData, gcp_service_account_json: value });
+
+    // Validate JSON format
+    if (!value.trim()) {
+      setJsonError("");
+      return;
+    }
+
+    try {
+      const parsed = JSON.parse(value);
+
+      // Validate it looks like a service account JSON
+      if (!parsed.type || parsed.type !== "service_account") {
+        setJsonError("⚠️ This doesn't look like a Service Account JSON (missing 'type: service_account')");
+      } else if (!parsed.project_id) {
+        setJsonError("⚠️ Missing 'project_id' in Service Account JSON");
+      } else if (!parsed.private_key) {
+        setJsonError("⚠️ Missing 'private_key' in Service Account JSON");
+      } else if (!parsed.client_email) {
+        setJsonError("⚠️ Missing 'client_email' in Service Account JSON");
+      } else {
+        setJsonError("");
+      }
+    } catch (e) {
+      setJsonError("❌ Invalid JSON format - please paste valid JSON");
+    }
+  };
+
+  const handleTestConnection = async () => {
+    setIsValidating(true);
+    setValidationResult(null);
+
+    try {
+      const testData = {
+        provider: "gcp" as const,
+        account_name: formData.account_name || "Test",
+        account_identifier: formData.gcp_project_id,
+        regions: formData.regions.split(",").map((r: string) => r.trim()).filter(Boolean),
+        gcp_project_id: formData.gcp_project_id,
+        gcp_service_account_json: formData.gcp_service_account_json,
+      };
+
+      const result = await accountsAPI.validateCredentials(testData);
+      setValidationResult({
+        status: 'success',
+        message: result.message,
+      });
+    } catch (error: any) {
+      setValidationResult({
+        status: 'error',
+        message: error.message || 'Validation failed',
+      });
+    } finally {
+      setIsValidating(false);
+    }
+  };
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    try {
+      await createAccount({
+        provider: "gcp",
+        account_name: formData.account_name,
+        account_identifier: formData.gcp_project_id,
+        gcp_project_id: formData.gcp_project_id,
+        gcp_service_account_json: formData.gcp_service_account_json,
+        regions: formData.regions.split(",").map((r: string) => r.trim()).filter(Boolean),
+        description: formData.description || undefined,
+      });
+      onClose();
+    } catch (err) {
+      // Error handled by store
+    }
+  };
+
+  return (
+    <div className="rounded-2xl border-2 border-red-200 bg-white p-8 shadow-xl">
+      <div className="flex items-center justify-between mb-6">
+        <h2 className="text-2xl font-bold bg-gradient-to-r from-red-600 to-pink-600 bg-clip-text text-transparent">
+          Add GCP Account
+        </h2>
+        <button
+          type="button"
+          onClick={() => setShowHelp(!showHelp)}
+          className="flex items-center gap-2 rounded-lg bg-red-50 px-4 py-2 text-sm font-medium text-red-700 hover:bg-red-100 transition-colors"
+        >
+          <HelpCircle className="h-4 w-4" />
+          {showHelp ? "Hide" : "How to get credentials?"}
+          {showHelp ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
+        </button>
+      </div>
+
+      {/* Help Section */}
+      {showHelp && <GCPCredentialsHelp />}
+
+      <form onSubmit={handleSubmit} className="mt-6 space-y-5">
+        {error && (
+          <div className="rounded-xl bg-red-50 border border-red-200 p-4 text-sm text-red-700 flex items-start gap-2">
+            <XCircle className="h-5 w-5 flex-shrink-0 mt-0.5" />
+            <span>{error}</span>
+          </div>
+        )}
+
+        <div>
+          <label className="block text-sm font-semibold text-gray-700 mb-2">
+            Account Name *
+          </label>
+          <input
+            required
+            type="text"
+            value={formData.account_name}
+            onChange={(e) =>
+              setFormData({ ...formData, account_name: e.target.value })
+            }
+            className="block w-full rounded-xl border-2 border-gray-300 px-4 py-3 focus:border-red-500 focus:outline-none focus:ring-2 focus:ring-red-500/20 transition-all"
+            placeholder="Production GCP"
+          />
+        </div>
+
+        <div>
+          <label className="block text-sm font-semibold text-gray-700 mb-2">
+            GCP Project ID *
+            <span className="ml-2 text-xs font-normal text-gray-500">(e.g., my-project-123456)</span>
+          </label>
+          <input
+            required
+            type="text"
+            value={formData.gcp_project_id}
+            onChange={(e) =>
+              setFormData({ ...formData, gcp_project_id: e.target.value })
+            }
+            className="block w-full rounded-xl border-2 border-gray-300 px-4 py-3 focus:border-red-500 focus:outline-none focus:ring-2 focus:ring-red-500/20 transition-all font-mono text-sm"
+            placeholder="my-project-123456"
+          />
+        </div>
+
+        <div>
+          <label className="block text-sm font-semibold text-gray-700 mb-2">
+            Service Account JSON Key *
+            <span className="ml-2 text-xs font-normal text-gray-500">(paste entire JSON file content)</span>
+          </label>
+          <textarea
+            required
+            value={formData.gcp_service_account_json}
+            onChange={(e) => handleJsonChange(e.target.value)}
+            className={`block w-full rounded-xl border-2 px-4 py-3 focus:outline-none focus:ring-2 transition-all font-mono text-xs ${
+              jsonError
+                ? "border-red-300 focus:border-red-500 focus:ring-red-500/20"
+                : "border-gray-300 focus:border-red-500 focus:ring-red-500/20"
+            }`}
+            rows={8}
+            placeholder='{\n  "type": "service_account",\n  "project_id": "my-project-123456",\n  "private_key_id": "...",\n  "private_key": "-----BEGIN PRIVATE KEY-----\\n...\\n-----END PRIVATE KEY-----\\n",\n  "client_email": "cloudwaste@my-project.iam.gserviceaccount.com",\n  ...\n}'
+          />
+          {jsonError && (
+            <p className="mt-2 text-sm text-red-600">{jsonError}</p>
+          )}
+          <p className="mt-2 text-xs text-gray-500">
+            🔒 Security: This JSON key will be encrypted before storage
+          </p>
+        </div>
+
+        <div>
+          <label className="block text-sm font-semibold text-gray-700 mb-2">
+            Regions (comma-separated)
+          </label>
+          <input
+            type="text"
+            value={formData.regions}
+            onChange={(e) =>
+              setFormData({ ...formData, regions: e.target.value })
+            }
+            className="block w-full rounded-xl border-2 border-gray-300 px-4 py-3 focus:border-red-500 focus:outline-none focus:ring-2 focus:ring-red-500/20 transition-all font-mono"
+            placeholder="us-central1,us-east1,europe-west1"
+          />
+          <p className="mt-2 text-xs text-gray-500">
+            💡 Tip: Common regions - us-central1, us-east1, us-west1, europe-west1, europe-west2, asia-southeast1, asia-northeast1
+          </p>
+        </div>
+
+        <div>
+          <label className="block text-sm font-semibold text-gray-700 mb-2">
+            Description (optional)
+          </label>
+          <textarea
+            value={formData.description}
+            onChange={(e) =>
+              setFormData({ ...formData, description: e.target.value })
+            }
+            className="block w-full rounded-xl border-2 border-gray-300 px-4 py-3 focus:border-red-500 focus:outline-none focus:ring-2 focus:ring-red-500/20 transition-all"
+            rows={3}
+            placeholder="Production environment GCP project"
+          />
+        </div>
+
+        {/* Validation Result */}
+        {validationResult && (
+          <div className={`p-4 rounded-xl ${
+            validationResult.status === 'success'
+              ? 'bg-green-50 border-2 border-green-200'
+              : 'bg-red-50 border-2 border-red-200'
+          }`}>
+            <p className={`text-sm font-medium ${
+              validationResult.status === 'success' ? 'text-green-700' : 'text-red-700'
+            }`}>
+              {validationResult.message}
+            </p>
+          </div>
+        )}
+
+        {/* Action Buttons */}
+        <div className="flex gap-3 pt-4">
+          {/* Test Connection Button */}
+          <button
+            type="button"
+            onClick={handleTestConnection}
+            disabled={isValidating || !isFormValid()}
+            className="flex-1 rounded-xl border-2 border-red-600 bg-white px-6 py-3 font-semibold text-red-600 hover:bg-red-50 transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+          >
+            {isValidating ? (
+              <>
+                <RefreshCw className="h-5 w-5 animate-spin" />
+                Testing...
+              </>
+            ) : (
+              <>
+                <CheckCircle className="h-5 w-5" />
+                Test Connection
+              </>
+            )}
+          </button>
+
+          {/* Add Account Button */}
+          <button
+            type="submit"
+            disabled={isLoading || validationResult?.status !== 'success'}
+            className="flex-1 rounded-xl bg-gradient-to-r from-red-600 to-pink-600 px-6 py-3 font-semibold text-white shadow-lg hover:shadow-xl transition-all hover:scale-[1.02] disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+          >
+            {isLoading ? (
+              <>
+                <RefreshCw className="h-5 w-5 animate-spin" />
+                Adding...
+              </>
+            ) : (
+              <>
+                <Plus className="h-5 w-5" />
+                Add Account
+              </>
+            )}
+          </button>
+
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-xl border-2 border-gray-300 bg-white px-6 py-3 font-semibold text-gray-700 hover:bg-gray-50 transition-all"
+          >
+            Cancel
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+// GCP Credentials Help Component
+function GCPCredentialsHelp() {
+  return (
+    <div className="rounded-xl bg-red-50 border-2 border-red-200 p-6 space-y-4 mb-6">
+      <h3 className="font-bold text-red-900 flex items-center gap-2">
+        <Info className="h-5 w-5" />
+        How to create a GCP Service Account for CloudWaste
+      </h3>
+
+      <div className="space-y-3 text-sm text-red-800">
+        <div className="flex gap-3">
+          <span className="flex-shrink-0 flex h-6 w-6 items-center justify-center rounded-full bg-red-600 text-xs font-bold text-white">
+            1
+          </span>
+          <div>
+            <p className="font-semibold">Open Google Cloud Console</p>
+            <p className="text-red-700 mt-1">
+              Go to{" "}
+              <a
+                href="https://console.cloud.google.com/iam-admin/serviceaccounts"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="underline hover:text-red-900"
+              >
+                IAM & Admin → Service Accounts
+              </a>
+            </p>
+          </div>
+        </div>
+
+        <div className="flex gap-3">
+          <span className="flex-shrink-0 flex h-6 w-6 items-center justify-center rounded-full bg-red-600 text-xs font-bold text-white">
+            2
+          </span>
+          <div>
+            <p className="font-semibold">Create Service Account</p>
+            <p className="text-red-700 mt-1">
+              Click <strong>"+ CREATE SERVICE ACCOUNT"</strong>
+            </p>
+            <p className="text-red-700 mt-1">
+              Name: <code className="bg-red-100 px-1 rounded">CloudWaste-Scanner</code>
+            </p>
+            <p className="text-red-700 mt-1">
+              Description: <code className="bg-red-100 px-1 rounded">Read-only access for CloudWaste waste detection</code>
+            </p>
+          </div>
+        </div>
+
+        <div className="flex gap-3">
+          <span className="flex-shrink-0 flex h-6 w-6 items-center justify-center rounded-full bg-red-600 text-xs font-bold text-white">
+            3
+          </span>
+          <div>
+            <p className="font-semibold">Grant Viewer Role (Read-Only)</p>
+            <p className="text-red-700 mt-1">
+              Role: <code className="bg-red-100 px-1 rounded font-semibold">Viewer</code>
+            </p>
+            <p className="text-red-700 mt-1 text-xs">
+              ⚠️ This role provides read-only access across all GCP resources
+            </p>
+          </div>
+        </div>
+
+        <div className="flex gap-3">
+          <span className="flex-shrink-0 flex h-6 w-6 items-center justify-center rounded-full bg-red-600 text-xs font-bold text-white">
+            4
+          </span>
+          <div>
+            <p className="font-semibold">Create JSON Key</p>
+            <p className="text-red-700 mt-1">
+              Click on the service account → <strong>KEYS</strong> tab → <strong>ADD KEY</strong> → <strong>Create new key</strong>
+            </p>
+            <p className="text-red-700 mt-1">
+              Select <strong>JSON</strong> format → Click <strong>CREATE</strong>
+            </p>
+            <p className="text-red-700 mt-1">
+              A JSON file will download automatically (e.g., <code className="bg-red-100 px-1 rounded text-xs">my-project-123456-abcdef.json</code>)
+            </p>
+          </div>
+        </div>
+
+        <div className="flex gap-3">
+          <span className="flex-shrink-0 flex h-6 w-6 items-center justify-center rounded-full bg-red-600 text-xs font-bold text-white">
+            5
+          </span>
+          <div>
+            <p className="font-semibold">Copy JSON Content</p>
+            <p className="text-red-700 mt-1">
+              Open the downloaded JSON file with a text editor
+            </p>
+            <p className="text-red-700 mt-1">
+              Copy the <strong>entire content</strong> and paste it in the "Service Account JSON Key" field above
+            </p>
+          </div>
+        </div>
+      </div>
+
+      <div className="rounded-lg bg-yellow-50 border border-yellow-200 p-4">
+        <p className="text-xs text-yellow-800 flex items-start gap-2">
+          <AlertCircle className="h-4 w-4 flex-shrink-0 mt-0.5" />
+          <span>
+            <strong>Security Best Practice:</strong> The Viewer role provides read-only access to all resources in your GCP project.
+            CloudWaste will NEVER modify, delete, or create resources. The JSON key will be encrypted before storage.
+            You can revoke access anytime by deleting the service account in GCP Console.
+          </span>
+        </p>
+      </div>
+
+      <div className="rounded-lg bg-blue-50 border border-blue-200 p-4">
+        <p className="text-xs text-blue-800 flex items-start gap-2">
+          <Info className="h-4 w-4 flex-shrink-0 mt-0.5" />
+          <span>
+            <strong>Required APIs:</strong> Make sure these APIs are enabled in your project: Compute Engine API, Cloud Storage API,
+            Cloud SQL Admin API, Cloud Monitoring API. You can enable them at{" "}
+            <a
+              href="https://console.cloud.google.com/apis/library"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="underline hover:text-blue-900"
+            >
+              APIs & Services → Library
+            </a>
+          </span>
+        </p>
+      </div>
     </div>
   );
 }

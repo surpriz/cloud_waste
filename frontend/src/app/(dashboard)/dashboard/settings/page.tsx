@@ -508,7 +508,10 @@ const AZURE_RESOURCE_LABELS: { [key: string]: string } = {
 };
 
 // Helper function to get provider from resource type
-const getResourceProvider = (resourceType: string): "aws" | "azure" => {
+const getResourceProvider = (resourceType: string): "aws" | "azure" | "gcp" => {
+  if (resourceType in GCP_RESOURCE_ICONS) {
+    return "gcp";
+  }
   if (resourceType in AZURE_RESOURCE_ICONS) {
     return "azure";
   }
@@ -518,6 +521,9 @@ const getResourceProvider = (resourceType: string): "aws" | "azure" => {
 // Helper function to get icon for resource type
 const getResourceIcon = (resourceType: string) => {
   const provider = getResourceProvider(resourceType);
+  if (provider === "gcp") {
+    return GCP_RESOURCE_ICONS[resourceType] || HardDrive;
+  }
   if (provider === "azure") {
     return AZURE_RESOURCE_ICONS[resourceType] || HardDrive;
   }
@@ -527,6 +533,9 @@ const getResourceIcon = (resourceType: string) => {
 // Helper function to get label for resource type
 const getResourceLabel = (resourceType: string): string => {
   const provider = getResourceProvider(resourceType);
+  if (provider === "gcp") {
+    return GCP_RESOURCE_LABELS[resourceType] || resourceType;
+  }
   if (provider === "azure") {
     return AZURE_RESOURCE_LABELS[resourceType] || resourceType;
   }
@@ -541,6 +550,12 @@ const RESOURCE_CATEGORIES = {
     database: ["rds_instance", "dynamodb_table", "redshift_cluster", "elasticache_cluster", "neptune_cluster", "documentdb_cluster"],
     networking: ["elastic_ip", "load_balancer", "nat_gateway", "vpn_connection", "transit_gateway_attachment", "vpc_endpoint", "global_accelerator"],
     analytics: ["kinesis_stream", "msk_cluster", "opensearch_domain"],
+  },
+  gcp: {
+    compute: ["gce_instance_stopped", "gce_instance_idle", "gke_cluster_idle"],
+    storage: ["persistent_disk_unattached", "gcs_bucket_empty", "disk_snapshot_old"],
+    networking: ["static_ip_unattached", "nat_gateway_unused"],
+    database: ["cloud_sql_stopped", "cloud_sql_idle"],
   },
   azure: {
     compute: [
@@ -661,6 +676,12 @@ const CATEGORY_LABELS = {
     networking: "🌐 Networking",
     analytics: "📊 Analytics & Streaming",
   },
+  gcp: {
+    compute: "💻 Compute",
+    storage: "💾 Storage",
+    networking: "🌐 Networking",
+    database: "🗄️ Database",
+  },
   azure: {
     compute: "💻 Compute",
     storage: "💾 Storage",
@@ -672,8 +693,35 @@ const CATEGORY_LABELS = {
   }
 };
 
+// GCP Resource Icons & Labels (empty for now - will be populated when detection scenarios are added)
+const GCP_RESOURCE_ICONS: { [key: string]: any } = {
+  gce_instance_stopped: Server,
+  gce_instance_idle: Server,
+  gke_cluster_idle: Server,
+  persistent_disk_unattached: HardDrive,
+  gcs_bucket_empty: HardDrive,
+  disk_snapshot_old: Camera,
+  static_ip_unattached: Globe,
+  nat_gateway_unused: Network,
+  cloud_sql_stopped: Database,
+  cloud_sql_idle: Database,
+};
+
+const GCP_RESOURCE_LABELS: { [key: string]: string } = {
+  gce_instance_stopped: "Compute Engine Instances (Stopped)",
+  gce_instance_idle: "Compute Engine Instances (Idle)",
+  gke_cluster_idle: "GKE Clusters (Idle)",
+  persistent_disk_unattached: "Persistent Disks (Unattached)",
+  gcs_bucket_empty: "Cloud Storage Buckets (Empty)",
+  disk_snapshot_old: "Disk Snapshots (Old)",
+  static_ip_unattached: "Static IPs (Unattached)",
+  nat_gateway_unused: "Cloud NAT (Unused)",
+  cloud_sql_stopped: "Cloud SQL (Stopped)",
+  cloud_sql_idle: "Cloud SQL (Idle)",
+};
+
 // Helper function to get resource category
-const getResourceCategory = (resourceType: string, provider: "aws" | "azure"): string | null => {
+const getResourceCategory = (resourceType: string, provider: "aws" | "azure" | "gcp"): string | null => {
   const categories = RESOURCE_CATEGORIES[provider];
   for (const [categoryName, resources] of Object.entries(categories)) {
     if (resources.includes(resourceType)) {
@@ -687,7 +735,7 @@ export default function SettingsPage() {
   const [activeTab, setActiveTab] = useState<"profile" | "notifications" | "security" | "detection">("detection");
   const [detectionRules, setDetectionRules] = useState<DetectionRule[]>([]);
   const [isLoading, setIsLoading] = useState(false);
-  const [selectedProvider, setSelectedProvider] = useState<"aws" | "azure" | "all">("all");
+  const [selectedProvider, setSelectedProvider] = useState<"aws" | "azure" | "gcp" | "all">("all");
   const [selectedCategory, setSelectedCategory] = useState<string>("all");
   const [searchQuery, setSearchQuery] = useState<string>("");
 
@@ -954,6 +1002,16 @@ export default function SettingsPage() {
                   >
                     🔵 Azure
                   </button>
+                  <button
+                    onClick={() => setSelectedProvider("gcp")}
+                    className={`px-4 py-2 rounded-lg font-semibold transition-colors ${
+                      selectedProvider === "gcp"
+                        ? "bg-red-500 text-white"
+                        : "bg-white text-gray-700 border-2 border-gray-300 hover:bg-gray-50"
+                    }`}
+                  >
+                    🔴 GCP
+                  </button>
                 </div>
 
                 {/* Category Filter - Only show when a specific provider is selected */}
@@ -968,8 +1026,8 @@ export default function SettingsPage() {
                       className="px-4 py-2 rounded-lg border-2 border-gray-300 bg-white font-semibold text-gray-700 hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-blue-500 cursor-pointer"
                     >
                       <option value="all">All Categories</option>
-                      {Object.entries(CATEGORY_LABELS[selectedProvider as "aws" | "azure"]).map(([key, label]) => {
-                        const providerCategories = RESOURCE_CATEGORIES[selectedProvider as "aws" | "azure"];
+                      {Object.entries(CATEGORY_LABELS[selectedProvider as "aws" | "azure" | "gcp"]).map(([key, label]) => {
+                        const providerCategories = RESOURCE_CATEGORIES[selectedProvider as "aws" | "azure" | "gcp"];
                         const count = (providerCategories as any)[key]?.length || 0;
                         return (
                           <option key={key} value={key}>
@@ -1022,7 +1080,7 @@ export default function SettingsPage() {
 
                   // Filter 2: Category
                   if (selectedCategory !== "all" && selectedProvider !== "all") {
-                    const category = getResourceCategory(rule.resource_type, selectedProvider as "aws" | "azure");
+                    const category = getResourceCategory(rule.resource_type, selectedProvider as "aws" | "azure" | "gcp");
                     if (category !== selectedCategory) return false;
                   }
 
@@ -1079,11 +1137,13 @@ export default function SettingsPage() {
                           <h3 className="text-lg md:text-xl font-bold text-gray-900 flex flex-wrap items-center gap-2">
                             <span>{label}</span>
                             <span className={`text-xs px-2 py-1 rounded-full font-semibold ${
-                              provider === "azure"
+                              provider === "gcp"
+                                ? "bg-red-100 text-red-800"
+                                : provider === "azure"
                                 ? "bg-blue-100 text-blue-800"
                                 : "bg-orange-100 text-orange-800"
                             }`}>
-                              {provider === "azure" ? "🔵 AZURE" : "🟠 AWS"}
+                              {provider === "gcp" ? "🔴 GCP" : provider === "azure" ? "🔵 AZURE" : "🟠 AWS"}
                             </span>
                             {isCustomized && (
                               <span className="text-xs bg-purple-200 text-purple-800 px-2 py-1 rounded-full font-semibold">

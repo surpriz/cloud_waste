@@ -11,6 +11,7 @@ from app.models.cloud_account import CloudAccount
 from app.schemas.cloud_account import (
     AWSCredentials,
     AzureCredentials,
+    GCPCredentials,
     CloudAccountCreate,
     CloudAccountUpdate,
     CloudAccountWithCredentials,
@@ -117,9 +118,14 @@ async def create_cloud_account(
             "client_secret": account_in.azure_client_secret,
             "subscription_id": account_in.azure_subscription_id,
         }
-    # Future providers: gcp
-    # elif account_in.provider == "gcp":
-    #     ...
+    elif account_in.provider == "gcp":
+        if not account_in.gcp_project_id or not account_in.gcp_service_account_json:
+            raise ValueError("GCP credentials (project_id and service_account_json) are required")
+
+        credentials_dict = {
+            "project_id": account_in.gcp_project_id,
+            "service_account_json": account_in.gcp_service_account_json,
+        }
 
     # Encrypt credentials
     credentials_json = json.dumps(credentials_dict)
@@ -199,6 +205,20 @@ async def update_cloud_account(
         update_data.pop("azure_client_secret", None)
         update_data.pop("azure_subscription_id", None)
 
+    # Handle GCP credentials update if both fields provided
+    if "gcp_project_id" in update_data and "gcp_service_account_json" in update_data:
+        credentials_dict = {
+            "project_id": update_data.pop("gcp_project_id"),
+            "service_account_json": update_data.pop("gcp_service_account_json"),
+        }
+        credentials_json = json.dumps(credentials_dict)
+        encrypted_credentials = credential_encryption.encrypt(credentials_json)
+        update_data["credentials_encrypted"] = encrypted_credentials
+    else:
+        # Remove individual GCP credential fields if not all provided
+        update_data.pop("gcp_project_id", None)
+        update_data.pop("gcp_service_account_json", None)
+
     # Update fields
     for field, value in update_data.items():
         setattr(db_account, field, value)
@@ -251,6 +271,7 @@ async def get_decrypted_credentials(
     # Parse based on provider
     aws_credentials = None
     azure_credentials = None
+    gcp_credentials = None
 
     if db_account.provider == "aws":
         aws_credentials = AWSCredentials(
@@ -264,6 +285,11 @@ async def get_decrypted_credentials(
             client_id=credentials_dict["client_id"],
             client_secret=credentials_dict["client_secret"],
             subscription_id=credentials_dict["subscription_id"],
+        )
+    elif db_account.provider == "gcp":
+        gcp_credentials = GCPCredentials(
+            project_id=credentials_dict["project_id"],
+            service_account_json=credentials_dict["service_account_json"],
         )
 
     # Create response with decrypted credentials
@@ -286,4 +312,5 @@ async def get_decrypted_credentials(
         updated_at=db_account.updated_at,
         aws_credentials=aws_credentials,
         azure_credentials=azure_credentials,
+        gcp_credentials=gcp_credentials,
     )

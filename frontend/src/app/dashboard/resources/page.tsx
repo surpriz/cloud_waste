@@ -178,6 +178,17 @@ const resourceIcons: Record<ResourceType, any> = {
   vpn_gateway_basic_sku_deprecated: AlertTriangle,
   vpn_gateway_no_connections: Network,
   network_interface_orphaned: Network,
+  // GCP Resources
+  gce_instance_stopped: Server,
+  gce_instance_idle: Server,
+  gke_cluster_idle: Server,
+  persistent_disk_unattached: HardDrive,
+  gcs_bucket_empty: HardDrive,
+  disk_snapshot_old: Camera,
+  static_ip_unattached: Wifi,
+  nat_gateway_unused: Network,
+  cloud_sql_stopped: Database,
+  cloud_sql_idle: Database,
 };
 
 // Confidence level badge component

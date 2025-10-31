@@ -53,7 +53,7 @@ export interface CloudAccount {
 }
 
 export interface CloudAccountCreate {
-  provider: "aws" | "azure";
+  provider: "aws" | "azure" | "gcp";
   account_name: string;
   account_identifier: string;
 
@@ -66,6 +66,10 @@ export interface CloudAccountCreate {
   azure_client_id?: string;
   azure_client_secret?: string;
   azure_subscription_id?: string;
+
+  // GCP credentials
+  gcp_project_id?: string;
+  gcp_service_account_json?: string;
 
   regions?: string[];
   resource_groups?: string[];
@@ -260,7 +264,18 @@ export type ResourceType =
   | "vpn_gateway_disconnected"
   | "vpn_gateway_basic_sku_deprecated"
   | "vpn_gateway_no_connections"
-  | "network_interface_orphaned";
+  | "network_interface_orphaned"
+  // GCP Resources (10 for MVP Phase 1)
+  | "gce_instance_stopped"
+  | "gce_instance_idle"
+  | "gke_cluster_idle"
+  | "persistent_disk_unattached"
+  | "gcs_bucket_empty"
+  | "disk_snapshot_old"
+  | "static_ip_unattached"
+  | "nat_gateway_unused"
+  | "cloud_sql_stopped"
+  | "cloud_sql_idle";
 
 export type ConfidenceLevel = "critical" | "high" | "medium" | "low";
 

@@ -25,6 +25,14 @@ class AzureCredentials(BaseModel):
     subscription_id: str = Field(..., min_length=36, max_length=36, description="Azure Subscription ID (GUID)")
 
 
+# GCP credentials schema (not stored directly, used for encryption)
+class GCPCredentials(BaseModel):
+    """GCP credentials schema."""
+
+    project_id: str = Field(..., min_length=6, max_length=30, description="GCP Project ID")
+    service_account_json: str = Field(..., description="GCP Service Account JSON key (as string)")
+
+
 # Base schema
 class CloudAccountBase(BaseModel):
     """Base cloud account schema."""
@@ -88,8 +96,17 @@ class CloudAccountCreate(CloudAccountBase):
         description="Azure Subscription ID (required for Azure)",
     )
 
-    # Future: GCP credentials
-    # gcp_credentials: dict | None = None
+    # GCP credentials (will be encrypted before storage)
+    gcp_project_id: str | None = Field(
+        default=None,
+        min_length=6,
+        max_length=30,
+        description="GCP Project ID (required for GCP)",
+    )
+    gcp_service_account_json: str | None = Field(
+        default=None,
+        description="GCP Service Account JSON key (required for GCP)",
+    )
 
 
 # Schema for updating cloud account
@@ -111,6 +128,10 @@ class CloudAccountUpdate(BaseModel):
     azure_client_id: str | None = Field(default=None, min_length=36, max_length=36)
     azure_client_secret: str | None = Field(default=None, min_length=1, max_length=256)
     azure_subscription_id: str | None = Field(default=None, min_length=36, max_length=36)
+
+    # Allow updating GCP credentials
+    gcp_project_id: str | None = Field(default=None, min_length=6, max_length=30)
+    gcp_service_account_json: str | None = None
 
     # Scheduled scan settings
     scheduled_scan_enabled: bool | None = None
@@ -147,4 +168,4 @@ class CloudAccountWithCredentials(CloudAccount):
 
     aws_credentials: AWSCredentials | None = None
     azure_credentials: AzureCredentials | None = None
-    # gcp_credentials: dict | None = None
+    gcp_credentials: GCPCredentials | None = None

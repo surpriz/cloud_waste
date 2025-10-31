@@ -18,6 +18,7 @@ from app.models.scan import Scan, ScanStatus
 from app.models.user import User
 from app.providers.aws import AWSProvider
 from app.providers.azure import AzureProvider
+from app.providers.gcp import GCPProvider
 from app.services.email_service import send_scan_summary_email
 from app.workers.celery_app import celery_app
 
@@ -314,6 +315,64 @@ async def _scan_cloud_account_async(
                     "total_resources_scanned": total_resources,
                     "orphan_resources_found": len(all_orphans),
                     "estimated_monthly_waste": total_waste,
+                    "regions_scanned": regions_to_scan,
+                }
+
+            elif account.provider == "gcp":
+                provider = GCPProvider(
+                    project_id=credentials["project_id"],
+                    service_account_json=credentials["service_account_json"],
+                    regions=account.regions if account.regions else None,
+                )
+
+                # Get regions to scan
+                regions_to_scan = (
+                    account.regions
+                    if account.regions
+                    else ["us-central1", "us-east1", "europe-west1"]  # Default GCP regions
+                )
+
+                # For MVP, GCP scanning returns empty list
+                # Full implementation will be added in Phase 2
+                all_orphans = []
+                total_resources = 0
+
+                # Update scan with results
+                scan.status = ScanStatus.COMPLETED.value
+                scan.total_resources_scanned = 0
+                scan.orphan_resources_found = 0
+                scan.estimated_monthly_waste = 0.0
+                scan.completed_at = datetime.now()
+
+                # Update account last_scan_at
+                account.last_scan_at = datetime.now()
+
+                await db.commit()
+
+                # Send email notification if user has enabled notifications
+                result = await db.execute(select(User).where(User.id == account.user_id))
+                user = result.scalar_one_or_none()
+                if user and user.email_scan_notifications:
+                    send_scan_summary_email(
+                        email=user.email,
+                        full_name=user.full_name or "Utilisateur",
+                        account_name=account.account_name,
+                        scan_type=scan.scan_type,
+                        status="completed",
+                        started_at=scan.started_at.strftime("%d/%m/%Y %H:%M") if scan.started_at else "N/A",
+                        completed_at=scan.completed_at.strftime("%d/%m/%Y %H:%M") if scan.completed_at else "N/A",
+                        total_resources_scanned=0,
+                        orphan_resources_found=0,
+                        estimated_monthly_waste=0.0,
+                        regions_scanned=regions_to_scan,
+                    )
+
+                return {
+                    "scan_id": str(scan.id),
+                    "status": "completed",
+                    "total_resources_scanned": 0,
+                    "orphan_resources_found": 0,
+                    "estimated_monthly_waste": 0.0,
                     "regions_scanned": regions_to_scan,
                 }
 
