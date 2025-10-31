@@ -51,7 +51,6 @@ azure-mgmt-machinelearningservices==1.0.0  # Azure ML Services management
 # GCP SDK
 google-cloud-compute==1.15.0  # Compute Engine instances, disks, snapshots
 google-cloud-storage==2.14.0  # Cloud Storage buckets
-google-cloud-sql==1.12.0  # Cloud SQL instances
 google-cloud-monitoring==2.18.0  # Cloud Monitoring metrics
 google-auth==2.26.2  # GCP authentication
 
