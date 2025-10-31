@@ -15,11 +15,50 @@ from app.core.database import Base
 DEFAULT_DETECTION_RULES = {
     "ebs_volume": {
         "enabled": True,
+        # SCENARIO 1: Unattached volumes
         "min_age_days": 7,  # Ignore volumes created in last 7 days
         "confidence_threshold_days": 30,  # High confidence after 30 days
         "detect_attached_unused": True,  # Also detect attached volumes with no I/O activity
         "min_idle_days_attached": 30,  # Min days of no I/O for attached volumes
-        "description": "Unattached EBS volumes and attached volumes with no I/O activity",
+
+        # SCENARIO 2: Volumes on stopped instances
+        "min_stopped_days": 30,  # Instance must be stopped for 30+ days
+
+        # SCENARIO 3: gp2 → gp3 migration recommendation
+        "min_size_gb": 100,  # Minimum volume size for migration recommendation (small volumes = marginal savings)
+
+        # SCENARIO 4: Unnecessary io2 volumes
+        "compliance_tags": [
+            "compliance", "hipaa", "pci-dss", "sox", "gdpr", "iso27001",
+            "critical", "production-critical", "high-availability"
+        ],  # Tags that justify io2 durability (99.999%)
+
+        # SCENARIO 5: Overprovisioned IOPS
+        "iops_overprovisioning_factor": 2.0,  # Flag if provisioned IOPS > baseline × 2
+
+        # SCENARIO 6: Overprovisioned throughput
+        "baseline_throughput_mbps": 125,  # gp3 baseline throughput (free)
+        "high_throughput_workload_tags": [
+            "database", "analytics", "bigdata", "ml", "etl", "data-warehouse"
+        ],  # Workloads that justify high throughput
+
+        # SCENARIO 7: Idle volumes (CloudWatch - already partially implemented)
+        "min_idle_days": 60,  # Observation period for idle detection
+        "max_ops_threshold": 0.1,  # ops/sec - consider idle if < 0.1 ops/sec
+
+        # SCENARIO 8: Low IOPS usage
+        "max_iops_utilization_percent": 30,  # Flag if IOPS utilization < 30%
+        "safety_buffer_factor": 1.5,  # Recommended IOPS = avg × 1.5 (safety margin)
+        "min_observation_days": 30,  # CloudWatch observation period
+
+        # SCENARIO 9: Low throughput usage
+        "max_throughput_utilization_percent": 30,  # Flag if throughput utilization < 30%
+
+        # SCENARIO 10: Volume type downgrade opportunities
+        "min_savings_percent": 20,  # Only recommend downgrade if savings ≥ 20%
+        "safety_margin_iops": 1.5,  # Ensure downgraded type can handle avg_iops × 1.5
+
+        "description": "EBS volumes - 10 waste scenarios: unattached, stopped instances, gp2→gp3 migration, unnecessary io2, overprovisioned IOPS/throughput, idle, low IOPS/throughput usage, type downgrade opportunities",
     },
     "elastic_ip": {
         "enabled": True,

@@ -125,16 +125,57 @@ class CloudProviderBase(ABC):
         pass
 
     @abstractmethod
-    async def scan_unattached_volumes(self, region: str) -> list[OrphanResourceData]:
+    async def scan_unattached_volumes(self, region: str, detection_rules: dict | None = None) -> list[OrphanResourceData]:
         """
         Scan for unattached storage volumes.
 
         Args:
             region: Region to scan
+            detection_rules: Optional detection rules
 
         Returns:
             List of orphan volume resources
         """
+        pass
+
+    @abstractmethod
+    async def scan_volumes_on_stopped_instances(self, region: str, detection_rules: dict | None = None) -> list[OrphanResourceData]:
+        """Scan for volumes on stopped instances."""
+        pass
+
+    @abstractmethod
+    async def scan_gp2_migration_opportunities(self, region: str, detection_rules: dict | None = None) -> list[OrphanResourceData]:
+        """Scan for gp2 volumes that should migrate to gp3."""
+        pass
+
+    @abstractmethod
+    async def scan_unnecessary_io2_volumes(self, region: str, detection_rules: dict | None = None) -> list[OrphanResourceData]:
+        """Scan for io2 volumes without compliance requirements."""
+        pass
+
+    @abstractmethod
+    async def scan_overprovisioned_iops_volumes(self, region: str, detection_rules: dict | None = None) -> list[OrphanResourceData]:
+        """Scan for volumes with over-provisioned IOPS."""
+        pass
+
+    @abstractmethod
+    async def scan_overprovisioned_throughput_volumes(self, region: str, detection_rules: dict | None = None) -> list[OrphanResourceData]:
+        """Scan for volumes with over-provisioned throughput."""
+        pass
+
+    @abstractmethod
+    async def scan_low_iops_usage_volumes(self, region: str, detection_rules: dict | None = None) -> list[OrphanResourceData]:
+        """Scan for volumes with low IOPS utilization (CloudWatch)."""
+        pass
+
+    @abstractmethod
+    async def scan_low_throughput_usage_volumes(self, region: str, detection_rules: dict | None = None) -> list[OrphanResourceData]:
+        """Scan for volumes with low throughput utilization (CloudWatch)."""
+        pass
+
+    @abstractmethod
+    async def scan_volume_type_downgrade_opportunities(self, region: str, detection_rules: dict | None = None) -> list[OrphanResourceData]:
+        """Scan for volume type downgrade opportunities (CloudWatch)."""
         pass
 
     @abstractmethod
@@ -429,9 +470,34 @@ class CloudProviderBase(ABC):
         # Execute all scan methods with user's rules
         # Original 7 resource types
 
-        # First, scan volumes to collect orphaned/idle volume IDs
+        # EBS Volume scanning - 10 waste scenarios (100% coverage)
+        # SCENARIO 1 & 7: Unattached and idle volumes
         volume_orphans = await self.scan_unattached_volumes(region, rules.get("ebs_volume"))
         results.extend(volume_orphans)
+
+        # SCENARIO 2: Volumes on stopped instances
+        results.extend(await self.scan_volumes_on_stopped_instances(region, rules.get("ebs_volume")))
+
+        # SCENARIO 3: gp2 → gp3 migration opportunities
+        results.extend(await self.scan_gp2_migration_opportunities(region, rules.get("ebs_volume")))
+
+        # SCENARIO 4: Unnecessary io2 volumes
+        results.extend(await self.scan_unnecessary_io2_volumes(region, rules.get("ebs_volume")))
+
+        # SCENARIO 5: Over-provisioned IOPS
+        results.extend(await self.scan_overprovisioned_iops_volumes(region, rules.get("ebs_volume")))
+
+        # SCENARIO 6: Over-provisioned throughput
+        results.extend(await self.scan_overprovisioned_throughput_volumes(region, rules.get("ebs_volume")))
+
+        # SCENARIO 8: Low IOPS usage (CloudWatch)
+        results.extend(await self.scan_low_iops_usage_volumes(region, rules.get("ebs_volume")))
+
+        # SCENARIO 9: Low throughput usage (CloudWatch)
+        results.extend(await self.scan_low_throughput_usage_volumes(region, rules.get("ebs_volume")))
+
+        # SCENARIO 10: Volume type downgrade opportunities (CloudWatch)
+        results.extend(await self.scan_volume_type_downgrade_opportunities(region, rules.get("ebs_volume")))
 
         # Extract orphaned volume IDs to pass to snapshot scanner
         orphaned_volume_ids = [

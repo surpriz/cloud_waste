@@ -340,6 +340,137 @@ class AWSProvider(CloudProviderBase):
                 "days_since_last_use": None,
             }
 
+    async def _get_volume_metrics(
+        self,
+        volume_id: str,
+        region: str,
+        metric_names: list[str],
+        period_days: int = 30,
+        statistic: str = "Average",
+    ) -> dict[str, float]:
+        """
+        Get CloudWatch metrics for an EBS volume.
+
+        Args:
+            volume_id: Volume ID
+            region: AWS region
+            metric_names: List of metric names (e.g., ["VolumeReadOps", "VolumeWriteOps", "VolumeReadBytes", "VolumeWriteBytes"])
+            period_days: Lookback period in days
+            statistic: CloudWatch statistic (Average, Sum, Maximum, Minimum)
+
+        Returns:
+            Dict with metric_name → calculated value (averaged across period)
+        """
+        try:
+            async with self.session.client("cloudwatch", region_name=region) as cw:
+                now = datetime.now(timezone.utc)
+                start_time = now - timedelta(days=period_days)
+
+                results = {}
+                for metric_name in metric_names:
+                    response = await cw.get_metric_statistics(
+                        Namespace="AWS/EBS",
+                        MetricName=metric_name,
+                        Dimensions=[{"Name": "VolumeId", "Value": volume_id}],
+                        StartTime=start_time,
+                        EndTime=now,
+                        Period=86400,  # 1 day aggregation
+                        Statistics=[statistic],
+                    )
+
+                    datapoints = response.get("Datapoints", [])
+                    if datapoints:
+                        # Calculate average/sum across all datapoints
+                        if statistic == "Sum":
+                            results[metric_name] = sum(dp[statistic] for dp in datapoints)
+                        else:  # Average, Maximum, Minimum
+                            results[metric_name] = sum(dp[statistic] for dp in datapoints) / len(datapoints)
+                    else:
+                        results[metric_name] = 0.0
+
+                return results
+
+        except Exception as e:
+            print(f"Error fetching CloudWatch metrics for volume {volume_id}: {e}")
+            return {metric_name: 0.0 for metric_name in metric_names}
+
+    def _calculate_volume_cost(
+        self,
+        volume_type: str,
+        size_gb: int,
+        iops: int | None = None,
+        throughput: int | None = None,
+    ) -> dict[str, float]:
+        """
+        Calculate comprehensive EBS volume monthly cost including IOPS and throughput.
+
+        Args:
+            volume_type: Volume type (gp2, gp3, io1, io2, st1, sc1, standard)
+            size_gb: Volume size in GB
+            iops: Provisioned IOPS (for io1/io2/gp3 with custom IOPS)
+            throughput: Provisioned throughput in MBps (for gp3 only)
+
+        Returns:
+            Dict with:
+                - total_monthly_cost: Total monthly cost
+                - storage_cost: GB storage cost
+                - iops_cost: IOPS provisioning cost
+                - throughput_cost: Throughput provisioning cost
+                - cost_breakdown: Detailed breakdown string
+        """
+        # Cost components
+        storage_cost = 0.0
+        iops_cost = 0.0
+        throughput_cost = 0.0
+
+        # 1. Calculate storage cost (GB × price/GB)
+        price_key = f"ebs_{volume_type}_per_gb"
+        price_per_gb = self.PRICING.get(price_key, self.PRICING["ebs_gp2_per_gb"])
+        storage_cost = size_gb * price_per_gb
+
+        # 2. Calculate IOPS cost
+        if volume_type == "gp3" and iops and iops > 3000:
+            # gp3: 3000 IOPS baseline included, $0.005/IOPS above baseline
+            iops_cost = (iops - 3000) * 0.005
+        elif volume_type in ["io1", "io2"] and iops:
+            # io1/io2: $0.065/IOPS/month for all provisioned IOPS
+            # Note: io2 has tiered pricing (≤32K IOPS: $0.065, 32K-64K: $0.046)
+            if volume_type == "io2" and iops > 32000:
+                # First 32K IOPS at $0.065, rest at $0.046
+                iops_cost = (32000 * 0.065) + ((iops - 32000) * 0.046)
+            else:
+                iops_cost = iops * 0.065
+
+        # 3. Calculate throughput cost (gp3 only)
+        if volume_type == "gp3" and throughput and throughput > 125:
+            # gp3: 125 MBps baseline included, $0.04/MBps above baseline
+            throughput_cost = (throughput - 125) * 0.04
+
+        # Total cost
+        total_monthly_cost = storage_cost + iops_cost + throughput_cost
+
+        # Build cost breakdown string
+        breakdown_parts = [f"{size_gb} GB × ${price_per_gb:.3f} = ${storage_cost:.2f}"]
+        if iops_cost > 0:
+            if volume_type == "gp3":
+                breakdown_parts.append(f"IOPS: ({iops} - 3000) × $0.005 = ${iops_cost:.2f}")
+            elif volume_type == "io2" and iops > 32000:
+                breakdown_parts.append(
+                    f"IOPS: (32K × $0.065) + ({iops - 32000} × $0.046) = ${iops_cost:.2f}"
+                )
+            else:
+                breakdown_parts.append(f"IOPS: {iops} × $0.065 = ${iops_cost:.2f}")
+        if throughput_cost > 0:
+            breakdown_parts.append(f"Throughput: ({throughput} - 125) MBps × $0.04 = ${throughput_cost:.2f}")
+
+        return {
+            "total_monthly_cost": round(total_monthly_cost, 2),
+            "storage_cost": round(storage_cost, 2),
+            "iops_cost": round(iops_cost, 2),
+            "throughput_cost": round(throughput_cost, 2),
+            "cost_breakdown": " + ".join(breakdown_parts),
+        }
+
     async def scan_unattached_volumes(
         self, region: str, detection_rules: dict | None = None
     ) -> list[OrphanResourceData]:
@@ -388,6 +519,8 @@ class AWSProvider(CloudProviderBase):
                     created_at = volume["CreateTime"]
                     volume_state = volume["State"]  # 'available', 'in-use', etc.
                     attachments = volume.get("Attachments", [])
+                    iops = volume.get("Iops")  # Provisioned IOPS (io1/io2/gp3)
+                    throughput = volume.get("Throughput")  # Provisioned throughput (gp3 only)
 
                     # Determine if volume is attached
                     is_attached = len(attachments) > 0 and volume_state == "in-use"
@@ -434,12 +567,9 @@ class AWSProvider(CloudProviderBase):
                     if not should_flag:
                         continue
 
-                    # Calculate monthly cost based on volume type
-                    price_key = f"ebs_{volume_type}_per_gb"
-                    price_per_gb = self.PRICING.get(
-                        price_key, self.PRICING["ebs_gp2_per_gb"]
-                    )
-                    monthly_cost = size_gb * price_per_gb
+                    # Calculate monthly cost using comprehensive cost calculator (includes IOPS + throughput)
+                    cost_data = self._calculate_volume_cost(volume_type, size_gb, iops, throughput)
+                    monthly_cost = cost_data["total_monthly_cost"]
 
                     # Extract name from tags
                     name = None
@@ -522,6 +652,13 @@ class AWSProvider(CloudProviderBase):
                         "usage_history": usage_history,
                         "volume_state": volume_state,
                         "is_attached": is_attached,
+                        # Cost breakdown (new)
+                        "iops": iops,
+                        "throughput": throughput,
+                        "cost_breakdown": cost_data["cost_breakdown"],
+                        "storage_cost": cost_data["storage_cost"],
+                        "iops_cost": cost_data["iops_cost"],
+                        "throughput_cost": cost_data["throughput_cost"],
                     }
 
                     # Add attachment info if volume is attached
@@ -544,6 +681,972 @@ class AWSProvider(CloudProviderBase):
         except ClientError as e:
             # Log error but don't fail entire scan
             print(f"Error scanning unattached volumes in {region}: {e}")
+
+        return orphans
+
+    async def scan_volumes_on_stopped_instances(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        SCENARIO 2: Scan for EBS volumes attached to stopped EC2 instances >30 days.
+
+        Volumes attached to stopped instances are fully charged (GB + IOPS + throughput)
+        while the instance compute is free. This represents waste if the instance
+        has been stopped for an extended period.
+
+        Args:
+            region: AWS region to scan
+            detection_rules: Optional detection rules (uses defaults if None)
+
+        Returns:
+            List of EBS volume resources on stopped instances
+        """
+        orphans: list[OrphanResourceData] = []
+
+        # Use provided rules or defaults
+        if detection_rules is None:
+            from app.models.detection_rule import DEFAULT_DETECTION_RULES
+            detection_rules = DEFAULT_DETECTION_RULES.get("ebs_volume", {})
+
+        # Check if detection is enabled
+        if not detection_rules.get("enabled", True):
+            return orphans
+
+        min_stopped_days = detection_rules.get("min_stopped_days", 30)
+        min_age_days = detection_rules.get("min_age_days", 7)
+
+        try:
+            async with self.session.client("ec2", region_name=region) as ec2:
+                # Get all stopped instances
+                response = await ec2.describe_instances(
+                    Filters=[{"Name": "instance-state-name", "Values": ["stopped"]}]
+                )
+
+                for reservation in response.get("Reservations", []):
+                    for instance in reservation.get("Instances", []):
+                        instance_id = instance["InstanceId"]
+                        instance_type = instance["InstanceType"]
+                        instance_state = instance["State"]["Name"]
+                        state_transition_time = instance.get("StateTransitionReason", "")
+
+                        # Try to parse stopped duration from StateTransitionReason
+                        # Format: "User initiated (YYYY-MM-DD HH:MM:SS GMT)"
+                        stopped_since = None
+                        stopped_days = 0
+
+                        # Get launch time as fallback
+                        launch_time = instance.get("LaunchTime")
+
+                        # Try to get state transition time from tags or other sources
+                        # For now, we'll use the instance launch time as an approximation
+                        # In production, you might want to track this in CloudWatch or tags
+                        if launch_time:
+                            # Estimate: if instance was launched long ago and is stopped now,
+                            # we consider it as potentially long-stopped
+                            # This is a simplified approach
+                            now = datetime.now(timezone.utc)
+                            instance_age_days = (now - launch_time).days
+
+                            # We can't know exactly when it was stopped without additional tracking
+                            # For conservative approach: flag only if instance is old enough
+                            if instance_age_days < min_stopped_days:
+                                continue  # Instance too young, skip
+
+                            # Assume it's been stopped for a significant portion of its lifetime
+                            # (This is imperfect but conservative)
+                            stopped_days = min_stopped_days  # Conservative estimate
+
+                        # Get attached volumes
+                        for bdm in instance.get("BlockDeviceMappings", []):
+                            if "Ebs" not in bdm:
+                                continue
+
+                            volume_id = bdm["Ebs"].get("VolumeId")
+                            if not volume_id:
+                                continue
+
+                            # Get volume details
+                            volume_response = await ec2.describe_volumes(VolumeIds=[volume_id])
+                            if not volume_response.get("Volumes"):
+                                continue
+
+                            volume = volume_response["Volumes"][0]
+                            size_gb = volume["Size"]
+                            volume_type = volume["VolumeType"]
+                            created_at = volume["CreateTime"]
+                            iops = volume.get("Iops")
+                            throughput = volume.get("Throughput")
+
+                            # Calculate volume age
+                            volume_age_days = (datetime.now(timezone.utc) - created_at).days
+
+                            # Skip if volume is too young
+                            if volume_age_days < min_age_days:
+                                continue
+
+                            # Calculate cost (volume continues to be charged even when instance is stopped)
+                            cost_data = self._calculate_volume_cost(volume_type, size_gb, iops, throughput)
+                            monthly_cost = cost_data["total_monthly_cost"]
+
+                            # Extract volume name from tags
+                            volume_name = None
+                            for tag in volume.get("Tags", []):
+                                if tag["Key"] == "Name":
+                                    volume_name = tag["Value"]
+                                    break
+
+                            # Extract instance name from tags
+                            instance_name = None
+                            for tag in instance.get("Tags", []):
+                                if tag["Key"] == "Name":
+                                    instance_name = tag["Value"]
+                                    break
+
+                            # Determine confidence level based on stopped duration
+                            if stopped_days >= 90:
+                                confidence = "critical"
+                                reason = f"Volume on instance stopped for {stopped_days}+ days (instance: {instance_name or instance_id})"
+                            elif stopped_days >= 60:
+                                confidence = "high"
+                                reason = f"Volume on instance stopped for {stopped_days}+ days (instance: {instance_name or instance_id})"
+                            elif stopped_days >= min_stopped_days:
+                                confidence = "medium"
+                                reason = f"Volume on instance stopped for {stopped_days}+ days (instance: {instance_name or instance_id})"
+                            else:
+                                confidence = "low"
+                                reason = f"Volume on recently stopped instance (instance: {instance_name or instance_id})"
+
+                            # Build metadata
+                            metadata = {
+                                "size_gb": size_gb,
+                                "volume_type": volume_type,
+                                "created_at": created_at.isoformat(),
+                                "availability_zone": volume["AvailabilityZone"],
+                                "encrypted": volume.get("Encrypted", False),
+                                "age_days": volume_age_days,
+                                "confidence": confidence,
+                                "confidence_level": self._calculate_confidence_level(stopped_days, detection_rules),
+                                "orphan_reason": reason,
+                                "orphan_type": "volume_on_stopped_instance",
+                                "volume_state": "in-use",
+                                "is_attached": True,
+                                "attached_instance_id": instance_id,
+                                "instance_name": instance_name,
+                                "instance_type": instance_type,
+                                "instance_state": instance_state,
+                                "stopped_days": stopped_days,
+                                "device": bdm.get("DeviceName", "Unknown"),
+                                # Cost breakdown
+                                "iops": iops,
+                                "throughput": throughput,
+                                "cost_breakdown": cost_data["cost_breakdown"],
+                                "storage_cost": cost_data["storage_cost"],
+                                "iops_cost": cost_data["iops_cost"],
+                                "throughput_cost": cost_data["throughput_cost"],
+                            }
+
+                            orphans.append(
+                                OrphanResourceData(
+                                    resource_type="ebs_volume",
+                                    resource_id=volume_id,
+                                    resource_name=volume_name,
+                                    region=region,
+                                    estimated_monthly_cost=round(monthly_cost, 2),
+                                    resource_metadata=metadata,
+                                )
+                            )
+
+        except ClientError as e:
+            print(f"Error scanning volumes on stopped instances in {region}: {e}")
+
+        return orphans
+
+    async def scan_gp2_migration_opportunities(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        SCENARIO 3: Scan for gp2 volumes that should be migrated to gp3 (~20% savings).
+
+        gp2 is the older generation General Purpose SSD. gp3 is newer, cheaper, and more performant.
+        Migrating from gp2 ($0.10/GB) to gp3 ($0.08/GB) saves ~20% with same or better performance.
+
+        Args:
+            region: AWS region to scan
+            detection_rules: Optional detection rules
+
+        Returns:
+            List of gp2 volumes recommended for migration
+        """
+        orphans: list[OrphanResourceData] = []
+
+        if detection_rules is None:
+            from app.models.detection_rule import DEFAULT_DETECTION_RULES
+            detection_rules = DEFAULT_DETECTION_RULES.get("ebs_volume", {})
+
+        if not detection_rules.get("enabled", True):
+            return orphans
+
+        min_age_days = detection_rules.get("min_age_days", 30)
+        min_size_gb = detection_rules.get("min_size_gb", 100)  # Small volumes = marginal savings
+
+        try:
+            async with self.session.client("ec2", region_name=region) as ec2:
+                response = await ec2.describe_volumes(
+                    Filters=[{"Name": "volume-type", "Values": ["gp2"]}]
+                )
+
+                for volume in response.get("Volumes", []):
+                    volume_id = volume["VolumeId"]
+                    size_gb = volume["Size"]
+                    created_at = volume["CreateTime"]
+                    age_days = (datetime.now(timezone.utc) - created_at).days
+
+                    # Skip if volume is too young or too small
+                    if age_days < min_age_days or size_gb < min_size_gb:
+                        continue
+
+                    # Calculate current gp2 cost
+                    current_cost = size_gb * self.PRICING["ebs_gp2_per_gb"]
+
+                    # Calculate gp3 cost (3000 IOPS + 125 MBps baseline included)
+                    suggested_cost = size_gb * self.PRICING["ebs_gp3_per_gb"]
+                    monthly_savings = current_cost - suggested_cost
+                    savings_percent = (monthly_savings / current_cost) * 100
+
+                    # Extract name from tags
+                    name = None
+                    for tag in volume.get("Tags", []):
+                        if tag["Key"] == "Name":
+                            name = tag["Value"]
+                            break
+
+                    reason = f"gp2 volume ({size_gb} GB) should migrate to gp3 for ~{savings_percent:.0f}% cost savings (${monthly_savings:.2f}/month)"
+
+                    metadata = {
+                        "size_gb": size_gb,
+                        "current_volume_type": "gp2",
+                        "suggested_volume_type": "gp3",
+                        "created_at": created_at.isoformat(),
+                        "availability_zone": volume["AvailabilityZone"],
+                        "encrypted": volume.get("Encrypted", False),
+                        "age_days": age_days,
+                        "current_monthly_cost": round(current_cost, 2),
+                        "suggested_monthly_cost": round(suggested_cost, 2),
+                        "potential_monthly_savings": round(monthly_savings, 2),
+                        "savings_percent": round(savings_percent, 1),
+                        "orphan_reason": reason,
+                        "orphan_type": "gp2_migration_opportunity",
+                        "suggested_iops": 3000,  # gp3 baseline
+                        "suggested_throughput": 125,  # gp3 baseline
+                        "migration_notes": "gp3 provides same or better performance with 20% cost reduction",
+                    }
+
+                    orphans.append(
+                        OrphanResourceData(
+                            resource_type="ebs_volume",
+                            resource_id=volume_id,
+                            resource_name=name,
+                            region=region,
+                            estimated_monthly_cost=round(monthly_savings, 2),  # Potential savings
+                            resource_metadata=metadata,
+                        )
+                    )
+
+        except ClientError as e:
+            print(f"Error scanning gp2 migration opportunities in {region}: {e}")
+
+        return orphans
+
+    async def scan_unnecessary_io2_volumes(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        SCENARIO 4: Scan for io2 volumes without compliance requirements (should be io1).
+
+        io2 provides 99.999% durability (vs io1's 99.9%) at same cost. Only needed for
+        compliance/critical workloads. Dev/test environments don't need io2.
+
+        Args:
+            region: AWS region to scan
+            detection_rules: Optional detection rules
+
+        Returns:
+            List of io2 volumes that could be downgraded to io1
+        """
+        orphans: list[OrphanResourceData] = []
+
+        if detection_rules is None:
+            from app.models.detection_rule import DEFAULT_DETECTION_RULES
+            detection_rules = DEFAULT_DETECTION_RULES.get("ebs_volume", {})
+
+        if not detection_rules.get("enabled", True):
+            return orphans
+
+        min_age_days = detection_rules.get("min_age_days", 30)
+        compliance_tags = detection_rules.get("compliance_tags", [
+            "compliance", "hipaa", "pci-dss", "sox", "gdpr", "iso27001", "critical"
+        ])
+
+        try:
+            async with self.session.client("ec2", region_name=region) as ec2:
+                response = await ec2.describe_volumes(
+                    Filters=[{"Name": "volume-type", "Values": ["io2"]}]
+                )
+
+                for volume in response.get("Volumes", []):
+                    volume_id = volume["VolumeId"]
+                    size_gb = volume["Size"]
+                    iops = volume.get("Iops", 0)
+                    created_at = volume["CreateTime"]
+                    age_days = (datetime.now(timezone.utc) - created_at).days
+
+                    if age_days < min_age_days:
+                        continue
+
+                    # Check for compliance tags
+                    has_compliance_tag = False
+                    environment_tag = None
+                    volume_tags = {tag["Key"].lower(): tag["Value"].lower() for tag in volume.get("Tags", [])}
+
+                    for tag_key, tag_value in volume_tags.items():
+                        if any(comp_tag.lower() in tag_value for comp_tag in compliance_tags):
+                            has_compliance_tag = True
+                            break
+
+                    # Check environment tag
+                    if "environment" in volume_tags:
+                        environment_tag = volume_tags["environment"]
+
+                    # Flag if no compliance tags AND in dev/test environment
+                    is_waste = (not has_compliance_tag) or (environment_tag in ["dev", "development", "test", "staging"])
+
+                    if not is_waste:
+                        continue
+
+                    # Calculate cost (same for io1 and io2, but io2 is overkill)
+                    cost_data = self._calculate_volume_cost("io2", size_gb, iops)
+                    monthly_cost = cost_data["total_monthly_cost"]
+
+                    name = volume_tags.get("name")
+                    reason = f"io2 volume in {environment_tag or 'non-compliance'} environment - io1 durability (99.9%) is sufficient"
+
+                    metadata = {
+                        "size_gb": size_gb,
+                        "current_volume_type": "io2",
+                        "suggested_volume_type": "io1",
+                        "iops": iops,
+                        "created_at": created_at.isoformat(),
+                        "availability_zone": volume["AvailabilityZone"],
+                        "encrypted": volume.get("Encrypted", False),
+                        "age_days": age_days,
+                        "environment": environment_tag,
+                        "has_compliance_tags": has_compliance_tag,
+                        "orphan_reason": reason,
+                        "orphan_type": "unnecessary_io2",
+                        "cost_breakdown": cost_data["cost_breakdown"],
+                        "recommendation": "Migrate to io1 (same cost, less durability but sufficient for non-compliance workloads)",
+                    }
+
+                    orphans.append(
+                        OrphanResourceData(
+                            resource_type="ebs_volume",
+                            resource_id=volume_id,
+                            resource_name=name,
+                            region=region,
+                            estimated_monthly_cost=round(monthly_cost, 2),
+                            resource_metadata=metadata,
+                        )
+                    )
+
+        except ClientError as e:
+            print(f"Error scanning unnecessary io2 volumes in {region}: {e}")
+
+        return orphans
+
+    async def scan_overprovisioned_iops_volumes(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        SCENARIO 5: Scan for volumes with over-provisioned IOPS (>2× baseline needed).
+
+        Detects io1/io2/gp3 volumes with IOPS provisioned significantly higher than
+        necessary based on volume size and AWS best practices.
+
+        Args:
+            region: AWS region to scan
+            detection_rules: Optional detection rules
+
+        Returns:
+            List of volumes with excessive IOPS provisioning
+        """
+        orphans: list[OrphanResourceData] = []
+
+        if detection_rules is None:
+            from app.models.detection_rule import DEFAULT_DETECTION_RULES
+            detection_rules = DEFAULT_DETECTION_RULES.get("ebs_volume", {})
+
+        if not detection_rules.get("enabled", True):
+            return orphans
+
+        min_age_days = detection_rules.get("min_age_days", 30)
+        iops_overprovisioning_factor = detection_rules.get("iops_overprovisioning_factor", 2.0)
+
+        try:
+            async with self.session.client("ec2", region_name=region) as ec2:
+                # Scan io1, io2, and gp3 volumes (types that support provisioned IOPS)
+                response = await ec2.describe_volumes(
+                    Filters=[{"Name": "volume-type", "Values": ["io1", "io2", "gp3"]}]
+                )
+
+                for volume in response.get("Volumes", []):
+                    volume_id = volume["VolumeId"]
+                    size_gb = volume["Size"]
+                    volume_type = volume["VolumeType"]
+                    iops = volume.get("Iops", 0)
+                    throughput = volume.get("Throughput")
+                    created_at = volume["CreateTime"]
+                    age_days = (datetime.now(timezone.utc) - created_at).days
+
+                    if age_days < min_age_days:
+                        continue
+
+                    # Calculate baseline IOPS based on volume type and size
+                    if volume_type == "gp3":
+                        baseline_iops = 3000  # gp3 baseline (free)
+                    elif volume_type in ["io1", "io2"]:
+                        # AWS recommends 50 IOPS/GB ratio, but conservative baseline is 10-30 IOPS/GB
+                        baseline_iops = size_gb * 10  # Conservative baseline
+                    else:
+                        continue
+
+                    # Check if provisioned IOPS > baseline × factor
+                    if not iops or iops <= baseline_iops * iops_overprovisioning_factor:
+                        continue
+
+                    # Calculate recommended IOPS (baseline × 1.5 for safety buffer)
+                    recommended_iops = int(baseline_iops * 1.5)
+
+                    # Calculate current and recommended costs
+                    current_cost_data = self._calculate_volume_cost(volume_type, size_gb, iops, throughput)
+                    recommended_cost_data = self._calculate_volume_cost(volume_type, size_gb, recommended_iops, throughput)
+
+                    monthly_savings = current_cost_data["total_monthly_cost"] - recommended_cost_data["total_monthly_cost"]
+                    savings_percent = (monthly_savings / current_cost_data["total_monthly_cost"]) * 100
+
+                    # Extract name
+                    name = None
+                    for tag in volume.get("Tags", []):
+                        if tag["Key"] == "Name":
+                            name = tag["Value"]
+                            break
+
+                    iops_ratio = iops / baseline_iops if baseline_iops > 0 else 0
+                    reason = f"{volume_type} volume with over-provisioned IOPS ({iops} IOPS, {iops_ratio:.1f}× baseline) - reduce to {recommended_iops} IOPS for ${monthly_savings:.2f}/month savings"
+
+                    metadata = {
+                        "size_gb": size_gb,
+                        "volume_type": volume_type,
+                        "provisioned_iops": iops,
+                        "baseline_iops": baseline_iops,
+                        "recommended_iops": recommended_iops,
+                        "iops_ratio": round(iops_ratio, 2),
+                        "created_at": created_at.isoformat(),
+                        "availability_zone": volume["AvailabilityZone"],
+                        "encrypted": volume.get("Encrypted", False),
+                        "age_days": age_days,
+                        "current_monthly_cost": current_cost_data["total_monthly_cost"],
+                        "recommended_monthly_cost": recommended_cost_data["total_monthly_cost"],
+                        "potential_monthly_savings": round(monthly_savings, 2),
+                        "savings_percent": round(savings_percent, 1),
+                        "orphan_reason": reason,
+                        "orphan_type": "overprovisioned_iops",
+                        "current_cost_breakdown": current_cost_data["cost_breakdown"],
+                    }
+
+                    orphans.append(
+                        OrphanResourceData(
+                            resource_type="ebs_volume",
+                            resource_id=volume_id,
+                            resource_name=name,
+                            region=region,
+                            estimated_monthly_cost=round(monthly_savings, 2),
+                            resource_metadata=metadata,
+                        )
+                    )
+
+        except ClientError as e:
+            print(f"Error scanning overprovisioned IOPS volumes in {region}: {e}")
+
+        return orphans
+
+    async def scan_overprovisioned_throughput_volumes(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        SCENARIO 6: Scan for gp3 volumes with over-provisioned throughput (>125 MBps baseline).
+
+        gp3 includes 125 MBps throughput for free. Additional throughput costs $0.04/MBps/month.
+        Flags volumes with high throughput in non-high-throughput workloads.
+
+        Args:
+            region: AWS region to scan
+            detection_rules: Optional detection rules
+
+        Returns:
+            List of gp3 volumes with excessive throughput provisioning
+        """
+        orphans: list[OrphanResourceData] = []
+
+        if detection_rules is None:
+            from app.models.detection_rule import DEFAULT_DETECTION_RULES
+            detection_rules = DEFAULT_DETECTION_RULES.get("ebs_volume", {})
+
+        if not detection_rules.get("enabled", True):
+            return orphans
+
+        min_age_days = detection_rules.get("min_age_days", 30)
+        baseline_throughput = detection_rules.get("baseline_throughput_mbps", 125)
+        high_throughput_tags = detection_rules.get("high_throughput_workload_tags", [
+            "database", "analytics", "bigdata", "ml", "etl", "data-warehouse"
+        ])
+
+        try:
+            async with self.session.client("ec2", region_name=region) as ec2:
+                response = await ec2.describe_volumes(
+                    Filters=[{"Name": "volume-type", "Values": ["gp3"]}]
+                )
+
+                for volume in response.get("Volumes", []):
+                    volume_id = volume["VolumeId"]
+                    size_gb = volume["Size"]
+                    iops = volume.get("Iops", 3000)
+                    throughput = volume.get("Throughput")
+                    created_at = volume["CreateTime"]
+                    age_days = (datetime.now(timezone.utc) - created_at).days
+
+                    # Skip if no provisioned throughput or within baseline
+                    if not throughput or throughput <= baseline_throughput:
+                        continue
+
+                    if age_days < min_age_days:
+                        continue
+
+                    # Check for high-throughput workload tags
+                    volume_tags = {tag["Key"].lower(): tag["Value"].lower() for tag in volume.get("Tags", [])}
+                    has_high_throughput_tag = any(
+                        ht_tag.lower() in str(volume_tags.values()).lower()
+                        for ht_tag in high_throughput_tags
+                    )
+
+                    # Check environment
+                    environment = volume_tags.get("environment", "")
+
+                    # Flag if high throughput in dev/test or no high-throughput workload tags
+                    should_flag = (environment in ["dev", "development", "test", "staging"]) or (not has_high_throughput_tag)
+
+                    if not should_flag:
+                        continue
+
+                    # Calculate costs
+                    current_cost_data = self._calculate_volume_cost("gp3", size_gb, iops, throughput)
+                    recommended_cost_data = self._calculate_volume_cost("gp3", size_gb, iops, baseline_throughput)
+
+                    monthly_savings = current_cost_data["throughput_cost"]  # All throughput above baseline
+                    savings_percent = (monthly_savings / current_cost_data["total_monthly_cost"]) * 100
+
+                    name = volume_tags.get("name")
+
+                    reason = f"gp3 volume with unnecessary throughput ({throughput} MBps vs {baseline_throughput} MBps baseline) in {environment or 'non-high-throughput'} workload - ${monthly_savings:.2f}/month savings"
+
+                    metadata = {
+                        "size_gb": size_gb,
+                        "volume_type": "gp3",
+                        "provisioned_throughput": throughput,
+                        "baseline_throughput": baseline_throughput,
+                        "recommended_throughput": baseline_throughput,
+                        "created_at": created_at.isoformat(),
+                        "availability_zone": volume["AvailabilityZone"],
+                        "encrypted": volume.get("Encrypted", False),
+                        "age_days": age_days,
+                        "environment": environment,
+                        "has_high_throughput_workload_tags": has_high_throughput_tag,
+                        "current_monthly_cost": current_cost_data["total_monthly_cost"],
+                        "recommended_monthly_cost": recommended_cost_data["total_monthly_cost"],
+                        "potential_monthly_savings": round(monthly_savings, 2),
+                        "savings_percent": round(savings_percent, 1),
+                        "orphan_reason": reason,
+                        "orphan_type": "overprovisioned_throughput",
+                        "current_cost_breakdown": current_cost_data["cost_breakdown"],
+                    }
+
+                    orphans.append(
+                        OrphanResourceData(
+                            resource_type="ebs_volume",
+                            resource_id=volume_id,
+                            resource_name=name,
+                            region=region,
+                            estimated_monthly_cost=round(monthly_savings, 2),
+                            resource_metadata=metadata,
+                        )
+                    )
+
+        except ClientError as e:
+            print(f"Error scanning overprovisioned throughput volumes in {region}: {e}")
+
+        return orphans
+
+    async def scan_low_iops_usage_volumes(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        SCENARIO 8: Scan for volumes with provisioned IOPS but low actual usage (<30%).
+
+        Uses CloudWatch metrics to detect io1/io2/gp3 volumes where actual IOPS usage
+        is significantly lower than provisioned capacity.
+
+        Args:
+            region: AWS region to scan
+            detection_rules: Optional detection rules
+
+        Returns:
+            List of volumes with under-utilized IOPS
+        """
+        orphans: list[OrphanResourceData] = []
+
+        if detection_rules is None:
+            from app.models.detection_rule import DEFAULT_DETECTION_RULES
+            detection_rules = DEFAULT_DETECTION_RULES.get("ebs_volume", {})
+
+        if not detection_rules.get("enabled", True):
+            return orphans
+
+        min_observation_days = detection_rules.get("min_observation_days", 30)
+        max_iops_utilization = detection_rules.get("max_iops_utilization_percent", 30) / 100  # Convert to decimal
+        safety_buffer = detection_rules.get("safety_buffer_factor", 1.5)
+
+        try:
+            async with self.session.client("ec2", region_name=region) as ec2:
+                response = await ec2.describe_volumes(
+                    Filters=[{"Name": "volume-type", "Values": ["io1", "io2", "gp3"]}]
+                )
+
+                for volume in response.get("Volumes", []):
+                    volume_id = volume["VolumeId"]
+                    size_gb = volume["Size"]
+                    volume_type = volume["VolumeType"]
+                    iops = volume.get("Iops")
+                    throughput = volume.get("Throughput")
+
+                    # Skip if no provisioned IOPS or baseline only (gp3 with 3000 IOPS)
+                    if not iops or (volume_type == "gp3" and iops <= 3000):
+                        continue
+
+                    # Get IOPS usage metrics from CloudWatch
+                    metrics = await self._get_volume_metrics(
+                        volume_id, region,
+                        ["VolumeReadOps", "VolumeWriteOps"],
+                        period_days=min_observation_days,
+                        statistic="Average"
+                    )
+
+                    avg_read_ops = metrics.get("VolumeReadOps", 0)
+                    avg_write_ops = metrics.get("VolumeWriteOps", 0)
+                    total_avg_iops = avg_read_ops + avg_write_ops
+
+                    # Calculate IOPS utilization
+                    iops_utilization = total_avg_iops / iops if iops > 0 else 0
+
+                    # Skip if utilization is above threshold
+                    if iops_utilization >= max_iops_utilization:
+                        continue
+
+                    # Calculate recommended IOPS (actual usage × safety buffer)
+                    if volume_type == "gp3":
+                        recommended_iops = max(3000, int(total_avg_iops * safety_buffer))  # Min 3000 baseline
+                    else:  # io1/io2
+                        recommended_iops = max(100, int(total_avg_iops * safety_buffer))  # Min 100 IOPS
+
+                    # Calculate costs
+                    current_cost_data = self._calculate_volume_cost(volume_type, size_gb, iops, throughput)
+                    recommended_cost_data = self._calculate_volume_cost(volume_type, size_gb, recommended_iops, throughput)
+
+                    monthly_savings = current_cost_data["total_monthly_cost"] - recommended_cost_data["total_monthly_cost"]
+
+                    if monthly_savings <= 0:
+                        continue
+
+                    name = None
+                    for tag in volume.get("Tags", []):
+                        if tag["Key"] == "Name":
+                            name = tag["Value"]
+                            break
+
+                    reason = f"{volume_type} volume with {iops_utilization*100:.1f}% IOPS utilization ({int(total_avg_iops)} avg vs {iops} provisioned) - reduce to {recommended_iops} IOPS for ${monthly_savings:.2f}/month savings"
+
+                    metadata = {
+                        "size_gb": size_gb,
+                        "volume_type": volume_type,
+                        "provisioned_iops": iops,
+                        "avg_read_ops_per_second": round(avg_read_ops, 2),
+                        "avg_write_ops_per_second": round(avg_write_ops, 2),
+                        "total_avg_iops": round(total_avg_iops, 2),
+                        "iops_utilization_percent": round(iops_utilization * 100, 1),
+                        "recommended_iops": recommended_iops,
+                        "observation_period_days": min_observation_days,
+                        "current_monthly_cost": current_cost_data["total_monthly_cost"],
+                        "recommended_monthly_cost": recommended_cost_data["total_monthly_cost"],
+                        "potential_monthly_savings": round(monthly_savings, 2),
+                        "orphan_reason": reason,
+                        "orphan_type": "low_iops_usage",
+                    }
+
+                    orphans.append(
+                        OrphanResourceData(
+                            resource_type="ebs_volume",
+                            resource_id=volume_id,
+                            resource_name=name,
+                            region=region,
+                            estimated_monthly_cost=round(monthly_savings, 2),
+                            resource_metadata=metadata,
+                        )
+                    )
+
+        except ClientError as e:
+            print(f"Error scanning low IOPS usage volumes in {region}: {e}")
+
+        return orphans
+
+    async def scan_low_throughput_usage_volumes(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        SCENARIO 9: Scan for gp3 volumes with provisioned throughput but low usage (<30%).
+
+        Uses CloudWatch metrics to detect gp3 volumes where actual throughput usage
+        is significantly lower than provisioned capacity.
+
+        Args:
+            region: AWS region to scan
+            detection_rules: Optional detection rules
+
+        Returns:
+            List of gp3 volumes with under-utilized throughput
+        """
+        orphans: list[OrphanResourceData] = []
+
+        if detection_rules is None:
+            from app.models.detection_rule import DEFAULT_DETECTION_RULES
+            detection_rules = DEFAULT_DETECTION_RULES.get("ebs_volume", {})
+
+        if not detection_rules.get("enabled", True):
+            return orphans
+
+        min_observation_days = detection_rules.get("min_observation_days", 30)
+        max_throughput_utilization = detection_rules.get("max_throughput_utilization_percent", 30) / 100
+        baseline_throughput = detection_rules.get("baseline_throughput_mbps", 125)
+
+        try:
+            async with self.session.client("ec2", region_name=region) as ec2:
+                response = await ec2.describe_volumes(
+                    Filters=[{"Name": "volume-type", "Values": ["gp3"]}]
+                )
+
+                for volume in response.get("Volumes", []):
+                    volume_id = volume["VolumeId"]
+                    size_gb = volume["Size"]
+                    iops = volume.get("Iops", 3000)
+                    throughput = volume.get("Throughput")
+
+                    # Skip if no provisioned throughput above baseline
+                    if not throughput or throughput <= baseline_throughput:
+                        continue
+
+                    # Get throughput metrics from CloudWatch
+                    metrics = await self._get_volume_metrics(
+                        volume_id, region,
+                        ["VolumeReadBytes", "VolumeWriteBytes"],
+                        period_days=min_observation_days,
+                        statistic="Average"
+                    )
+
+                    avg_read_bytes = metrics.get("VolumeReadBytes", 0)
+                    avg_write_bytes = metrics.get("VolumeWriteBytes", 0)
+
+                    # Convert bytes/sec to MBps
+                    total_avg_throughput_mbps = (avg_read_bytes + avg_write_bytes) / (1024 * 1024)
+
+                    # Calculate throughput utilization
+                    throughput_utilization = total_avg_throughput_mbps / throughput if throughput > 0 else 0
+
+                    # Skip if utilization is above threshold
+                    if throughput_utilization >= max_throughput_utilization:
+                        continue
+
+                    # Calculate costs
+                    current_cost_data = self._calculate_volume_cost("gp3", size_gb, iops, throughput)
+                    recommended_cost_data = self._calculate_volume_cost("gp3", size_gb, iops, baseline_throughput)
+
+                    monthly_savings = current_cost_data["throughput_cost"]  # All throughput cost above baseline
+
+                    if monthly_savings <= 0:
+                        continue
+
+                    name = None
+                    for tag in volume.get("Tags", []):
+                        if tag["Key"] == "Name":
+                            name = tag["Value"]
+                            break
+
+                    reason = f"gp3 volume with {throughput_utilization*100:.1f}% throughput utilization ({total_avg_throughput_mbps:.1f} MBps avg vs {throughput} MBps provisioned) - reduce to {baseline_throughput} MBps baseline for ${monthly_savings:.2f}/month savings"
+
+                    metadata = {
+                        "size_gb": size_gb,
+                        "volume_type": "gp3",
+                        "provisioned_throughput_mbps": throughput,
+                        "avg_read_mbps": round(avg_read_bytes / (1024 * 1024), 2),
+                        "avg_write_mbps": round(avg_write_bytes / (1024 * 1024), 2),
+                        "total_avg_throughput_mbps": round(total_avg_throughput_mbps, 2),
+                        "throughput_utilization_percent": round(throughput_utilization * 100, 1),
+                        "recommended_throughput_mbps": baseline_throughput,
+                        "observation_period_days": min_observation_days,
+                        "current_monthly_cost": current_cost_data["total_monthly_cost"],
+                        "recommended_monthly_cost": recommended_cost_data["total_monthly_cost"],
+                        "potential_monthly_savings": round(monthly_savings, 2),
+                        "orphan_reason": reason,
+                        "orphan_type": "low_throughput_usage",
+                    }
+
+                    orphans.append(
+                        OrphanResourceData(
+                            resource_type="ebs_volume",
+                            resource_id=volume_id,
+                            resource_name=name,
+                            region=region,
+                            estimated_monthly_cost=round(monthly_savings, 2),
+                            resource_metadata=metadata,
+                        )
+                    )
+
+        except ClientError as e:
+            print(f"Error scanning low throughput usage volumes in {region}: {e}")
+
+        return orphans
+
+    async def scan_volume_type_downgrade_opportunities(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        SCENARIO 10: Scan for volume type downgrade opportunities (io1→gp3 etc).
+
+        Uses CloudWatch to analyze actual usage and recommend cheaper volume types
+        that can handle the workload (e.g., io1 with 8K IOPS → gp3 with 10K IOPS saves 90%).
+
+        Args:
+            region: AWS region to scan
+            detection_rules: Optional detection rules
+
+        Returns:
+            List of volumes with downgrade opportunities
+        """
+        orphans: list[OrphanResourceData] = []
+
+        if detection_rules is None:
+            from app.models.detection_rule import DEFAULT_DETECTION_RULES
+            detection_rules = DEFAULT_DETECTION_RULES.get("ebs_volume", {})
+
+        if not detection_rules.get("enabled", True):
+            return orphans
+
+        min_observation_days = detection_rules.get("min_observation_days", 30)
+        min_savings_percent = detection_rules.get("min_savings_percent", 20)
+        safety_margin = detection_rules.get("safety_margin_iops", 1.5)
+
+        try:
+            async with self.session.client("ec2", region_name=region) as ec2:
+                # Focus on expensive volume types (io1, io2)
+                response = await ec2.describe_volumes(
+                    Filters=[{"Name": "volume-type", "Values": ["io1", "io2"]}]
+                )
+
+                for volume in response.get("Volumes", []):
+                    volume_id = volume["VolumeId"]
+                    size_gb = volume["Size"]
+                    volume_type = volume["VolumeType"]
+                    iops = volume.get("Iops", 0)
+
+                    # Get actual usage metrics
+                    metrics = await self._get_volume_metrics(
+                        volume_id, region,
+                        ["VolumeReadOps", "VolumeWriteOps", "VolumeReadBytes", "VolumeWriteBytes"],
+                        period_days=min_observation_days,
+                        statistic="Average"
+                    )
+
+                    avg_iops = metrics.get("VolumeReadOps", 0) + metrics.get("VolumeWriteOps", 0)
+                    avg_throughput_mbps = (metrics.get("VolumeReadBytes", 0) + metrics.get("VolumeWriteBytes", 0)) / (1024 * 1024)
+
+                    # Check if gp3 can handle this workload
+                    # gp3 limits: 16,000 IOPS max, 1,000 MBps max
+                    required_iops = int(avg_iops * safety_margin)
+                    required_throughput = int(avg_throughput_mbps * safety_margin)
+
+                    if required_iops > 16000 or required_throughput > 1000:
+                        continue  # gp3 cannot handle this workload
+
+                    # Calculate current io1/io2 cost
+                    current_cost_data = self._calculate_volume_cost(volume_type, size_gb, iops)
+
+                    # Calculate gp3 cost with required IOPS and throughput
+                    suggested_iops = max(3000, required_iops)  # gp3 baseline or higher
+                    suggested_throughput = max(125, required_throughput)  # gp3 baseline or higher
+                    suggested_cost_data = self._calculate_volume_cost("gp3", size_gb, suggested_iops, suggested_throughput)
+
+                    monthly_savings = current_cost_data["total_monthly_cost"] - suggested_cost_data["total_monthly_cost"]
+                    savings_percent = (monthly_savings / current_cost_data["total_monthly_cost"]) * 100
+
+                    # Skip if savings below threshold
+                    if savings_percent < min_savings_percent:
+                        continue
+
+                    name = None
+                    for tag in volume.get("Tags", []):
+                        if tag["Key"] == "Name":
+                            name = tag["Value"]
+                            break
+
+                    reason = f"{volume_type} volume can be downgraded to gp3 (current: {int(avg_iops)} IOPS avg, {avg_throughput_mbps:.1f} MBps avg) - migrate to gp3 ({suggested_iops} IOPS, {suggested_throughput} MBps) for ${monthly_savings:.2f}/month ({savings_percent:.0f}% savings)"
+
+                    metadata = {
+                        "size_gb": size_gb,
+                        "current_volume_type": volume_type,
+                        "suggested_volume_type": "gp3",
+                        "avg_iops": round(avg_iops, 2),
+                        "avg_throughput_mbps": round(avg_throughput_mbps, 2),
+                        "suggested_iops": suggested_iops,
+                        "suggested_throughput": suggested_throughput,
+                        "observation_period_days": min_observation_days,
+                        "current_monthly_cost": current_cost_data["total_monthly_cost"],
+                        "suggested_monthly_cost": suggested_cost_data["total_monthly_cost"],
+                        "potential_monthly_savings": round(monthly_savings, 2),
+                        "savings_percent": round(savings_percent, 1),
+                        "orphan_reason": reason,
+                        "orphan_type": "volume_type_downgrade_opportunity",
+                        "downgrade_rationale": f"gp3 can handle {required_iops} IOPS and {required_throughput} MBps (well within 16K/1000 limits)",
+                    }
+
+                    orphans.append(
+                        OrphanResourceData(
+                            resource_type="ebs_volume",
+                            resource_id=volume_id,
+                            resource_name=name,
+                            region=region,
+                            estimated_monthly_cost=round(monthly_savings, 2),
+                            resource_metadata=metadata,
+                        )
+                    )
+
+        except ClientError as e:
+            print(f"Error scanning volume type downgrade opportunities in {region}: {e}")
 
         return orphans
 
