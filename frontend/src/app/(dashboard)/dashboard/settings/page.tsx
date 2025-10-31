@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { User, Bell, Shield, Trash2, Save, Key, Sliders, RotateCcw, HardDrive, Globe, Camera, Server, Activity, Zap, Database, ArrowLeft, Network, AlertTriangle, TrendingDown, Archive, TestTube, Copy, Clock, Cpu, Users, FileText } from "lucide-react";
+import { User, Bell, Shield, Trash2, Save, Key, Sliders, RotateCcw, HardDrive, Globe, Camera, Server, Activity, Zap, Database, ArrowLeft, Network, AlertTriangle, TrendingDown, Archive, TestTube, Copy, Clock, Cpu, Users, FileText, Search, ChevronDown } from "lucide-react";
 import Link from "next/link";
 import { useNotifications } from "@/hooks/useNotifications";
 import { Toast } from "@/components/ui/Toast";
@@ -533,11 +533,163 @@ const getResourceLabel = (resourceType: string): string => {
   return AWS_RESOURCE_LABELS[resourceType] || resourceType;
 };
 
+// Resource categories mapping for filtering
+const RESOURCE_CATEGORIES = {
+  aws: {
+    compute: ["ec2_instance", "lambda_function", "eks_cluster", "sagemaker_endpoint"],
+    storage: ["ebs_volume", "ebs_snapshot", "s3_bucket", "fsx_file_system"],
+    database: ["rds_instance", "dynamodb_table", "redshift_cluster", "elasticache_cluster", "neptune_cluster", "documentdb_cluster"],
+    networking: ["elastic_ip", "load_balancer", "nat_gateway", "vpn_connection", "transit_gateway_attachment", "vpc_endpoint", "global_accelerator"],
+    analytics: ["kinesis_stream", "msk_cluster", "opensearch_domain"],
+  },
+  azure: {
+    compute: [
+      // Virtual Machines (9 scenarios)
+      "virtual_machine_deallocated", "virtual_machine_stopped_not_deallocated", "virtual_machine_never_started",
+      "virtual_machine_oversized_premium", "virtual_machine_untagged_orphan", "virtual_machine_idle",
+      "virtual_machine_old_generation", "virtual_machine_spot_convertible", "virtual_machine_underutilized",
+      "virtual_machine_memory_overprovisioned",
+      // Container Apps (16 scenarios)
+      "container_app_stopped", "container_app_zero_replicas", "container_app_unnecessary_premium_tier",
+      "container_app_dev_zone_redundancy", "container_app_no_ingress_configured", "container_app_empty_environment",
+      "container_app_unused_revision", "container_app_overprovisioned_cpu_memory", "container_app_custom_domain_unused",
+      "container_app_secrets_unused", "container_app_low_cpu_utilization", "container_app_low_memory_utilization",
+      "container_app_zero_http_requests", "container_app_high_replica_low_traffic", "container_app_autoscaling_not_triggering",
+      "container_app_cold_start_issues",
+      // Azure Functions (10 scenarios)
+      "functions_never_invoked", "functions_premium_plan_idle", "functions_consumption_over_allocated_memory",
+      "functions_always_on_consumption", "functions_premium_plan_oversized", "functions_dev_test_premium",
+      "functions_multiple_plans_same_app", "functions_low_invocation_rate_premium", "functions_high_error_rate",
+      "functions_cold_start_excessive"
+    ],
+    storage: [
+      // Managed Disks (15 scenarios)
+      "managed_disk_unattached", "managed_disk_on_stopped_vm", "managed_disk_unnecessary_zrs",
+      "managed_disk_unnecessary_cmk", "managed_disk_idle", "managed_disk_unused_bursting",
+      "managed_disk_overprovisioned", "managed_disk_underutilized_hdd",
+      // Disk Snapshots (10 scenarios)
+      "disk_snapshot_orphaned", "disk_snapshot_redundant", "disk_snapshot_very_old",
+      "disk_snapshot_premium_source", "disk_snapshot_large_unused", "disk_snapshot_full_instead_incremental",
+      "disk_snapshot_excessive_retention", "disk_snapshot_manual_without_policy", "disk_snapshot_never_restored",
+      "disk_snapshot_frequent_creation",
+      // Storage Accounts (8 scenarios)
+      "storage_account_empty", "storage_account_never_used", "storage_account_no_transactions",
+      "storage_no_lifecycle_policy", "storage_unnecessary_grs", "soft_deleted_blobs_accumulated",
+      "blobs_hot_tier_unused", "blob_old_versions_accumulated"
+    ],
+    networking: [
+      // Public IPs (10 scenarios)
+      "public_ip_unassociated", "public_ip_on_stopped_resource", "public_ip_dynamic_unassociated",
+      "public_ip_unnecessary_standard_sku", "public_ip_unnecessary_zone_redundancy", "public_ip_ddos_protection_unused",
+      "public_ip_on_nic_without_vm", "public_ip_reserved_but_unused", "public_ip_no_traffic",
+      "public_ip_very_low_traffic",
+      // NAT Gateways (10 scenarios)
+      "nat_gateway_no_subnet", "nat_gateway_never_used", "nat_gateway_no_public_ip",
+      "nat_gateway_single_vm", "nat_gateway_redundant", "nat_gateway_dev_test_always_on",
+      "nat_gateway_unnecessary_zones", "nat_gateway_no_traffic", "nat_gateway_very_low_traffic",
+      "nat_gateway_private_link_alternative",
+      // Load Balancers (10 scenarios)
+      "load_balancer_no_backend_instances", "load_balancer_all_backends_unhealthy", "load_balancer_no_inbound_rules",
+      "load_balancer_basic_sku_retired", "application_gateway_no_backend_targets", "application_gateway_stopped",
+      "load_balancer_never_used", "load_balancer_no_traffic", "application_gateway_no_requests",
+      "application_gateway_underutilized",
+      // ExpressRoute (4 scenarios)
+      "expressroute_circuit_not_provisioned", "expressroute_circuit_no_connection", "expressroute_gateway_orphaned",
+      "expressroute_circuit_underutilized",
+      // VPN Gateway (3 scenarios)
+      "vpn_gateway_disconnected", "vpn_gateway_basic_sku_deprecated", "vpn_gateway_no_connections",
+      // NICs (1 scenario)
+      "network_interface_orphaned"
+    ],
+    database: [
+      // SQL Database (4 scenarios)
+      "sql_database_stopped", "sql_database_idle_connections", "sql_database_over_provisioned_dtu",
+      "sql_database_serverless_not_pausing",
+      // Cosmos DB (3 scenarios)
+      "cosmosdb_over_provisioned_ru", "cosmosdb_idle_containers", "cosmosdb_hot_partitions_idle_others",
+      // PostgreSQL/MySQL (4 scenarios)
+      "postgres_mysql_stopped", "postgres_mysql_idle_connections", "postgres_mysql_over_provisioned_vcores",
+      "postgres_mysql_burstable_always_bursting",
+      // Synapse (2 scenarios)
+      "synapse_sql_pool_paused", "synapse_sql_pool_idle_queries",
+      // Redis (2 scenarios)
+      "redis_idle_cache", "redis_over_sized_tier"
+    ],
+    virtual_desktop: [
+      // AVD (18 scenarios - Phase 1 + Phase 2)
+      "avd_host_pool_empty", "avd_session_host_stopped", "avd_session_host_never_used",
+      "avd_host_pool_no_autoscale", "avd_host_pool_over_provisioned", "avd_application_group_empty",
+      "avd_workspace_empty", "avd_premium_disk_in_dev", "avd_unnecessary_availability_zones",
+      "avd_personal_desktop_never_used", "avd_fslogix_oversized", "avd_session_host_old_vm_generation",
+      "avd_low_cpu_utilization", "avd_low_memory_utilization", "avd_zero_user_sessions",
+      "avd_high_host_count_low_users", "avd_disconnected_sessions_waste", "avd_peak_hours_mismatch"
+    ],
+    big_data_ai: [
+      // HDInsight Spark (18 scenarios)
+      "hdinsight_spark_cluster_stopped", "hdinsight_spark_cluster_never_used", "hdinsight_spark_premium_storage_dev",
+      "hdinsight_spark_no_autoscale", "hdinsight_spark_outdated_version", "hdinsight_spark_external_metastore_unused",
+      "hdinsight_spark_empty_cluster", "hdinsight_spark_oversized_head_nodes", "hdinsight_spark_unnecessary_edge_node",
+      "hdinsight_spark_undersized_disks", "hdinsight_spark_low_cpu_utilization", "hdinsight_spark_zero_jobs_metrics",
+      "hdinsight_spark_idle_business_hours", "hdinsight_spark_high_yarn_memory_waste", "hdinsight_spark_excessive_shuffle_data",
+      "hdinsight_spark_autoscale_not_working", "hdinsight_spark_low_memory_utilization", "hdinsight_spark_high_job_failure_rate",
+      // ML Compute Instance (18 scenarios)
+      "ml_compute_instance_no_auto_shutdown", "ml_compute_instance_gpu_for_cpu_workload", "ml_compute_instance_stopped_30_days",
+      "ml_compute_instance_over_provisioned", "ml_compute_instance_never_accessed", "ml_compute_instance_multiple_per_user",
+      "ml_compute_instance_premium_ssd_unnecessary", "ml_compute_instance_no_idle_shutdown", "ml_compute_instance_dev_high_performance_sku",
+      "ml_compute_instance_old_sdk_deprecated_image", "ml_compute_instance_low_cpu_utilization", "ml_compute_instance_low_gpu_utilization",
+      "ml_compute_instance_idle_business_hours", "ml_compute_instance_no_jupyter_activity", "ml_compute_instance_no_training_jobs",
+      "ml_compute_instance_low_memory_utilization", "ml_compute_instance_network_idle", "ml_compute_instance_disk_io_near_zero"
+    ],
+    app_services: [
+      // App Service (18 scenarios)
+      "app_service_plan_empty", "app_service_premium_in_dev", "app_service_no_auto_scale",
+      "app_service_always_on_low_traffic", "app_service_unused_deployment_slots", "app_service_over_provisioned_plan",
+      "app_service_stopped_apps_paid_plan", "app_service_multiple_plans_consolidation", "app_service_vnet_integration_unused",
+      "app_service_old_runtime_version", "app_service_low_cpu_utilization", "app_service_low_memory_utilization",
+      "app_service_low_request_count", "app_service_no_traffic_business_hours", "app_service_high_http_error_rate",
+      "app_service_slow_response_time", "app_service_auto_scale_never_triggers", "app_service_cold_start_excessive"
+    ],
+  }
+};
+
+// Category labels for display
+const CATEGORY_LABELS = {
+  aws: {
+    compute: "💻 Compute",
+    storage: "💾 Storage",
+    database: "🗄️ Database",
+    networking: "🌐 Networking",
+    analytics: "📊 Analytics & Streaming",
+  },
+  azure: {
+    compute: "💻 Compute",
+    storage: "💾 Storage",
+    networking: "🌐 Networking",
+    database: "🗄️ Database",
+    virtual_desktop: "🖥️ Virtual Desktop",
+    big_data_ai: "🤖 Big Data & AI",
+    app_services: "⚡ App Services",
+  }
+};
+
+// Helper function to get resource category
+const getResourceCategory = (resourceType: string, provider: "aws" | "azure"): string | null => {
+  const categories = RESOURCE_CATEGORIES[provider];
+  for (const [categoryName, resources] of Object.entries(categories)) {
+    if (resources.includes(resourceType)) {
+      return categoryName;
+    }
+  }
+  return null;
+};
+
 export default function SettingsPage() {
   const [activeTab, setActiveTab] = useState<"profile" | "notifications" | "security" | "detection">("detection");
   const [detectionRules, setDetectionRules] = useState<DetectionRule[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [selectedProvider, setSelectedProvider] = useState<"aws" | "azure" | "all">("all");
+  const [selectedCategory, setSelectedCategory] = useState<string>("all");
+  const [searchQuery, setSearchQuery] = useState<string>("");
 
   // Use advanced notification system
   const { currentNotification, history, showSuccess, showError, dismiss, clearHistory } = useNotifications();
@@ -547,6 +699,11 @@ export default function SettingsPage() {
       fetchDetectionRules();
     }
   }, [activeTab]);
+
+  // Reset category filter when provider changes
+  useEffect(() => {
+    setSelectedCategory("all");
+  }, [selectedProvider]);
 
   const fetchDetectionRules = async () => {
     setIsLoading(true);
@@ -766,7 +923,7 @@ export default function SettingsPage() {
                 </div>
 
                 {/* Provider Filter */}
-                <div className="flex gap-2">
+                <div className="flex flex-wrap gap-2">
                   <button
                     onClick={() => setSelectedProvider("all")}
                     className={`px-4 py-2 rounded-lg font-semibold transition-colors ${
@@ -798,19 +955,109 @@ export default function SettingsPage() {
                     🔵 Azure
                   </button>
                 </div>
+
+                {/* Category Filter - Only show when a specific provider is selected */}
+                {selectedProvider !== "all" && (
+                  <div className="flex flex-col gap-2">
+                    <label className="text-sm font-semibold text-gray-700">
+                      Filter by Category:
+                    </label>
+                    <select
+                      value={selectedCategory}
+                      onChange={(e) => setSelectedCategory(e.target.value)}
+                      className="px-4 py-2 rounded-lg border-2 border-gray-300 bg-white font-semibold text-gray-700 hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-blue-500 cursor-pointer"
+                    >
+                      <option value="all">All Categories</option>
+                      {Object.entries(CATEGORY_LABELS[selectedProvider as "aws" | "azure"]).map(([key, label]) => {
+                        const providerCategories = RESOURCE_CATEGORIES[selectedProvider as "aws" | "azure"];
+                        const count = (providerCategories as any)[key]?.length || 0;
+                        return (
+                          <option key={key} value={key}>
+                            {label} ({count})
+                          </option>
+                        );
+                      })}
+                    </select>
+                  </div>
+                )}
+
+                {/* Search Bar */}
+                <div className="flex flex-col gap-2">
+                  <label className="text-sm font-semibold text-gray-700">
+                    Search Resources:
+                  </label>
+                  <div className="relative">
+                    <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 h-5 w-5 text-gray-400" />
+                    <input
+                      type="text"
+                      value={searchQuery}
+                      onChange={(e) => setSearchQuery(e.target.value)}
+                      placeholder="Filter by resource name..."
+                      className="w-full pl-10 pr-4 py-2 rounded-lg border-2 border-gray-300 bg-white text-gray-700 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                    />
+                    {searchQuery && (
+                      <button
+                        onClick={() => setSearchQuery("")}
+                        className="absolute right-3 top-1/2 transform -translate-y-1/2 text-gray-400 hover:text-gray-600"
+                      >
+                        ✕
+                      </button>
+                    )}
+                  </div>
+                </div>
               </div>
             </div>
 
             {isLoading ? (
               <div className="text-center py-12 text-gray-600">Loading detection rules...</div>
             ) : (
-              detectionRules
-                .filter((rule) => {
-                  if (selectedProvider === "all") return true;
-                  const provider = getResourceProvider(rule.resource_type);
-                  return provider === selectedProvider;
-                })
-                .map((rule) => {
+              (() => {
+                // Apply multi-criteria filtering
+                const filteredRules = detectionRules.filter((rule) => {
+                  // Filter 1: Provider
+                  if (selectedProvider !== "all") {
+                    const provider = getResourceProvider(rule.resource_type);
+                    if (provider !== selectedProvider) return false;
+                  }
+
+                  // Filter 2: Category
+                  if (selectedCategory !== "all" && selectedProvider !== "all") {
+                    const category = getResourceCategory(rule.resource_type, selectedProvider as "aws" | "azure");
+                    if (category !== selectedCategory) return false;
+                  }
+
+                  // Filter 3: Search query
+                  if (searchQuery) {
+                    const label = getResourceLabel(rule.resource_type).toLowerCase();
+                    const resourceType = rule.resource_type.toLowerCase();
+                    const query = searchQuery.toLowerCase();
+                    if (!label.includes(query) && !resourceType.includes(query)) return false;
+                  }
+
+                  return true;
+                });
+
+                return (
+                  <>
+                    {/* Resource Counter */}
+                    {(selectedProvider !== "all" || selectedCategory !== "all" || searchQuery) && (
+                      <div className="rounded-lg bg-blue-50 border-2 border-blue-200 p-4 mb-4">
+                        <p className="text-sm font-semibold text-blue-900">
+                          📊 Showing <span className="text-blue-600">{filteredRules.length}</span> resource{filteredRules.length !== 1 ? "s" : ""}
+                          {detectionRules.length !== filteredRules.length && (
+                            <span className="text-gray-600"> (filtered from {detectionRules.length} total)</span>
+                          )}
+                        </p>
+                      </div>
+                    )}
+
+                    {filteredRules.length === 0 ? (
+                      <div className="text-center py-12 text-gray-600">
+                        <p className="text-lg font-semibold mb-2">No resources found</p>
+                        <p className="text-sm">Try adjusting your filters or search query</p>
+                      </div>
+                    ) : (
+                      filteredRules.map((rule) => {
                 const Icon = getResourceIcon(rule.resource_type);
                 const label = getResourceLabel(rule.resource_type);
                 const isCustomized = JSON.stringify(rule.current_rules) !== JSON.stringify(rule.default_rules);
@@ -1163,6 +1410,10 @@ export default function SettingsPage() {
                   </div>
                 );
               })
+                    )}
+                  </>
+                );
+              })()
             )}
           </div>
         )}
