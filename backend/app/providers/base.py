@@ -179,16 +179,57 @@ class CloudProviderBase(ABC):
         pass
 
     @abstractmethod
-    async def scan_unassigned_ips(self, region: str) -> list[OrphanResourceData]:
+    async def scan_unassigned_ips(self, region: str, detection_rules: dict | None = None) -> list[OrphanResourceData]:
         """
-        Scan for unassigned public IP addresses.
+        Scan for unassigned Elastic IPs and EIPs on stopped instances (SCENARIOS 1-2).
 
         Args:
             region: Region to scan
+            detection_rules: Optional detection rules
 
         Returns:
             List of orphan IP address resources
         """
+        pass
+
+    @abstractmethod
+    async def scan_additional_eips_per_instance(self, region: str, detection_rules: dict | None = None) -> list[OrphanResourceData]:
+        """Scan for instances with multiple EIPs (SCENARIO 3)."""
+        pass
+
+    @abstractmethod
+    async def scan_eips_on_detached_enis(self, region: str, detection_rules: dict | None = None) -> list[OrphanResourceData]:
+        """Scan for EIPs on detached ENIs (SCENARIO 4)."""
+        pass
+
+    @abstractmethod
+    async def scan_never_used_eips(self, region: str, detection_rules: dict | None = None) -> list[OrphanResourceData]:
+        """Scan for EIPs never associated with any resource (SCENARIO 5)."""
+        pass
+
+    @abstractmethod
+    async def scan_eips_on_unused_nat_gateways(self, region: str, detection_rules: dict | None = None) -> list[OrphanResourceData]:
+        """Scan for EIPs on unused NAT Gateways (SCENARIO 6)."""
+        pass
+
+    @abstractmethod
+    async def scan_idle_eips(self, region: str, detection_rules: dict | None = None) -> list[OrphanResourceData]:
+        """Scan for EIPs on idle instances with minimal traffic (SCENARIO 7)."""
+        pass
+
+    @abstractmethod
+    async def scan_low_traffic_eips(self, region: str, detection_rules: dict | None = None) -> list[OrphanResourceData]:
+        """Scan for EIPs with low network traffic (SCENARIO 8)."""
+        pass
+
+    @abstractmethod
+    async def scan_unused_nat_gateway_eips(self, region: str, detection_rules: dict | None = None) -> list[OrphanResourceData]:
+        """Scan for EIPs on NAT Gateways with zero connections (SCENARIO 9)."""
+        pass
+
+    @abstractmethod
+    async def scan_eips_on_failed_instances(self, region: str, detection_rules: dict | None = None) -> list[OrphanResourceData]:
+        """Scan for EIPs on instances failing status checks (SCENARIO 10)."""
         pass
 
     @abstractmethod
@@ -505,7 +546,33 @@ class CloudProviderBase(ABC):
             if vol.resource_metadata.get("orphan_type") in ["unattached", "attached_never_used", "attached_idle"]
         ]
 
+        # Elastic IP scanning - 10 waste scenarios (100% coverage)
+        # SCENARIO 1-2: Unassociated and stopped instance EIPs
         results.extend(await self.scan_unassigned_ips(region, rules.get("elastic_ip")))
+
+        # SCENARIO 3: Multiple EIPs per instance
+        results.extend(await self.scan_additional_eips_per_instance(region, rules.get("elastic_ip")))
+
+        # SCENARIO 4: EIPs on detached ENIs
+        results.extend(await self.scan_eips_on_detached_enis(region, rules.get("elastic_ip")))
+
+        # SCENARIO 5: Never-used EIPs
+        results.extend(await self.scan_never_used_eips(region, rules.get("elastic_ip")))
+
+        # SCENARIO 6: EIPs on unused NAT Gateways (basic traffic check)
+        results.extend(await self.scan_eips_on_unused_nat_gateways(region, rules.get("elastic_ip")))
+
+        # SCENARIO 7: Idle EIPs (CloudWatch - minimal network traffic)
+        results.extend(await self.scan_idle_eips(region, rules.get("elastic_ip")))
+
+        # SCENARIO 8: Low-traffic EIPs (CloudWatch - < 1 GB/month)
+        results.extend(await self.scan_low_traffic_eips(region, rules.get("elastic_ip")))
+
+        # SCENARIO 9: EIPs on NAT Gateways with zero connections (CloudWatch)
+        results.extend(await self.scan_unused_nat_gateway_eips(region, rules.get("elastic_ip")))
+
+        # SCENARIO 10: EIPs on failed instances (CloudWatch - status check failures)
+        results.extend(await self.scan_eips_on_failed_instances(region, rules.get("elastic_ip")))
 
         # Scan snapshots with orphaned volume IDs
         results.extend(

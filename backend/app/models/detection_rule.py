@@ -62,9 +62,47 @@ DEFAULT_DETECTION_RULES = {
     },
     "elastic_ip": {
         "enabled": True,
+
+        # SCENARIO 1: Unassociated Elastic IPs
         "min_age_days": 3,  # Ignore IPs allocated in last 3 days
-        "confidence_threshold_days": 7,
-        "description": "Unassociated Elastic IP addresses",
+        "confidence_threshold_days": 7,  # High confidence after 7 days
+
+        # SCENARIO 2: EIPs on stopped EC2 instances
+        "min_stopped_days": 30,  # Instance must be stopped for 30+ days
+
+        # SCENARIO 3: Multiple EIPs per instance
+        "max_eips_per_instance": 1,  # Flag instances with more than 1 EIP
+        "allow_multiple_eips_tags": [
+            "multi-nic", "ha", "high-availability", "active-active",
+            "failover", "floating-ip"
+        ],  # Tags that justify multiple EIPs
+
+        # SCENARIO 4: EIPs on detached ENIs
+        "detached_eni_min_days": 7,  # ENI must be detached for 7+ days
+
+        # SCENARIO 5: Never-used EIPs
+        "min_never_used_days": 7,  # EIP never attached since allocation for 7+ days
+
+        # SCENARIO 6: EIPs on unused NAT Gateways
+        "nat_gateway_min_idle_days": 30,  # NAT Gateway must be idle for 30+ days
+        "nat_gateway_traffic_threshold_gb": 0.1,  # < 0.1 GB/month = unused
+
+        # SCENARIO 7: Idle EIPs (CloudWatch)
+        "min_idle_days": 30,  # Active resource must be idle for 30+ days
+        "idle_network_threshold_bytes": 1_000_000,  # < 1MB in lookback = idle
+        "min_observation_days": 30,  # CloudWatch observation period
+
+        # SCENARIO 8: Low-traffic EIPs
+        "low_traffic_threshold_gb": 1.0,  # < 1 GB/month for 30 days
+
+        # SCENARIO 9: EIPs on unused NAT Gateways (advanced CloudWatch)
+        "nat_gateway_zero_connections_days": 30,  # NAT with zero connections for 30+ days
+
+        # SCENARIO 10: EIPs on failed instances
+        "max_status_check_failures": 7,  # Consecutive days of status check failures
+        "min_failed_days": 7,  # Instance failing for 7+ days
+
+        "description": "Elastic IP addresses - 10 waste scenarios: unassociated, stopped instances, multiple EIPs per instance, detached ENIs, never-used, unused NAT Gateways, idle resources, low traffic, zero NAT connections, failed instances",
     },
     "ebs_snapshot": {
         "enabled": True,

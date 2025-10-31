@@ -1200,10 +1200,10 @@ export default function SettingsPage() {
                       <div className="mb-4">
                         <div className="flex items-center justify-between mb-2">
                           <h4 className="font-semibold text-gray-900">
-                            {rule.resource_type === 'ec2_instance' ? 'Minimum Age (Stopped Instances)' : 'Minimum Age'}: {rule.current_rules.min_age_days || rule.current_rules.min_stopped_days} days
+                            {rule.resource_type === 'ec2_instance' ? 'Minimum Age (Stopped Instances)' : 'Minimum Age'}: {rule.current_rules.min_age_days ?? rule.current_rules.min_stopped_days} days
                           </h4>
                           <span className="text-sm text-gray-500">
-                            Default: {rule.default_rules.min_age_days || rule.default_rules.min_stopped_days} days
+                            Default: {rule.default_rules.min_age_days ?? rule.default_rules.min_stopped_days} days
                           </span>
                         </div>
                         <input
@@ -1211,7 +1211,7 @@ export default function SettingsPage() {
                           min="0"
                           max="90"
                           step="1"
-                          value={rule.current_rules.min_age_days || rule.current_rules.min_stopped_days || 0}
+                          value={rule.current_rules.min_age_days ?? rule.current_rules.min_stopped_days ?? 0}
                           onChange={(e) =>
                             handleRuleChange(
                               rule.resource_type,
@@ -1235,23 +1235,23 @@ export default function SettingsPage() {
                             <div className="flex items-start gap-2">
                               <span className="text-green-600 font-bold">✓</span>
                               <span className="text-gray-700">
-                                Resources created <strong>{rule.current_rules.min_age_days || rule.current_rules.min_stopped_days}+ days ago</strong> will be detected
+                                Resources created <strong>{rule.current_rules.min_age_days ?? rule.current_rules.min_stopped_days}+ days ago</strong> will be detected
                               </span>
                             </div>
                             <div className="flex items-start gap-2">
                               <span className="text-red-600 font-bold">✗</span>
                               <span className="text-gray-700">
-                                Resources created <strong>less than {rule.current_rules.min_age_days || rule.current_rules.min_stopped_days} days ago</strong> will be ignored
+                                Resources created <strong>less than {rule.current_rules.min_age_days ?? rule.current_rules.min_stopped_days} days ago</strong> will be ignored
                               </span>
                             </div>
                           </div>
                           <div className="mt-3 p-3 bg-white rounded border border-blue-300">
                             <p className="text-xs text-blue-800">
-                              <strong>Example:</strong> If set to <strong>{rule.current_rules?.min_age_days || rule.current_rules?.min_stopped_days || 0} days</strong>:
-                              {(rule.current_rules?.min_age_days || rule.current_rules?.min_stopped_days || 0) === 0 ? (
+                              <strong>Example:</strong> If set to <strong>{rule.current_rules?.min_age_days ?? rule.current_rules?.min_stopped_days ?? 0} days</strong>:
+                              {(rule.current_rules?.min_age_days ?? rule.current_rules?.min_stopped_days ?? 0) === 0 ? (
                                 <> All {rule.resource_type.replace('_', ' ')} will be detected immediately, even brand new ones.</>
                               ) : (
-                                <> A {rule.resource_type.replace('_', ' ')} created on {new Date(Date.now() - ((rule.current_rules?.min_age_days || rule.current_rules?.min_stopped_days || 0) * 24 * 60 * 60 * 1000)).toLocaleDateString()} or earlier will be detected. One created today will be ignored.</>
+                                <> A {rule.resource_type.replace('_', ' ')} created on {new Date(Date.now() - ((rule.current_rules?.min_age_days ?? rule.current_rules?.min_stopped_days ?? 0) * 24 * 60 * 60 * 1000)).toLocaleDateString()} or earlier will be detected. One created today will be ignored.</>
                               )}
                             </p>
                           </div>
@@ -1272,10 +1272,10 @@ export default function SettingsPage() {
                               <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold border bg-red-100 text-red-800 border-red-300">
                                 🔴 Critical
                               </span>
-                              After {rule.current_rules.confidence_critical_days || rule.default_rules.confidence_critical_days || 90} days
+                              After {rule.current_rules.confidence_critical_days ?? rule.default_rules.confidence_critical_days ?? 90} days
                             </label>
                             <span className="text-xs text-gray-500">
-                              Default: {rule.default_rules.confidence_critical_days || 90} days
+                              Default: {rule.default_rules.confidence_critical_days ?? 90} days
                             </span>
                           </div>
                           <input
@@ -1283,7 +1283,7 @@ export default function SettingsPage() {
                             min="30"
                             max="365"
                             step="1"
-                            value={rule.current_rules.confidence_critical_days || rule.default_rules.confidence_critical_days || 90}
+                            value={rule.current_rules.confidence_critical_days ?? rule.default_rules.confidence_critical_days ?? 90}
                             onChange={(e) =>
                               handleRuleChange(
                                 rule.resource_type,
@@ -1306,10 +1306,10 @@ export default function SettingsPage() {
                               <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold border bg-orange-100 text-orange-800 border-orange-300">
                                 🟠 High
                               </span>
-                              After {rule.current_rules.confidence_high_days || rule.default_rules.confidence_high_days || 30} days
+                              After {rule.current_rules.confidence_high_days ?? rule.default_rules.confidence_high_days ?? 30} days
                             </label>
                             <span className="text-xs text-gray-500">
-                              Default: {rule.default_rules.confidence_high_days || 30} days
+                              Default: {rule.default_rules.confidence_high_days ?? 30} days
                             </span>
                           </div>
                           <input
@@ -1317,7 +1317,7 @@ export default function SettingsPage() {
                             min="7"
                             max="180"
                             step="1"
-                            value={rule.current_rules.confidence_high_days || rule.default_rules.confidence_high_days || 30}
+                            value={rule.current_rules.confidence_high_days ?? rule.default_rules.confidence_high_days ?? 30}
                             onChange={(e) =>
                               handleRuleChange(
                                 rule.resource_type,
@@ -1340,18 +1340,18 @@ export default function SettingsPage() {
                               <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold border bg-yellow-100 text-yellow-800 border-yellow-300">
                                 🟡 Medium
                               </span>
-                              After {rule.current_rules.confidence_medium_days || rule.default_rules.confidence_medium_days || 7} days
+                              After {rule.current_rules.confidence_medium_days ?? rule.default_rules.confidence_medium_days ?? 7} days
                             </label>
                             <span className="text-xs text-gray-500">
-                              Default: {rule.default_rules.confidence_medium_days || 7} days
+                              Default: {rule.default_rules.confidence_medium_days ?? 7} days
                             </span>
                           </div>
                           <input
                             type="range"
-                            min="1"
+                            min="0"
                             max="60"
                             step="1"
-                            value={rule.current_rules.confidence_medium_days || rule.default_rules.confidence_medium_days || 7}
+                            value={rule.current_rules.confidence_medium_days ?? rule.default_rules.confidence_medium_days ?? 7}
                             onChange={(e) =>
                               handleRuleChange(
                                 rule.resource_type,
@@ -1362,7 +1362,7 @@ export default function SettingsPage() {
                             className="w-full h-2 bg-gradient-to-r from-green-200 to-yellow-300 rounded-lg appearance-none cursor-pointer"
                           />
                           <div className="flex justify-between text-xs text-gray-500 mt-1">
-                            <span>1 day</span>
+                            <span>0 days</span>
                             <span>60 days</span>
                           </div>
                         </div>
@@ -1373,19 +1373,19 @@ export default function SettingsPage() {
                           <div className="space-y-1.5 text-xs text-gray-700">
                             <div className="flex items-center gap-2">
                               <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-xs font-semibold border bg-red-100 text-red-800 border-red-300">🔴</span>
-                              <span>Resources <strong>{rule.current_rules.confidence_critical_days || rule.default_rules.confidence_critical_days || 90}+ days old</strong> → Critical priority</span>
+                              <span>Resources <strong>{rule.current_rules.confidence_critical_days ?? rule.default_rules.confidence_critical_days ?? 90}+ days old</strong> → Critical priority</span>
                             </div>
                             <div className="flex items-center gap-2">
                               <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-xs font-semibold border bg-orange-100 text-orange-800 border-orange-300">🟠</span>
-                              <span>Resources <strong>{rule.current_rules.confidence_high_days || rule.default_rules.confidence_high_days || 30}-{(rule.current_rules.confidence_critical_days || rule.default_rules.confidence_critical_days || 90) - 1} days old</strong> → High priority</span>
+                              <span>Resources <strong>{rule.current_rules.confidence_high_days ?? rule.default_rules.confidence_high_days ?? 30}-{(rule.current_rules.confidence_critical_days ?? rule.default_rules.confidence_critical_days ?? 90) - 1} days old</strong> → High priority</span>
                             </div>
                             <div className="flex items-center gap-2">
                               <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-xs font-semibold border bg-yellow-100 text-yellow-800 border-yellow-300">🟡</span>
-                              <span>Resources <strong>{rule.current_rules.confidence_medium_days || rule.default_rules.confidence_medium_days || 7}-{(rule.current_rules.confidence_high_days || rule.default_rules.confidence_high_days || 30) - 1} days old</strong> → Medium priority</span>
+                              <span>Resources <strong>{rule.current_rules.confidence_medium_days ?? rule.default_rules.confidence_medium_days ?? 7}-{(rule.current_rules.confidence_high_days ?? rule.default_rules.confidence_high_days ?? 30) - 1} days old</strong> → Medium priority</span>
                             </div>
                             <div className="flex items-center gap-2">
                               <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-xs font-semibold border bg-green-100 text-green-800 border-green-300">🟢</span>
-                              <span>Resources <strong>less than {rule.current_rules.confidence_medium_days || rule.default_rules.confidence_medium_days || 7} days old</strong> → Low priority</span>
+                              <span>Resources <strong>less than {rule.current_rules.confidence_medium_days ?? rule.default_rules.confidence_medium_days ?? 7} days old</strong> → Low priority</span>
                             </div>
                           </div>
                           <p className="mt-2 text-xs text-blue-800 italic">

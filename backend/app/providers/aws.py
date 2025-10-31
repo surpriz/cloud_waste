@@ -394,6 +394,170 @@ class AWSProvider(CloudProviderBase):
             print(f"Error fetching CloudWatch metrics for volume {volume_id}: {e}")
             return {metric_name: 0.0 for metric_name in metric_names}
 
+    async def _get_eip_nat_gateway_metrics(
+        self,
+        nat_gateway_id: str,
+        region: str,
+        period_days: int = 30,
+    ) -> dict[str, float]:
+        """
+        Get CloudWatch metrics for a NAT Gateway associated with an Elastic IP.
+
+        Used for detecting:
+        - SCENARIO 6: EIPs on unused NAT Gateways (no traffic)
+        - SCENARIO 9: EIPs on NAT Gateways with zero connections
+
+        Args:
+            nat_gateway_id: NAT Gateway ID
+            region: AWS region
+            period_days: Lookback period in days (default 30)
+
+        Returns:
+            Dict with:
+                - bytes_in_from_source: Total bytes inbound from source (Sum over period)
+                - bytes_out_to_destination: Total bytes outbound to destination (Sum over period)
+                - active_connection_count: Average active connections
+                - total_traffic_gb: Total traffic in GB (bytes_in + bytes_out)
+        """
+        try:
+            async with self.session.client("cloudwatch", region_name=region) as cw:
+                now = datetime.now(timezone.utc)
+                start_time = now - timedelta(days=period_days)
+
+                # Fetch NAT Gateway metrics
+                metrics_to_fetch = [
+                    ("BytesInFromSource", "Sum"),
+                    ("BytesOutToDestination", "Sum"),
+                    ("ActiveConnectionCount", "Average"),
+                ]
+
+                results = {}
+                for metric_name, statistic in metrics_to_fetch:
+                    response = await cw.get_metric_statistics(
+                        Namespace="AWS/NATGateway",
+                        MetricName=metric_name,
+                        Dimensions=[{"Name": "NatGatewayId", "Value": nat_gateway_id}],
+                        StartTime=start_time,
+                        EndTime=now,
+                        Period=86400,  # 1 day aggregation
+                        Statistics=[statistic],
+                    )
+
+                    datapoints = response.get("Datapoints", [])
+                    if datapoints:
+                        if statistic == "Sum":
+                            results[metric_name] = sum(dp[statistic] for dp in datapoints)
+                        else:  # Average
+                            results[metric_name] = sum(dp[statistic] for dp in datapoints) / len(datapoints)
+                    else:
+                        results[metric_name] = 0.0
+
+                # Calculate total traffic in GB
+                bytes_in = results.get("BytesInFromSource", 0.0)
+                bytes_out = results.get("BytesOutToDestination", 0.0)
+                total_traffic_gb = (bytes_in + bytes_out) / (1024 ** 3)  # Convert bytes to GB
+
+                return {
+                    "bytes_in_from_source": bytes_in,
+                    "bytes_out_to_destination": bytes_out,
+                    "active_connection_count": results.get("ActiveConnectionCount", 0.0),
+                    "total_traffic_gb": round(total_traffic_gb, 4),
+                }
+
+        except Exception as e:
+            print(f"Error fetching CloudWatch metrics for NAT Gateway {nat_gateway_id}: {e}")
+            return {
+                "bytes_in_from_source": 0.0,
+                "bytes_out_to_destination": 0.0,
+                "active_connection_count": 0.0,
+                "total_traffic_gb": 0.0,
+            }
+
+    async def _get_ec2_network_metrics(
+        self,
+        instance_id: str,
+        region: str,
+        period_days: int = 30,
+    ) -> dict[str, float]:
+        """
+        Get CloudWatch network metrics for an EC2 instance with an Elastic IP.
+
+        Used for detecting:
+        - SCENARIO 7: Idle EIPs on active resources (low NetworkIn/Out)
+        - SCENARIO 8: Low-traffic EIPs (< 1 GB/month)
+        - SCENARIO 10: EIPs on failed instances (StatusCheckFailed)
+
+        Args:
+            instance_id: EC2 instance ID
+            region: AWS region
+            period_days: Lookback period in days (default 30)
+
+        Returns:
+            Dict with:
+                - network_in: Total network in bytes (Sum over period)
+                - network_out: Total network out bytes (Sum over period)
+                - total_traffic_gb: Total traffic in GB (network_in + network_out)
+                - status_check_failed: Count of status check failures
+                - status_check_failed_instance: Instance-level failures
+                - status_check_failed_system: System-level failures
+        """
+        try:
+            async with self.session.client("cloudwatch", region_name=region) as cw:
+                now = datetime.now(timezone.utc)
+                start_time = now - timedelta(days=period_days)
+
+                # Fetch EC2 network metrics
+                metrics_to_fetch = [
+                    ("NetworkIn", "Sum"),
+                    ("NetworkOut", "Sum"),
+                    ("StatusCheckFailed", "Sum"),
+                    ("StatusCheckFailed_Instance", "Sum"),
+                    ("StatusCheckFailed_System", "Sum"),
+                ]
+
+                results = {}
+                for metric_name, statistic in metrics_to_fetch:
+                    response = await cw.get_metric_statistics(
+                        Namespace="AWS/EC2",
+                        MetricName=metric_name,
+                        Dimensions=[{"Name": "InstanceId", "Value": instance_id}],
+                        StartTime=start_time,
+                        EndTime=now,
+                        Period=86400,  # 1 day aggregation
+                        Statistics=[statistic],
+                    )
+
+                    datapoints = response.get("Datapoints", [])
+                    if datapoints:
+                        results[metric_name] = sum(dp[statistic] for dp in datapoints)
+                    else:
+                        results[metric_name] = 0.0
+
+                # Calculate total traffic in GB
+                network_in = results.get("NetworkIn", 0.0)
+                network_out = results.get("NetworkOut", 0.0)
+                total_traffic_gb = (network_in + network_out) / (1024 ** 3)  # Convert bytes to GB
+
+                return {
+                    "network_in": network_in,
+                    "network_out": network_out,
+                    "total_traffic_gb": round(total_traffic_gb, 4),
+                    "status_check_failed": results.get("StatusCheckFailed", 0.0),
+                    "status_check_failed_instance": results.get("StatusCheckFailed_Instance", 0.0),
+                    "status_check_failed_system": results.get("StatusCheckFailed_System", 0.0),
+                }
+
+        except Exception as e:
+            print(f"Error fetching CloudWatch metrics for instance {instance_id}: {e}")
+            return {
+                "network_in": 0.0,
+                "network_out": 0.0,
+                "total_traffic_gb": 0.0,
+                "status_check_failed": 0.0,
+                "status_check_failed_instance": 0.0,
+                "status_check_failed_system": 0.0,
+            }
+
     def _calculate_volume_cost(
         self,
         volume_type: str,
@@ -1654,12 +1818,16 @@ class AWSProvider(CloudProviderBase):
         self, region: str, detection_rules: dict | None = None
     ) -> list[OrphanResourceData]:
         """
-        Scan for unassigned Elastic IP addresses AND associated IPs on stopped instances.
+        Scan for Elastic IPs that are wasting money.
 
-        Detects:
-        - Elastic IPs not associated with any instance or network interface
-        - Elastic IPs associated to stopped EC2 instances (still charged!)
-        - Elastic IPs associated to orphaned ENIs (network interfaces not attached)
+        SCENARIO 1: Unassociated Elastic IPs
+        - EIPs not associated with any instance or network interface ($3.60/month waste)
+
+        SCENARIO 2: EIPs on stopped EC2 instances
+        - EIPs associated to stopped instances (still charged $3.60/month)
+        - Calculates stopped_days to determine confidence level
+
+        Uses AWS native AllocationTime attribute (no manual tags required).
 
         Args:
             region: AWS region to scan
@@ -1681,17 +1849,22 @@ class AWSProvider(CloudProviderBase):
 
         min_age_days = detection_rules.get("min_age_days", 3)
         confidence_threshold_days = detection_rules.get("confidence_threshold_days", 7)
+        min_stopped_days = detection_rules.get("min_stopped_days", 30)
 
         try:
             async with self.session.client("ec2", region_name=region) as ec2:
                 response = await ec2.describe_addresses()
 
-                # Get all instances to check their state
+                # Get all instances to check their state and launch time
                 instances_response = await ec2.describe_instances()
-                instance_states = {}
+                instance_info = {}  # {instance_id: {"state": str, "state_transition_reason": str}}
                 for reservation in instances_response.get("Reservations", []):
                     for instance in reservation.get("Instances", []):
-                        instance_states[instance["InstanceId"]] = instance["State"]["Name"]
+                        instance_info[instance["InstanceId"]] = {
+                            "state": instance["State"]["Name"],
+                            "state_transition_reason": instance.get("StateTransitionReason", ""),
+                            "launch_time": instance.get("LaunchTime"),
+                        }
 
                 for address in response.get("Addresses", []):
                     allocation_id = address.get("AllocationId", "N/A")
@@ -1700,100 +1873,95 @@ class AWSProvider(CloudProviderBase):
                     instance_id = address.get("InstanceId")
                     network_interface_id = address.get("NetworkInterfaceId")
 
+                    # **KEY FIX**: Use AWS native AllocationTime instead of manual tag
+                    allocation_time = address.get("AllocationTime")
+
+                    # Calculate age using native AllocationTime
+                    if not allocation_time:
+                        continue  # Skip if no allocation time (shouldn't happen for VPC EIPs)
+
+                    age_days = (datetime.now(timezone.utc) - allocation_time).days
+
                     # Determine orphan status
                     should_flag = False
                     orphan_type = ""
+                    stopped_days = 0
 
                     if not association_id:
-                        # CASE 1: Not associated at all (original logic)
-                        should_flag = True
-                        orphan_type = "unassociated"
-                    elif instance_id and instance_id in instance_states:
-                        # CASE 2: Associated to an instance - check if instance is stopped
-                        instance_state = instance_states[instance_id]
-                        if instance_state == "stopped":
+                        # SCENARIO 1: Unassociated Elastic IP
+                        if age_days >= min_age_days:
                             should_flag = True
-                            orphan_type = "associated_stopped_instance"
-                    elif network_interface_id and not instance_id:
-                        # CASE 3: Associated to ENI but ENI not attached to instance
-                        should_flag = True
-                        orphan_type = "associated_orphaned_eni"
+                            orphan_type = "unassociated"
+
+                    elif instance_id and instance_id in instance_info:
+                        # SCENARIO 2: EIP on stopped EC2 instance
+                        instance_state = instance_info[instance_id]["state"]
+                        if instance_state == "stopped":
+                            # Parse StateTransitionReason to calculate stopped_days
+                            # Format: "User initiated (2024-01-15 14:32:15 GMT)"
+                            state_transition_reason = instance_info[instance_id]["state_transition_reason"]
+                            try:
+                                # Extract date from StateTransitionReason
+                                import re
+                                date_match = re.search(r"\((\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})", state_transition_reason)
+                                if date_match:
+                                    stopped_time_str = date_match.group(1)
+                                    stopped_time = datetime.strptime(stopped_time_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+                                    stopped_days = (datetime.now(timezone.utc) - stopped_time).days
+                            except Exception:
+                                # Fallback: assume stopped recently if we can't parse
+                                stopped_days = 0
+
+                            if stopped_days >= min_stopped_days:
+                                should_flag = True
+                                orphan_type = "associated_stopped_instance"
 
                     if not should_flag:
                         continue
 
-                    # Extract tags
+                    # Extract name from tags
                     name = None
-                    created_date = None
-
-                    for tag in address.get("Tags", []):
+                    tags = address.get("Tags", [])
+                    for tag in tags:
                         if tag["Key"] == "Name":
                             name = tag["Value"]
-                        elif tag["Key"] == "CreatedDate":
-                            # User can manually tag IPs with creation date in ISO format
-                            try:
-                                from datetime import datetime
-                                created_date = datetime.fromisoformat(tag["Value"].replace('Z', '+00:00'))
-                            except Exception:
-                                pass
+                            break
 
-                    # Calculate age if creation date is available
-                    age_days = -1
-                    if created_date:
-                        age_days = (datetime.now(timezone.utc) - created_date).days
-                        if age_days < min_age_days:
-                            continue
-
-                    # Determine confidence and reason based on orphan type
+                    # Determine confidence and reason
                     if orphan_type == "unassociated":
-                        # Original logic for unassociated IPs
-                        if created_date:
-                            confidence = "high" if age_days >= confidence_threshold_days else "medium"
-                            reason = f"Not associated for {age_days} days"
-                        else:
-                            # No creation date available
-                            if min_age_days > 0:
-                                continue  # Skip - can't verify age requirement
-                            confidence = "low"
-                            reason = "Not associated (age unknown - add 'CreatedDate' tag for tracking)"
+                        confidence = "high" if age_days >= confidence_threshold_days else "medium"
+                        reason = f"Unassociated for {age_days} days ($3.60/month waste)"
 
                     elif orphan_type == "associated_stopped_instance":
-                        # IP associated to stopped instance - CHARGED!
-                        confidence = "high"
-                        reason = f"Associated to stopped instance {instance_id} (charged $3.60/month)"
-
-                    elif orphan_type == "associated_orphaned_eni":
-                        # IP associated to ENI but ENI not attached to instance
-                        confidence = "high"
-                        reason = f"Associated to orphaned network interface {network_interface_id} (charged)"
+                        confidence = "critical" if stopped_days >= 90 else ("high" if stopped_days >= confidence_threshold_days else "medium")
+                        reason = f"Associated to stopped instance {instance_id} for {stopped_days} days ($3.60/month waste)"
 
                     else:
-                        # Fallback
                         confidence = "low"
                         reason = "Detected as potentially orphaned"
+
+                    # Calculate already wasted cost
+                    already_wasted = round((age_days / 30) * self.PRICING["elastic_ip"], 2)
 
                     # Build metadata
                     metadata = {
                         "public_ip": public_ip,
                         "domain": address.get("Domain", "vpc"),
+                        "allocation_time": allocation_time.isoformat(),
                         "age_days": age_days,
                         "confidence": confidence,
                         "confidence_level": self._calculate_confidence_level(age_days, detection_rules),
                         "orphan_reason": reason,
                         "orphan_type": orphan_type,
                         "is_associated": bool(association_id),
+                        "already_wasted": already_wasted,
                     }
 
-                    # Add association info if available
-                    if instance_id:
+                    # SCENARIO 2 specific metadata
+                    if orphan_type == "associated_stopped_instance" and instance_id:
                         metadata["associated_instance_id"] = instance_id
-                        metadata["instance_state"] = instance_states.get(instance_id, "unknown")
-                    if network_interface_id:
-                        metadata["network_interface_id"] = network_interface_id
-
-                    # Add created_at if we have it from the tag
-                    if created_date:
-                        metadata["created_at"] = created_date.isoformat()
+                        metadata["instance_state"] = "stopped"
+                        metadata["stopped_days"] = stopped_days
 
                     orphans.append(
                         OrphanResourceData(
@@ -1807,7 +1975,1035 @@ class AWSProvider(CloudProviderBase):
                     )
 
         except ClientError as e:
-            print(f"Error scanning unassigned IPs in {region}: {e}")
+            print(f"Error scanning Elastic IPs (Scenarios 1-2) in {region}: {e}")
+
+        return orphans
+
+    async def scan_additional_eips_per_instance(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scan for EC2 instances with multiple Elastic IPs (SCENARIO 3).
+
+        Most instances only need 1 EIP. Multiple EIPs per instance indicate:
+        - Over-provisioning (unnecessary redundancy)
+        - Misconfiguration (forgot to clean up old IPs)
+        - Special use cases (multi-NIC, HA/failover) - justifiable via tags
+
+        Each additional EIP costs $3.60/month.
+
+        Args:
+            region: AWS region to scan
+            detection_rules: Optional detection rules
+
+        Returns:
+            List of orphan Elastic IP resources (additional IPs beyond the first)
+        """
+        orphans: list[OrphanResourceData] = []
+
+        # Use provided rules or defaults
+        if detection_rules is None:
+            from app.models.detection_rule import DEFAULT_DETECTION_RULES
+            detection_rules = DEFAULT_DETECTION_RULES.get("elastic_ip", {})
+
+        if not detection_rules.get("enabled", True):
+            return orphans
+
+        max_eips_per_instance = detection_rules.get("max_eips_per_instance", 1)
+        allow_multiple_eips_tags = detection_rules.get("allow_multiple_eips_tags", [
+            "multi-nic", "ha", "high-availability", "active-active", "failover", "floating-ip"
+        ])
+        min_age_days = detection_rules.get("min_age_days", 3)
+
+        try:
+            async with self.session.client("ec2", region_name=region) as ec2:
+                response = await ec2.describe_addresses()
+
+                # Get instance tags to check for justification
+                instances_response = await ec2.describe_instances()
+                instance_tags = {}  # {instance_id: [tag_keys]}
+                for reservation in instances_response.get("Reservations", []):
+                    for instance in reservation.get("Instances", []):
+                        instance_id = instance["InstanceId"]
+                        tags = [tag["Key"].lower() for tag in instance.get("Tags", [])]
+                        instance_tags[instance_id] = tags
+
+                # Group EIPs by instance
+                instance_eips = {}  # {instance_id: [eip_data]}
+                for address in response.get("Addresses", []):
+                    instance_id = address.get("InstanceId")
+                    if instance_id:  # Only consider IPs associated with instances
+                        if instance_id not in instance_eips:
+                            instance_eips[instance_id] = []
+                        instance_eips[instance_id].append(address)
+
+                # Find instances with more than max_eips_per_instance
+                for instance_id, eips in instance_eips.items():
+                    if len(eips) <= max_eips_per_instance:
+                        continue  # Within limit
+
+                    # Check if instance has justification tags
+                    tags = instance_tags.get(instance_id, [])
+                    has_justification = any(tag in tags for tag in [t.lower() for t in allow_multiple_eips_tags])
+
+                    if has_justification:
+                        continue  # Skip - multiple EIPs are justified
+
+                    # Flag additional EIPs (beyond the first one)
+                    for i, address in enumerate(sorted(eips, key=lambda x: x.get("AllocationTime", datetime.min))):
+                        if i < max_eips_per_instance:
+                            continue  # Keep the first N EIPs
+
+                        allocation_id = address.get("AllocationId", "N/A")
+                        public_ip = address.get("PublicIp", "Unknown")
+                        allocation_time = address.get("AllocationTime")
+
+                        if not allocation_time:
+                            continue
+
+                        age_days = (datetime.now(timezone.utc) - allocation_time).days
+                        if age_days < min_age_days:
+                            continue
+
+                        # Extract name from tags
+                        name = None
+                        for tag in address.get("Tags", []):
+                            if tag["Key"] == "Name":
+                                name = tag["Value"]
+                                break
+
+                        # Confidence based on age
+                        confidence = "high" if age_days >= 30 else "medium"
+                        reason = f"Instance {instance_id} has {len(eips)} EIPs (max {max_eips_per_instance} recommended). Additional EIP #{i+1} wastes $3.60/month."
+
+                        already_wasted = round((age_days / 30) * self.PRICING["elastic_ip"], 2)
+
+                        metadata = {
+                            "public_ip": public_ip,
+                            "allocation_time": allocation_time.isoformat(),
+                            "age_days": age_days,
+                            "confidence": confidence,
+                            "confidence_level": self._calculate_confidence_level(age_days, detection_rules),
+                            "orphan_reason": reason,
+                            "orphan_type": "additional_eip_per_instance",
+                            "associated_instance_id": instance_id,
+                            "total_eips_on_instance": len(eips),
+                            "eip_index": i + 1,
+                            "already_wasted": already_wasted,
+                        }
+
+                        orphans.append(
+                            OrphanResourceData(
+                                resource_type="elastic_ip",
+                                resource_id=allocation_id,
+                                resource_name=name,
+                                region=region,
+                                estimated_monthly_cost=self.PRICING["elastic_ip"],
+                                resource_metadata=metadata,
+                            )
+                        )
+
+        except ClientError as e:
+            print(f"Error scanning additional EIPs per instance (Scenario 3) in {region}: {e}")
+
+        return orphans
+
+    async def scan_eips_on_detached_enis(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scan for Elastic IPs associated with detached ENIs (SCENARIO 4).
+
+        Detects:
+        - EIPs associated with ENIs (Elastic Network Interfaces) that are not attached to instances
+        - These EIPs are still charged ($3.60/month) even though the ENI is detached
+        - Common after instance termination, ENI manual detachment, or configuration changes
+
+        Args:
+            region: AWS region to scan
+            detection_rules: Optional detection rules
+
+        Returns:
+            List of orphan Elastic IP resources on detached ENIs
+        """
+        orphans: list[OrphanResourceData] = []
+
+        # Use provided rules or defaults
+        if detection_rules is None:
+            from app.models.detection_rule import DEFAULT_DETECTION_RULES
+            detection_rules = DEFAULT_DETECTION_RULES.get("elastic_ip", {})
+
+        if not detection_rules.get("enabled", True):
+            return orphans
+
+        detached_eni_min_days = detection_rules.get("detached_eni_min_days", 7)
+        min_age_days = detection_rules.get("min_age_days", 3)
+
+        try:
+            async with self.session.client("ec2", region_name=region) as ec2:
+                # Get all EIPs
+                eips_response = await ec2.describe_addresses()
+
+                # Get all ENIs to check their attachment status
+                enis_response = await ec2.describe_network_interfaces()
+                eni_attachment_info = {}  # {eni_id: {"attached": bool, "attachment_time": datetime}}
+                for eni in enis_response.get("NetworkInterfaces", []):
+                    eni_id = eni["NetworkInterfaceId"]
+                    attachment = eni.get("Attachment")
+                    eni_attachment_info[eni_id] = {
+                        "attached": attachment is not None and attachment.get("Status") == "attached",
+                        "attachment_time": attachment.get("AttachTime") if attachment else None,
+                    }
+
+                for address in eips_response.get("Addresses", []):
+                    network_interface_id = address.get("NetworkInterfaceId")
+
+                    # Only consider EIPs associated with ENIs (not directly with instances)
+                    if not network_interface_id:
+                        continue
+
+                    instance_id = address.get("InstanceId")
+                    if instance_id:
+                        # Skip - ENI is attached to instance (handled by other scenarios)
+                        continue
+
+                    # Check if ENI is detached
+                    eni_info = eni_attachment_info.get(network_interface_id)
+                    if not eni_info or eni_info["attached"]:
+                        continue  # ENI is attached or not found
+
+                    allocation_id = address.get("AllocationId", "N/A")
+                    public_ip = address.get("PublicIp", "Unknown")
+                    allocation_time = address.get("AllocationTime")
+
+                    if not allocation_time:
+                        continue
+
+                    age_days = (datetime.now(timezone.utc) - allocation_time).days
+                    if age_days < min_age_days:
+                        continue
+
+                    # Calculate detached days (approximation - we don't have exact detachment time)
+                    # We use EIP allocation time as proxy for detachment duration
+                    detached_days = age_days
+
+                    if detached_days < detached_eni_min_days:
+                        continue
+
+                    # Extract name from tags
+                    name = None
+                    for tag in address.get("Tags", []):
+                        if tag["Key"] == "Name":
+                            name = tag["Value"]
+                            break
+
+                    confidence = "critical" if detached_days >= 90 else ("high" if detached_days >= 30 else "medium")
+                    reason = f"Associated with detached ENI {network_interface_id} for {detached_days}+ days ($3.60/month waste)"
+
+                    already_wasted = round((age_days / 30) * self.PRICING["elastic_ip"], 2)
+
+                    metadata = {
+                        "public_ip": public_ip,
+                        "allocation_time": allocation_time.isoformat(),
+                        "age_days": age_days,
+                        "detached_days": detached_days,
+                        "confidence": confidence,
+                        "confidence_level": self._calculate_confidence_level(age_days, detection_rules),
+                        "orphan_reason": reason,
+                        "orphan_type": "eip_on_detached_eni",
+                        "network_interface_id": network_interface_id,
+                        "already_wasted": already_wasted,
+                    }
+
+                    orphans.append(
+                        OrphanResourceData(
+                            resource_type="elastic_ip",
+                            resource_id=allocation_id,
+                            resource_name=name,
+                            region=region,
+                            estimated_monthly_cost=self.PRICING["elastic_ip"],
+                            resource_metadata=metadata,
+                        )
+                    )
+
+        except ClientError as e:
+            print(f"Error scanning EIPs on detached ENIs (Scenario 4) in {region}: {e}")
+
+        return orphans
+
+    async def scan_never_used_eips(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scan for Elastic IPs that have NEVER been associated with any resource (SCENARIO 5).
+
+        Detects:
+        - EIPs allocated but never attached to any instance, ENI, or NAT Gateway
+        - Strong indicator of forgotten/test allocation ($3.60/month waste)
+        - Higher confidence than simple "unassociated" because it's never been used
+
+        Args:
+            region: AWS region to scan
+            detection_rules: Optional detection rules
+
+        Returns:
+            List of orphan Elastic IP resources that were never used
+        """
+        orphans: list[OrphanResourceData] = []
+
+        # Use provided rules or defaults
+        if detection_rules is None:
+            from app.models.detection_rule import DEFAULT_DETECTION_RULES
+            detection_rules = DEFAULT_DETECTION_RULES.get("elastic_ip", {})
+
+        if not detection_rules.get("enabled", True):
+            return orphans
+
+        min_never_used_days = detection_rules.get("min_never_used_days", 7)
+        min_age_days = detection_rules.get("min_age_days", 3)
+
+        try:
+            async with self.session.client("ec2", region_name=region) as ec2:
+                response = await ec2.describe_addresses()
+
+                for address in response.get("Addresses", []):
+                    # Check if EIP was NEVER associated
+                    association_id = address.get("AssociationId")
+                    instance_id = address.get("InstanceId")
+                    network_interface_id = address.get("NetworkInterfaceId")
+
+                    # AWS Elastic IP attributes:
+                    # - If never attached: no AssociationId, no InstanceId, no NetworkInterfaceId
+                    # - If currently unattached but was attached before: may have NetworkInterfaceId (of last attachment)
+                    # The key is: if AssociationId is None AND NetworkInterfaceOwnerId is "amazon-elb" or missing
+
+                    network_interface_owner_id = address.get("NetworkInterfaceOwnerId")
+
+                    # Only flag if:
+                    # 1. Not currently associated (no AssociationId)
+                    # 2. No previous association trace (no NetworkInterfaceId OR NetworkInterfaceOwnerId is amazon service)
+                    if association_id:
+                        continue  # Currently associated
+
+                    if network_interface_id and network_interface_owner_id not in [None, "amazon-elb", "amazon-aws"]:
+                        # Was previously associated with user resource
+                        continue
+
+                    allocation_id = address.get("AllocationId", "N/A")
+                    public_ip = address.get("PublicIp", "Unknown")
+                    allocation_time = address.get("AllocationTime")
+
+                    if not allocation_time:
+                        continue
+
+                    age_days = (datetime.now(timezone.utc) - allocation_time).days
+
+                    if age_days < min_age_days or age_days < min_never_used_days:
+                        continue
+
+                    # Extract name from tags
+                    name = None
+                    for tag in address.get("Tags", []):
+                        if tag["Key"] == "Name":
+                            name = tag["Value"]
+                            break
+
+                    confidence = "critical" if age_days >= 90 else ("high" if age_days >= 30 else "medium")
+                    reason = f"Never associated with any resource for {age_days} days ($3.60/month waste)"
+
+                    already_wasted = round((age_days / 30) * self.PRICING["elastic_ip"], 2)
+
+                    metadata = {
+                        "public_ip": public_ip,
+                        "allocation_time": allocation_time.isoformat(),
+                        "age_days": age_days,
+                        "confidence": confidence,
+                        "confidence_level": self._calculate_confidence_level(age_days, detection_rules),
+                        "orphan_reason": reason,
+                        "orphan_type": "never_used",
+                        "already_wasted": already_wasted,
+                    }
+
+                    orphans.append(
+                        OrphanResourceData(
+                            resource_type="elastic_ip",
+                            resource_id=allocation_id,
+                            resource_name=name,
+                            region=region,
+                            estimated_monthly_cost=self.PRICING["elastic_ip"],
+                            resource_metadata=metadata,
+                        )
+                    )
+
+        except ClientError as e:
+            print(f"Error scanning never-used EIPs (Scenario 5) in {region}: {e}")
+
+        return orphans
+
+    async def scan_eips_on_unused_nat_gateways(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scan for Elastic IPs on unused NAT Gateways (SCENARIO 6).
+
+        Detects:
+        - EIPs associated with NAT Gateways that have minimal/no traffic
+        - NAT Gateway ($32.40/month) + EIP ($3.60/month) = $36/month total waste
+        - Uses CloudWatch metrics to determine if NAT Gateway is actually used
+        - This is 10x more expensive than a standalone unused EIP!
+
+        Args:
+            region: AWS region to scan
+            detection_rules: Optional detection rules
+
+        Returns:
+            List of orphan Elastic IP resources on unused NAT Gateways
+        """
+        orphans: list[OrphanResourceData] = []
+
+        # Use provided rules or defaults
+        if detection_rules is None:
+            from app.models.detection_rule import DEFAULT_DETECTION_RULES
+            detection_rules = DEFAULT_DETECTION_RULES.get("elastic_ip", {})
+
+        if not detection_rules.get("enabled", True):
+            return orphans
+
+        nat_gateway_min_idle_days = detection_rules.get("nat_gateway_min_idle_days", 30)
+        nat_gateway_traffic_threshold_gb = detection_rules.get("nat_gateway_traffic_threshold_gb", 0.1)
+        min_observation_days = detection_rules.get("min_observation_days", 30)
+
+        try:
+            async with self.session.client("ec2", region_name=region) as ec2:
+                # Get all EIPs
+                eips_response = await ec2.describe_addresses()
+
+                # Get all NAT Gateways
+                nat_gateways_response = await ec2.describe_nat_gateways(
+                    Filters=[{"Name": "state", "Values": ["available"]}]
+                )
+
+                # Map EIPs to NAT Gateways
+                eip_to_nat_gateway = {}  # {eip_allocation_id: nat_gateway_id}
+                nat_gateway_info = {}  # {nat_gateway_id: {create_time, public_ip}}
+
+                for nat_gw in nat_gateways_response.get("NatGateways", []):
+                    nat_gw_id = nat_gw["NatGatewayId"]
+                    create_time = nat_gw.get("CreateTime")
+
+                    # Find EIP allocation ID for this NAT Gateway
+                    for address_set in nat_gw.get("NatGatewayAddresses", []):
+                        allocation_id = address_set.get("AllocationId")
+                        public_ip = address_set.get("PublicIp")
+                        if allocation_id:
+                            eip_to_nat_gateway[allocation_id] = nat_gw_id
+                            nat_gateway_info[nat_gw_id] = {
+                                "create_time": create_time,
+                                "public_ip": public_ip,
+                            }
+
+                # Check each EIP associated with NAT Gateway
+                for address in eips_response.get("Addresses", []):
+                    allocation_id = address.get("AllocationId", "N/A")
+
+                    if allocation_id not in eip_to_nat_gateway:
+                        continue  # Not associated with NAT Gateway
+
+                    nat_gw_id = eip_to_nat_gateway[allocation_id]
+                    nat_info = nat_gateway_info.get(nat_gw_id)
+
+                    if not nat_info:
+                        continue
+
+                    create_time = nat_info["create_time"]
+                    age_days = (datetime.now(timezone.utc) - create_time).days
+
+                    if age_days < nat_gateway_min_idle_days:
+                        continue
+
+                    # Get CloudWatch metrics for NAT Gateway
+                    metrics = await self._get_eip_nat_gateway_metrics(
+                        nat_gw_id, region, period_days=min_observation_days
+                    )
+
+                    total_traffic_gb = metrics.get("total_traffic_gb", 0.0)
+
+                    # Flag if traffic is below threshold
+                    if total_traffic_gb > nat_gateway_traffic_threshold_gb:
+                        continue  # NAT Gateway has sufficient traffic
+
+                    # This NAT Gateway is unused!
+                    public_ip = address.get("PublicIp", "Unknown")
+                    allocation_time = address.get("AllocationTime")
+
+                    # Extract name from tags
+                    name = None
+                    for tag in address.get("Tags", []):
+                        if tag["Key"] == "Name":
+                            name = tag["Value"]
+                            break
+
+                    confidence = "critical" if age_days >= 90 else ("high" if age_days >= 60 else "medium")
+
+                    # **KEY**: NAT Gateway + EIP = $32.40 + $3.60 = $36/month
+                    nat_gateway_cost = 32.40
+                    total_monthly_cost = nat_gateway_cost + self.PRICING["elastic_ip"]
+
+                    reason = f"EIP on unused NAT Gateway {nat_gw_id} ({total_traffic_gb:.4f} GB traffic in {min_observation_days} days). Total waste: ${total_monthly_cost:.2f}/month (NAT Gateway ${nat_gateway_cost} + EIP ${self.PRICING['elastic_ip']})"
+
+                    already_wasted = round((age_days / 30) * total_monthly_cost, 2)
+
+                    metadata = {
+                        "public_ip": public_ip,
+                        "allocation_time": allocation_time.isoformat() if allocation_time else None,
+                        "age_days": age_days,
+                        "confidence": confidence,
+                        "confidence_level": self._calculate_confidence_level(age_days, detection_rules),
+                        "orphan_reason": reason,
+                        "orphan_type": "eip_on_unused_nat_gateway",
+                        "nat_gateway_id": nat_gw_id,
+                        "nat_gateway_total_traffic_gb": total_traffic_gb,
+                        "observation_period_days": min_observation_days,
+                        "nat_gateway_cost_monthly": nat_gateway_cost,
+                        "already_wasted": already_wasted,
+                    }
+
+                    orphans.append(
+                        OrphanResourceData(
+                            resource_type="elastic_ip",
+                            resource_id=allocation_id,
+                            resource_name=name,
+                            region=region,
+                            estimated_monthly_cost=total_monthly_cost,  # Include NAT Gateway cost
+                            resource_metadata=metadata,
+                        )
+                    )
+
+        except ClientError as e:
+            print(f"Error scanning EIPs on unused NAT Gateways (Scenario 6) in {region}: {e}")
+
+        return orphans
+
+    async def scan_idle_eips(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scan for Elastic IPs on active resources with extremely low network traffic (SCENARIO 7).
+
+        Detects:
+        - EIPs on running EC2 instances with minimal NetworkIn/Out (CloudWatch)
+        - Instance is "running" but not actually being used
+        - Common for forgotten test instances, abandoned projects, or over-provisioned infrastructure
+        - Uses CloudWatch NetworkIn/NetworkOut metrics to determine idle status
+
+        Args:
+            region: AWS region to scan
+            detection_rules: Optional detection rules
+
+        Returns:
+            List of orphan Elastic IP resources on idle instances
+        """
+        orphans: list[OrphanResourceData] = []
+
+        # Use provided rules or defaults
+        if detection_rules is None:
+            from app.models.detection_rule import DEFAULT_DETECTION_RULES
+            detection_rules = DEFAULT_DETECTION_RULES.get("elastic_ip", {})
+
+        if not detection_rules.get("enabled", True):
+            return orphans
+
+        min_idle_days = detection_rules.get("min_idle_days", 30)
+        idle_network_threshold_bytes = detection_rules.get("idle_network_threshold_bytes", 1_000_000)  # 1 MB
+        min_observation_days = detection_rules.get("min_observation_days", 30)
+
+        try:
+            async with self.session.client("ec2", region_name=region) as ec2:
+                # Get all EIPs
+                eips_response = await ec2.describe_addresses()
+
+                # Get all running instances
+                instances_response = await ec2.describe_instances(
+                    Filters=[{"Name": "instance-state-name", "Values": ["running"]}]
+                )
+                running_instances = {}  # {instance_id: launch_time}
+                for reservation in instances_response.get("Reservations", []):
+                    for instance in reservation.get("Instances", []):
+                        running_instances[instance["InstanceId"]] = instance.get("LaunchTime")
+
+                for address in eips_response.get("Addresses", []):
+                    instance_id = address.get("InstanceId")
+
+                    if not instance_id or instance_id not in running_instances:
+                        continue  # Only check EIPs on running instances
+
+                    allocation_id = address.get("AllocationId", "N/A")
+                    public_ip = address.get("PublicIp", "Unknown")
+                    allocation_time = address.get("AllocationTime")
+
+                    if not allocation_time:
+                        continue
+
+                    launch_time = running_instances[instance_id]
+                    running_days = (datetime.now(timezone.utc) - launch_time).days
+
+                    if running_days < min_idle_days:
+                        continue
+
+                    # Get CloudWatch network metrics for the instance
+                    metrics = await self._get_ec2_network_metrics(
+                        instance_id, region, period_days=min_observation_days
+                    )
+
+                    total_traffic_bytes = metrics.get("network_in", 0.0) + metrics.get("network_out", 0.0)
+
+                    # Flag if traffic is below idle threshold
+                    if total_traffic_bytes > idle_network_threshold_bytes:
+                        continue  # Instance has sufficient network activity
+
+                    # This instance (and its EIP) is idle!
+                    age_days = (datetime.now(timezone.utc) - allocation_time).days
+
+                    # Extract name from tags
+                    name = None
+                    for tag in address.get("Tags", []):
+                        if tag["Key"] == "Name":
+                            name = tag["Value"]
+                            break
+
+                    confidence = "critical" if running_days >= 90 else ("high" if running_days >= 60 else "medium")
+
+                    total_traffic_mb = total_traffic_bytes / (1024 * 1024)
+                    reason = f"EIP on idle running instance {instance_id} ({total_traffic_mb:.2f} MB traffic in {min_observation_days} days). Instance running but unused for {running_days} days."
+
+                    already_wasted = round((age_days / 30) * self.PRICING["elastic_ip"], 2)
+
+                    metadata = {
+                        "public_ip": public_ip,
+                        "allocation_time": allocation_time.isoformat(),
+                        "age_days": age_days,
+                        "confidence": confidence,
+                        "confidence_level": self._calculate_confidence_level(age_days, detection_rules),
+                        "orphan_reason": reason,
+                        "orphan_type": "idle_eip",
+                        "associated_instance_id": instance_id,
+                        "instance_running_days": running_days,
+                        "total_network_traffic_mb": round(total_traffic_mb, 2),
+                        "observation_period_days": min_observation_days,
+                        "already_wasted": already_wasted,
+                    }
+
+                    orphans.append(
+                        OrphanResourceData(
+                            resource_type="elastic_ip",
+                            resource_id=allocation_id,
+                            resource_name=name,
+                            region=region,
+                            estimated_monthly_cost=self.PRICING["elastic_ip"],
+                            resource_metadata=metadata,
+                        )
+                    )
+
+        except ClientError as e:
+            print(f"Error scanning idle EIPs (Scenario 7) in {region}: {e}")
+
+        return orphans
+
+    async def scan_low_traffic_eips(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scan for Elastic IPs with low network traffic (SCENARIO 8).
+
+        Detects:
+        - EIPs on running instances with low but non-zero traffic (< 1 GB/month)
+        - Instance is technically active but severely underutilized
+        - Suggests the resource might be over-provisioned or unnecessary
+        - Uses CloudWatch NetworkIn/NetworkOut metrics over observation period
+
+        Args:
+            region: AWS region to scan
+            detection_rules: Optional detection rules
+
+        Returns:
+            List of orphan Elastic IP resources with low traffic
+        """
+        orphans: list[OrphanResourceData] = []
+
+        # Use provided rules or defaults
+        if detection_rules is None:
+            from app.models.detection_rule import DEFAULT_DETECTION_RULES
+            detection_rules = DEFAULT_DETECTION_RULES.get("elastic_ip", {})
+
+        if not detection_rules.get("enabled", True):
+            return orphans
+
+        low_traffic_threshold_gb = detection_rules.get("low_traffic_threshold_gb", 1.0)  # 1 GB/month
+        min_observation_days = detection_rules.get("min_observation_days", 30)
+        min_age_days = detection_rules.get("min_age_days", 3)
+
+        try:
+            async with self.session.client("ec2", region_name=region) as ec2:
+                # Get all EIPs
+                eips_response = await ec2.describe_addresses()
+
+                # Get all running instances
+                instances_response = await ec2.describe_instances(
+                    Filters=[{"Name": "instance-state-name", "Values": ["running"]}]
+                )
+                running_instances = {}  # {instance_id: launch_time}
+                for reservation in instances_response.get("Reservations", []):
+                    for instance in reservation.get("Instances", []):
+                        running_instances[instance["InstanceId"]] = instance.get("LaunchTime")
+
+                for address in eips_response.get("Addresses", []):
+                    instance_id = address.get("InstanceId")
+
+                    if not instance_id or instance_id not in running_instances:
+                        continue  # Only check EIPs on running instances
+
+                    allocation_id = address.get("AllocationId", "N/A")
+                    public_ip = address.get("PublicIp", "Unknown")
+                    allocation_time = address.get("AllocationTime")
+
+                    if not allocation_time:
+                        continue
+
+                    age_days = (datetime.now(timezone.utc) - allocation_time).days
+                    if age_days < min_age_days:
+                        continue
+
+                    # Get CloudWatch network metrics for the instance
+                    metrics = await self._get_ec2_network_metrics(
+                        instance_id, region, period_days=min_observation_days
+                    )
+
+                    total_traffic_gb = metrics.get("total_traffic_gb", 0.0)
+
+                    # Flag if traffic is low but not zero (to avoid overlap with Scenario 7)
+                    if total_traffic_gb >= low_traffic_threshold_gb:
+                        continue  # Traffic is above low-traffic threshold
+
+                    if total_traffic_gb < 0.001:  # Less than 1 MB
+                        continue  # Covered by Scenario 7 (idle)
+
+                    # This EIP has low traffic!
+                    launch_time = running_instances[instance_id]
+                    running_days = (datetime.now(timezone.utc) - launch_time).days
+
+                    # Extract name from tags
+                    name = None
+                    for tag in address.get("Tags", []):
+                        if tag["Key"] == "Name":
+                            name = tag["Value"]
+                            break
+
+                    confidence = "high" if running_days >= 60 else ("medium" if running_days >= 30 else "low")
+
+                    reason = f"EIP on low-traffic instance {instance_id} ({total_traffic_gb:.4f} GB in {min_observation_days} days, < {low_traffic_threshold_gb} GB threshold)."
+
+                    already_wasted = round((age_days / 30) * self.PRICING["elastic_ip"], 2)
+
+                    metadata = {
+                        "public_ip": public_ip,
+                        "allocation_time": allocation_time.isoformat(),
+                        "age_days": age_days,
+                        "confidence": confidence,
+                        "confidence_level": self._calculate_confidence_level(age_days, detection_rules),
+                        "orphan_reason": reason,
+                        "orphan_type": "low_traffic_eip",
+                        "associated_instance_id": instance_id,
+                        "instance_running_days": running_days,
+                        "total_traffic_gb": round(total_traffic_gb, 4),
+                        "observation_period_days": min_observation_days,
+                        "low_traffic_threshold_gb": low_traffic_threshold_gb,
+                        "already_wasted": already_wasted,
+                    }
+
+                    orphans.append(
+                        OrphanResourceData(
+                            resource_type="elastic_ip",
+                            resource_id=allocation_id,
+                            resource_name=name,
+                            region=region,
+                            estimated_monthly_cost=self.PRICING["elastic_ip"],
+                            resource_metadata=metadata,
+                        )
+                    )
+
+        except ClientError as e:
+            print(f"Error scanning low-traffic EIPs (Scenario 8) in {region}: {e}")
+
+        return orphans
+
+    async def scan_unused_nat_gateway_eips(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scan for Elastic IPs on NAT Gateways with zero active connections (SCENARIO 9).
+
+        Detects:
+        - EIPs on NAT Gateways with ActiveConnectionCount = 0 for extended period
+        - More precise than Scenario 6 (focuses on active connections vs total traffic)
+        - NAT Gateway ($32.40/month) + EIP ($3.60/month) = $36/month waste
+        - Uses CloudWatch ActiveConnectionCount metric
+
+        Args:
+            region: AWS region to scan
+            detection_rules: Optional detection rules
+
+        Returns:
+            List of orphan Elastic IP resources on NAT Gateways with zero connections
+        """
+        orphans: list[OrphanResourceData] = []
+
+        # Use provided rules or defaults
+        if detection_rules is None:
+            from app.models.detection_rule import DEFAULT_DETECTION_RULES
+            detection_rules = DEFAULT_DETECTION_RULES.get("elastic_ip", {})
+
+        if not detection_rules.get("enabled", True):
+            return orphans
+
+        nat_gateway_zero_connections_days = detection_rules.get("nat_gateway_zero_connections_days", 30)
+        min_observation_days = detection_rules.get("min_observation_days", 30)
+
+        try:
+            async with self.session.client("ec2", region_name=region) as ec2:
+                # Get all EIPs
+                eips_response = await ec2.describe_addresses()
+
+                # Get all NAT Gateways
+                nat_gateways_response = await ec2.describe_nat_gateways(
+                    Filters=[{"Name": "state", "Values": ["available"]}]
+                )
+
+                # Map EIPs to NAT Gateways
+                eip_to_nat_gateway = {}  # {eip_allocation_id: nat_gateway_id}
+                nat_gateway_info = {}  # {nat_gateway_id: {create_time, public_ip}}
+
+                for nat_gw in nat_gateways_response.get("NatGateways", []):
+                    nat_gw_id = nat_gw["NatGatewayId"]
+                    create_time = nat_gw.get("CreateTime")
+
+                    # Find EIP allocation ID for this NAT Gateway
+                    for address_set in nat_gw.get("NatGatewayAddresses", []):
+                        allocation_id = address_set.get("AllocationId")
+                        public_ip = address_set.get("PublicIp")
+                        if allocation_id:
+                            eip_to_nat_gateway[allocation_id] = nat_gw_id
+                            nat_gateway_info[nat_gw_id] = {
+                                "create_time": create_time,
+                                "public_ip": public_ip,
+                            }
+
+                # Check each EIP associated with NAT Gateway
+                for address in eips_response.get("Addresses", []):
+                    allocation_id = address.get("AllocationId", "N/A")
+
+                    if allocation_id not in eip_to_nat_gateway:
+                        continue  # Not associated with NAT Gateway
+
+                    nat_gw_id = eip_to_nat_gateway[allocation_id]
+                    nat_info = nat_gateway_info.get(nat_gw_id)
+
+                    if not nat_info:
+                        continue
+
+                    create_time = nat_info["create_time"]
+                    age_days = (datetime.now(timezone.utc) - create_time).days
+
+                    if age_days < nat_gateway_zero_connections_days:
+                        continue
+
+                    # Get CloudWatch metrics for NAT Gateway
+                    metrics = await self._get_eip_nat_gateway_metrics(
+                        nat_gw_id, region, period_days=min_observation_days
+                    )
+
+                    active_connection_count = metrics.get("active_connection_count", 0.0)
+
+                    # Flag if zero active connections
+                    if active_connection_count > 0.1:  # Some tolerance for measurement
+                        continue  # NAT Gateway has active connections
+
+                    # This NAT Gateway has ZERO connections!
+                    public_ip = address.get("PublicIp", "Unknown")
+                    allocation_time = address.get("AllocationTime")
+
+                    # Extract name from tags
+                    name = None
+                    for tag in address.get("Tags", []):
+                        if tag["Key"] == "Name":
+                            name = tag["Value"]
+                            break
+
+                    confidence = "critical" if age_days >= 90 else ("high" if age_days >= 60 else "medium")
+
+                    # **KEY**: NAT Gateway + EIP = $32.40 + $3.60 = $36/month
+                    nat_gateway_cost = 32.40
+                    total_monthly_cost = nat_gateway_cost + self.PRICING["elastic_ip"]
+
+                    reason = f"EIP on NAT Gateway {nat_gw_id} with ZERO active connections for {age_days} days. Total waste: ${total_monthly_cost:.2f}/month (NAT Gateway ${nat_gateway_cost} + EIP ${self.PRICING['elastic_ip']})"
+
+                    already_wasted = round((age_days / 30) * total_monthly_cost, 2)
+
+                    metadata = {
+                        "public_ip": public_ip,
+                        "allocation_time": allocation_time.isoformat() if allocation_time else None,
+                        "age_days": age_days,
+                        "confidence": confidence,
+                        "confidence_level": self._calculate_confidence_level(age_days, detection_rules),
+                        "orphan_reason": reason,
+                        "orphan_type": "eip_on_zero_connection_nat_gateway",
+                        "nat_gateway_id": nat_gw_id,
+                        "active_connection_count": active_connection_count,
+                        "observation_period_days": min_observation_days,
+                        "nat_gateway_cost_monthly": nat_gateway_cost,
+                        "already_wasted": already_wasted,
+                    }
+
+                    orphans.append(
+                        OrphanResourceData(
+                            resource_type="elastic_ip",
+                            resource_id=allocation_id,
+                            resource_name=name,
+                            region=region,
+                            estimated_monthly_cost=total_monthly_cost,  # Include NAT Gateway cost
+                            resource_metadata=metadata,
+                        )
+                    )
+
+        except ClientError as e:
+            print(f"Error scanning EIPs on NAT Gateways with zero connections (Scenario 9) in {region}: {e}")
+
+        return orphans
+
+    async def scan_eips_on_failed_instances(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scan for Elastic IPs on EC2 instances failing status checks (SCENARIO 10).
+
+        Detects:
+        - EIPs on instances with persistent StatusCheckFailed metrics (CloudWatch)
+        - Instance is technically "running" but not operational
+        - Common after system failures, network issues, or kernel panics
+        - Indicates the EIP is attached to a non-functional resource
+
+        Args:
+            region: AWS region to scan
+            detection_rules: Optional detection rules
+
+        Returns:
+            List of orphan Elastic IP resources on failed instances
+        """
+        orphans: list[OrphanResourceData] = []
+
+        # Use provided rules or defaults
+        if detection_rules is None:
+            from app.models.detection_rule import DEFAULT_DETECTION_RULES
+            detection_rules = DEFAULT_DETECTION_RULES.get("elastic_ip", {})
+
+        if not detection_rules.get("enabled", True):
+            return orphans
+
+        max_status_check_failures = detection_rules.get("max_status_check_failures", 7)  # 7 days of failures
+        min_failed_days = detection_rules.get("min_failed_days", 7)
+        min_observation_days = detection_rules.get("min_observation_days", 30)
+
+        try:
+            async with self.session.client("ec2", region_name=region) as ec2:
+                # Get all EIPs
+                eips_response = await ec2.describe_addresses()
+
+                # Get all running instances
+                instances_response = await ec2.describe_instances(
+                    Filters=[{"Name": "instance-state-name", "Values": ["running"]}]
+                )
+                running_instances = {}  # {instance_id: launch_time}
+                for reservation in instances_response.get("Reservations", []):
+                    for instance in reservation.get("Instances", []):
+                        running_instances[instance["InstanceId"]] = instance.get("LaunchTime")
+
+                for address in eips_response.get("Addresses", []):
+                    instance_id = address.get("InstanceId")
+
+                    if not instance_id or instance_id not in running_instances:
+                        continue  # Only check EIPs on running instances
+
+                    allocation_id = address.get("AllocationId", "N/A")
+                    public_ip = address.get("PublicIp", "Unknown")
+                    allocation_time = address.get("AllocationTime")
+
+                    if not allocation_time:
+                        continue
+
+                    age_days = (datetime.now(timezone.utc) - allocation_time).days
+
+                    # Get CloudWatch status check metrics for the instance
+                    metrics = await self._get_ec2_network_metrics(
+                        instance_id, region, period_days=min_observation_days
+                    )
+
+                    status_check_failed = metrics.get("status_check_failed", 0.0)
+                    status_check_failed_instance = metrics.get("status_check_failed_instance", 0.0)
+                    status_check_failed_system = metrics.get("status_check_failed_system", 0.0)
+
+                    # Flag if excessive status check failures
+                    if status_check_failed < max_status_check_failures:
+                        continue  # Instance is healthy or has acceptable failure rate
+
+                    # This instance is failing status checks!
+                    launch_time = running_instances[instance_id]
+                    running_days = (datetime.now(timezone.utc) - launch_time).days
+
+                    if running_days < min_failed_days:
+                        continue
+
+                    # Extract name from tags
+                    name = None
+                    for tag in address.get("Tags", []):
+                        if tag["Key"] == "Name":
+                            name = tag["Value"]
+                            break
+
+                    confidence = "critical" if status_check_failed >= 30 else ("high" if status_check_failed >= 14 else "medium")
+
+                    reason = f"EIP on failing instance {instance_id} ({int(status_check_failed)} status check failures in {min_observation_days} days). Instance may be unresponsive or misconfigured."
+
+                    already_wasted = round((age_days / 30) * self.PRICING["elastic_ip"], 2)
+
+                    metadata = {
+                        "public_ip": public_ip,
+                        "allocation_time": allocation_time.isoformat(),
+                        "age_days": age_days,
+                        "confidence": confidence,
+                        "confidence_level": self._calculate_confidence_level(age_days, detection_rules),
+                        "orphan_reason": reason,
+                        "orphan_type": "eip_on_failed_instance",
+                        "associated_instance_id": instance_id,
+                        "instance_running_days": running_days,
+                        "status_check_failed_total": int(status_check_failed),
+                        "status_check_failed_instance": int(status_check_failed_instance),
+                        "status_check_failed_system": int(status_check_failed_system),
+                        "observation_period_days": min_observation_days,
+                        "already_wasted": already_wasted,
+                    }
+
+                    orphans.append(
+                        OrphanResourceData(
+                            resource_type="elastic_ip",
+                            resource_id=allocation_id,
+                            resource_name=name,
+                            region=region,
+                            estimated_monthly_cost=self.PRICING["elastic_ip"],
+                            resource_metadata=metadata,
+                        )
+                    )
+
+        except ClientError as e:
+            print(f"Error scanning EIPs on failed instances (Scenario 10) in {region}: {e}")
 
         return orphans
 
