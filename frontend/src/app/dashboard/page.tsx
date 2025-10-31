@@ -361,7 +361,8 @@ export default function DashboardPage() {
                 topOffenders.map((resource, idx) => {
                   const Icon = resourceIcons[resource.resource_type] || HardDrive;
                   const account = accounts.find((acc) => acc.id === resource.cloud_account_id);
-                  const providerColors = PROVIDER_COLORS[account?.provider || "aws"];
+                  const provider = (account?.provider || "aws") as keyof typeof PROVIDER_COLORS;
+                  const providerColors = PROVIDER_COLORS[provider];
 
                   return (
                     <div
@@ -428,7 +429,8 @@ export default function DashboardPage() {
                 <div className="space-y-3">
                   {Object.entries(providerBreakdown).map(([provider, data]) => {
                     if (data.count === 0) return null;
-                    const colors = PROVIDER_COLORS[provider];
+                    const providerKey = provider as keyof typeof PROVIDER_COLORS;
+                    const colors = PROVIDER_COLORS[providerKey];
                     return (
                       <div key={provider} className="flex items-center gap-3">
                         <div
@@ -490,7 +492,8 @@ export default function DashboardPage() {
                 // Get provider for this resource type
                 const firstResource = resources.find((r) => r.resource_type === type);
                 const account = accounts.find((acc) => acc.id === firstResource?.cloud_account_id);
-                const providerColors = PROVIDER_COLORS[account?.provider || "aws"];
+                const provider = (account?.provider || "aws") as keyof typeof PROVIDER_COLORS;
+                const providerColors = PROVIDER_COLORS[provider];
 
                 return (
                   <div key={type} className="space-y-2">
