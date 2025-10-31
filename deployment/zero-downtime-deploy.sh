@@ -10,10 +10,11 @@
 #   1. Save current commit for rollback capability
 #   2. Build new images WITHOUT stopping current containers
 #   3. Start new containers alongside old ones (blue-green)
-#   4. Perform health checks on NEW containers
-#   5. Switch traffic to new containers if healthy
-#   6. Remove old containers
-#   7. If any step fails → AUTOMATIC ROLLBACK to previous version
+#   4. Perform internal health checks on NEW containers
+#   5. Restart Nginx to refresh DNS cache (new IPs!)
+#   6. Perform external health checks via public URLs
+#   7. Save stable commit if all checks pass
+#   8. If any step fails → AUTOMATIC ROLLBACK to previous version
 #
 # Usage:
 #   cd /opt/cloudwaste
@@ -207,6 +208,17 @@ if [ "$FRONTEND_HEALTHY" != true ]; then
 fi
 
 # ============================================================================
+# Step 3.5: Restart Nginx to refresh DNS cache
+# ============================================================================
+
+print_step "Redémarrage de Nginx pour rafraîchir le cache DNS..."
+print_warning "Les nouveaux conteneurs ont des IPs différentes - Nginx doit rafraîchir son cache"
+docker compose -f "$COMPOSE_FILE" restart nginx
+
+print_step "Attente du redémarrage de Nginx..."
+sleep 10
+
+# ============================================================================
 # Step 4: External Health Checks (Public URL)
 # ============================================================================
 
@@ -229,26 +241,6 @@ if [ "$API_STATUS" == "200" ]; then
 else
     print_error "API publique: FAIL (HTTP $API_STATUS)"
     rollback
-fi
-
-# ============================================================================
-# Step 4.5: Restart Nginx to refresh DNS cache
-# ============================================================================
-
-print_step "Redémarrage de Nginx pour rafraîchir le cache DNS..."
-docker compose -f "$COMPOSE_FILE" restart nginx
-
-print_step "Attente du redémarrage de Nginx..."
-sleep 5
-
-# Verify Nginx can reach backend with new IPs
-print_step "Vérification finale de la connexion Nginx → Backend..."
-FINAL_API_CHECK=$(curl -s -o /dev/null -w "%{http_code}" https://cutcosts.tech/api/v1/health || echo "000")
-if [ "$FINAL_API_CHECK" == "200" ]; then
-    print_success "Nginx → Backend: OK (HTTP $FINAL_API_CHECK)"
-else
-    print_warning "Nginx → Backend: Problème potentiel (HTTP $FINAL_API_CHECK)"
-    print_warning "Cela peut être normal si Nginx prend plus de temps à redémarrer"
 fi
 
 # ============================================================================
