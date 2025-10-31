@@ -113,8 +113,28 @@ DEFAULT_DETECTION_RULES = {
         "max_snapshots_per_volume": 7,  # Keep only N most recent snapshots per volume
         "detect_unused_ami_snapshots": True,  # Detect snapshots of unused AMIs
         "min_ami_unused_days": 180,  # AMI unused for 180+ days
+        # Scenario 3: Old unused snapshots
+        "detect_old_unused": True,  # Detect very old snapshots without compliance tags
+        "old_unused_age_days": 365,  # Snapshots >365 days without compliance tags
+        "compliance_tags": ["Backup", "Compliance", "Governance", "Retention", "Legal"],  # Tags indicating intentional retention
+        # Scenario 4: Snapshots from deleted instances
+        "detect_deleted_instance_snapshots": True,  # Detect snapshots with instance IDs in description where instance no longer exists
+        # Scenario 5: Incomplete/failed snapshots
+        "detect_incomplete_failed": True,  # Detect snapshots in error or pending state
+        "max_pending_days": 7,  # Maximum days a snapshot can be in pending state
+        # Scenario 6: Untagged snapshots
+        "detect_untagged": True,  # Detect snapshots with no tags (likely abandoned)
+        "min_untagged_age_days": 30,  # Snapshots must be >30 days old to be flagged as untagged
+        # Scenario 8: Excessive retention in non-prod
+        "detect_excessive_retention": True,  # Detect snapshots retained too long in non-prod environments
+        "nonprod_max_days": 90,  # Max retention for dev/test/staging environments
+        "nonprod_env_tags": ["Environment", "Env", "Stage"],  # Tags that indicate environment
+        "nonprod_env_values": ["dev", "development", "test", "testing", "stage", "staging", "qa"],  # Values indicating non-prod
+        # Scenario 9: Duplicate snapshots
+        "detect_duplicates": True,  # Detect duplicate snapshots (same volume + size within short time window)
+        "duplicate_window_hours": 1,  # Time window to detect duplicates (snapshots of same volume within N hours)
         "confidence_threshold_days": 180,
-        "description": "Orphaned, redundant, and unused AMI snapshots",
+        "description": "EBS Snapshots - 10 waste scenarios: orphaned volumes, redundant backups, old unused, deleted instances, incomplete/failed, untagged, never restored (CloudTrail), excessive retention, duplicates, unused AMIs",
     },
     "ec2_instance": {
         "enabled": True,

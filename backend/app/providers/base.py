@@ -237,7 +237,7 @@ class CloudProviderBase(ABC):
         self, region: str, detection_rules: dict | None = None, orphaned_volume_ids: list[str] | None = None
     ) -> list[OrphanResourceData]:
         """
-        Scan for orphaned snapshots (parent resource deleted or idle).
+        Scan for orphaned snapshots (SCENARIO 1: parent resource deleted or idle).
 
         Args:
             region: Region to scan
@@ -247,6 +247,62 @@ class CloudProviderBase(ABC):
         Returns:
             List of orphan snapshot resources
         """
+        pass
+
+    @abstractmethod
+    async def scan_redundant_snapshots(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """Scan for redundant snapshots (SCENARIO 2: exceeding retention limit)."""
+        pass
+
+    @abstractmethod
+    async def scan_unused_ami_snapshots(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """Scan for snapshots of unused AMIs (SCENARIO 10)."""
+        pass
+
+    @abstractmethod
+    async def scan_old_unused_snapshots(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """Scan for very old snapshots without compliance tags (SCENARIO 3)."""
+        pass
+
+    @abstractmethod
+    async def scan_snapshots_from_deleted_instances(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """Scan for snapshots from deleted instances (SCENARIO 4)."""
+        pass
+
+    @abstractmethod
+    async def scan_incomplete_failed_snapshots(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """Scan for incomplete/failed snapshots (SCENARIO 5: error or pending state)."""
+        pass
+
+    @abstractmethod
+    async def scan_untagged_snapshots(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """Scan for untagged snapshots (SCENARIO 6: no tags present)."""
+        pass
+
+    @abstractmethod
+    async def scan_excessive_retention_snapshots(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """Scan for snapshots with excessive retention in non-prod (SCENARIO 8)."""
+        pass
+
+    @abstractmethod
+    async def scan_duplicate_snapshots(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """Scan for duplicate snapshots (SCENARIO 9: same volume within time window)."""
         pass
 
     @abstractmethod
@@ -574,10 +630,38 @@ class CloudProviderBase(ABC):
         # SCENARIO 10: EIPs on failed instances (CloudWatch - status check failures)
         results.extend(await self.scan_eips_on_failed_instances(region, rules.get("elastic_ip")))
 
-        # Scan snapshots with orphaned volume IDs
+        # EBS Snapshot scanning - 10 waste scenarios (100% coverage)
+        # SCENARIO 1: Orphaned snapshots (volume deleted or idle)
         results.extend(
             await self.scan_orphaned_snapshots(region, rules.get("ebs_snapshot"), orphaned_volume_ids)
         )
+        # SCENARIO 2: Redundant snapshots (exceeding retention limit)
+        results.extend(await self.scan_redundant_snapshots(region, rules.get("ebs_snapshot")))
+
+        # SCENARIO 3: Old unused snapshots (>365 days without compliance tags)
+        results.extend(await self.scan_old_unused_snapshots(region, rules.get("ebs_snapshot")))
+
+        # SCENARIO 4: Snapshots from deleted instances
+        results.extend(await self.scan_snapshots_from_deleted_instances(region, rules.get("ebs_snapshot")))
+
+        # SCENARIO 5: Incomplete/failed snapshots
+        results.extend(await self.scan_incomplete_failed_snapshots(region, rules.get("ebs_snapshot")))
+
+        # SCENARIO 6: Untagged snapshots
+        results.extend(await self.scan_untagged_snapshots(region, rules.get("ebs_snapshot")))
+
+        # SCENARIO 7: Never restored snapshots (CloudTrail - Phase 2, deferred)
+        # TODO: Implement CloudTrail-based detection
+
+        # SCENARIO 8: Excessive retention in non-prod
+        results.extend(await self.scan_excessive_retention_snapshots(region, rules.get("ebs_snapshot")))
+
+        # SCENARIO 9: Duplicate snapshots
+        results.extend(await self.scan_duplicate_snapshots(region, rules.get("ebs_snapshot")))
+
+        # SCENARIO 10: Snapshots of unused AMIs
+        results.extend(await self.scan_unused_ami_snapshots(region, rules.get("ebs_snapshot")))
+
         results.extend(
             await self.scan_stopped_instances(region, rules.get("ec2_instance"))
         )

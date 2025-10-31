@@ -3011,11 +3011,10 @@ class AWSProvider(CloudProviderBase):
         self, region: str, detection_rules: dict | None = None, orphaned_volume_ids: list[str] | None = None
     ) -> list[OrphanResourceData]:
         """
-        Scan for orphaned EBS snapshots in a region.
+        Scan for orphaned EBS snapshots (SCENARIO 1: ebs_snapshot_orphaned).
 
-        Detects:
-        - Snapshots where source volume no longer exists
-        - Snapshots of volumes that are idle/orphaned (if enabled)
+        Detects snapshots where the source volume no longer exists, or snapshots
+        of volumes that are idle/orphaned.
 
         Args:
             region: AWS region to scan
@@ -3034,10 +3033,6 @@ class AWSProvider(CloudProviderBase):
         min_age_days = rules.get("min_age_days", 90)
         confidence_threshold_days = rules.get("confidence_threshold_days", 180)
         detect_idle_volume_snapshots = rules.get("detect_idle_volume_snapshots", True)
-        detect_redundant_snapshots = rules.get("detect_redundant_snapshots", True)
-        max_snapshots_per_volume = rules.get("max_snapshots_per_volume", 7)
-        detect_unused_ami_snapshots = rules.get("detect_unused_ami_snapshots", True)
-        min_ami_unused_days = rules.get("min_ami_unused_days", 180)
         enabled = rules.get("enabled", True)
 
         if not enabled:
@@ -3066,79 +3061,17 @@ class AWSProvider(CloudProviderBase):
                         "attachments": vol.get("Attachments", []),
                     }
 
-                # Get all AMIs owned by this account (for unused AMI detection)
-                amis_response = await ec2.describe_images(Owners=[account_id])
-                all_amis = amis_response.get("Images", [])
-
-                # Build AMI usage info
-                ami_snapshot_ids = set()  # Snapshots used by AMIs
-                unused_ami_snapshot_ids = set()  # Snapshots of unused AMIs
-
-                if detect_unused_ami_snapshots:
-                    for ami in all_amis:
-                        ami_id = ami["ImageId"]
-                        ami_creation_date = datetime.fromisoformat(ami["CreationDate"].replace('Z', '+00:00'))
-                        ami_age_days = (datetime.now(timezone.utc) - ami_creation_date).days
-
-                        # Extract snapshot IDs from AMI block device mappings
-                        ami_snapshots = []
-                        for block_device in ami.get("BlockDeviceMappings", []):
-                            if "Ebs" in block_device and "SnapshotId" in block_device["Ebs"]:
-                                snapshot_id = block_device["Ebs"]["SnapshotId"]
-                                ami_snapshots.append(snapshot_id)
-                                ami_snapshot_ids.add(snapshot_id)
-
-                        # Check if AMI has been used to launch instances
-                        if ami_age_days >= min_ami_unused_days:
-                            # Check if any instances use this AMI
-                            instances_with_ami = await ec2.describe_instances(
-                                Filters=[{"Name": "image-id", "Values": [ami_id]}]
-                            )
-
-                            has_instances = False
-                            for reservation in instances_with_ami.get("Reservations", []):
-                                if len(reservation.get("Instances", [])) > 0:
-                                    has_instances = True
-                                    break
-
-                            # If AMI unused, mark its snapshots as orphaned
-                            if not has_instances:
-                                unused_ami_snapshot_ids.update(ami_snapshots)
-
-                # Group snapshots by volume for redundancy detection
-                snapshots_by_volume = {}
-                if detect_redundant_snapshots:
-                    for snapshot in all_snapshots:
-                        volume_id = snapshot.get("VolumeId")
-                        if volume_id:
-                            if volume_id not in snapshots_by_volume:
-                                snapshots_by_volume[volume_id] = []
-                            snapshots_by_volume[volume_id].append(snapshot)
-
-                    # Sort snapshots by creation date (newest first) for each volume
-                    for volume_id in snapshots_by_volume:
-                        snapshots_by_volume[volume_id].sort(
-                            key=lambda s: s["StartTime"], reverse=True
-                        )
-
-                cutoff_date = datetime.now(timezone.utc) - timedelta(days=min_age_days)
-
                 for snapshot in all_snapshots:
                     snapshot_id = snapshot["SnapshotId"]
                     volume_id = snapshot.get("VolumeId")
                     start_time = snapshot["StartTime"]
-
-                    # Check if snapshot is old enough and volume doesn't exist
                     age_days = (datetime.now(timezone.utc) - start_time).days
 
-                    # Determine orphan status
                     should_flag = False
                     orphan_type = ""
                     source_volume_status = "unknown"
-                    redundant_info = None
-                    ami_info = None
 
-                    # CASE 1: Volume no longer exists (original logic)
+                    # CASE 1: Volume no longer exists
                     if volume_id not in volume_info and age_days >= min_age_days:
                         should_flag = True
                         orphan_type = "volume_deleted"
@@ -3158,99 +3091,293 @@ class AWSProvider(CloudProviderBase):
                         else:
                             source_volume_status = "deleted"
 
-                    # CASE 3: Redundant snapshot (too many snapshots for same volume)
-                    elif detect_redundant_snapshots and volume_id and volume_id in snapshots_by_volume:
-                        volume_snapshots = snapshots_by_volume[volume_id]
-                        if len(volume_snapshots) > max_snapshots_per_volume:
-                            # Find position of this snapshot in the sorted list
-                            snapshot_index = next(
-                                (i for i, s in enumerate(volume_snapshots) if s["SnapshotId"] == snapshot_id),
-                                None
-                            )
-                            # Flag snapshots beyond the retention limit
-                            if snapshot_index is not None and snapshot_index >= max_snapshots_per_volume:
-                                should_flag = True
-                                orphan_type = "redundant_snapshot"
-                                redundant_info = {
-                                    "total_snapshots": len(volume_snapshots),
-                                    "retention_limit": max_snapshots_per_volume,
-                                    "position": snapshot_index + 1,
-                                }
-                                source_volume_status = "exists" if volume_id in volume_info else "deleted"
-
-                    # CASE 4: Snapshot of unused AMI
-                    elif detect_unused_ami_snapshots and snapshot_id in unused_ami_snapshot_ids:
-                        should_flag = True
-                        orphan_type = "unused_ami_snapshot"
-                        # Find the AMI that uses this snapshot
-                        associated_ami = None
-                        for ami in all_amis:
-                            for block_device in ami.get("BlockDeviceMappings", []):
-                                if block_device.get("Ebs", {}).get("SnapshotId") == snapshot_id:
-                                    associated_ami = ami["ImageId"]
-                                    break
-                            if associated_ami:
-                                break
-                        ami_info = {
-                            "ami_id": associated_ami,
-                            "ami_unused": True,
-                        }
-                        source_volume_status = "ami_snapshot"
-
                     if not should_flag:
                         continue
 
-                    # Continue with orphan processing
-                    if should_flag:
+                    size_gb = snapshot["VolumeSize"]
+                    monthly_cost = size_gb * self.PRICING["snapshot_per_gb"]
+
+                    # Determine confidence level based on orphan type and age
+                    if orphan_type == "volume_deleted":
+                        if age_days >= confidence_threshold_days:
+                            confidence = "high"
+                            reason = f"Snapshot {age_days} days old with deleted source volume (safe to delete)"
+                        elif age_days >= min_age_days * 2:
+                            confidence = "high"
+                            reason = f"Snapshot {age_days} days old with deleted source volume"
+                        elif age_days >= min_age_days:
+                            confidence = "medium"
+                            reason = f"Snapshot {age_days} days old with deleted source volume"
+                        else:
+                            confidence = "low"
+                            reason = f"Recent snapshot ({age_days} days) with deleted source volume (verify before deleting)"
+
+                    elif orphan_type == "idle_volume_snapshot":
+                        if source_volume_status == "unattached":
+                            confidence = "high"
+                            reason = f"Snapshot of unattached volume {volume_id} (volume is orphaned)"
+                        elif source_volume_status == "attached_idle":
+                            confidence = "medium"
+                            reason = f"Snapshot of idle volume {volume_id} (volume has no I/O activity)"
+                        else:
+                            confidence = "medium"
+                            reason = f"Snapshot of orphaned volume {volume_id}"
+                    else:
+                        confidence = "low"
+                        reason = "Detected as potentially orphaned"
+
+                    # Extract name/description
+                    description = snapshot.get("Description", "")
+                    name = None
+                    for tag in snapshot.get("Tags", []):
+                        if tag["Key"] == "Name":
+                            name = tag["Value"]
+                            break
+
+                    # Build metadata
+                    metadata = {
+                        "size_gb": size_gb,
+                        "volume_id": volume_id or "Unknown",
+                        "created_at": start_time.isoformat(),
+                        "age_days": age_days,
+                        "description": description,
+                        "encrypted": snapshot.get("Encrypted", False),
+                        "confidence": confidence,
+                        "confidence_level": self._calculate_confidence_level(age_days, detection_rules),
+                        "orphan_reason": reason,
+                        "orphan_type": orphan_type,
+                        "source_volume_status": source_volume_status,
+                        "scenario": "ebs_snapshot_orphaned",
+                    }
+
+                    orphans.append(
+                        OrphanResourceData(
+                            resource_type="ebs_snapshot",
+                            resource_id=snapshot_id,
+                            resource_name=name or description,
+                            region=region,
+                            estimated_monthly_cost=round(monthly_cost, 2),
+                            resource_metadata=metadata,
+                        )
+                    )
+
+        except ClientError as e:
+            print(f"Error scanning orphaned snapshots in {region}: {e}")
+
+        return orphans
+
+    async def scan_redundant_snapshots(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scan for redundant EBS snapshots (SCENARIO 2: ebs_snapshot_redundant).
+
+        Detects volumes with more than N snapshots, flagging older snapshots
+        beyond the retention limit as redundant.
+
+        Args:
+            region: AWS region to scan
+            detection_rules: Optional user-defined detection rules
+
+        Returns:
+            List of orphan snapshot resources
+        """
+        orphans: list[OrphanResourceData] = []
+
+        from app.models.detection_rule import DEFAULT_DETECTION_RULES
+
+        rules = detection_rules or DEFAULT_DETECTION_RULES.get("ebs_snapshot", {})
+        detect_redundant_snapshots = rules.get("detect_redundant_snapshots", True)
+        max_snapshots_per_volume = rules.get("max_snapshots_per_volume", 7)
+        enabled = rules.get("enabled", True)
+
+        if not enabled or not detect_redundant_snapshots:
+            return orphans
+
+        try:
+            async with self.session.client("ec2", region_name=region) as ec2:
+                # Get account ID
+                account_info = await self.validate_credentials()
+                account_id = account_info["account_id"]
+
+                # Get all snapshots owned by this account
+                response = await ec2.describe_snapshots(OwnerIds=[account_id])
+                all_snapshots = response.get("Snapshots", [])
+
+                # Get all existing volumes
+                volumes_response = await ec2.describe_volumes()
+                volume_info = {}
+                for vol in volumes_response.get("Volumes", []):
+                    volume_info[vol["VolumeId"]] = {
+                        "state": vol["State"],
+                        "attachments": vol.get("Attachments", []),
+                    }
+
+                # Group snapshots by volume
+                snapshots_by_volume = {}
+                for snapshot in all_snapshots:
+                    volume_id = snapshot.get("VolumeId")
+                    if volume_id:
+                        if volume_id not in snapshots_by_volume:
+                            snapshots_by_volume[volume_id] = []
+                        snapshots_by_volume[volume_id].append(snapshot)
+
+                # Sort snapshots by creation date (newest first) for each volume
+                for volume_id in snapshots_by_volume:
+                    snapshots_by_volume[volume_id].sort(
+                        key=lambda s: s["StartTime"], reverse=True
+                    )
+
+                # Flag redundant snapshots
+                for volume_id, volume_snapshots in snapshots_by_volume.items():
+                    if len(volume_snapshots) > max_snapshots_per_volume:
+                        # Flag snapshots beyond the retention limit
+                        for i, snapshot in enumerate(volume_snapshots):
+                            if i >= max_snapshots_per_volume:
+                                snapshot_id = snapshot["SnapshotId"]
+                                start_time = snapshot["StartTime"]
+                                age_days = (datetime.now(timezone.utc) - start_time).days
+                                size_gb = snapshot["VolumeSize"]
+                                monthly_cost = size_gb * self.PRICING["snapshot_per_gb"]
+
+                                # Extract name/description
+                                description = snapshot.get("Description", "")
+                                name = None
+                                for tag in snapshot.get("Tags", []):
+                                    if tag["Key"] == "Name":
+                                        name = tag["Value"]
+                                        break
+
+                                source_volume_status = "exists" if volume_id in volume_info else "deleted"
+
+                                metadata = {
+                                    "size_gb": size_gb,
+                                    "volume_id": volume_id,
+                                    "created_at": start_time.isoformat(),
+                                    "age_days": age_days,
+                                    "description": description,
+                                    "encrypted": snapshot.get("Encrypted", False),
+                                    "confidence": "high",
+                                    "confidence_level": self._calculate_confidence_level(age_days, detection_rules),
+                                    "orphan_reason": f"Redundant snapshot #{i+1} of {len(volume_snapshots)} (retention limit: {max_snapshots_per_volume})",
+                                    "orphan_type": "redundant_snapshot",
+                                    "source_volume_status": source_volume_status,
+                                    "redundant_info": {
+                                        "total_snapshots": len(volume_snapshots),
+                                        "retention_limit": max_snapshots_per_volume,
+                                        "position": i + 1,
+                                    },
+                                    "scenario": "ebs_snapshot_redundant",
+                                }
+
+                                orphans.append(
+                                    OrphanResourceData(
+                                        resource_type="ebs_snapshot",
+                                        resource_id=snapshot_id,
+                                        resource_name=name or description,
+                                        region=region,
+                                        estimated_monthly_cost=round(monthly_cost, 2),
+                                        resource_metadata=metadata,
+                                    )
+                                )
+
+        except ClientError as e:
+            print(f"Error scanning redundant snapshots in {region}: {e}")
+
+        return orphans
+
+    async def scan_unused_ami_snapshots(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scan for snapshots of unused AMIs (SCENARIO 10: ebs_snapshot_from_unused_ami).
+
+        Detects snapshots backing AMIs that have never been used to launch instances.
+
+        Args:
+            region: AWS region to scan
+            detection_rules: Optional user-defined detection rules
+
+        Returns:
+            List of orphan snapshot resources
+        """
+        orphans: list[OrphanResourceData] = []
+
+        from app.models.detection_rule import DEFAULT_DETECTION_RULES
+
+        rules = detection_rules or DEFAULT_DETECTION_RULES.get("ebs_snapshot", {})
+        detect_unused_ami_snapshots = rules.get("detect_unused_ami_snapshots", True)
+        min_ami_unused_days = rules.get("min_ami_unused_days", 180)
+        enabled = rules.get("enabled", True)
+
+        if not enabled or not detect_unused_ami_snapshots:
+            return orphans
+
+        try:
+            async with self.session.client("ec2", region_name=region) as ec2:
+                # Get account ID
+                account_info = await self.validate_credentials()
+                account_id = account_info["account_id"]
+
+                # Get all AMIs owned by this account
+                amis_response = await ec2.describe_images(Owners=[account_id])
+                all_amis = amis_response.get("Images", [])
+
+                # Build AMI usage info
+                unused_ami_snapshot_ids = set()
+
+                for ami in all_amis:
+                    ami_id = ami["ImageId"]
+                    ami_creation_date = datetime.fromisoformat(ami["CreationDate"].replace('Z', '+00:00'))
+                    ami_age_days = (datetime.now(timezone.utc) - ami_creation_date).days
+
+                    # Only check AMIs old enough
+                    if ami_age_days < min_ami_unused_days:
+                        continue
+
+                    # Extract snapshot IDs from AMI block device mappings
+                    ami_snapshots = []
+                    for block_device in ami.get("BlockDeviceMappings", []):
+                        if "Ebs" in block_device and "SnapshotId" in block_device["Ebs"]:
+                            snapshot_id = block_device["Ebs"]["SnapshotId"]
+                            ami_snapshots.append(snapshot_id)
+
+                    # Check if any instances use this AMI
+                    instances_with_ami = await ec2.describe_instances(
+                        Filters=[{"Name": "image-id", "Values": [ami_id]}]
+                    )
+
+                    has_instances = False
+                    for reservation in instances_with_ami.get("Reservations", []):
+                        if len(reservation.get("Instances", [])) > 0:
+                            has_instances = True
+                            break
+
+                    # If AMI unused, mark its snapshots as orphaned
+                    if not has_instances:
+                        for snapshot_id in ami_snapshots:
+                            unused_ami_snapshot_ids.add((snapshot_id, ami_id))
+
+                # Get all snapshots owned by this account
+                response = await ec2.describe_snapshots(OwnerIds=[account_id])
+                all_snapshots = response.get("Snapshots", [])
+
+                # Flag unused AMI snapshots
+                for snapshot in all_snapshots:
+                    snapshot_id = snapshot["SnapshotId"]
+
+                    # Check if this snapshot is in our unused AMI set
+                    associated_ami = None
+                    for snap_id, ami_id in unused_ami_snapshot_ids:
+                        if snap_id == snapshot_id:
+                            associated_ami = ami_id
+                            break
+
+                    if associated_ami:
+                        start_time = snapshot["StartTime"]
+                        age_days = (datetime.now(timezone.utc) - start_time).days
                         size_gb = snapshot["VolumeSize"]
                         monthly_cost = size_gb * self.PRICING["snapshot_per_gb"]
-
-                        # Determine confidence level based on orphan type and age
-                        if orphan_type == "volume_deleted":
-                            # Original logic for deleted volumes
-                            if age_days >= confidence_threshold_days:
-                                confidence = "high"
-                                reason = f"Snapshot {age_days} days old with deleted source volume (safe to delete)"
-                            elif age_days >= min_age_days * 2:
-                                confidence = "high"
-                                reason = f"Snapshot {age_days} days old with deleted source volume"
-                            elif age_days >= min_age_days:
-                                confidence = "medium"
-                                reason = f"Snapshot {age_days} days old with deleted source volume"
-                            else:
-                                confidence = "low"
-                                reason = f"Recent snapshot ({age_days} days) with deleted source volume (verify before deleting)"
-
-                        elif orphan_type == "idle_volume_snapshot":
-                            # Snapshot of idle/orphaned volume
-                            if source_volume_status == "unattached":
-                                confidence = "high"
-                                reason = f"Snapshot of unattached volume {volume_id} (volume is orphaned)"
-                            elif source_volume_status == "attached_idle":
-                                confidence = "medium"
-                                reason = f"Snapshot of idle volume {volume_id} (volume has no I/O activity)"
-                            else:
-                                confidence = "medium"
-                                reason = f"Snapshot of orphaned volume {volume_id}"
-
-                        elif orphan_type == "redundant_snapshot":
-                            # Redundant snapshot (exceeds retention limit)
-                            total = redundant_info["total_snapshots"]
-                            limit = redundant_info["retention_limit"]
-                            position = redundant_info["position"]
-                            confidence = "high"
-                            reason = f"Redundant snapshot #{position} of {total} (retention limit: {limit})"
-
-                        elif orphan_type == "unused_ami_snapshot":
-                            # Snapshot of unused AMI
-                            ami_id = ami_info.get("ami_id", "unknown")
-                            confidence = "high"
-                            reason = f"Snapshot of unused AMI {ami_id} (AMI not used for 180+ days)"
-
-                        else:
-                            # Fallback
-                            confidence = "low"
-                            reason = "Detected as potentially orphaned"
 
                         # Extract name/description
                         description = snapshot.get("Description", "")
@@ -3260,28 +3387,24 @@ class AWSProvider(CloudProviderBase):
                                 name = tag["Value"]
                                 break
 
-                        # Build metadata
                         metadata = {
                             "size_gb": size_gb,
-                            "volume_id": volume_id or "Unknown",
+                            "volume_id": snapshot.get("VolumeId", "Unknown"),
                             "created_at": start_time.isoformat(),
                             "age_days": age_days,
                             "description": description,
                             "encrypted": snapshot.get("Encrypted", False),
-                            "confidence": confidence,
+                            "confidence": "high",
                             "confidence_level": self._calculate_confidence_level(age_days, detection_rules),
-                            "orphan_reason": reason,
-                            "orphan_type": orphan_type,  # 'volume_deleted', 'idle_volume_snapshot', 'redundant_snapshot', 'unused_ami_snapshot'
-                            "source_volume_status": source_volume_status,  # 'deleted', 'unattached', 'attached_idle', 'exists', 'ami_snapshot'
+                            "orphan_reason": f"Snapshot of unused AMI {associated_ami} (AMI not used for {min_ami_unused_days}+ days)",
+                            "orphan_type": "unused_ami_snapshot",
+                            "source_volume_status": "ami_snapshot",
+                            "ami_info": {
+                                "ami_id": associated_ami,
+                                "ami_unused": True,
+                            },
+                            "scenario": "ebs_snapshot_from_unused_ami",
                         }
-
-                        # Add redundant snapshot info if applicable
-                        if redundant_info:
-                            metadata["redundant_info"] = redundant_info
-
-                        # Add AMI info if applicable
-                        if ami_info:
-                            metadata["ami_info"] = ami_info
 
                         orphans.append(
                             OrphanResourceData(
@@ -3295,7 +3418,617 @@ class AWSProvider(CloudProviderBase):
                         )
 
         except ClientError as e:
-            print(f"Error scanning orphaned snapshots in {region}: {e}")
+            print(f"Error scanning unused AMI snapshots in {region}: {e}")
+
+        return orphans
+
+    async def scan_old_unused_snapshots(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scan for very old snapshots without compliance tags (SCENARIO 3: ebs_snapshot_old_unused).
+
+        Detects snapshots >365 days old without compliance/governance tags.
+
+        Args:
+            region: AWS region to scan
+            detection_rules: Optional user-defined detection rules
+
+        Returns:
+            List of orphan snapshot resources
+        """
+        orphans: list[OrphanResourceData] = []
+
+        from app.models.detection_rule import DEFAULT_DETECTION_RULES
+
+        rules = detection_rules or DEFAULT_DETECTION_RULES.get("ebs_snapshot", {})
+        detect_old_unused = rules.get("detect_old_unused", True)
+        old_unused_age_days = rules.get("old_unused_age_days", 365)
+        compliance_tags = rules.get("compliance_tags", ["Backup", "Compliance", "Governance", "Retention", "Legal"])
+        enabled = rules.get("enabled", True)
+
+        if not enabled or not detect_old_unused:
+            return orphans
+
+        try:
+            async with self.session.client("ec2", region_name=region) as ec2:
+                # Get account ID
+                account_info = await self.validate_credentials()
+                account_id = account_info["account_id"]
+
+                # Get all snapshots owned by this account
+                response = await ec2.describe_snapshots(OwnerIds=[account_id])
+                all_snapshots = response.get("Snapshots", [])
+
+                for snapshot in all_snapshots:
+                    snapshot_id = snapshot["SnapshotId"]
+                    start_time = snapshot["StartTime"]
+                    age_days = (datetime.now(timezone.utc) - start_time).days
+
+                    # Check if snapshot is old enough
+                    if age_days < old_unused_age_days:
+                        continue
+
+                    # Check if snapshot has any compliance tags
+                    tags = snapshot.get("Tags", [])
+                    has_compliance_tag = False
+                    for tag in tags:
+                        if tag["Key"] in compliance_tags:
+                            has_compliance_tag = True
+                            break
+
+                    # Flag only if no compliance tags
+                    if not has_compliance_tag:
+                        size_gb = snapshot["VolumeSize"]
+                        monthly_cost = size_gb * self.PRICING["snapshot_per_gb"]
+
+                        # Extract name/description
+                        description = snapshot.get("Description", "")
+                        name = None
+                        for tag in tags:
+                            if tag["Key"] == "Name":
+                                name = tag["Value"]
+                                break
+
+                        metadata = {
+                            "size_gb": size_gb,
+                            "volume_id": snapshot.get("VolumeId", "Unknown"),
+                            "created_at": start_time.isoformat(),
+                            "age_days": age_days,
+                            "description": description,
+                            "encrypted": snapshot.get("Encrypted", False),
+                            "confidence": "high",
+                            "confidence_level": self._calculate_confidence_level(age_days, detection_rules),
+                            "orphan_reason": f"Snapshot {age_days} days old without compliance/governance tags (likely abandoned)",
+                            "orphan_type": "old_unused",
+                            "has_compliance_tags": False,
+                            "scenario": "ebs_snapshot_old_unused",
+                        }
+
+                        orphans.append(
+                            OrphanResourceData(
+                                resource_type="ebs_snapshot",
+                                resource_id=snapshot_id,
+                                resource_name=name or description,
+                                region=region,
+                                estimated_monthly_cost=round(monthly_cost, 2),
+                                resource_metadata=metadata,
+                            )
+                        )
+
+        except ClientError as e:
+            print(f"Error scanning old unused snapshots in {region}: {e}")
+
+        return orphans
+
+    async def scan_snapshots_from_deleted_instances(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scan for snapshots from deleted instances (SCENARIO 4: ebs_snapshot_from_deleted_instance).
+
+        Detects snapshots with instance IDs in description where the instance no longer exists.
+
+        Args:
+            region: AWS region to scan
+            detection_rules: Optional user-defined detection rules
+
+        Returns:
+            List of orphan snapshot resources
+        """
+        orphans: list[OrphanResourceData] = []
+
+        from app.models.detection_rule import DEFAULT_DETECTION_RULES
+        import re
+
+        rules = detection_rules or DEFAULT_DETECTION_RULES.get("ebs_snapshot", {})
+        detect_deleted_instance_snapshots = rules.get("detect_deleted_instance_snapshots", True)
+        min_age_days = rules.get("min_age_days", 90)
+        enabled = rules.get("enabled", True)
+
+        if not enabled or not detect_deleted_instance_snapshots:
+            return orphans
+
+        try:
+            async with self.session.client("ec2", region_name=region) as ec2:
+                # Get account ID
+                account_info = await self.validate_credentials()
+                account_id = account_info["account_id"]
+
+                # Get all snapshots owned by this account
+                response = await ec2.describe_snapshots(OwnerIds=[account_id])
+                all_snapshots = response.get("Snapshots", [])
+
+                # Get all existing instances
+                instances_response = await ec2.describe_instances()
+                existing_instance_ids = set()
+                for reservation in instances_response.get("Reservations", []):
+                    for instance in reservation.get("Instances", []):
+                        existing_instance_ids.add(instance["InstanceId"])
+
+                # Pattern to match instance IDs in description (i-xxxxxxxxxxxxxxxxx)
+                instance_id_pattern = re.compile(r'i-[a-f0-9]{8,17}')
+
+                for snapshot in all_snapshots:
+                    snapshot_id = snapshot["SnapshotId"]
+                    description = snapshot.get("Description", "")
+                    start_time = snapshot["StartTime"]
+                    age_days = (datetime.now(timezone.utc) - start_time).days
+
+                    # Check if snapshot is old enough
+                    if age_days < min_age_days:
+                        continue
+
+                    # Parse instance IDs from description
+                    instance_ids_in_desc = instance_id_pattern.findall(description)
+
+                    if instance_ids_in_desc:
+                        # Check if any of these instances still exist
+                        all_deleted = True
+                        deleted_instance_ids = []
+                        for instance_id in instance_ids_in_desc:
+                            if instance_id in existing_instance_ids:
+                                all_deleted = False
+                            else:
+                                deleted_instance_ids.append(instance_id)
+
+                        # Flag if at least one instance is deleted
+                        if deleted_instance_ids:
+                            size_gb = snapshot["VolumeSize"]
+                            monthly_cost = size_gb * self.PRICING["snapshot_per_gb"]
+
+                            # Extract name/description
+                            name = None
+                            for tag in snapshot.get("Tags", []):
+                                if tag["Key"] == "Name":
+                                    name = tag["Value"]
+                                    break
+
+                            confidence = "high" if all_deleted else "medium"
+
+                            metadata = {
+                                "size_gb": size_gb,
+                                "volume_id": snapshot.get("VolumeId", "Unknown"),
+                                "created_at": start_time.isoformat(),
+                                "age_days": age_days,
+                                "description": description,
+                                "encrypted": snapshot.get("Encrypted", False),
+                                "confidence": confidence,
+                                "confidence_level": self._calculate_confidence_level(age_days, detection_rules),
+                                "orphan_reason": f"Snapshot from deleted instance(s): {', '.join(deleted_instance_ids)}",
+                                "orphan_type": "deleted_instance_snapshot",
+                                "deleted_instance_ids": deleted_instance_ids,
+                                "all_instances_deleted": all_deleted,
+                                "scenario": "ebs_snapshot_from_deleted_instance",
+                            }
+
+                            orphans.append(
+                                OrphanResourceData(
+                                    resource_type="ebs_snapshot",
+                                    resource_id=snapshot_id,
+                                    resource_name=name or description,
+                                    region=region,
+                                    estimated_monthly_cost=round(monthly_cost, 2),
+                                    resource_metadata=metadata,
+                                )
+                            )
+
+        except ClientError as e:
+            print(f"Error scanning snapshots from deleted instances in {region}: {e}")
+
+        return orphans
+
+    async def scan_incomplete_failed_snapshots(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scan for incomplete/failed snapshots (SCENARIO 5: ebs_snapshot_incomplete_failed).
+
+        Detects snapshots in 'error' state or 'pending' state for >7 days.
+
+        Args:
+            region: AWS region to scan
+            detection_rules: Optional user-defined detection rules
+
+        Returns:
+            List of orphan snapshot resources
+        """
+        orphans: list[OrphanResourceData] = []
+
+        from app.models.detection_rule import DEFAULT_DETECTION_RULES
+
+        rules = detection_rules or DEFAULT_DETECTION_RULES.get("ebs_snapshot", {})
+        detect_incomplete_failed = rules.get("detect_incomplete_failed", True)
+        max_pending_days = rules.get("max_pending_days", 7)
+        enabled = rules.get("enabled", True)
+
+        if not enabled or not detect_incomplete_failed:
+            return orphans
+
+        try:
+            async with self.session.client("ec2", region_name=region) as ec2:
+                # Get account ID
+                account_info = await self.validate_credentials()
+                account_id = account_info["account_id"]
+
+                # Get all snapshots owned by this account
+                response = await ec2.describe_snapshots(OwnerIds=[account_id])
+                all_snapshots = response.get("Snapshots", [])
+
+                for snapshot in all_snapshots:
+                    snapshot_id = snapshot["SnapshotId"]
+                    state = snapshot.get("State", "")
+                    start_time = snapshot["StartTime"]
+                    age_days = (datetime.now(timezone.utc) - start_time).days
+
+                    # Flag if in error state OR pending for too long
+                    should_flag = False
+                    reason = ""
+
+                    if state == "error":
+                        should_flag = True
+                        reason = f"Snapshot in error state (failed to complete)"
+                        confidence = "critical"
+                    elif state == "pending" and age_days >= max_pending_days:
+                        should_flag = True
+                        reason = f"Snapshot stuck in pending state for {age_days} days (likely failed)"
+                        confidence = "high"
+
+                    if should_flag:
+                        size_gb = snapshot["VolumeSize"]
+                        monthly_cost = size_gb * self.PRICING["snapshot_per_gb"]
+
+                        # Extract name/description
+                        description = snapshot.get("Description", "")
+                        name = None
+                        for tag in snapshot.get("Tags", []):
+                            if tag["Key"] == "Name":
+                                name = tag["Value"]
+                                break
+
+                        metadata = {
+                            "size_gb": size_gb,
+                            "volume_id": snapshot.get("VolumeId", "Unknown"),
+                            "created_at": start_time.isoformat(),
+                            "age_days": age_days,
+                            "description": description,
+                            "encrypted": snapshot.get("Encrypted", False),
+                            "confidence": confidence,
+                            "confidence_level": self._calculate_confidence_level(age_days, detection_rules),
+                            "orphan_reason": reason,
+                            "orphan_type": "incomplete_failed",
+                            "snapshot_state": state,
+                            "scenario": "ebs_snapshot_incomplete_failed",
+                        }
+
+                        orphans.append(
+                            OrphanResourceData(
+                                resource_type="ebs_snapshot",
+                                resource_id=snapshot_id,
+                                resource_name=name or description,
+                                region=region,
+                                estimated_monthly_cost=round(monthly_cost, 2),
+                                resource_metadata=metadata,
+                            )
+                        )
+
+        except ClientError as e:
+            print(f"Error scanning incomplete/failed snapshots in {region}: {e}")
+
+        return orphans
+
+    async def scan_untagged_snapshots(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scan for untagged snapshots (SCENARIO 6: ebs_snapshot_untagged_unmanaged).
+
+        Detects snapshots with no tags present (likely abandoned/unmanaged).
+
+        Args:
+            region: AWS region to scan
+            detection_rules: Optional user-defined detection rules
+
+        Returns:
+            List of orphan snapshot resources
+        """
+        orphans: list[OrphanResourceData] = []
+
+        from app.models.detection_rule import DEFAULT_DETECTION_RULES
+
+        rules = detection_rules or DEFAULT_DETECTION_RULES.get("ebs_snapshot", {})
+        detect_untagged = rules.get("detect_untagged", True)
+        min_untagged_age_days = rules.get("min_untagged_age_days", 30)
+        enabled = rules.get("enabled", True)
+
+        if not enabled or not detect_untagged:
+            return orphans
+
+        try:
+            async with self.session.client("ec2", region_name=region) as ec2:
+                # Get account ID
+                account_info = await self.validate_credentials()
+                account_id = account_info["account_id"]
+
+                # Get all snapshots owned by this account
+                response = await ec2.describe_snapshots(OwnerIds=[account_id])
+                all_snapshots = response.get("Snapshots", [])
+
+                for snapshot in all_snapshots:
+                    snapshot_id = snapshot["SnapshotId"]
+                    tags = snapshot.get("Tags", [])
+                    start_time = snapshot["StartTime"]
+                    age_days = (datetime.now(timezone.utc) - start_time).days
+
+                    # Flag if no tags and old enough
+                    if not tags and age_days >= min_untagged_age_days:
+                        size_gb = snapshot["VolumeSize"]
+                        monthly_cost = size_gb * self.PRICING["snapshot_per_gb"]
+                        description = snapshot.get("Description", "")
+
+                        metadata = {
+                            "size_gb": size_gb,
+                            "volume_id": snapshot.get("VolumeId", "Unknown"),
+                            "created_at": start_time.isoformat(),
+                            "age_days": age_days,
+                            "description": description,
+                            "encrypted": snapshot.get("Encrypted", False),
+                            "confidence": "high",
+                            "confidence_level": self._calculate_confidence_level(age_days, detection_rules),
+                            "orphan_reason": f"Snapshot {age_days} days old with no tags (likely abandoned/unmanaged)",
+                            "orphan_type": "untagged",
+                            "has_tags": False,
+                            "scenario": "ebs_snapshot_untagged_unmanaged",
+                        }
+
+                        orphans.append(
+                            OrphanResourceData(
+                                resource_type="ebs_snapshot",
+                                resource_id=snapshot_id,
+                                resource_name=description or snapshot_id,
+                                region=region,
+                                estimated_monthly_cost=round(monthly_cost, 2),
+                                resource_metadata=metadata,
+                            )
+                        )
+
+        except ClientError as e:
+            print(f"Error scanning untagged snapshots in {region}: {e}")
+
+        return orphans
+
+    async def scan_excessive_retention_snapshots(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scan for snapshots with excessive retention in non-prod (SCENARIO 8: ebs_snapshot_excessive_retention).
+
+        Detects snapshots retained too long in dev/test/staging environments.
+
+        Args:
+            region: AWS region to scan
+            detection_rules: Optional user-defined detection rules
+
+        Returns:
+            List of orphan snapshot resources
+        """
+        orphans: list[OrphanResourceData] = []
+
+        from app.models.detection_rule import DEFAULT_DETECTION_RULES
+
+        rules = detection_rules or DEFAULT_DETECTION_RULES.get("ebs_snapshot", {})
+        detect_excessive_retention = rules.get("detect_excessive_retention", True)
+        nonprod_max_days = rules.get("nonprod_max_days", 90)
+        nonprod_env_tags = rules.get("nonprod_env_tags", ["Environment", "Env", "Stage"])
+        nonprod_env_values = rules.get("nonprod_env_values", ["dev", "development", "test", "testing", "stage", "staging", "qa"])
+        enabled = rules.get("enabled", True)
+
+        if not enabled or not detect_excessive_retention:
+            return orphans
+
+        try:
+            async with self.session.client("ec2", region_name=region) as ec2:
+                # Get account ID
+                account_info = await self.validate_credentials()
+                account_id = account_info["account_id"]
+
+                # Get all snapshots owned by this account
+                response = await ec2.describe_snapshots(OwnerIds=[account_id])
+                all_snapshots = response.get("Snapshots", [])
+
+                for snapshot in all_snapshots:
+                    snapshot_id = snapshot["SnapshotId"]
+                    tags = snapshot.get("Tags", [])
+                    start_time = snapshot["StartTime"]
+                    age_days = (datetime.now(timezone.utc) - start_time).days
+
+                    # Check if snapshot is old enough
+                    if age_days < nonprod_max_days:
+                        continue
+
+                    # Check if snapshot has non-prod environment tag
+                    is_nonprod = False
+                    env_value = None
+                    for tag in tags:
+                        if tag["Key"] in nonprod_env_tags:
+                            tag_value = tag["Value"].lower()
+                            if tag_value in nonprod_env_values:
+                                is_nonprod = True
+                                env_value = tag_value
+                                break
+
+                    # Flag if non-prod and old enough
+                    if is_nonprod:
+                        size_gb = snapshot["VolumeSize"]
+                        monthly_cost = size_gb * self.PRICING["snapshot_per_gb"]
+
+                        # Extract name/description
+                        description = snapshot.get("Description", "")
+                        name = None
+                        for tag in tags:
+                            if tag["Key"] == "Name":
+                                name = tag["Value"]
+                                break
+
+                        metadata = {
+                            "size_gb": size_gb,
+                            "volume_id": snapshot.get("VolumeId", "Unknown"),
+                            "created_at": start_time.isoformat(),
+                            "age_days": age_days,
+                            "description": description,
+                            "encrypted": snapshot.get("Encrypted", False),
+                            "confidence": "high",
+                            "confidence_level": self._calculate_confidence_level(age_days, detection_rules),
+                            "orphan_reason": f"Non-prod ({env_value}) snapshot retained for {age_days} days (exceeds {nonprod_max_days} day limit)",
+                            "orphan_type": "excessive_retention",
+                            "environment": env_value,
+                            "is_nonprod": True,
+                            "scenario": "ebs_snapshot_excessive_retention",
+                        }
+
+                        orphans.append(
+                            OrphanResourceData(
+                                resource_type="ebs_snapshot",
+                                resource_id=snapshot_id,
+                                resource_name=name or description,
+                                region=region,
+                                estimated_monthly_cost=round(monthly_cost, 2),
+                                resource_metadata=metadata,
+                            )
+                        )
+
+        except ClientError as e:
+            print(f"Error scanning excessive retention snapshots in {region}: {e}")
+
+        return orphans
+
+    async def scan_duplicate_snapshots(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scan for duplicate snapshots (SCENARIO 9: ebs_snapshot_duplicate_content).
+
+        Detects snapshots of the same volume with same size within short time window.
+
+        Args:
+            region: AWS region to scan
+            detection_rules: Optional user-defined detection rules
+
+        Returns:
+            List of orphan snapshot resources
+        """
+        orphans: list[OrphanResourceData] = []
+
+        from app.models.detection_rule import DEFAULT_DETECTION_RULES
+
+        rules = detection_rules or DEFAULT_DETECTION_RULES.get("ebs_snapshot", {})
+        detect_duplicates = rules.get("detect_duplicates", True)
+        duplicate_window_hours = rules.get("duplicate_window_hours", 1)
+        enabled = rules.get("enabled", True)
+
+        if not enabled or not detect_duplicates:
+            return orphans
+
+        try:
+            async with self.session.client("ec2", region_name=region) as ec2:
+                # Get account ID
+                account_info = await self.validate_credentials()
+                account_id = account_info["account_id"]
+
+                # Get all snapshots owned by this account
+                response = await ec2.describe_snapshots(OwnerIds=[account_id])
+                all_snapshots = response.get("Snapshots", [])
+
+                # Group snapshots by volume ID
+                snapshots_by_volume = {}
+                for snapshot in all_snapshots:
+                    volume_id = snapshot.get("VolumeId")
+                    if volume_id:
+                        if volume_id not in snapshots_by_volume:
+                            snapshots_by_volume[volume_id] = []
+                        snapshots_by_volume[volume_id].append(snapshot)
+
+                # Sort by creation time
+                for volume_id in snapshots_by_volume:
+                    snapshots_by_volume[volume_id].sort(key=lambda s: s["StartTime"])
+
+                # Find duplicates
+                for volume_id, volume_snapshots in snapshots_by_volume.items():
+                    for i, snapshot in enumerate(volume_snapshots):
+                        if i == 0:
+                            continue  # Skip first snapshot
+
+                        prev_snapshot = volume_snapshots[i - 1]
+
+                        # Check if same size and within time window
+                        if snapshot["VolumeSize"] == prev_snapshot["VolumeSize"]:
+                            time_diff = snapshot["StartTime"] - prev_snapshot["StartTime"]
+                            time_diff_hours = time_diff.total_seconds() / 3600
+
+                            if time_diff_hours <= duplicate_window_hours:
+                                snapshot_id = snapshot["SnapshotId"]
+                                start_time = snapshot["StartTime"]
+                                age_days = (datetime.now(timezone.utc) - start_time).days
+                                size_gb = snapshot["VolumeSize"]
+                                monthly_cost = size_gb * self.PRICING["snapshot_per_gb"]
+
+                                # Extract name/description
+                                description = snapshot.get("Description", "")
+                                name = None
+                                for tag in snapshot.get("Tags", []):
+                                    if tag["Key"] == "Name":
+                                        name = tag["Value"]
+                                        break
+
+                                metadata = {
+                                    "size_gb": size_gb,
+                                    "volume_id": volume_id,
+                                    "created_at": start_time.isoformat(),
+                                    "age_days": age_days,
+                                    "description": description,
+                                    "encrypted": snapshot.get("Encrypted", False),
+                                    "confidence": "high",
+                                    "confidence_level": self._calculate_confidence_level(age_days, detection_rules),
+                                    "orphan_reason": f"Duplicate snapshot created {time_diff_hours:.1f}h after previous snapshot (same volume, same size)",
+                                    "orphan_type": "duplicate",
+                                    "previous_snapshot_id": prev_snapshot["SnapshotId"],
+                                    "time_diff_hours": round(time_diff_hours, 2),
+                                    "scenario": "ebs_snapshot_duplicate_content",
+                                }
+
+                                orphans.append(
+                                    OrphanResourceData(
+                                        resource_type="ebs_snapshot",
+                                        resource_id=snapshot_id,
+                                        resource_name=name or description,
+                                        region=region,
+                                        estimated_monthly_cost=round(monthly_cost, 2),
+                                        resource_metadata=metadata,
+                                    )
+                                )
+
+        except ClientError as e:
+            print(f"Error scanning duplicate snapshots in {region}: {e}")
 
         return orphans
 
