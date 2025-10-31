@@ -111,8 +111,8 @@ print_success "Cleanup completed"
 
 print_step "Building Docker images with latest code..."
 
-# Build with cache for faster deployments
-docker compose -f "$COMPOSE_FILE" build --parallel
+# Build without cache to ensure latest code is used
+docker compose -f "$COMPOSE_FILE" build --no-cache --parallel
 
 print_success "Images built successfully"
 
