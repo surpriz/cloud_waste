@@ -1907,10 +1907,13 @@ class AWSProvider(CloudProviderBase):
                     allocation_time = address.get("AllocationTime")
 
                     # Calculate age using native AllocationTime
-                    if not allocation_time:
-                        continue  # Skip if no allocation time (shouldn't happen for VPC EIPs)
-
-                    age_days = (datetime.now(timezone.utc) - allocation_time).days
+                    # If AllocationTime is not available (older EIPs), assume it's old enough to be flagged
+                    if allocation_time:
+                        age_days = (datetime.now(timezone.utc) - allocation_time).days
+                    else:
+                        # Fallback: if no AllocationTime, assume EIP is old (30 days)
+                        # This ensures we don't miss unassociated EIPs that lack this metadata
+                        age_days = 30
 
                     # Determine orphan status
                     should_flag = False
@@ -1970,14 +1973,17 @@ class AWSProvider(CloudProviderBase):
                         confidence = "low"
                         reason = "Detected as potentially orphaned"
 
+                    # Get dynamic pricing
+                    eip_price = await self.pricing_service.get_aws_price("elastic_ip", region)
+
                     # Calculate already wasted cost
-                    already_wasted = round((age_days / 30) * self.PRICING["elastic_ip"], 2)
+                    already_wasted = round((age_days / 30) * eip_price, 2)
 
                     # Build metadata
                     metadata = {
                         "public_ip": public_ip,
                         "domain": address.get("Domain", "vpc"),
-                        "allocation_time": allocation_time.isoformat(),
+                        "allocation_time": allocation_time.isoformat() if allocation_time else "unknown",
                         "age_days": age_days,
                         "confidence": confidence,
                         "confidence_level": self._calculate_confidence_level(age_days, detection_rules),
@@ -1999,7 +2005,7 @@ class AWSProvider(CloudProviderBase):
                             resource_id=allocation_id,
                             resource_name=name,
                             region=region,
-                            estimated_monthly_cost=self.PRICING["elastic_ip"],
+                            estimated_monthly_cost=eip_price,
                             resource_metadata=metadata,
                         )
                     )
