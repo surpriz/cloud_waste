@@ -101,6 +101,120 @@ class CloudProviderBase(ABC):
         else:
             return "low"
 
+    def _deduplicate_resources(
+        self, resources: list[OrphanResourceData]
+    ) -> list[OrphanResourceData]:
+        """
+        Deduplicate resources detected by multiple scenarios.
+
+        When a single physical resource (e.g., EBS volume) is detected by multiple
+        waste scenarios (e.g., unattached + over-provisioned IOPS + low utilization),
+        this method combines them into a single entry to avoid:
+        - Counting the same resource multiple times
+        - Summing costs incorrectly (3x the actual cost)
+        - Misleading users about total waste
+
+        Strategy:
+        - Group by (resource_id, region)
+        - Keep the highest cost (= real cost of the resource)
+        - Combine all detection scenarios in metadata
+        - Keep the highest confidence level
+
+        Args:
+            resources: List of detected orphan resources (may contain duplicates)
+
+        Returns:
+            Deduplicated list with one entry per unique resource
+        """
+        import structlog
+
+        logger = structlog.get_logger()
+
+        # Group resources by (resource_id, region)
+        grouped: dict[tuple[str, str], list[OrphanResourceData]] = {}
+        for resource in resources:
+            key = (resource.resource_id, resource.region)
+            if key not in grouped:
+                grouped[key] = []
+            grouped[key].append(resource)
+
+        # Deduplicate each group
+        deduplicated: list[OrphanResourceData] = []
+        total_duplicates = 0
+
+        for key, duplicates in grouped.items():
+            if len(duplicates) == 1:
+                # No duplication, keep as is
+                deduplicated.append(duplicates[0])
+            else:
+                # Duplication detected: combine information
+                total_duplicates += len(duplicates) - 1
+
+                # Keep the detection with the highest cost (= real cost of resource)
+                primary = max(duplicates, key=lambda r: r.estimated_monthly_cost)
+
+                # Collect all detection scenarios
+                all_scenarios = []
+                all_reasons = []
+                all_detections = []
+
+                for dup in duplicates:
+                    scenario = dup.resource_metadata.get("orphan_type", "unknown")
+                    reason = dup.resource_metadata.get("orphan_reason", "")
+                    confidence = dup.resource_metadata.get("confidence", "low")
+
+                    all_scenarios.append(scenario)
+                    if reason:
+                        all_reasons.append(reason)
+
+                    all_detections.append(
+                        {
+                            "scenario": scenario,
+                            "reason": reason,
+                            "cost": dup.estimated_monthly_cost,
+                            "confidence": confidence,
+                        }
+                    )
+
+                # Find highest confidence level (critical > high > medium > low)
+                confidence_order = {"critical": 4, "high": 3, "medium": 2, "low": 1}
+                best_confidence = max(
+                    [d.resource_metadata.get("confidence", "low") for d in duplicates],
+                    key=lambda c: confidence_order.get(c, 0),
+                )
+
+                # Enrich primary metadata with combined information
+                primary.resource_metadata["detection_scenarios"] = all_scenarios
+                primary.resource_metadata["combined_reasons"] = all_reasons
+                primary.resource_metadata["confidence"] = best_confidence
+                primary.resource_metadata["duplicate_count"] = len(duplicates)
+                primary.resource_metadata["all_detections"] = all_detections
+                primary.resource_metadata["is_deduplicated"] = True
+
+                # Log deduplication for monitoring
+                logger.info(
+                    "resource.deduplicated",
+                    resource_id=key[0],
+                    region=key[1],
+                    duplicate_count=len(duplicates),
+                    scenarios=all_scenarios,
+                    final_cost=primary.estimated_monthly_cost,
+                )
+
+                deduplicated.append(primary)
+
+        # Log overall deduplication stats
+        if total_duplicates > 0:
+            logger.info(
+                "scan.deduplication_complete",
+                total_resources_before=len(resources),
+                total_resources_after=len(deduplicated),
+                duplicates_removed=total_duplicates,
+                deduplication_ratio=f"{total_duplicates / len(resources) * 100:.1f}%",
+            )
+
+        return deduplicated
+
     @abstractmethod
     async def validate_credentials(self) -> dict[str, str]:
         """
@@ -1001,5 +1115,9 @@ class CloudProviderBase(ABC):
         # Global resources (scanned only once, not per region)
         if scan_global_resources:
             results.extend(await self.scan_idle_s3_buckets(rules.get("s3_bucket")))
+
+        # Deduplicate resources to avoid counting the same resource multiple times
+        # (e.g., a volume detected as unattached + over-provisioned + low IOPS usage)
+        results = self._deduplicate_resources(results)
 
         return results
