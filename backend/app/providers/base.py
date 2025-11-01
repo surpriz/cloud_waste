@@ -868,6 +868,37 @@ class CloudProviderBase(ABC):
         """
         pass
 
+    @abstractmethod
+    async def scan_fargate_tasks(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scan for idle/wasted Fargate tasks in a specific region.
+
+        Detects 10 scenarios (100% coverage):
+        Phase 1 - Basic detection:
+        1. Stopped tasks never cleaned (>30 days in STOPPED state)
+        2. Idle tasks (RUNNING but 0 network traffic >7 days)
+        3. Over-provisioned CPU/Memory (<10% utilization >30 days)
+        4. Inactive ECS services (desired count = 0 >90 days)
+        5. No Fargate Spot usage (100% On-Demand = 70% overpay)
+
+        Phase 2 - Advanced detection:
+        6. Excessive CloudWatch Logs retention (>90 days)
+        7. EC2 opportunity (24/7 workloads >95% uptime)
+        8. Standalone orphaned tasks (RunTask without service >14 days)
+        9. Bad autoscaling config (target <30% or >70%)
+        10. Outdated platform version (>2 versions behind LATEST)
+
+        Args:
+            region: Region to scan
+            detection_rules: Optional detection configuration
+
+        Returns:
+            List of orphaned/wasted Fargate task resources
+        """
+        pass
+
     async def scan_all_resources(
         self, region: str, detection_rules: dict[str, dict] | None = None, scan_global_resources: bool = False
     ) -> list[OrphanResourceData]:
@@ -1110,6 +1141,9 @@ class CloudProviderBase(ABC):
         )
         results.extend(
             await self.scan_idle_dynamodb_tables(region, rules.get("dynamodb_table"))
+        )
+        results.extend(
+            await self.scan_fargate_tasks(region, rules.get("fargate_task"))
         )
 
         # Global resources (scanned only once, not per region)

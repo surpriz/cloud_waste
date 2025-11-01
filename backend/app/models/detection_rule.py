@@ -837,6 +837,63 @@ DEFAULT_DETECTION_RULES = {
 
         "description": "DynamoDB tables - 10 waste scenarios (100% coverage): over-provisioned capacity, unused GSI, never used (provisioned/on-demand), empty tables, unused PITR, unused Global Tables replication, Streams without consumers, missing TTL on temporal data, wrong billing mode",
     },
+    "fargate_task": {
+        "enabled": True,
+        "min_age_days": 7,  # Ignore tasks created in last 7 days
+        "confidence_threshold_days": 30,  # High confidence after 30 days
+        "critical_age_days": 90,  # Critical alert after 90 days
+
+        # Phase 1 - Basic detection (5 scenarios)
+        # Scenario 1: Stopped tasks never cleaned up
+        "detect_stopped_tasks": True,  # Detect STOPPED tasks polluting namespace
+        "stopped_tasks_min_age_days": 30,  # Flag if stopped >30 days
+
+        # Scenario 2: Idle tasks (running but 0 traffic)
+        "detect_idle_tasks": True,  # Detect tasks running with 0 network traffic
+        "idle_traffic_lookback_days": 7,  # Check last 7 days of traffic
+        "network_bytes_threshold": 1000,  # <1KB total = idle (essentially 0)
+
+        # Scenario 3: Over-provisioned CPU/Memory
+        "detect_over_provisioned": True,  # Detect low CPU/Memory utilization
+        "cpu_threshold_pct": 10.0,  # <10% CPU utilization = over-provisioned
+        "memory_threshold_pct": 10.0,  # <10% Memory utilization = over-provisioned
+        "utilization_lookback_days": 30,  # Check last 30 days
+
+        # Scenario 4: Inactive services (desired count = 0)
+        "detect_inactive_services": True,  # Detect ECS services with 0 desired tasks
+        "inactive_min_age_days": 90,  # Inactive for 90+ days
+        "desired_count_check": 0,  # Desired count = 0
+
+        # Scenario 5: No Fargate Spot usage (100% On-Demand)
+        "detect_no_spot": True,  # Detect services not using Fargate Spot
+        "spot_usage_threshold_pct": 0.0,  # 0% Spot usage = waste
+        "recommend_spot_pct": 70.0,  # Recommend 70% Spot for savings
+
+        # Phase 2 - Advanced detection (5 scenarios)
+        # Scenario 6: Excessive CloudWatch Logs retention
+        "detect_excessive_logs": True,  # Detect log groups with excessive retention
+        "log_retention_threshold_days": 90,  # >90 days retention questionable
+
+        # Scenario 7: EC2 opportunity (24/7 workloads better on EC2)
+        "detect_ec2_opportunity": True,  # Detect 24/7 workloads better suited for EC2
+        "uptime_threshold_pct": 95.0,  # >95% uptime = constant workload
+        "min_running_days": 30,  # Running constantly for 30+ days
+
+        # Scenario 8: Standalone orphaned tasks (RunTask without service)
+        "detect_standalone_orphaned": True,  # Detect standalone tasks never cleaned
+        "standalone_min_age_days": 14,  # Standalone for 14+ days
+
+        # Scenario 9: Bad autoscaling configuration
+        "detect_bad_autoscaling": True,  # Detect poorly configured autoscaling
+        "target_utilization_min_pct": 30.0,  # Target <30% = over-scaled
+        "target_utilization_max_pct": 70.0,  # Target >70% = under-scaled
+
+        # Scenario 10: Outdated platform version
+        "detect_outdated_platform": True,  # Detect tasks on old Fargate platform
+        "platform_versions_behind": 2,  # >2 versions behind = outdated
+
+        "description": "Fargate tasks - 10 waste scenarios (100% coverage): stopped tasks pollution, idle tasks (0 traffic), over-provisioned CPU/Memory, inactive services, no Fargate Spot, excessive logs retention, EC2 opportunity (24/7), standalone orphaned, bad autoscaling, outdated platform",
+    },
     # ===================================
     # AZURE RESOURCES (Managed by Azure)
     # ===================================

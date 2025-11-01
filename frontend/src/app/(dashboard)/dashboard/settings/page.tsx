@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { User, Bell, Shield, Trash2, Save, Key, Sliders, RotateCcw, HardDrive, Globe, Camera, Server, Activity, Zap, Database, ArrowLeft, Network, AlertTriangle, TrendingDown, Archive, TestTube, Copy, Clock, Cpu, Users, FileText, Search, ChevronDown } from "lucide-react";
+import { User, Bell, Shield, Trash2, Save, Key, Sliders, RotateCcw, HardDrive, Globe, Camera, Server, Activity, Zap, Database, ArrowLeft, Network, AlertTriangle, TrendingDown, Archive, TestTube, Copy, Clock, Cpu, Users, FileText, Search, ChevronDown, Box } from "lucide-react";
 import Link from "next/link";
 import { useNotifications } from "@/hooks/useNotifications";
 import { Toast } from "@/components/ui/Toast";
@@ -46,6 +46,7 @@ const AWS_RESOURCE_ICONS: { [key: string]: any } = {
   s3_bucket: Archive,
   lambda_function: Zap,
   dynamodb_table: Database,
+  fargate_task: Box,
 };
 
 const AWS_RESOURCE_LABELS: { [key: string]: string } = {
@@ -60,6 +61,7 @@ const AWS_RESOURCE_LABELS: { [key: string]: string } = {
   s3_bucket: "S3 Buckets",
   lambda_function: "Lambda Functions",
   dynamodb_table: "DynamoDB Tables",
+  fargate_task: "Fargate Tasks",
 };
 
 // Azure Resources
@@ -555,7 +557,7 @@ const getResourceLabel = (resourceType: string): string => {
 // Resource categories mapping for filtering
 const RESOURCE_CATEGORIES = {
   aws: {
-    compute: ["ec2_instance", "lambda_function", "eks_cluster", "sagemaker_endpoint"],
+    compute: ["ec2_instance", "lambda_function", "eks_cluster", "fargate_task", "sagemaker_endpoint"],
     storage: ["ebs_volume", "ebs_snapshot", "s3_bucket", "fsx_file_system"],
     database: ["rds_instance", "dynamodb_table", "redshift_cluster", "elasticache_cluster", "neptune_cluster", "documentdb_cluster"],
     networking: ["elastic_ip", "load_balancer", "nat_gateway", "vpn_connection", "transit_gateway_attachment", "vpc_endpoint", "global_accelerator"],
