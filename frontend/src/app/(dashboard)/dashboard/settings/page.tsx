@@ -42,6 +42,7 @@ const AWS_RESOURCE_ICONS: { [key: string]: any } = {
   load_balancer: Zap,
   rds_instance: Database,
   nat_gateway: Network,
+  eks_cluster: Cpu,
 };
 
 const AWS_RESOURCE_LABELS: { [key: string]: string } = {
@@ -52,6 +53,7 @@ const AWS_RESOURCE_LABELS: { [key: string]: string } = {
   load_balancer: "Load Balancers",
   rds_instance: "RDS Instances",
   nat_gateway: "NAT Gateways",
+  eks_cluster: "EKS Clusters",
 };
 
 // Azure Resources

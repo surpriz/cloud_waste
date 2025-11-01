@@ -384,3 +384,35 @@ export interface AdminStats {
   inactive_users: number;
   superusers: number;
 }
+
+// Pricing types
+export interface PricingCacheItem {
+  provider: string;
+  service: string;
+  region: string;
+  price_per_unit: number;
+  unit: string;
+  currency: string;
+  source: string;
+  last_updated: string;
+  expires_at: string;
+  is_expired: boolean;
+}
+
+export interface PricingStats {
+  total_cached_prices: number;
+  expired_prices: number;
+  api_sourced_prices: number;
+  fallback_sourced_prices: number;
+  last_refresh_at: string | null;
+  cache_hit_rate: number;
+  api_success_rate: number;
+}
+
+export interface PricingRefreshResponse {
+  status: string;
+  task_id: string | null;
+  message: string;
+  updated_count: number | null;
+  failed_count: number | null;
+}

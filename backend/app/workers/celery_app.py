@@ -45,6 +45,10 @@ celery_app.conf.beat_schedule = {
         "task": "app.workers.tasks.cleanup_unverified_accounts",
         "schedule": crontab(hour=3, minute=0),  # Every day at 3:00 AM UTC
     },
+    "update-pricing-cache": {
+        "task": "app.workers.tasks.update_pricing_cache",
+        "schedule": crontab(hour=2, minute=0),  # Every day at 2:00 AM UTC
+    },
 }
 
 if __name__ == "__main__":

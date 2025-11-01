@@ -1,13 +1,16 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
 import { adminAPI } from "@/lib/api";
-import type { User, AdminStats } from "@/types";
-import { Shield, Users, UserCheck, UserX, Crown, Ban, CheckCircle } from "lucide-react";
+import type { User, AdminStats, PricingStats } from "@/types";
+import { Shield, Users, UserCheck, UserX, Crown, Ban, CheckCircle, DollarSign, TrendingUp } from "lucide-react";
 
 export default function AdminPage() {
+  const router = useRouter();
   const [users, setUsers] = useState<User[]>([]);
   const [stats, setStats] = useState<AdminStats | null>(null);
+  const [pricingStats, setPricingStats] = useState<PricingStats | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
@@ -19,12 +22,14 @@ export default function AdminPage() {
   const loadData = async () => {
     try {
       setLoading(true);
-      const [usersData, statsData] = await Promise.all([
+      const [usersData, statsData, pricingData] = await Promise.all([
         adminAPI.listUsers(),
         adminAPI.getStats(),
+        adminAPI.getPricingStats().catch(() => null), // Optional pricing stats
       ]);
       setUsers(usersData);
       setStats(statsData);
+      setPricingStats(pricingData);
       setError(null);
     } catch (err: any) {
       setError(err.message || "Failed to load admin data");
@@ -184,6 +189,42 @@ export default function AdminPage() {
                 </div>
                 <Crown className="h-12 w-12 text-purple-600" />
               </div>
+            </div>
+          </div>
+        )}
+
+        {/* Pricing System Status Widget */}
+        {pricingStats && (
+          <div className="mb-8 bg-gradient-to-r from-green-50 to-blue-50 rounded-lg shadow-sm border border-green-200 p-6">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-4">
+                <DollarSign className="h-10 w-10 text-green-600" />
+                <div>
+                  <h3 className="text-lg font-semibold text-gray-900 flex items-center gap-2">
+                    Dynamic Pricing System
+                    {pricingStats.api_success_rate >= 80 ? (
+                      <span className="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-green-100 text-green-800">
+                        ✅ Active
+                      </span>
+                    ) : (
+                      <span className="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-orange-100 text-orange-800">
+                        ⚠️ Degraded
+                      </span>
+                    )}
+                  </h3>
+                  <p className="text-sm text-gray-600 mt-1">
+                    {pricingStats.total_cached_prices} prices cached | API Success: {pricingStats.api_success_rate.toFixed(1)}% |
+                    Cache Hit: {pricingStats.cache_hit_rate.toFixed(1)}%
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={() => router.push("/dashboard/admin/pricing")}
+                className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700"
+              >
+                <TrendingUp className="h-4 w-4" />
+                View Details →
+              </button>
             </div>
           </div>
         )}

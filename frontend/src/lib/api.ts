@@ -514,6 +514,38 @@ export const adminAPI = {
       method: "DELETE",
     });
   },
+
+  // Pricing management
+  async getPricingStats(): Promise<import("@/types").PricingStats> {
+    return fetchAPI<import("@/types").PricingStats>("/api/v1/admin/pricing/stats");
+  },
+
+  async getPricingCache(
+    provider?: string,
+    region?: string,
+    service?: string,
+    skip: number = 0,
+    limit: number = 100
+  ): Promise<import("@/types").PricingCacheItem[]> {
+    const params = new URLSearchParams();
+    if (provider) params.append("provider", provider);
+    if (region) params.append("region", region);
+    if (service) params.append("service", service);
+    params.append("skip", skip.toString());
+    params.append("limit", limit.toString());
+    const query = params.toString() ? `?${params.toString()}` : "";
+    return fetchAPI<import("@/types").PricingCacheItem[]>(`/api/v1/admin/pricing/cache${query}`);
+  },
+
+  async refreshPricing(): Promise<import("@/types").PricingRefreshResponse> {
+    return fetchAPI<import("@/types").PricingRefreshResponse>("/api/v1/admin/pricing/refresh", {
+      method: "POST",
+    });
+  },
+
+  async getRefreshTaskStatus(taskId: string): Promise<import("@/types").PricingRefreshResponse> {
+    return fetchAPI<import("@/types").PricingRefreshResponse>(`/api/v1/admin/pricing/refresh/${taskId}`);
+  },
 };
 
 export { APIError, clearAuthTokens, getAuthToken, setAuthTokens };

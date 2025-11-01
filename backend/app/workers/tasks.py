@@ -20,6 +20,7 @@ from app.providers.aws import AWSProvider
 from app.providers.azure import AzureProvider
 from app.providers.gcp import GCPProvider
 from app.services.email_service import send_scan_summary_email
+from app.services.pricing_service import PricingService
 from app.workers.celery_app import celery_app
 
 # Create async engine for database operations
@@ -116,10 +117,14 @@ async def _scan_cloud_account_async(
 
             # Initialize provider based on account type
             if account.provider == "aws":
+                # Create pricing service for dynamic pricing
+                pricing_service = PricingService(db)
+
                 provider = AWSProvider(
                     access_key=credentials["access_key_id"],
                     secret_key=credentials["secret_access_key"],
                     regions=account.regions if account.regions else None,
+                    pricing_service=pricing_service,
                 )
 
                 # Validate credentials
@@ -703,3 +708,141 @@ def cleanup_unverified_accounts() -> dict[str, Any]:
 
     # Run async cleanup
     return loop.run_until_complete(_cleanup_accounts())
+
+
+@celery_app.task(name="app.workers.tasks.update_pricing_cache")
+def update_pricing_cache() -> dict[str, Any]:
+    """
+    Update pricing cache from cloud provider APIs.
+
+    This task runs daily at 2 AM to refresh pricing data from:
+    - AWS Price List API (for EBS volumes, Elastic IPs, etc.)
+    - Azure Retail Prices API (future)
+    - GCP Cloud Billing API (future)
+
+    Returns:
+        Dict with update results
+    """
+    # Get or create event loop
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_closed():
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
+    return loop.run_until_complete(_update_pricing_cache_async())
+
+
+async def _update_pricing_cache_async() -> dict[str, Any]:
+    """
+    Async implementation of pricing cache update.
+
+    Fetches prices from cloud provider APIs and stores them in the database.
+    """
+    import structlog
+
+    logger = structlog.get_logger()
+
+    async with AsyncSessionLocal() as db:
+        try:
+            pricing_service = PricingService(db)
+
+            # AWS regions to fetch pricing for
+            aws_regions = [
+                "us-east-1",
+                "us-east-2",
+                "us-west-1",
+                "us-west-2",
+                "eu-west-1",
+                "eu-west-2",
+                "eu-west-3",
+                "eu-central-1",
+                "ap-southeast-1",
+                "ap-southeast-2",
+                "ap-northeast-1",
+                "ap-northeast-2",
+            ]
+
+            # EBS volume types to update
+            ebs_volume_types = ["ebs_gp3", "ebs_gp2", "ebs_io1", "ebs_io2", "ebs_st1", "ebs_sc1"]
+
+            # Other AWS services
+            other_services = ["elastic_ip"]
+
+            updated_count = 0
+            failed_count = 0
+
+            # Update EBS pricing for each region
+            for region in aws_regions:
+                for volume_type in ebs_volume_types:
+                    try:
+                        # Force refresh to fetch from API
+                        price = await pricing_service.get_aws_price(
+                            volume_type, region, force_refresh=True
+                        )
+                        updated_count += 1
+                        logger.info(
+                            "pricing.updated",
+                            provider="aws",
+                            service=volume_type,
+                            region=region,
+                            price=price,
+                        )
+                    except Exception as e:
+                        failed_count += 1
+                        logger.error(
+                            "pricing.update_failed",
+                            provider="aws",
+                            service=volume_type,
+                            region=region,
+                            error=str(e),
+                        )
+
+            # Update other service pricing (region-independent or us-east-1)
+            for service in other_services:
+                try:
+                    price = await pricing_service.get_aws_price(
+                        service, "us-east-1", force_refresh=True
+                    )
+                    updated_count += 1
+                    logger.info(
+                        "pricing.updated",
+                        provider="aws",
+                        service=service,
+                        region="us-east-1",
+                        price=price,
+                    )
+                except Exception as e:
+                    failed_count += 1
+                    logger.error(
+                        "pricing.update_failed",
+                        provider="aws",
+                        service=service,
+                        region="us-east-1",
+                        error=str(e),
+                    )
+
+            logger.info(
+                "pricing.cache_update_complete",
+                updated_count=updated_count,
+                failed_count=failed_count,
+            )
+
+            return {
+                "status": "success",
+                "updated_count": updated_count,
+                "failed_count": failed_count,
+            }
+
+        except Exception as e:
+            logger.error(
+                "pricing.cache_update_error",
+                error=str(e),
+            )
+            return {
+                "status": "error",
+                "error": str(e),
+            }

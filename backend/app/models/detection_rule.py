@@ -393,20 +393,63 @@ DEFAULT_DETECTION_RULES = {
         "min_stopped_days": 7,  # RDS auto-starts after 7 days
         "confidence_threshold_days": 14,
         "critical_age_days": 30,  # Critical after 30+ days stopped
-        # Idle running instances detection
+
+        # Scenarios 1-5 (Phase 1 - Basic detection)
+        # Scenario 1: Stopped long-term
+        # (Uses min_stopped_days, confidence_threshold_days, critical_age_days)
+
+        # Scenario 2: Idle running instances detection
         "detect_idle_running": True,  # Detect running instances with 0 connections
         "min_idle_days": 7,  # Running with 0 connections for 7+ days
         "idle_confidence_threshold_days": 14,  # High confidence after 14 days
-        # Zero I/O detection
+
+        # Scenario 3: Zero I/O detection
         "detect_zero_io": True,  # Detect instances with no read/write operations
         "min_zero_io_days": 7,  # No I/O for 7+ days
-        # Never connected detection
+
+        # Scenario 4: Never connected detection
         "detect_never_connected": True,  # Detect instances never connected since creation
         "never_connected_min_age_days": 7,  # Min age to consider "never connected"
-        # No backups detection
+
+        # Scenario 5: No backups detection
         "detect_no_backups": True,  # Detect instances without automated backups
         "no_backups_min_age_days": 30,  # Min age for no-backup detection
-        "description": "RDS instances stopped long-term, idle running (0 connections), zero I/O, never connected, or without backups",
+
+        # Scenarios 6-10 (Phase 2 - Advanced detection)
+        # Scenario 6: Over-provisioned (CPU <20%)
+        "detect_over_provisioned": True,  # Detect instances with low CPU utilization
+        "cpu_threshold_percent": 20.0,  # CPU <20% = over-provisioned
+        "cpu_lookback_days": 30,  # Analyze last 30 days of CPU metrics
+        "min_age_for_cpu_analysis": 7,  # Min age before analyzing CPU (allow ramp-up)
+
+        # Scenario 7: Old generation instance types
+        "detect_old_generation": True,  # Detect db.t2/m4/r4 instance types
+        "old_generation_types": ["t2", "m4", "r4"],  # Generations to flag
+        "old_generation_savings_percent": 15.0,  # Estimated savings from migration
+
+        # Scenario 8: Storage over-provisioned (>80% free)
+        "detect_storage_over_provisioned": True,  # Detect storage with >80% free space
+        "free_storage_threshold_percent": 80.0,  # >80% free = over-provisioned
+        "storage_lookback_days": 7,  # Analyze last 7 days of storage metrics
+        "min_allocated_storage_gb": 100,  # Only flag if allocated >100GB (avoid small DBs)
+
+        # Scenario 9: Multi-AZ waste (dev/test with Multi-AZ)
+        "detect_multi_az_waste": True,  # Detect Multi-AZ on non-production databases
+        "multi_az_waste_tag_key": "Environment",  # Tag key to check
+        "multi_az_waste_tag_values": ["dev", "test", "staging", "development"],  # Non-prod values
+        "multi_az_waste_connections_threshold": 5.0,  # <5 avg connections = likely non-prod
+
+        # Scenario 10: Dev/Test running 24/7
+        "detect_dev_test_24_7": True,  # Detect dev/test databases running 24/7
+        "dev_test_tag_key": "Environment",  # Tag key to check
+        "dev_test_tag_values": ["dev", "test", "staging", "development"],  # Dev/test values
+        "dev_test_name_patterns": ["dev-", "test-", "staging-", "dev_", "test_", "staging_"],  # Name patterns
+        "business_hours_start": 9,  # 9 AM
+        "business_hours_end": 18,  # 6 PM
+        "business_days": [0, 1, 2, 3, 4],  # Monday-Friday (0=Monday)
+        "dev_test_connections_lookback_days": 7,  # Analyze last 7 days
+
+        "description": "RDS instances - 10 waste scenarios (100% coverage): stopped long-term, idle running, zero I/O, never connected, no backups, over-provisioned CPU, old generation, storage over-provisioned, Multi-AZ waste, dev/test 24/7",
     },
     # TOP 15 high-cost idle resources
     "fsx_file_system": {
@@ -461,22 +504,60 @@ DEFAULT_DETECTION_RULES = {
         "min_age_days": 3,
         "confidence_threshold_days": 7,
         "critical_age_days": 30,  # Critical after 30+ days unused
-        # No worker nodes detection
+
+        # Scenarios 1-5 (Phase 1 - Basic detection)
+        # Scenario 1: No worker nodes detection
         "detect_no_nodes": True,  # Detect clusters with 0 nodes
-        # Unhealthy nodes detection
+
+        # Scenario 2: Unhealthy nodes detection
         "detect_unhealthy_nodes": True,  # Detect clusters with all nodes unhealthy
         "min_unhealthy_days": 7,  # Nodes unhealthy for 7+ days
-        # Low utilization detection
+
+        # Scenario 3: Low utilization detection
         "detect_low_utilization": True,  # Detect clusters with low CPU on all nodes
-        "cpu_threshold_percent": 5.0,  # Average CPU < 5% = idle
+        "cpu_threshold_percent": 5.0,  # Average CPU < 5% = idle/abandoned
         "min_idle_days": 7,  # Low utilization for 7+ days
         "idle_lookback_days": 7,  # CloudWatch lookback period
-        # Fargate detection
+
+        # Scenario 4: Fargate detection
         "detect_fargate_no_profiles": True,  # Detect Fargate-only clusters with no profiles
-        # Version detection
+
+        # Scenario 5: Version detection
         "detect_outdated_version": True,  # Detect outdated Kubernetes versions
         "min_supported_minor_versions": 3,  # Min 3 versions behind latest (e.g., 1.25 if latest is 1.28)
-        "description": "EKS clusters: no nodes, unhealthy nodes, low CPU utilization, Fargate misconfigured, or outdated K8s version",
+
+        # Scenarios 6-10 (Phase 2 - Advanced detection)
+        # Scenario 6: Over-provisioned nodes (CPU <20%)
+        "detect_over_provisioned_nodes": True,  # Detect nodes with low CPU utilization (right-sizing)
+        "cpu_over_provisioned_threshold": 20.0,  # Average CPU < 20% = over-provisioned
+        "cpu_lookback_days": 30,  # Analyze last 30 days of CPU metrics
+        "min_age_for_cpu_analysis": 7,  # Min age before analyzing CPU (allow ramp-up)
+
+        # Scenario 7: Old generation instance types
+        "detect_old_generation_nodes": True,  # Detect t2/m4/c4/r4 instance types
+        "old_generation_types": ["t2", "m4", "c4", "r4"],  # Generations to flag
+        "old_generation_savings_percent": 15.0,  # Estimated savings from migration
+
+        # Scenario 8: Dev/Test clusters running 24/7
+        "detect_dev_test_24_7": True,  # Detect dev/test clusters running 24/7
+        "dev_test_tag_key": "Environment",  # Tag key to check
+        "dev_test_tag_values": ["dev", "test", "staging", "development"],  # Dev/test values
+        "dev_test_name_patterns": ["dev-", "test-", "staging-", "dev_", "test_", "staging_"],  # Name patterns
+        "business_hours_start": 9,  # 9 AM
+        "business_hours_end": 18,  # 6 PM
+        "business_days": [0, 1, 2, 3, 4],  # Monday-Friday (0=Monday)
+
+        # Scenario 9: 100% On-Demand nodes (Spot instances not used)
+        "detect_spot_not_used": True,  # Detect clusters with 100% on-demand nodes
+        "spot_mix_percentage_recommended": 60.0,  # Recommended % of Spot instances
+        "min_nodes_for_spot": 3,  # Min nodes before recommending Spot (avoid 1-2 node clusters)
+
+        # Scenario 10: Fargate cost vs EC2 analysis
+        "detect_fargate_cost_vs_ec2": True,  # Detect Fargate when EC2 would be cheaper
+        "fargate_pod_count_threshold": 15,  # >15 constant pods → EC2 likely cheaper
+        "fargate_break_even_pods": 10,  # Break-even point for Fargate vs EC2
+
+        "description": "EKS clusters - 10 waste scenarios (100% coverage): no nodes, unhealthy nodes, low CPU (<5%), Fargate misconfigured, outdated K8s, over-provisioned (<20%), old generation, dev/test 24/7, no Spot instances, Fargate vs EC2 mismatch",
     },
     "sagemaker_endpoint": {
         "enabled": True,

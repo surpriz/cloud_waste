@@ -130,6 +130,7 @@ class AWSProvider(CloudProviderBase):
         access_key: str,
         secret_key: str,
         regions: list[str] | None = None,
+        pricing_service: Any | None = None,
     ) -> None:
         """
         Initialize AWS provider.
@@ -138,6 +139,7 @@ class AWSProvider(CloudProviderBase):
             access_key: AWS Access Key ID
             secret_key: AWS Secret Access Key
             regions: List of AWS regions to scan (None = all regions)
+            pricing_service: Optional PricingService for dynamic pricing (uses hardcoded fallback if None)
         """
         super().__init__(access_key, secret_key, regions)
 
@@ -152,6 +154,9 @@ class AWSProvider(CloudProviderBase):
             aws_access_key_id=access_key,
             aws_secret_access_key=secret_key,
         )
+
+        # Store pricing service for dynamic pricing
+        self.pricing_service = pricing_service
 
         logger.info(f"AWSProvider initialized with config: connect_timeout=60s, read_timeout=60s, retries=3")
 
@@ -558,10 +563,34 @@ class AWSProvider(CloudProviderBase):
                 "status_check_failed_system": 0.0,
             }
 
-    def _calculate_volume_cost(
+    async def _get_price(self, service: str, region: str) -> float:
+        """
+        Get AWS price with dynamic pricing support.
+
+        Args:
+            service: Service identifier (e.g., 'ebs_gp3', 'elastic_ip')
+            region: AWS region code
+
+        Returns:
+            Price per unit (fallback to hardcoded if PricingService unavailable)
+        """
+        if self.pricing_service:
+            try:
+                return await self.pricing_service.get_aws_price(service, region)
+            except Exception as e:
+                logger.warning(
+                    f"Failed to fetch dynamic price for {service} in {region}: {e}. Using fallback."
+                )
+                # Fall through to hardcoded pricing
+
+        # Fallback to hardcoded pricing
+        return self.PRICING.get(service, 0.10)
+
+    async def _calculate_volume_cost(
         self,
         volume_type: str,
         size_gb: int,
+        region: str,
         iops: int | None = None,
         throughput: int | None = None,
     ) -> dict[str, float]:
@@ -571,6 +600,7 @@ class AWSProvider(CloudProviderBase):
         Args:
             volume_type: Volume type (gp2, gp3, io1, io2, st1, sc1, standard)
             size_gb: Volume size in GB
+            region: AWS region code (e.g., 'us-east-1')
             iops: Provisioned IOPS (for io1/io2/gp3 with custom IOPS)
             throughput: Provisioned throughput in MBps (for gp3 only)
 
@@ -587,9 +617,9 @@ class AWSProvider(CloudProviderBase):
         iops_cost = 0.0
         throughput_cost = 0.0
 
-        # 1. Calculate storage cost (GB × price/GB)
-        price_key = f"ebs_{volume_type}_per_gb"
-        price_per_gb = self.PRICING.get(price_key, self.PRICING["ebs_gp2_per_gb"])
+        # 1. Calculate storage cost (GB × price/GB) - Use dynamic pricing
+        price_key = f"ebs_{volume_type}"
+        price_per_gb = await self._get_price(price_key, region)
         storage_cost = size_gb * price_per_gb
 
         # 2. Calculate IOPS cost
@@ -732,7 +762,7 @@ class AWSProvider(CloudProviderBase):
                         continue
 
                     # Calculate monthly cost using comprehensive cost calculator (includes IOPS + throughput)
-                    cost_data = self._calculate_volume_cost(volume_type, size_gb, iops, throughput)
+                    cost_data = await self._calculate_volume_cost(volume_type, size_gb, region, iops, throughput)
                     monthly_cost = cost_data["total_monthly_cost"]
 
                     # Extract name from tags
@@ -949,7 +979,7 @@ class AWSProvider(CloudProviderBase):
                                 continue
 
                             # Calculate cost (volume continues to be charged even when instance is stopped)
-                            cost_data = self._calculate_volume_cost(volume_type, size_gb, iops, throughput)
+                            cost_data = await self._calculate_volume_cost(volume_type, size_gb, region, iops, throughput)
                             monthly_cost = cost_data["total_monthly_cost"]
 
                             # Extract volume name from tags
@@ -1188,7 +1218,7 @@ class AWSProvider(CloudProviderBase):
                         continue
 
                     # Calculate cost (same for io1 and io2, but io2 is overkill)
-                    cost_data = self._calculate_volume_cost("io2", size_gb, iops)
+                    cost_data = await self._calculate_volume_cost("io2", size_gb, region, iops)
                     monthly_cost = cost_data["total_monthly_cost"]
 
                     name = volume_tags.get("name")
@@ -1291,8 +1321,8 @@ class AWSProvider(CloudProviderBase):
                     recommended_iops = int(baseline_iops * 1.5)
 
                     # Calculate current and recommended costs
-                    current_cost_data = self._calculate_volume_cost(volume_type, size_gb, iops, throughput)
-                    recommended_cost_data = self._calculate_volume_cost(volume_type, size_gb, recommended_iops, throughput)
+                    current_cost_data = await self._calculate_volume_cost(volume_type, size_gb, region, iops, throughput)
+                    recommended_cost_data = await self._calculate_volume_cost(volume_type, size_gb, region, recommended_iops, throughput)
 
                     monthly_savings = current_cost_data["total_monthly_cost"] - recommended_cost_data["total_monthly_cost"]
                     savings_percent = (monthly_savings / current_cost_data["total_monthly_cost"]) * 100
@@ -1412,8 +1442,8 @@ class AWSProvider(CloudProviderBase):
                         continue
 
                     # Calculate costs
-                    current_cost_data = self._calculate_volume_cost("gp3", size_gb, iops, throughput)
-                    recommended_cost_data = self._calculate_volume_cost("gp3", size_gb, iops, baseline_throughput)
+                    current_cost_data = await self._calculate_volume_cost("gp3", size_gb, region, iops, throughput)
+                    recommended_cost_data = await self._calculate_volume_cost("gp3", size_gb, region, iops, baseline_throughput)
 
                     monthly_savings = current_cost_data["throughput_cost"]  # All throughput above baseline
                     savings_percent = (monthly_savings / current_cost_data["total_monthly_cost"]) * 100
@@ -1531,8 +1561,8 @@ class AWSProvider(CloudProviderBase):
                         recommended_iops = max(100, int(total_avg_iops * safety_buffer))  # Min 100 IOPS
 
                     # Calculate costs
-                    current_cost_data = self._calculate_volume_cost(volume_type, size_gb, iops, throughput)
-                    recommended_cost_data = self._calculate_volume_cost(volume_type, size_gb, recommended_iops, throughput)
+                    current_cost_data = await self._calculate_volume_cost(volume_type, size_gb, region, iops, throughput)
+                    recommended_cost_data = await self._calculate_volume_cost(volume_type, size_gb, region, recommended_iops, throughput)
 
                     monthly_savings = current_cost_data["total_monthly_cost"] - recommended_cost_data["total_monthly_cost"]
 
@@ -1647,8 +1677,8 @@ class AWSProvider(CloudProviderBase):
                         continue
 
                     # Calculate costs
-                    current_cost_data = self._calculate_volume_cost("gp3", size_gb, iops, throughput)
-                    recommended_cost_data = self._calculate_volume_cost("gp3", size_gb, iops, baseline_throughput)
+                    current_cost_data = await self._calculate_volume_cost("gp3", size_gb, region, iops, throughput)
+                    recommended_cost_data = await self._calculate_volume_cost("gp3", size_gb, region, iops, baseline_throughput)
 
                     monthly_savings = current_cost_data["throughput_cost"]  # All throughput cost above baseline
 
@@ -1758,12 +1788,12 @@ class AWSProvider(CloudProviderBase):
                         continue  # gp3 cannot handle this workload
 
                     # Calculate current io1/io2 cost
-                    current_cost_data = self._calculate_volume_cost(volume_type, size_gb, iops)
+                    current_cost_data = await self._calculate_volume_cost(volume_type, size_gb, region, iops)
 
                     # Calculate gp3 cost with required IOPS and throughput
                     suggested_iops = max(3000, required_iops)  # gp3 baseline or higher
                     suggested_throughput = max(125, required_throughput)  # gp3 baseline or higher
-                    suggested_cost_data = self._calculate_volume_cost("gp3", size_gb, suggested_iops, suggested_throughput)
+                    suggested_cost_data = await self._calculate_volume_cost("gp3", size_gb, region, suggested_iops, suggested_throughput)
 
                     monthly_savings = current_cost_data["total_monthly_cost"] - suggested_cost_data["total_monthly_cost"]
                     savings_percent = (monthly_savings / current_cost_data["total_monthly_cost"]) * 100
@@ -5972,19 +6002,27 @@ class AWSProvider(CloudProviderBase):
         """
         Scan for RDS instances with comprehensive orphan detection.
 
-        Detection scenarios:
+        Detection scenarios (10/10 = 100% coverage):
+        Phase 1 - Basic detection:
         1. Stopped long-term - RDS stopped > min_stopped_days
         2. Idle running - Running with 0 database connections
         3. Zero I/O - Running with 0 read/write operations
         4. Never connected - Created but never connected since creation
         5. No backups - Automated backups disabled (BackupRetentionPeriod = 0)
 
+        Phase 2 - Advanced detection:
+        6. Over-provisioned - CPU utilization <20% over 30 days
+        7. Old generation - db.t2/m4/r4 instance types (recommend upgrade)
+        8. Storage over-provisioned - >80% storage free space
+        9. Multi-AZ waste - dev/test databases with Multi-AZ enabled
+        10. Dev/Test 24/7 - dev/test databases running 24/7 instead of business hours
+
         Args:
             region: AWS region to scan
             detection_rules: Optional user-defined detection rules
 
         Returns:
-            List of stopped/idle RDS instance resources
+            List of stopped/idle/wasteful RDS instance resources
         """
         orphans: list[OrphanResourceData] = []
 
@@ -5998,7 +6036,7 @@ class AWSProvider(CloudProviderBase):
         if not detection_rules.get("enabled", True):
             return orphans
 
-        # Load configuration
+        # Load configuration - Phase 1 (Scenarios 1-5)
         min_stopped_days = detection_rules.get("min_stopped_days", 7)
         confidence_threshold_days = detection_rules.get("confidence_threshold_days", 14)
         critical_age_days = detection_rules.get("critical_age_days", 30)
@@ -6011,6 +6049,35 @@ class AWSProvider(CloudProviderBase):
         never_connected_min_age_days = detection_rules.get("never_connected_min_age_days", 7)
         detect_no_backups = detection_rules.get("detect_no_backups", True)
         no_backups_min_age_days = detection_rules.get("no_backups_min_age_days", 30)
+
+        # Load configuration - Phase 2 (Scenarios 6-10)
+        detect_over_provisioned = detection_rules.get("detect_over_provisioned", True)
+        cpu_threshold_percent = detection_rules.get("cpu_threshold_percent", 20.0)
+        cpu_lookback_days = detection_rules.get("cpu_lookback_days", 30)
+        min_age_for_cpu_analysis = detection_rules.get("min_age_for_cpu_analysis", 7)
+
+        detect_old_generation = detection_rules.get("detect_old_generation", True)
+        old_generation_types = detection_rules.get("old_generation_types", ["t2", "m4", "r4"])
+        old_generation_savings_percent = detection_rules.get("old_generation_savings_percent", 15.0)
+
+        detect_storage_over_provisioned = detection_rules.get("detect_storage_over_provisioned", True)
+        free_storage_threshold_percent = detection_rules.get("free_storage_threshold_percent", 80.0)
+        storage_lookback_days = detection_rules.get("storage_lookback_days", 7)
+        min_allocated_storage_gb = detection_rules.get("min_allocated_storage_gb", 100)
+
+        detect_multi_az_waste = detection_rules.get("detect_multi_az_waste", True)
+        multi_az_waste_tag_key = detection_rules.get("multi_az_waste_tag_key", "Environment")
+        multi_az_waste_tag_values = detection_rules.get("multi_az_waste_tag_values", ["dev", "test", "staging", "development"])
+        multi_az_waste_connections_threshold = detection_rules.get("multi_az_waste_connections_threshold", 5.0)
+
+        detect_dev_test_24_7 = detection_rules.get("detect_dev_test_24_7", True)
+        dev_test_tag_key = detection_rules.get("dev_test_tag_key", "Environment")
+        dev_test_tag_values = detection_rules.get("dev_test_tag_values", ["dev", "test", "staging", "development"])
+        dev_test_name_patterns = detection_rules.get("dev_test_name_patterns", ["dev-", "test-", "staging-", "dev_", "test_", "staging_"])
+        business_hours_start = detection_rules.get("business_hours_start", 9)
+        business_hours_end = detection_rules.get("business_hours_end", 18)
+        business_days = detection_rules.get("business_days", [0, 1, 2, 3, 4])
+        dev_test_connections_lookback_days = detection_rules.get("dev_test_connections_lookback_days", 7)
 
         try:
             async with self.session.client("rds", region_name=region) as rds, self.session.client(
@@ -6202,6 +6269,182 @@ class AWSProvider(CloudProviderBase):
                             confidence_level = "medium"
                         orphan_reasons.append("No automated backups configured (BackupRetentionPeriod = 0)")
                         orphan_reasons.append("Indicates abandoned or non-production database")
+
+                    # ========== PHASE 2 - Advanced Detection (Scenarios 6-10) ==========
+
+                    # Scenario #6: Over-provisioned (CPU <20% for 30 days)
+                    if detect_over_provisioned and status == "available" and age_days >= min_age_for_cpu_analysis and orphan_type is None:
+                        try:
+                            cpu_end_time = now
+                            cpu_start_time = now - timedelta(days=cpu_lookback_days)
+
+                            cpu_response = await cloudwatch.get_metric_statistics(
+                                Namespace="AWS/RDS",
+                                MetricName="CPUUtilization",
+                                Dimensions=[{"Name": "DBInstanceIdentifier", "Value": db_id}],
+                                StartTime=cpu_start_time,
+                                EndTime=cpu_end_time,
+                                Period=86400,  # 1 day
+                                Statistics=["Average"],
+                            )
+
+                            cpu_datapoints = cpu_response.get("Datapoints", [])
+                            if cpu_datapoints and len(cpu_datapoints) >= 7:  # At least 7 days of data
+                                avg_cpu = sum(dp["Average"] for dp in cpu_datapoints) / len(cpu_datapoints)
+
+                                if avg_cpu < cpu_threshold_percent:
+                                    is_orphaned = True
+                                    orphan_type = "over_provisioned"
+                                    orphan_reasons.append(f"CPU utilization {avg_cpu:.1f}% over {cpu_lookback_days} days (threshold: {cpu_threshold_percent}%)")
+                                    orphan_reasons.append(f"Right-sizing recommended - downsize instance type to reduce cost")
+                                    confidence_level = "high" if avg_cpu < 10.0 else "medium"
+                                    monthly_cost = compute_cost * 0.5  # Estimate 50% savings with right-sizing
+                        except Exception as e:
+                            print(f"Warning: Could not get CPU metrics for {db_id}: {e}")
+
+                    # Scenario #7: Old generation instance types (t2/m4/r4)
+                    if detect_old_generation and status == "available" and orphan_type is None:
+                        # Check if instance type is old generation
+                        is_old_gen = any(f".{gen_type}." in db_class for gen_type in old_generation_types)
+
+                        if is_old_gen:
+                            is_orphaned = True
+                            orphan_type = "old_generation"
+
+                            # Determine new generation recommendation
+                            new_generation = db_class
+                            if ".t2." in db_class:
+                                new_generation = db_class.replace(".t2.", ".t3.")
+                            elif ".m4." in db_class:
+                                new_generation = db_class.replace(".m4.", ".m5.")
+                            elif ".r4." in db_class:
+                                new_generation = db_class.replace(".r4.", ".r5.")
+
+                            estimated_savings = compute_cost * (old_generation_savings_percent / 100)
+                            orphan_reasons.append(f"Old generation instance type: {db_class}")
+                            orphan_reasons.append(f"Recommended upgrade: {new_generation} (~{old_generation_savings_percent}% cost savings)")
+                            orphan_reasons.append("Modern instances offer better performance at lower cost")
+                            confidence_level = "medium"
+                            monthly_cost = estimated_savings  # Show potential savings
+
+                    # Scenario #8: Storage over-provisioned (>80% free space)
+                    if detect_storage_over_provisioned and status == "available" and storage_gb >= min_allocated_storage_gb and orphan_type is None:
+                        try:
+                            storage_end_time = now
+                            storage_start_time = now - timedelta(days=storage_lookback_days)
+
+                            free_storage_response = await cloudwatch.get_metric_statistics(
+                                Namespace="AWS/RDS",
+                                MetricName="FreeStorageSpace",
+                                Dimensions=[{"Name": "DBInstanceIdentifier", "Value": db_id}],
+                                StartTime=storage_start_time,
+                                EndTime=storage_end_time,
+                                Period=86400,  # 1 day
+                                Statistics=["Average"],
+                            )
+
+                            storage_datapoints = free_storage_response.get("Datapoints", [])
+                            if storage_datapoints:
+                                avg_free_storage_bytes = sum(dp["Average"] for dp in storage_datapoints) / len(storage_datapoints)
+                                avg_free_storage_gb = avg_free_storage_bytes / (1024**3)  # Convert to GB
+                                free_storage_percent = (avg_free_storage_gb / storage_gb) * 100
+
+                                if free_storage_percent >= free_storage_threshold_percent:
+                                    is_orphaned = True
+                                    orphan_type = "storage_over_provisioned"
+                                    used_storage_gb = storage_gb - avg_free_storage_gb
+                                    wasted_storage_gb = storage_gb - (used_storage_gb * 1.2)  # 20% safety margin
+                                    wasted_storage_cost = wasted_storage_gb * storage_cost_per_gb
+
+                                    orphan_reasons.append(f"Storage {free_storage_percent:.1f}% free ({avg_free_storage_gb:.1f}GB / {storage_gb}GB)")
+                                    orphan_reasons.append(f"Allocated: {storage_gb}GB, Used: {used_storage_gb:.1f}GB")
+                                    orphan_reasons.append("Note: RDS storage cannot be reduced - requires Blue/Green deployment or migration")
+                                    confidence_level = "medium"
+                                    monthly_cost = wasted_storage_cost if wasted_storage_cost > 0 else storage_cost * 0.5
+                        except Exception as e:
+                            print(f"Warning: Could not get storage metrics for {db_id}: {e}")
+
+                    # Scenario #9: Multi-AZ waste (dev/test with Multi-AZ enabled)
+                    if detect_multi_az_waste and multi_az and status == "available" and orphan_type is None:
+                        # Get tags to check if this is dev/test
+                        try:
+                            tags_response = await rds.list_tags_for_resource(
+                                ResourceName=db.get("DBInstanceArn", f"arn:aws:rds:{region}:*:db:{db_id}")
+                            )
+                            tags = {tag["Key"]: tag["Value"] for tag in tags_response.get("TagList", [])}
+                            env_tag = tags.get(multi_az_waste_tag_key, "").lower()
+
+                            is_dev_test = env_tag in [v.lower() for v in multi_az_waste_tag_values]
+                            low_connections = avg_connections < multi_az_waste_connections_threshold
+
+                            if is_dev_test or (low_connections and avg_connections > 0):
+                                is_orphaned = True
+                                orphan_type = "multi_az_waste"
+                                multi_az_cost = compute_cost  # Multi-AZ doubles compute cost
+                                single_az_cost = compute_cost / 2
+                                savings = single_az_cost
+
+                                orphan_reasons.append(f"Multi-AZ enabled on non-production database")
+                                if is_dev_test:
+                                    orphan_reasons.append(f"Environment tag: {env_tag} (dev/test detected)")
+                                if low_connections:
+                                    orphan_reasons.append(f"Low connection count: {avg_connections:.1f} avg (threshold: {multi_az_waste_connections_threshold})")
+                                orphan_reasons.append(f"Multi-AZ cost: ${multi_az_cost:.2f}/month → Single-AZ: ${single_az_cost:.2f}/month")
+                                confidence_level = "high" if is_dev_test else "medium"
+                                monthly_cost = savings
+                        except Exception as e:
+                            print(f"Warning: Could not get tags for {db_id}: {e}")
+
+                    # Scenario #10: Dev/Test database running 24/7
+                    if detect_dev_test_24_7 and status == "available" and orphan_type is None:
+                        # Check if this is a dev/test database by tags or naming pattern
+                        is_dev_test_db = False
+                        detection_method = ""
+
+                        try:
+                            # Check tags
+                            tags_response = await rds.list_tags_for_resource(
+                                ResourceName=db.get("DBInstanceArn", f"arn:aws:rds:{region}:*:db:{db_id}")
+                            )
+                            tags = {tag["Key"]: tag["Value"] for tag in tags_response.get("TagList", [])}
+                            env_tag = tags.get(dev_test_tag_key, "").lower()
+
+                            if env_tag in [v.lower() for v in dev_test_tag_values]:
+                                is_dev_test_db = True
+                                detection_method = f"Environment tag: {env_tag}"
+                        except Exception:
+                            pass
+
+                        # Check naming patterns
+                        if not is_dev_test_db:
+                            for pattern in dev_test_name_patterns:
+                                if db_id.lower().startswith(pattern.lower()):
+                                    is_dev_test_db = True
+                                    detection_method = f"Name pattern: {pattern}"
+                                    break
+
+                        # Check if no backups (often indicates dev/test)
+                        if not is_dev_test_db and backup_retention_period == 0:
+                            is_dev_test_db = True
+                            detection_method = "No backups configured"
+
+                        if is_dev_test_db:
+                            is_orphaned = True
+                            orphan_type = "dev_test_24_7"
+
+                            # Calculate business hours savings
+                            # Business hours: 9h/day * 5 days = 45h/week
+                            # Total hours: 168h/week
+                            # Off-hours: 168 - 45 = 123h/week = 73.2%
+                            off_hours_percentage = 123 / 168
+                            potential_savings = compute_cost * off_hours_percentage
+
+                            orphan_reasons.append(f"Dev/test database running 24/7 ({detection_method})")
+                            orphan_reasons.append(f"Business hours only: {business_hours_start}:00-{business_hours_end}:00, Mon-Fri")
+                            orphan_reasons.append(f"Off-hours waste: {off_hours_percentage*100:.1f}% of time ({123}h/{168}h per week)")
+                            orphan_reasons.append("Recommendation: Implement scheduled start/stop or Aurora Serverless v2")
+                            confidence_level = "high" if "tag" in detection_method.lower() else "medium"
+                            monthly_cost = potential_savings
 
                     # Add to orphans list if detected
                     if is_orphaned:
@@ -7833,19 +8076,27 @@ class AWSProvider(CloudProviderBase):
         """
         Scan for idle/orphaned EKS clusters with comprehensive detection scenarios.
 
-        Scenarios:
+        Detection scenarios (10/10 = 100% coverage):
+        Phase 1 - Basic detection:
         1. No worker nodes - Cluster with 0 nodes (paying control plane only)
         2. All nodes unhealthy - All nodes in degraded/failed state
-        3. Low CPU utilization - All nodes with <5% CPU average
+        3. Low CPU utilization - All nodes with <5% CPU average (abandoned)
         4. Fargate no profiles - Fargate-only cluster with no profiles configured
-        5. Outdated K8s version - Very old Kubernetes version (abandoned)
+        5. Outdated K8s version - Very old Kubernetes version (security risk)
+
+        Phase 2 - Advanced detection:
+        6. Over-provisioned nodes - Nodes with CPU <20% (right-sizing opportunity)
+        7. Old generation nodes - t2/m4/c4/r4 instance types (upgrade recommendation)
+        8. Dev/Test 24/7 - Dev/test clusters running 24/7 instead of business hours
+        9. Spot not used - 100% On-Demand nodes (Spot instances 70% cheaper)
+        10. Fargate cost vs EC2 - Fargate when EC2 would be cheaper
 
         Args:
             region: AWS region to scan
             detection_rules: Optional user-defined detection rules
 
         Returns:
-            List of orphaned EKS cluster resources
+            List of orphaned/wasteful EKS cluster resources
         """
         orphans: list[OrphanResourceData] = []
 
@@ -7859,7 +8110,7 @@ class AWSProvider(CloudProviderBase):
         if not detection_rules.get("enabled", True):
             return orphans
 
-        # Load configuration
+        # Load configuration - Phase 1 (Scenarios 1-5)
         min_age_days = detection_rules.get("min_age_days", 3)
         confidence_threshold_days = detection_rules.get("confidence_threshold_days", 7)
         critical_age_days = detection_rules.get("critical_age_days", 30)
@@ -7877,6 +8128,32 @@ class AWSProvider(CloudProviderBase):
         min_supported_minor_versions = detection_rules.get(
             "min_supported_minor_versions", 3
         )
+
+        # Load configuration - Phase 2 (Scenarios 6-10)
+        detect_over_provisioned_nodes = detection_rules.get("detect_over_provisioned_nodes", True)
+        cpu_over_provisioned_threshold = detection_rules.get("cpu_over_provisioned_threshold", 20.0)
+        cpu_lookback_days = detection_rules.get("cpu_lookback_days", 30)
+        min_age_for_cpu_analysis = detection_rules.get("min_age_for_cpu_analysis", 7)
+
+        detect_old_generation_nodes = detection_rules.get("detect_old_generation_nodes", True)
+        old_generation_types = detection_rules.get("old_generation_types", ["t2", "m4", "c4", "r4"])
+        old_generation_savings_percent = detection_rules.get("old_generation_savings_percent", 15.0)
+
+        detect_dev_test_24_7 = detection_rules.get("detect_dev_test_24_7", True)
+        dev_test_tag_key = detection_rules.get("dev_test_tag_key", "Environment")
+        dev_test_tag_values = detection_rules.get("dev_test_tag_values", ["dev", "test", "staging", "development"])
+        dev_test_name_patterns = detection_rules.get("dev_test_name_patterns", ["dev-", "test-", "staging-", "dev_", "test_", "staging_"])
+        business_hours_start = detection_rules.get("business_hours_start", 9)
+        business_hours_end = detection_rules.get("business_hours_end", 18)
+        business_days = detection_rules.get("business_days", [0, 1, 2, 3, 4])
+
+        detect_spot_not_used = detection_rules.get("detect_spot_not_used", True)
+        spot_mix_percentage_recommended = detection_rules.get("spot_mix_percentage_recommended", 60.0)
+        min_nodes_for_spot = detection_rules.get("min_nodes_for_spot", 3)
+
+        detect_fargate_cost_vs_ec2 = detection_rules.get("detect_fargate_cost_vs_ec2", True)
+        fargate_pod_count_threshold = detection_rules.get("fargate_pod_count_threshold", 15)
+        fargate_break_even_pods = detection_rules.get("fargate_break_even_pods", 10)
 
         # AWS supports last 3-4 minor versions (adjust as AWS updates support)
         # As of 2025, latest is 1.28, so minimum supported would be 1.25
@@ -8160,6 +8437,168 @@ class AWSProvider(CloudProviderBase):
                                         )
                                 except Exception:
                                     pass
+
+                            # ========== PHASE 2 - Advanced Detection (Scenarios 6-10) ==========
+
+                            # Scenario #6: Over-provisioned nodes (CPU <20%)
+                            if detect_over_provisioned_nodes and total_nodes > 0 and len(node_instance_ids) > 0 and age_days >= min_age_for_cpu_analysis and orphan_type is None:
+                                try:
+                                    start_time_cpu = datetime.now(timezone.utc) - timedelta(days=cpu_lookback_days)
+                                    over_prov_low_cpu_nodes = 0
+                                    over_prov_total_checked = 0
+                                    over_prov_avg_cpu = 0.0
+
+                                    for instance_id in node_instance_ids:
+                                        try:
+                                            cpu_response = await cloudwatch.get_metric_statistics(
+                                                Namespace="AWS/EC2",
+                                                MetricName="CPUUtilization",
+                                                Dimensions=[{"Name": "InstanceId", "Value": instance_id}],
+                                                StartTime=start_time_cpu,
+                                                EndTime=datetime.now(timezone.utc),
+                                                Period=86400,
+                                                Statistics=["Average"],
+                                            )
+                                            datapoints = cpu_response.get("Datapoints", [])
+                                            if datapoints and len(datapoints) >= 7:
+                                                avg_cpu = sum(dp["Average"] for dp in datapoints) / len(datapoints)
+                                                over_prov_avg_cpu += avg_cpu
+                                                over_prov_total_checked += 1
+                                                if avg_cpu < cpu_over_provisioned_threshold:
+                                                    over_prov_low_cpu_nodes += 1
+                                        except Exception:
+                                            pass
+
+                                    if over_prov_total_checked > 0:
+                                        over_prov_avg_cpu /= over_prov_total_checked
+
+                                        if over_prov_low_cpu_nodes == over_prov_total_checked and over_prov_avg_cpu < cpu_over_provisioned_threshold:
+                                            is_orphaned = True
+                                            orphan_type = "over_provisioned_nodes"
+                                            orphan_reasons.append(f"All nodes have <{cpu_over_provisioned_threshold}% CPU utilization (avg: {over_prov_avg_cpu:.2f}%)")
+                                            orphan_reasons.append("Right-sizing recommended - downsize instance types to reduce cost 30-50%")
+                                            confidence_level = "high" if over_prov_avg_cpu < 10.0 else "medium"
+                                except Exception as e:
+                                    print(f"Warning: Could not analyze CPU for over-provisioning on {cluster_name}: {e}")
+
+                            # Scenario #7: Old generation instance types
+                            if detect_old_generation_nodes and total_nodes > 0 and orphan_type is None:
+                                old_gen_node_groups = []
+                                for node in node_details:
+                                    instance_type = node["instance_type"]
+                                    # Check if instance type is old generation
+                                    is_old_gen = any(f".{gen_type}." in instance_type for gen_type in old_generation_types)
+                                    if is_old_gen:
+                                        old_gen_node_groups.append(node)
+
+                                if old_gen_node_groups:
+                                    is_orphaned = True
+                                    orphan_type = "old_generation_nodes"
+
+                                    # Determine new generation recommendations
+                                    recommendations = []
+                                    for node in old_gen_node_groups:
+                                        instance_type = node["instance_type"]
+                                        new_generation = instance_type
+                                        if ".t2." in instance_type:
+                                            new_generation = instance_type.replace(".t2.", ".t3.")
+                                        elif ".m4." in instance_type:
+                                            new_generation = instance_type.replace(".m4.", ".m5.")
+                                        elif ".c4." in instance_type:
+                                            new_generation = instance_type.replace(".c4.", ".c5.")
+                                        elif ".r4." in instance_type:
+                                            new_generation = instance_type.replace(".r4.", ".r5.")
+                                        recommendations.append(f"{instance_type} → {new_generation}")
+
+                                    orphan_reasons.append(f"Old generation instance types detected: {len(old_gen_node_groups)} node groups")
+                                    orphan_reasons.append(f"Recommended upgrades: {', '.join(recommendations[:3])}")
+                                    orphan_reasons.append(f"Modern instances offer ~{old_generation_savings_percent}% cost savings + better performance")
+                                    confidence_level = "medium"
+
+                            # Scenario #8: Dev/Test clusters running 24/7
+                            if detect_dev_test_24_7 and total_nodes > 0 and orphan_type is None:
+                                is_dev_test_cluster = False
+                                detection_method = ""
+
+                                # Check tags
+                                try:
+                                    tags_response = await eks.list_tags_for_resource(
+                                        resourceArn=cluster.get("arn", "")
+                                    )
+                                    tags_dict = tags_response.get("tags", {})
+                                    env_tag = tags_dict.get(dev_test_tag_key, "").lower()
+
+                                    if env_tag in [v.lower() for v in dev_test_tag_values]:
+                                        is_dev_test_cluster = True
+                                        detection_method = f"Environment tag: {env_tag}"
+                                except Exception:
+                                    pass
+
+                                # Check naming patterns
+                                if not is_dev_test_cluster:
+                                    for pattern in dev_test_name_patterns:
+                                        if cluster_name.lower().startswith(pattern.lower()):
+                                            is_dev_test_cluster = True
+                                            detection_method = f"Name pattern: {pattern}"
+                                            break
+
+                                if is_dev_test_cluster:
+                                    is_orphaned = True
+                                    orphan_type = "dev_test_24_7"
+
+                                    # Calculate business hours savings
+                                    off_hours_percentage = 123 / 168  # 73.2%
+                                    orphan_reasons.append(f"Dev/test cluster running 24/7 ({detection_method})")
+                                    orphan_reasons.append(f"Business hours only: {business_hours_start}:00-{business_hours_end}:00, Mon-Fri")
+                                    orphan_reasons.append(f"Off-hours waste: {off_hours_percentage*100:.1f}% of time ({123}h/{168}h per week)")
+                                    orphan_reasons.append("Recommendation: Scale to zero nights/weekends or use Karpenter auto-scaling")
+                                    confidence_level = "high" if "tag" in detection_method.lower() else "medium"
+
+                            # Scenario #9: 100% On-Demand nodes (Spot instances not used)
+                            if detect_spot_not_used and total_nodes >= min_nodes_for_spot and orphan_type is None:
+                                on_demand_nodes_count = 0
+                                spot_nodes_count = 0
+
+                                for ng_name in nodegroups:
+                                    ng_info = await eks.describe_nodegroup(
+                                        clusterName=cluster_name, nodegroupName=ng_name
+                                    )
+                                    ng = ng_info["nodegroup"]
+                                    capacity_type = ng.get("capacityType", "ON_DEMAND")
+                                    desired_size = ng.get("scalingConfig", {}).get("desiredSize", 0)
+
+                                    if capacity_type == "SPOT":
+                                        spot_nodes_count += desired_size
+                                    else:
+                                        on_demand_nodes_count += desired_size
+
+                                # Flag if 100% on-demand (no spot instances)
+                                if on_demand_nodes_count > 0 and spot_nodes_count == 0:
+                                    is_orphaned = True
+                                    orphan_type = "spot_not_used"
+                                    spot_percentage = spot_mix_percentage_recommended
+
+                                    orphan_reasons.append(f"100% On-Demand nodes ({on_demand_nodes_count} nodes, 0 Spot)")
+                                    orphan_reasons.append(f"Spot instances are 70% cheaper than On-Demand")
+                                    orphan_reasons.append(f"Recommendation: Migrate {spot_percentage:.0f}% to Spot for 42% cost savings")
+                                    orphan_reasons.append("Use managed node groups with Spot capacity for fault-tolerant workloads")
+                                    confidence_level = "medium"
+
+                            # Scenario #10: Fargate cost vs EC2 analysis
+                            if detect_fargate_cost_vs_ec2 and len(fargate_profiles) > 0 and total_nodes == 0 and orphan_type is None:
+                                # This is a Fargate-only cluster
+                                # Estimate if EC2 would be cheaper based on pod count (simplified)
+                                # Note: In production, would query Kubernetes API for actual pod count
+                                # For now, we'll flag Fargate-only clusters with many profiles as potential candidates
+                                if len(fargate_profiles) >= fargate_break_even_pods // 2:  # Heuristic: profiles suggest many pods
+                                    is_orphaned = True
+                                    orphan_type = "fargate_cost_vs_ec2"
+
+                                    orphan_reasons.append(f"Fargate-only cluster with {len(fargate_profiles)} profiles")
+                                    orphan_reasons.append("Fargate is more expensive than EC2 for high-utilization steady workloads")
+                                    orphan_reasons.append(f"If >15 pods running 24/7, EC2 nodes would be ~40% cheaper")
+                                    orphan_reasons.append("Recommendation: Analyze pod count and consider migrating to EC2 node groups")
+                                    confidence_level = "low"  # Low confidence without actual pod count
 
                             if is_orphaned:
                                 # Calculate costs
