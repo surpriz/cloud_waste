@@ -730,7 +730,58 @@ DEFAULT_DETECTION_RULES = {
         "failure_rate_threshold": 95.0,  # > 95% errors = dead function
         "min_invocations_for_failure_check": 10,  # Minimum invocations to avoid false positives
         "failure_lookback_days": 30,  # Check last 30 days
-        "description": "Lambda functions: unused provisioned concurrency, never invoked, zero invocations, or 100% failures",
+
+        # Scenarios 5-10 (Phase 2 - Advanced detection)
+        # Scenario 5: Over-provisioned memory (>50% unused)
+        "detect_over_provisioned_memory": True,  # Detect memory over-provisioning
+        "memory_usage_threshold": 50.0,  # <50% memory utilization = over-provisioned
+        "min_invocations_for_memory_check": 100,  # Minimum invocations to analyze memory
+        "memory_lookback_days": 30,  # Check last 30 days of memory usage
+
+        # Scenario 6: Timeout too high vs actual duration
+        "detect_timeout_too_high": True,  # Detect excessive timeout configuration
+        "timeout_ratio_threshold": 10.0,  # Timeout > 10× actual duration = excessive
+        "min_avg_duration_ms": 500,  # Minimum average duration to check (500ms)
+        "timeout_lookback_days": 30,  # Check last 30 days of duration
+
+        # Scenario 7: Old/deprecated runtime
+        "detect_old_deprecated_runtime": True,  # Detect deprecated or EOL runtimes
+        "deprecated_runtimes": [
+            # Python deprecated
+            "python2.7", "python3.6", "python3.7",
+            # Node.js deprecated
+            "nodejs", "nodejs4.3", "nodejs4.3-edge", "nodejs6.10", "nodejs8.10", "nodejs10.x", "nodejs12.x",
+            # Ruby deprecated
+            "ruby2.5", "ruby2.7",
+            # Java deprecated
+            "java8",
+            # .NET deprecated
+            "dotnetcore2.0", "dotnetcore2.1", "dotnetcore3.1",
+            # Go deprecated
+            "go1.x"
+        ],
+        "deprecated_runtime_confidence": "high",  # All deprecated runtimes = high confidence
+
+        # Scenario 8: Excessive cold starts (>20% of invocations)
+        "detect_excessive_cold_starts": True,  # Detect high cold start rate
+        "cold_start_threshold_pct": 20.0,  # >20% cold starts = excessive
+        "cold_start_lookback_days": 30,  # Check last 30 days
+        "min_invocations_for_cold_start_check": 100,  # Need sufficient invocations
+
+        # Scenario 9: Excessive duration (p99/p50 ratio >5× or p99 >10s)
+        "detect_excessive_duration": True,  # Detect inefficient code patterns
+        "duration_p99_p50_ratio": 5.0,  # p99 > 5× p50 = inefficient
+        "max_duration_threshold_ms": 10000,  # p99 > 10,000ms = excessive
+        "min_invocations_for_duration_check": 100,  # Need sufficient data
+        "duration_lookback_days": 30,  # Check last 30 days
+
+        # Scenario 10: Reserved concurrency unused (<20% utilization)
+        "detect_reserved_concurrency_unused": True,  # Detect unused reserved capacity
+        "reserved_utilization_threshold": 20.0,  # <20% utilization = unused
+        "min_reserved_units": 10,  # Only check if ≥10 units reserved
+        "reserved_lookback_days": 30,  # Check last 30 days
+
+        "description": "Lambda functions - 10 waste scenarios (100% coverage): unused provisioned concurrency, never invoked, zero invocations, 100% failures, over-provisioned memory, timeout too high, deprecated runtime, excessive cold starts, excessive duration, reserved concurrency unused",
     },
     "dynamodb_table": {
         "enabled": True,

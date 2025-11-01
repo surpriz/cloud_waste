@@ -44,6 +44,7 @@ const AWS_RESOURCE_ICONS: { [key: string]: any } = {
   nat_gateway: Network,
   eks_cluster: Cpu,
   s3_bucket: Archive,
+  lambda_function: Zap,
 };
 
 const AWS_RESOURCE_LABELS: { [key: string]: string } = {
@@ -56,6 +57,7 @@ const AWS_RESOURCE_LABELS: { [key: string]: string } = {
   nat_gateway: "NAT Gateways",
   eks_cluster: "EKS Clusters",
   s3_bucket: "S3 Buckets",
+  lambda_function: "Lambda Functions",
 };
 
 // Azure Resources
