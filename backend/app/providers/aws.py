@@ -2052,6 +2052,9 @@ class AWSProvider(CloudProviderBase):
         min_age_days = detection_rules.get("min_age_days", 3)
 
         try:
+            # Get dynamic pricing for Elastic IP
+            eip_price = await self.pricing_service.get_aws_price("elastic_ip", region)
+
             async with self.session.client("ec2", region_name=region) as ec2:
                 response = await ec2.describe_addresses()
 
@@ -2112,7 +2115,7 @@ class AWSProvider(CloudProviderBase):
                         confidence = "high" if age_days >= 30 else "medium"
                         reason = f"Instance {instance_id} has {len(eips)} EIPs (max {max_eips_per_instance} recommended). Additional EIP #{i+1} wastes $3.60/month."
 
-                        already_wasted = round((age_days / 30) * self.PRICING["elastic_ip"], 2)
+                        already_wasted = round((age_days / 30) * eip_price, 2)
 
                         metadata = {
                             "public_ip": public_ip,
@@ -2134,7 +2137,7 @@ class AWSProvider(CloudProviderBase):
                                 resource_id=allocation_id,
                                 resource_name=name,
                                 region=region,
-                                estimated_monthly_cost=self.PRICING["elastic_ip"],
+                                estimated_monthly_cost=eip_price,
                                 resource_metadata=metadata,
                             )
                         )
@@ -2176,6 +2179,9 @@ class AWSProvider(CloudProviderBase):
         min_age_days = detection_rules.get("min_age_days", 3)
 
         try:
+            # Get dynamic pricing for Elastic IP
+            eip_price = await self.pricing_service.get_aws_price("elastic_ip", region)
+
             async with self.session.client("ec2", region_name=region) as ec2:
                 # Get all EIPs
                 eips_response = await ec2.describe_addresses()
@@ -2236,7 +2242,7 @@ class AWSProvider(CloudProviderBase):
                     confidence = "critical" if detached_days >= 90 else ("high" if detached_days >= 30 else "medium")
                     reason = f"Associated with detached ENI {network_interface_id} for {detached_days}+ days ($3.60/month waste)"
 
-                    already_wasted = round((age_days / 30) * self.PRICING["elastic_ip"], 2)
+                    already_wasted = round((age_days / 30) * eip_price, 2)
 
                     metadata = {
                         "public_ip": public_ip,
@@ -2257,7 +2263,7 @@ class AWSProvider(CloudProviderBase):
                             resource_id=allocation_id,
                             resource_name=name,
                             region=region,
-                            estimated_monthly_cost=self.PRICING["elastic_ip"],
+                            estimated_monthly_cost=eip_price,
                             resource_metadata=metadata,
                         )
                     )
@@ -2299,6 +2305,9 @@ class AWSProvider(CloudProviderBase):
         min_age_days = detection_rules.get("min_age_days", 3)
 
         try:
+            # Get dynamic pricing for Elastic IP
+            eip_price = await self.pricing_service.get_aws_price("elastic_ip", region)
+
             async with self.session.client("ec2", region_name=region) as ec2:
                 response = await ec2.describe_addresses()
 
@@ -2347,7 +2356,7 @@ class AWSProvider(CloudProviderBase):
                     confidence = "critical" if age_days >= 90 else ("high" if age_days >= 30 else "medium")
                     reason = f"Never associated with any resource for {age_days} days ($3.60/month waste)"
 
-                    already_wasted = round((age_days / 30) * self.PRICING["elastic_ip"], 2)
+                    already_wasted = round((age_days / 30) * eip_price, 2)
 
                     metadata = {
                         "public_ip": public_ip,
@@ -2366,7 +2375,7 @@ class AWSProvider(CloudProviderBase):
                             resource_id=allocation_id,
                             resource_name=name,
                             region=region,
-                            estimated_monthly_cost=self.PRICING["elastic_ip"],
+                            estimated_monthly_cost=eip_price,
                             resource_metadata=metadata,
                         )
                     )
@@ -2410,6 +2419,9 @@ class AWSProvider(CloudProviderBase):
         min_observation_days = detection_rules.get("min_observation_days", 30)
 
         try:
+            # Get dynamic pricing for Elastic IP
+            eip_price = await self.pricing_service.get_aws_price("elastic_ip", region)
+
             async with self.session.client("ec2", region_name=region) as ec2:
                 # Get all EIPs
                 eips_response = await ec2.describe_addresses()
@@ -2483,9 +2495,9 @@ class AWSProvider(CloudProviderBase):
 
                     # **KEY**: NAT Gateway + EIP = $32.40 + $3.60 = $36/month
                     nat_gateway_cost = 32.40
-                    total_monthly_cost = nat_gateway_cost + self.PRICING["elastic_ip"]
+                    total_monthly_cost = nat_gateway_cost + eip_price
 
-                    reason = f"EIP on unused NAT Gateway {nat_gw_id} ({total_traffic_gb:.4f} GB traffic in {min_observation_days} days). Total waste: ${total_monthly_cost:.2f}/month (NAT Gateway ${nat_gateway_cost} + EIP ${self.PRICING['elastic_ip']})"
+                    reason = f"EIP on unused NAT Gateway {nat_gw_id} ({total_traffic_gb:.4f} GB traffic in {min_observation_days} days). Total waste: ${total_monthly_cost:.2f}/month (NAT Gateway ${nat_gateway_cost} + EIP ${eip_price})"
 
                     already_wasted = round((age_days / 30) * total_monthly_cost, 2)
 
@@ -2554,6 +2566,9 @@ class AWSProvider(CloudProviderBase):
         min_observation_days = detection_rules.get("min_observation_days", 30)
 
         try:
+            # Get dynamic pricing for Elastic IP
+            eip_price = await self.pricing_service.get_aws_price("elastic_ip", region)
+
             async with self.session.client("ec2", region_name=region) as ec2:
                 # Get all EIPs
                 eips_response = await ec2.describe_addresses()
@@ -2612,7 +2627,7 @@ class AWSProvider(CloudProviderBase):
                     total_traffic_mb = total_traffic_bytes / (1024 * 1024)
                     reason = f"EIP on idle running instance {instance_id} ({total_traffic_mb:.2f} MB traffic in {min_observation_days} days). Instance running but unused for {running_days} days."
 
-                    already_wasted = round((age_days / 30) * self.PRICING["elastic_ip"], 2)
+                    already_wasted = round((age_days / 30) * eip_price, 2)
 
                     metadata = {
                         "public_ip": public_ip,
@@ -2635,7 +2650,7 @@ class AWSProvider(CloudProviderBase):
                             resource_id=allocation_id,
                             resource_name=name,
                             region=region,
-                            estimated_monthly_cost=self.PRICING["elastic_ip"],
+                            estimated_monthly_cost=eip_price,
                             resource_metadata=metadata,
                         )
                     )
@@ -2679,6 +2694,9 @@ class AWSProvider(CloudProviderBase):
         min_age_days = detection_rules.get("min_age_days", 3)
 
         try:
+            # Get dynamic pricing for Elastic IP
+            eip_price = await self.pricing_service.get_aws_price("elastic_ip", region)
+
             async with self.session.client("ec2", region_name=region) as ec2:
                 # Get all EIPs
                 eips_response = await ec2.describe_addresses()
@@ -2738,7 +2756,7 @@ class AWSProvider(CloudProviderBase):
 
                     reason = f"EIP on low-traffic instance {instance_id} ({total_traffic_gb:.4f} GB in {min_observation_days} days, < {low_traffic_threshold_gb} GB threshold)."
 
-                    already_wasted = round((age_days / 30) * self.PRICING["elastic_ip"], 2)
+                    already_wasted = round((age_days / 30) * eip_price, 2)
 
                     metadata = {
                         "public_ip": public_ip,
@@ -2762,7 +2780,7 @@ class AWSProvider(CloudProviderBase):
                             resource_id=allocation_id,
                             resource_name=name,
                             region=region,
-                            estimated_monthly_cost=self.PRICING["elastic_ip"],
+                            estimated_monthly_cost=eip_price,
                             resource_metadata=metadata,
                         )
                     )
@@ -2805,6 +2823,9 @@ class AWSProvider(CloudProviderBase):
         min_observation_days = detection_rules.get("min_observation_days", 30)
 
         try:
+            # Get dynamic pricing for Elastic IP
+            eip_price = await self.pricing_service.get_aws_price("elastic_ip", region)
+
             async with self.session.client("ec2", region_name=region) as ec2:
                 # Get all EIPs
                 eips_response = await ec2.describe_addresses()
@@ -2878,9 +2899,9 @@ class AWSProvider(CloudProviderBase):
 
                     # **KEY**: NAT Gateway + EIP = $32.40 + $3.60 = $36/month
                     nat_gateway_cost = 32.40
-                    total_monthly_cost = nat_gateway_cost + self.PRICING["elastic_ip"]
+                    total_monthly_cost = nat_gateway_cost + eip_price
 
-                    reason = f"EIP on NAT Gateway {nat_gw_id} with ZERO active connections for {age_days} days. Total waste: ${total_monthly_cost:.2f}/month (NAT Gateway ${nat_gateway_cost} + EIP ${self.PRICING['elastic_ip']})"
+                    reason = f"EIP on NAT Gateway {nat_gw_id} with ZERO active connections for {age_days} days. Total waste: ${total_monthly_cost:.2f}/month (NAT Gateway ${nat_gateway_cost} + EIP ${eip_price})"
 
                     already_wasted = round((age_days / 30) * total_monthly_cost, 2)
 
@@ -2949,6 +2970,9 @@ class AWSProvider(CloudProviderBase):
         min_observation_days = detection_rules.get("min_observation_days", 30)
 
         try:
+            # Get dynamic pricing for Elastic IP
+            eip_price = await self.pricing_service.get_aws_price("elastic_ip", region)
+
             async with self.session.client("ec2", region_name=region) as ec2:
                 # Get all EIPs
                 eips_response = await ec2.describe_addresses()
@@ -3008,7 +3032,7 @@ class AWSProvider(CloudProviderBase):
 
                     reason = f"EIP on failing instance {instance_id} ({int(status_check_failed)} status check failures in {min_observation_days} days). Instance may be unresponsive or misconfigured."
 
-                    already_wasted = round((age_days / 30) * self.PRICING["elastic_ip"], 2)
+                    already_wasted = round((age_days / 30) * eip_price, 2)
 
                     metadata = {
                         "public_ip": public_ip,
@@ -3033,7 +3057,7 @@ class AWSProvider(CloudProviderBase):
                             resource_id=allocation_id,
                             resource_name=name,
                             region=region,
-                            estimated_monthly_cost=self.PRICING["elastic_ip"],
+                            estimated_monthly_cost=eip_price,
                             resource_metadata=metadata,
                         )
                     )
@@ -3100,7 +3124,12 @@ class AWSProvider(CloudProviderBase):
                 for snapshot in all_snapshots:
                     snapshot_id = snapshot["SnapshotId"]
                     volume_id = snapshot.get("VolumeId")
-                    start_time = snapshot["StartTime"]
+                    start_time = snapshot.get("StartTime")
+
+                    # Skip snapshot if no StartTime available
+                    if not start_time:
+                        continue
+
                     age_days = (datetime.now(timezone.utc) - start_time).days
 
                     should_flag = False
@@ -3271,7 +3300,12 @@ class AWSProvider(CloudProviderBase):
                         for i, snapshot in enumerate(volume_snapshots):
                             if i >= max_snapshots_per_volume:
                                 snapshot_id = snapshot["SnapshotId"]
-                                start_time = snapshot["StartTime"]
+                                start_time = snapshot.get("StartTime")
+
+                                # Skip snapshot if no StartTime available
+                                if not start_time:
+                                    continue
+
                                 age_days = (datetime.now(timezone.utc) - start_time).days
                                 size_gb = snapshot["VolumeSize"]
                                 monthly_cost = size_gb * self.PRICING["snapshot_per_gb"]
@@ -3410,7 +3444,12 @@ class AWSProvider(CloudProviderBase):
                             break
 
                     if associated_ami:
-                        start_time = snapshot["StartTime"]
+                        start_time = snapshot.get("StartTime")
+
+                        # Skip snapshot if no StartTime available
+                        if not start_time:
+                            continue
+
                         age_days = (datetime.now(timezone.utc) - start_time).days
                         size_gb = snapshot["VolumeSize"]
                         monthly_cost = size_gb * self.PRICING["snapshot_per_gb"]
@@ -3498,7 +3537,12 @@ class AWSProvider(CloudProviderBase):
 
                 for snapshot in all_snapshots:
                     snapshot_id = snapshot["SnapshotId"]
-                    start_time = snapshot["StartTime"]
+                    start_time = snapshot.get("StartTime")
+
+                    # Skip snapshot if no StartTime available
+                    if not start_time:
+                        continue
+
                     age_days = (datetime.now(timezone.utc) - start_time).days
 
                     # Check if snapshot is old enough
@@ -3608,7 +3652,12 @@ class AWSProvider(CloudProviderBase):
                 for snapshot in all_snapshots:
                     snapshot_id = snapshot["SnapshotId"]
                     description = snapshot.get("Description", "")
-                    start_time = snapshot["StartTime"]
+                    start_time = snapshot.get("StartTime")
+
+                    # Skip snapshot if no StartTime available
+                    if not start_time:
+                        continue
+
                     age_days = (datetime.now(timezone.utc) - start_time).days
 
                     # Check if snapshot is old enough
@@ -3714,7 +3763,12 @@ class AWSProvider(CloudProviderBase):
                 for snapshot in all_snapshots:
                     snapshot_id = snapshot["SnapshotId"]
                     state = snapshot.get("State", "")
-                    start_time = snapshot["StartTime"]
+                    start_time = snapshot.get("StartTime")
+
+                    # Skip snapshot if no StartTime available
+                    if not start_time:
+                        continue
+
                     age_days = (datetime.now(timezone.utc) - start_time).days
 
                     # Flag if in error state OR pending for too long
@@ -3813,7 +3867,12 @@ class AWSProvider(CloudProviderBase):
                 for snapshot in all_snapshots:
                     snapshot_id = snapshot["SnapshotId"]
                     tags = snapshot.get("Tags", [])
-                    start_time = snapshot["StartTime"]
+                    start_time = snapshot.get("StartTime")
+
+                    # Skip snapshot if no StartTime available
+                    if not start_time:
+                        continue
+
                     age_days = (datetime.now(timezone.utc) - start_time).days
 
                     # Flag if no tags and old enough
@@ -3895,7 +3954,12 @@ class AWSProvider(CloudProviderBase):
                 for snapshot in all_snapshots:
                     snapshot_id = snapshot["SnapshotId"]
                     tags = snapshot.get("Tags", [])
-                    start_time = snapshot["StartTime"]
+                    start_time = snapshot.get("StartTime")
+
+                    # Skip snapshot if no StartTime available
+                    if not start_time:
+                        continue
+
                     age_days = (datetime.now(timezone.utc) - start_time).days
 
                     # Check if snapshot is old enough
@@ -4016,15 +4080,21 @@ class AWSProvider(CloudProviderBase):
 
                         prev_snapshot = volume_snapshots[i - 1]
 
+                        # Get StartTime for both snapshots (skip if either missing)
+                        snapshot_start_time = snapshot.get("StartTime")
+                        prev_snapshot_start_time = prev_snapshot.get("StartTime")
+
+                        if not snapshot_start_time or not prev_snapshot_start_time:
+                            continue
+
                         # Check if same size and within time window
                         if snapshot["VolumeSize"] == prev_snapshot["VolumeSize"]:
-                            time_diff = snapshot["StartTime"] - prev_snapshot["StartTime"]
+                            time_diff = snapshot_start_time - prev_snapshot_start_time
                             time_diff_hours = time_diff.total_seconds() / 3600
 
                             if time_diff_hours <= duplicate_window_hours:
                                 snapshot_id = snapshot["SnapshotId"]
-                                start_time = snapshot["StartTime"]
-                                age_days = (datetime.now(timezone.utc) - start_time).days
+                                age_days = (datetime.now(timezone.utc) - snapshot_start_time).days
                                 size_gb = snapshot["VolumeSize"]
                                 monthly_cost = size_gb * self.PRICING["snapshot_per_gb"]
 
@@ -4039,7 +4109,7 @@ class AWSProvider(CloudProviderBase):
                                 metadata = {
                                     "size_gb": size_gb,
                                     "volume_id": volume_id,
-                                    "created_at": start_time.isoformat(),
+                                    "created_at": snapshot_start_time.isoformat(),
                                     "age_days": age_days,
                                     "description": description,
                                     "encrypted": snapshot.get("Encrypted", False),
@@ -4255,7 +4325,11 @@ class AWSProvider(CloudProviderBase):
                         for instance in reservation.get("Instances", []):
                             instance_id = instance["InstanceId"]
                             instance_type = instance["InstanceType"]
-                            launch_time = instance["LaunchTime"]
+                            launch_time = instance.get("LaunchTime")
+
+                            # Skip instance if no LaunchTime available
+                            if not launch_time:
+                                continue
 
                             # Calculate instance age
                             instance_age_days = (now - launch_time).days
