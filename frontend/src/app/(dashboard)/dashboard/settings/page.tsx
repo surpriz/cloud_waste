@@ -45,6 +45,7 @@ const AWS_RESOURCE_ICONS: { [key: string]: any } = {
   eks_cluster: Cpu,
   s3_bucket: Archive,
   lambda_function: Zap,
+  dynamodb_table: Database,
 };
 
 const AWS_RESOURCE_LABELS: { [key: string]: string } = {
@@ -58,6 +59,7 @@ const AWS_RESOURCE_LABELS: { [key: string]: string } = {
   eks_cluster: "EKS Clusters",
   s3_bucket: "S3 Buckets",
   lambda_function: "Lambda Functions",
+  dynamodb_table: "DynamoDB Tables",
 };
 
 // Azure Resources

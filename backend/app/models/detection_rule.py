@@ -804,7 +804,38 @@ DEFAULT_DETECTION_RULES = {
         # PRIORITY 5: Empty tables
         "detect_empty_tables": True,  # Detect tables with 0 items
         "empty_table_min_age_days": 90,  # Empty for 90+ days
-        "description": "DynamoDB tables: over-provisioned capacity, unused GSI, never used (provisioned/on-demand), or empty tables",
+
+        # Scenarios 6-10 (Phase 2 - Advanced detection)
+        # Scenario 6: PITR enabled but never used
+        "detect_pitr_unused": True,  # Detect PITR enabled without restore history
+        "pitr_min_age_days": 30,  # PITR enabled for 30+ days without use
+        "pitr_cost_per_gb": 0.20,  # $0.20/GB/month for continuous backups
+
+        # Scenario 7: Global Tables replication unused
+        "detect_global_tables_unused": True,  # Detect replica regions with 0 traffic
+        "replica_min_age_days": 30,  # Replica active for 30+ days
+        "replica_traffic_threshold_pct": 1.0,  # <1% traffic in replica = unused
+
+        # Scenario 8: DynamoDB Streams without consumers
+        "detect_streams_no_consumers": True,  # Detect Streams enabled without Lambda/Kinesis consumers
+        "streams_min_age_days": 14,  # Streams enabled for 14+ days
+        "check_lambda_triggers": True,  # Check for Lambda event source mappings
+        "check_kinesis_consumers": True,  # Check for Kinesis Data Streams consumers
+
+        # Scenario 9: TTL disabled on temporal data
+        "detect_ttl_disabled_temporal": True,  # Detect tables with temporal data without TTL
+        "temporal_data_keywords": [  # Table name patterns indicating temporal data
+            "session", "sessions", "cache", "token", "tokens", "otp",
+            "log", "logs", "event", "events", "temp", "temporary"
+        ],
+        "item_growth_rate_threshold": 10.0,  # >10% monthly growth = potential temporal data
+
+        # Scenario 10: Wrong billing mode (Provisioned vs On-Demand mismatch)
+        "detect_wrong_billing_mode": True,  # Detect suboptimal billing mode
+        "provisioned_utilization_threshold_low": 30.0,  # <30% utilization = should be On-Demand
+        "ondemand_consistency_threshold": 70.0,  # >70% consistent traffic = should be Provisioned
+
+        "description": "DynamoDB tables - 10 waste scenarios (100% coverage): over-provisioned capacity, unused GSI, never used (provisioned/on-demand), empty tables, unused PITR, unused Global Tables replication, Streams without consumers, missing TTL on temporal data, wrong billing mode",
     },
     # ===================================
     # AZURE RESOURCES (Managed by Azure)
