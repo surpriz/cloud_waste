@@ -325,6 +325,15 @@ class PricingService:
                 fallback_price=fallback_price,
             )
 
+        # Cache the fallback price so it appears in the dashboard
+        await self._save_price_to_db(
+            CloudProvider.AWS.value,
+            service,
+            region,
+            fallback_price,
+            source="fallback",
+        )
+
         return fallback_price
 
     async def _fetch_aws_price_from_api(self, service: str, region: str) -> float | None:
