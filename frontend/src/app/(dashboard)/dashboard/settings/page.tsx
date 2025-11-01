@@ -43,6 +43,7 @@ const AWS_RESOURCE_ICONS: { [key: string]: any } = {
   rds_instance: Database,
   nat_gateway: Network,
   eks_cluster: Cpu,
+  s3_bucket: Archive,
 };
 
 const AWS_RESOURCE_LABELS: { [key: string]: string } = {
@@ -54,6 +55,7 @@ const AWS_RESOURCE_LABELS: { [key: string]: string } = {
   rds_instance: "RDS Instances",
   nat_gateway: "NAT Gateways",
   eks_cluster: "EKS Clusters",
+  s3_bucket: "S3 Buckets",
 };
 
 // Azure Resources

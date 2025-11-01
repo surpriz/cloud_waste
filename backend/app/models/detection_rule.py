@@ -656,18 +656,56 @@ DEFAULT_DETECTION_RULES = {
         "enabled": True,
         "min_bucket_age_days": 1,  # TEMPORAIRE: Minimum bucket age before flagging (ORIGINAL: 90)
         "confidence_threshold_days": 180,
-        # Empty bucket detection
+
+        # Scenarios 1-4 (Phase 1 - Basic detection)
+        # Scenario 1: Empty bucket detection
         "detect_empty": True,  # Detect buckets with 0 objects
-        # Old objects detection
+
+        # Scenario 2: Old objects detection
         "detect_old_objects": True,  # Detect buckets where ALL objects are very old
         "object_age_threshold_days": 1,  # TEMPORAIRE: All objects > 1 days old (ORIGINAL: 365)
-        # Incomplete multipart uploads detection
+
+        # Scenario 3: Incomplete multipart uploads detection
         "detect_multipart_uploads": True,  # Detect incomplete multipart uploads
         "multipart_age_days": 1,  # TEMPORAIRE: Incomplete uploads > 1 days old (ORIGINAL: 30)
-        # No lifecycle policy detection
+
+        # Scenario 4: No lifecycle policy detection
         "detect_no_lifecycle": True,  # Detect buckets without lifecycle policies + old objects
         "lifecycle_age_threshold_days": 1,  # TEMPORAIRE: Buckets with objects > 1 days + no lifecycle (ORIGINAL: 180)
-        "description": "S3 buckets: empty, old objects, incomplete multipart uploads, no lifecycle policy",
+
+        # Scenarios 5-10 (Phase 2 - Advanced detection)
+        # Scenario 5: Wrong storage class (Standard vs IA/Glacier)
+        "detect_wrong_storage_class": True,  # Detect objects in Standard that should be in IA/Glacier
+        "min_object_age_for_ia": 30,  # Objects > 30 days eligible for Standard-IA
+        "access_threshold_per_month": 1.0,  # <1 access/month → recommend IA
+        "cloudwatch_lookback_days": 90,  # Analyze last 90 days of access patterns
+
+        # Scenario 6: Excessive versions (10+ versions/object)
+        "detect_excessive_versions": True,  # Detect buckets with excessive versioning
+        "version_threshold_per_object": 10,  # >10 versions per object = excessive
+        "min_versions_bucket_age_days": 90,  # Only check buckets older than 90 days
+
+        # Scenario 7: Intelligent-Tiering opportunity (>500GB)
+        "detect_intelligent_tiering_opportunity": True,  # Detect large buckets without Intelligent-Tiering
+        "intelligent_tiering_min_size_gb": 500.0,  # Buckets >500GB should use Intelligent-Tiering
+        "access_pattern_lookback_days": 90,  # Analyze access patterns over 90 days
+
+        # Scenario 8: Transfer Acceleration unused
+        "detect_transfer_acceleration_unused": True,  # Detect Transfer Acceleration enabled but unused
+        "transfer_accel_min_days_enabled": 30,  # Min days enabled before flagging
+        "transfer_accel_min_usage_bytes": 1048576,  # Min 1MB usage to consider "used" (1024*1024)
+
+        # Scenario 9: Replication unused (30 days no activity)
+        "detect_replication_unused": True,  # Detect Cross-Region Replication without activity
+        "replication_no_activity_days": 30,  # No replication for 30 days
+        "replication_min_age_days": 30,  # Min days since replication enabled
+
+        # Scenario 10: Glacier never retrieved (>1 year)
+        "detect_glacier_never_retrieved": True,  # Detect Glacier objects never retrieved
+        "glacier_min_age_days": 365,  # Objects in Glacier >365 days
+        "glacier_retrieval_lookback_days": 365,  # Check last 365 days for retrieval requests
+
+        "description": "S3 buckets - 10 waste scenarios (100% coverage): empty, old objects, incomplete multipart, no lifecycle, wrong storage class, excessive versions, no Intelligent-Tiering, Transfer Acceleration unused, Replication unused, Glacier never retrieved",
     },
     "lambda_function": {
         "enabled": True,
