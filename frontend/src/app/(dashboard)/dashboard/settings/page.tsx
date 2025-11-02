@@ -520,7 +520,10 @@ const AZURE_RESOURCE_LABELS: { [key: string]: string } = {
 };
 
 // Helper function to get provider from resource type
-const getResourceProvider = (resourceType: string): "aws" | "azure" | "gcp" => {
+const getResourceProvider = (resourceType: string): "aws" | "azure" | "gcp" | "microsoft365" => {
+  if (resourceType in MICROSOFT365_RESOURCE_ICONS) {
+    return "microsoft365";
+  }
   if (resourceType in GCP_RESOURCE_ICONS) {
     return "gcp";
   }
@@ -533,6 +536,9 @@ const getResourceProvider = (resourceType: string): "aws" | "azure" | "gcp" => {
 // Helper function to get icon for resource type
 const getResourceIcon = (resourceType: string) => {
   const provider = getResourceProvider(resourceType);
+  if (provider === "microsoft365") {
+    return MICROSOFT365_RESOURCE_ICONS[resourceType] || HardDrive;
+  }
   if (provider === "gcp") {
     return GCP_RESOURCE_ICONS[resourceType] || HardDrive;
   }
@@ -545,6 +551,9 @@ const getResourceIcon = (resourceType: string) => {
 // Helper function to get label for resource type
 const getResourceLabel = (resourceType: string): string => {
   const provider = getResourceProvider(resourceType);
+  if (provider === "microsoft365") {
+    return MICROSOFT365_RESOURCE_LABELS[resourceType] || resourceType;
+  }
   if (provider === "gcp") {
     return GCP_RESOURCE_LABELS[resourceType] || resourceType;
   }
@@ -676,6 +685,9 @@ const RESOURCE_CATEGORIES = {
       "app_service_low_request_count", "app_service_no_traffic_business_hours", "app_service_high_http_error_rate",
       "app_service_slow_response_time", "app_service_auto_scale_never_triggers", "app_service_cold_start_excessive"
     ],
+  },
+  microsoft365: {
+    collaboration: ["sharepoint_sites", "onedrive_drives"],
   }
 };
 
@@ -702,6 +714,9 @@ const CATEGORY_LABELS = {
     virtual_desktop: "🖥️ Virtual Desktop",
     big_data_ai: "🤖 Big Data & AI",
     app_services: "⚡ App Services",
+  },
+  microsoft365: {
+    collaboration: "📁 Collaboration & Storage",
   }
 };
 
@@ -732,8 +747,19 @@ const GCP_RESOURCE_LABELS: { [key: string]: string } = {
   cloud_sql_idle: "Cloud SQL (Idle)",
 };
 
+// Microsoft 365 Resource Icons & Labels
+const MICROSOFT365_RESOURCE_ICONS: { [key: string]: any } = {
+  sharepoint_sites: FileText,
+  onedrive_drives: HardDrive,
+};
+
+const MICROSOFT365_RESOURCE_LABELS: { [key: string]: string } = {
+  sharepoint_sites: "SharePoint Sites",
+  onedrive_drives: "OneDrive Drives",
+};
+
 // Helper function to get resource category
-const getResourceCategory = (resourceType: string, provider: "aws" | "azure" | "gcp"): string | null => {
+const getResourceCategory = (resourceType: string, provider: "aws" | "azure" | "gcp" | "microsoft365"): string | null => {
   const categories = RESOURCE_CATEGORIES[provider];
   for (const [categoryName, resources] of Object.entries(categories)) {
     if (resources.includes(resourceType)) {
@@ -747,7 +773,7 @@ export default function SettingsPage() {
   const [activeTab, setActiveTab] = useState<"profile" | "notifications" | "security" | "detection">("detection");
   const [detectionRules, setDetectionRules] = useState<DetectionRule[]>([]);
   const [isLoading, setIsLoading] = useState(false);
-  const [selectedProvider, setSelectedProvider] = useState<"aws" | "azure" | "gcp" | "all">("all");
+  const [selectedProvider, setSelectedProvider] = useState<"aws" | "azure" | "gcp" | "microsoft365" | "all">("all");
   const [selectedCategory, setSelectedCategory] = useState<string>("all");
   const [searchQuery, setSearchQuery] = useState<string>("");
 
@@ -1024,6 +1050,16 @@ export default function SettingsPage() {
                   >
                     🔴 GCP
                   </button>
+                  <button
+                    onClick={() => setSelectedProvider("microsoft365")}
+                    className={`px-4 py-2 rounded-lg font-semibold transition-colors ${
+                      selectedProvider === "microsoft365"
+                        ? "bg-green-500 text-white"
+                        : "bg-white text-gray-700 border-2 border-gray-300 hover:bg-gray-50"
+                    }`}
+                  >
+                    🟢 Microsoft 365
+                  </button>
                 </div>
 
                 {/* Category Filter - Only show when a specific provider is selected */}
@@ -1038,8 +1074,8 @@ export default function SettingsPage() {
                       className="px-4 py-2 rounded-lg border-2 border-gray-300 bg-white font-semibold text-gray-700 hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-blue-500 cursor-pointer"
                     >
                       <option value="all">All Categories</option>
-                      {Object.entries(CATEGORY_LABELS[selectedProvider as "aws" | "azure" | "gcp"]).map(([key, label]) => {
-                        const providerCategories = RESOURCE_CATEGORIES[selectedProvider as "aws" | "azure" | "gcp"];
+                      {Object.entries(CATEGORY_LABELS[selectedProvider as "aws" | "azure" | "gcp" | "microsoft365"]).map(([key, label]) => {
+                        const providerCategories = RESOURCE_CATEGORIES[selectedProvider as "aws" | "azure" | "gcp" | "microsoft365"];
                         const count = (providerCategories as any)[key]?.length || 0;
                         return (
                           <option key={key} value={key}>
@@ -1092,7 +1128,7 @@ export default function SettingsPage() {
 
                   // Filter 2: Category
                   if (selectedCategory !== "all" && selectedProvider !== "all") {
-                    const category = getResourceCategory(rule.resource_type, selectedProvider as "aws" | "azure" | "gcp");
+                    const category = getResourceCategory(rule.resource_type, selectedProvider as "aws" | "azure" | "gcp" | "microsoft365");
                     if (category !== selectedCategory) return false;
                   }
 

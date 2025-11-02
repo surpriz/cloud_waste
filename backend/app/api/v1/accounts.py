@@ -13,12 +13,17 @@ from app.schemas.cloud_account import (
     AWSCredentials,
     AzureCredentials,
     GCPCredentials,
+    Microsoft365Credentials,
     CloudAccount,
     CloudAccountCreate,
     CloudAccountUpdate,
 )
 from app.services.aws_validator import AWSValidationError, validate_aws_credentials
 from app.services.azure_validator import AzureValidationError, validate_azure_credentials
+from app.services.microsoft365_validator import (
+    Microsoft365ValidationError,
+    validate_microsoft365_credentials,
+)
 
 router = APIRouter()
 
@@ -118,6 +123,36 @@ async def create_cloud_account(
         # GCP validation will be implemented in Phase 2
         if not account_in.account_identifier:
             account_in.account_identifier = account_in.gcp_project_id
+
+    elif account_in.provider == "microsoft365":
+        if (
+            not account_in.microsoft365_tenant_id
+            or not account_in.microsoft365_client_id
+            or not account_in.microsoft365_client_secret
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Microsoft 365 Tenant ID, Client ID, and Client Secret are required for Microsoft 365 accounts",
+            )
+
+        # Validate Microsoft 365 credentials
+        try:
+            credentials = Microsoft365Credentials(
+                tenant_id=account_in.microsoft365_tenant_id,
+                client_id=account_in.microsoft365_client_id,
+                client_secret=account_in.microsoft365_client_secret,
+            )
+            org_info = await validate_microsoft365_credentials(credentials)
+
+            # Use tenant_id as account_identifier
+            if not account_in.account_identifier:
+                account_in.account_identifier = org_info["tenant_id"]
+
+        except Microsoft365ValidationError as e:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Microsoft 365 credentials validation failed: {str(e)}",
+            )
 
     # Create cloud account with encrypted credentials
     try:
@@ -244,6 +279,39 @@ async def validate_credentials_before_creation(
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"❌ GCP validation failed: {str(e)}",
+            )
+
+    elif credentials_data.provider == "microsoft365":
+        if not all([
+            credentials_data.microsoft365_tenant_id,
+            credentials_data.microsoft365_client_id,
+            credentials_data.microsoft365_client_secret,
+        ]):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Microsoft 365 Tenant ID, Client ID, and Client Secret are required",
+            )
+
+        credentials = Microsoft365Credentials(
+            tenant_id=credentials_data.microsoft365_tenant_id,
+            client_id=credentials_data.microsoft365_client_id,
+            client_secret=credentials_data.microsoft365_client_secret,
+        )
+
+        try:
+            org_info = await validate_microsoft365_credentials(credentials)
+            return {
+                "valid": True,
+                "provider": "microsoft365",
+                "tenant_id": org_info["tenant_id"],
+                "organization_name": org_info["organization_name"],
+                "verified_domains": org_info["verified_domains"],
+                "message": f"✅ Microsoft 365 credentials are valid! Organization: {org_info['organization_name']}",
+            }
+        except Microsoft365ValidationError as e:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"❌ Microsoft 365 validation failed: {str(e)}",
             )
 
     else:

@@ -8,14 +8,14 @@ import { Plus, Trash2, RefreshCw, CheckCircle, XCircle, HelpCircle, ChevronDown,
 export default function AccountsPage() {
   const { accounts, fetchAccounts, deleteAccount, isLoading } = useAccountStore();
   const [showProviderSelector, setShowProviderSelector] = useState(false);
-  const [selectedProvider, setSelectedProvider] = useState<"aws" | "azure" | "gcp" | null>(null);
+  const [selectedProvider, setSelectedProvider] = useState<"aws" | "azure" | "gcp" | "microsoft365" | null>(null);
   const [editingAccount, setEditingAccount] = useState<any>(null);
 
   useEffect(() => {
     fetchAccounts();
   }, [fetchAccounts]);
 
-  const handleAddAccount = (provider: "aws" | "azure" | "gcp") => {
+  const handleAddAccount = (provider: "aws" | "azure" | "gcp" | "microsoft365") => {
     setSelectedProvider(provider);
     setShowProviderSelector(false);
   };
@@ -59,6 +59,9 @@ export default function AccountsPage() {
 
       {/* Add GCP Account Form */}
       {selectedProvider === "gcp" && <AddGCPAccountForm onClose={closeAddForm} />}
+
+      {/* Add Microsoft 365 Account Form */}
+      {selectedProvider === "microsoft365" && <AddMicrosoft365AccountForm onClose={closeAddForm} />}
 
       {/* Edit Account Form */}
       {editingAccount && (
@@ -108,6 +111,7 @@ function AccountCard({ account, onEdit, onDelete }: any) {
     aws: "bg-orange-100 text-orange-700",
     azure: "bg-blue-100 text-blue-700",
     gcp: "bg-red-100 text-red-700",
+    microsoft365: "bg-green-100 text-green-700",
   };
 
   return (
@@ -346,7 +350,7 @@ function AWSCredentialsHelp() {
   );
 }
 
-function ProviderSelector({ onSelectProvider, onClose }: { onSelectProvider: (provider: "aws" | "azure" | "gcp") => void; onClose: () => void }) {
+function ProviderSelector({ onSelectProvider, onClose }: { onSelectProvider: (provider: "aws" | "azure" | "gcp" | "microsoft365") => void; onClose: () => void }) {
   return (
     <div className="rounded-2xl border-2 border-blue-200 bg-white p-8 shadow-xl">
       <div className="flex items-center justify-between mb-6">
@@ -395,6 +399,20 @@ function ProviderSelector({ onSelectProvider, onClose }: { onSelectProvider: (pr
           <div className="text-center">
             <h3 className="text-lg font-bold text-gray-900">Google Cloud Platform</h3>
             <p className="mt-1 text-sm text-gray-600">Connect your GCP project</p>
+          </div>
+        </button>
+
+        {/* Microsoft 365 Card */}
+        <button
+          onClick={() => onSelectProvider("microsoft365")}
+          className="flex flex-col items-center gap-4 rounded-xl border-2 border-green-200 bg-green-50 p-6 transition-all hover:border-green-400 hover:bg-green-100 hover:shadow-lg"
+        >
+          <div className="flex h-16 w-16 items-center justify-center rounded-full bg-green-600 text-white shadow-md">
+            <span className="text-base font-bold">M365</span>
+          </div>
+          <div className="text-center">
+            <h3 className="text-lg font-bold text-gray-900">Microsoft 365</h3>
+            <p className="mt-1 text-sm text-gray-600">Connect SharePoint & OneDrive</p>
           </div>
         </button>
       </div>
@@ -1949,6 +1967,391 @@ function GCPCredentialsHelp() {
           </span>
         </p>
       </div>
+    </div>
+  );
+}
+
+// Microsoft 365 Credentials Help Component
+function Microsoft365CredentialsHelp() {
+  return (
+    <div className="mb-6 rounded-xl border-2 border-green-200 bg-gradient-to-br from-green-50 to-blue-50 p-6">
+      <div className="flex items-start gap-3 mb-4">
+        <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-green-600 text-white shadow-md">
+          <HelpCircle className="h-6 w-6" />
+        </div>
+        <div>
+          <h3 className="text-lg font-bold text-gray-900">How to get your Microsoft 365 credentials</h3>
+          <p className="text-sm text-gray-600 mt-1">Follow these steps to create an Entra ID App Registration</p>
+        </div>
+      </div>
+
+      <div className="space-y-4">
+        {/* Step 1 */}
+        <div className="flex gap-3">
+          <div className="flex h-7 w-7 items-center justify-center rounded-full bg-blue-600 text-white font-bold text-sm flex-shrink-0">
+            1
+          </div>
+          <div className="flex-1">
+            <h4 className="font-semibold text-gray-900">Go to Entra Admin Center</h4>
+            <p className="text-sm text-gray-600 mt-1">
+              Navigate to Microsoft Entra ID → App registrations → New registration
+            </p>
+            <a
+              href="https://entra.microsoft.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="mt-2 inline-flex items-center gap-1 text-sm text-green-600 hover:text-green-700 font-medium"
+            >
+              <ExternalLink className="h-4 w-4" />
+              Open Entra App Registrations
+            </a>
+          </div>
+        </div>
+
+        {/* Step 2 */}
+        <div className="flex gap-3">
+          <div className="flex h-7 w-7 items-center justify-center rounded-full bg-purple-600 text-white font-bold text-sm flex-shrink-0">
+            2
+          </div>
+          <div className="flex-1">
+            <h4 className="font-semibold text-gray-900">Create App Registration</h4>
+            <p className="text-sm text-gray-600 mt-1">
+              Name: <code className="bg-gray-200 px-2 py-0.5 rounded">CloudWaste-Scanner</code>
+              <br />
+              Supported account types: Single tenant
+              <br />
+              Redirect URI: Leave blank
+            </p>
+          </div>
+        </div>
+
+        {/* Step 3 */}
+        <div className="flex gap-3">
+          <div className="flex h-7 w-7 items-center justify-center rounded-full bg-orange-600 text-white font-bold text-sm flex-shrink-0">
+            3
+          </div>
+          <div className="flex-1">
+            <h4 className="font-semibold text-gray-900">Get Client Secret</h4>
+            <p className="text-sm text-gray-600 mt-1">
+              In your app → Certificates & secrets → New client secret
+              <br />
+              Description: CloudWaste Scanner
+              <br />
+              Expires: 24 months (recommended)
+            </p>
+            <div className="mt-3 rounded-lg bg-amber-50 border border-amber-200 p-3">
+              <p className="text-xs text-amber-800 font-medium">
+                ⚠️ Save the Client Secret VALUE immediately - you won't see it again!
+              </p>
+            </div>
+          </div>
+        </div>
+
+        {/* Step 4 */}
+        <div className="flex gap-3">
+          <div className="flex h-7 w-7 items-center justify-center rounded-full bg-green-600 text-white font-bold text-sm flex-shrink-0">
+            4
+          </div>
+          <div className="flex-1">
+            <h4 className="font-semibold text-gray-900">Grant API Permissions</h4>
+            <p className="text-sm text-gray-600 mt-1">
+              In your app → API permissions → Add a permission → Microsoft Graph → Application permissions
+            </p>
+            <p className="text-sm text-gray-600 mt-2 font-semibold">
+              Required permissions (read-only):
+            </p>
+            <ul className="text-sm text-gray-600 mt-1 space-y-1 list-disc list-inside ml-2">
+              <li><code className="bg-gray-100 px-1 rounded text-xs">Sites.Read.All</code> - Read SharePoint sites</li>
+              <li><code className="bg-gray-100 px-1 rounded text-xs">Files.Read.All</code> - Read OneDrive files</li>
+              <li><code className="bg-gray-100 px-1 rounded text-xs">User.Read.All</code> - Read user information</li>
+              <li><code className="bg-gray-100 px-1 rounded text-xs">Reports.Read.All</code> - Read usage reports</li>
+            </ul>
+            <div className="mt-3 rounded-lg bg-red-50 border border-red-200 p-3">
+              <p className="text-xs text-red-800 font-medium">
+                ⚠️ Important: After adding permissions, click "Grant admin consent" button!
+              </p>
+            </div>
+          </div>
+        </div>
+
+        {/* Step 5 */}
+        <div className="flex gap-3">
+          <div className="flex h-7 w-7 items-center justify-center rounded-full bg-indigo-600 text-white font-bold text-sm flex-shrink-0">
+            5
+          </div>
+          <div className="flex-1">
+            <h4 className="font-semibold text-gray-900">Get Credentials</h4>
+            <p className="text-sm text-gray-600 mt-1">
+              Go to your App registration → Overview page:
+            </p>
+            <ul className="text-sm text-gray-600 mt-2 space-y-1 list-disc list-inside">
+              <li><strong>Application (client) ID</strong>: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx</li>
+              <li><strong>Directory (tenant) ID</strong>: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx</li>
+              <li><strong>Client Secret</strong>: The value you saved in Step 3</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+
+      <div className="mt-6 rounded-lg bg-blue-50 border border-blue-200 p-4">
+        <p className="text-sm text-blue-900">
+          <strong>🔒 Security:</strong> CloudWaste only uses READ-ONLY permissions. We never modify or delete your Microsoft 365 data.
+        </p>
+      </div>
+    </div>
+  );
+}
+
+// Microsoft 365 Account Form Component
+function AddMicrosoft365AccountForm({ onClose }: { onClose: () => void }) {
+  const { createAccount, isLoading, error } = useAccountStore();
+  const [showHelp, setShowHelp] = useState(false);
+  const [isValidating, setIsValidating] = useState(false);
+  const [validationResult, setValidationResult] = useState<{
+    status: 'idle' | 'success' | 'error';
+    message: string;
+  } | null>(null);
+  const [formData, setFormData] = useState({
+    account_name: "",
+    microsoft365_tenant_id: "",
+    microsoft365_client_id: "",
+    microsoft365_client_secret: "",
+    description: "",
+  });
+
+  const isFormValid = () => {
+    return !!(
+      formData.account_name &&
+      formData.microsoft365_tenant_id &&
+      formData.microsoft365_client_id &&
+      formData.microsoft365_client_secret
+    );
+  };
+
+  const handleTestConnection = async () => {
+    setIsValidating(true);
+    setValidationResult(null);
+
+    try {
+      const testData = {
+        provider: "microsoft365" as const,
+        account_name: formData.account_name || "Test",
+        account_identifier: formData.microsoft365_tenant_id,
+        microsoft365_tenant_id: formData.microsoft365_tenant_id,
+        microsoft365_client_id: formData.microsoft365_client_id,
+        microsoft365_client_secret: formData.microsoft365_client_secret,
+      };
+
+      const result = await accountsAPI.validateCredentials(testData);
+      setValidationResult({
+        status: 'success',
+        message: result.message,
+      });
+    } catch (error: any) {
+      setValidationResult({
+        status: 'error',
+        message: error.message || 'Validation failed',
+      });
+    } finally {
+      setIsValidating(false);
+    }
+  };
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    try {
+      await createAccount({
+        provider: "microsoft365",
+        account_name: formData.account_name,
+        account_identifier: formData.microsoft365_tenant_id,
+        microsoft365_tenant_id: formData.microsoft365_tenant_id,
+        microsoft365_client_id: formData.microsoft365_client_id,
+        microsoft365_client_secret: formData.microsoft365_client_secret,
+        description: formData.description || undefined,
+      });
+      onClose();
+    } catch (err) {
+      // Error handled by store
+    }
+  };
+
+  return (
+    <div className="rounded-2xl border-2 border-green-200 bg-white p-8 shadow-xl">
+      <div className="flex items-center justify-between mb-6">
+        <h2 className="text-2xl font-bold bg-gradient-to-r from-green-600 to-blue-600 bg-clip-text text-transparent">
+          Add Microsoft 365 Account
+        </h2>
+        <button
+          type="button"
+          onClick={() => setShowHelp(!showHelp)}
+          className="flex items-center gap-2 rounded-lg bg-green-50 px-4 py-2 text-sm font-medium text-green-700 hover:bg-green-100 transition-colors"
+        >
+          <HelpCircle className="h-4 w-4" />
+          {showHelp ? "Hide" : "How to get credentials?"}
+          {showHelp ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
+        </button>
+      </div>
+
+      {/* Help Section */}
+      {showHelp && <Microsoft365CredentialsHelp />}
+
+      <form onSubmit={handleSubmit} className="mt-6 space-y-5">
+        {error && (
+          <div className="rounded-xl bg-red-50 border border-red-200 p-4 text-sm text-red-700 flex items-start gap-2">
+            <XCircle className="h-5 w-5 flex-shrink-0 mt-0.5" />
+            <span>{error}</span>
+          </div>
+        )}
+
+        <div>
+          <label className="block text-sm font-semibold text-gray-700 mb-2">
+            Account Name *
+          </label>
+          <input
+            required
+            type="text"
+            value={formData.account_name}
+            onChange={(e) =>
+              setFormData({ ...formData, account_name: e.target.value })
+            }
+            className="block w-full rounded-xl border-2 border-gray-300 px-4 py-3 focus:border-green-500 focus:outline-none focus:ring-2 focus:ring-green-500/20 transition-all"
+            placeholder="Production Microsoft 365"
+          />
+        </div>
+
+        <div>
+          <label className="block text-sm font-semibold text-gray-700 mb-2">
+            Tenant ID *
+            <span className="ml-2 text-xs font-normal text-gray-500">(Directory ID)</span>
+          </label>
+          <input
+            required
+            type="text"
+            value={formData.microsoft365_tenant_id}
+            onChange={(e) =>
+              setFormData({ ...formData, microsoft365_tenant_id: e.target.value })
+            }
+            className="block w-full rounded-xl border-2 border-gray-300 px-4 py-3 focus:border-green-500 focus:outline-none focus:ring-2 focus:ring-green-500/20 transition-all font-mono text-sm"
+            placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+          />
+        </div>
+
+        <div>
+          <label className="block text-sm font-semibold text-gray-700 mb-2">
+            Client ID *
+            <span className="ml-2 text-xs font-normal text-gray-500">(Application ID)</span>
+          </label>
+          <input
+            required
+            type="text"
+            value={formData.microsoft365_client_id}
+            onChange={(e) =>
+              setFormData({ ...formData, microsoft365_client_id: e.target.value })
+            }
+            className="block w-full rounded-xl border-2 border-gray-300 px-4 py-3 focus:border-green-500 focus:outline-none focus:ring-2 focus:ring-green-500/20 transition-all font-mono text-sm"
+            placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+          />
+        </div>
+
+        <div>
+          <label className="block text-sm font-semibold text-gray-700 mb-2">
+            Client Secret *
+          </label>
+          <input
+            required
+            type="password"
+            value={formData.microsoft365_client_secret}
+            onChange={(e) =>
+              setFormData({
+                ...formData,
+                microsoft365_client_secret: e.target.value,
+              })
+            }
+            className="block w-full rounded-xl border-2 border-gray-300 px-4 py-3 focus:border-green-500 focus:outline-none focus:ring-2 focus:ring-green-500/20 transition-all font-mono text-sm"
+            placeholder="Client secret value from step 3"
+          />
+        </div>
+
+        <div>
+          <label className="block text-sm font-semibold text-gray-700 mb-2">
+            Description (optional)
+          </label>
+          <textarea
+            value={formData.description}
+            onChange={(e) =>
+              setFormData({ ...formData, description: e.target.value })
+            }
+            className="block w-full rounded-xl border-2 border-gray-300 px-4 py-3 focus:border-green-500 focus:outline-none focus:ring-2 focus:ring-green-500/20 transition-all"
+            rows={3}
+            placeholder="Production Microsoft 365 tenant for SharePoint and OneDrive scanning"
+          />
+        </div>
+
+        {/* Validation Result */}
+        {validationResult && (
+          <div className={`p-4 rounded-xl ${
+            validationResult.status === 'success'
+              ? 'bg-green-50 border-2 border-green-200'
+              : 'bg-red-50 border-2 border-red-200'
+          }`}>
+            <p className={`text-sm font-medium ${
+              validationResult.status === 'success' ? 'text-green-700' : 'text-red-700'
+            }`}>
+              {validationResult.message}
+            </p>
+          </div>
+        )}
+
+        {/* Action Buttons */}
+        <div className="flex gap-3 pt-4">
+          {/* Test Connection Button */}
+          <button
+            type="button"
+            onClick={handleTestConnection}
+            disabled={isValidating || !isFormValid()}
+            className="flex-1 rounded-xl border-2 border-green-600 bg-white px-6 py-3 font-semibold text-green-600 hover:bg-green-50 transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+          >
+            {isValidating ? (
+              <>
+                <RefreshCw className="h-5 w-5 animate-spin" />
+                Testing...
+              </>
+            ) : (
+              <>
+                <CheckCircle className="h-5 w-5" />
+                Test Connection
+              </>
+            )}
+          </button>
+
+          {/* Add Account Button */}
+          <button
+            type="submit"
+            disabled={isLoading || validationResult?.status !== 'success'}
+            className="flex-1 rounded-xl bg-gradient-to-r from-green-600 to-blue-600 px-6 py-3 font-semibold text-white shadow-lg hover:shadow-xl transition-all hover:scale-[1.02] disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+          >
+            {isLoading ? (
+              <>
+                <RefreshCw className="h-5 w-5 animate-spin" />
+                Adding...
+              </>
+            ) : (
+              <>
+                <Plus className="h-5 w-5" />
+                Add Account
+              </>
+            )}
+          </button>
+
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-xl border-2 border-gray-300 bg-white px-6 py-3 font-semibold text-gray-700 hover:bg-gray-50 transition-all"
+          >
+            Cancel
+          </button>
+        </div>
+      </form>
     </div>
   );
 }

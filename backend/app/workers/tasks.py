@@ -19,6 +19,7 @@ from app.models.user import User
 from app.providers.aws import AWSProvider
 from app.providers.azure import AzureProvider
 from app.providers.gcp import GCPProvider
+from app.providers.microsoft365 import Microsoft365Provider
 from app.services.email_service import send_scan_summary_email
 from app.services.pricing_service import PricingService
 from app.workers.celery_app import celery_app
@@ -379,6 +380,81 @@ async def _scan_cloud_account_async(
                     "orphan_resources_found": 0,
                     "estimated_monthly_waste": 0.0,
                     "regions_scanned": regions_to_scan,
+                }
+
+            elif account.provider == "microsoft365":
+                provider = Microsoft365Provider(
+                    tenant_id=credentials["tenant_id"],
+                    client_id=credentials["client_id"],
+                    client_secret=credentials["client_secret"],
+                )
+
+                # Validate credentials
+                await provider.validate_credentials()
+
+                # Microsoft 365 is global (no regions)
+                # Scan all resources globally (scan_global_resources=True)
+                all_orphans = await provider.scan_all_resources(
+                    region="global",
+                    detection_rules=user_detection_rules,
+                    scan_global_resources=True,
+                )
+                total_resources = len(all_orphans)
+
+                # Save orphan resources to database
+                for orphan in all_orphans:
+                    orphan_resource = OrphanResource(
+                        scan_id=scan.id,
+                        cloud_account_id=account.id,
+                        resource_type=orphan.resource_type,
+                        resource_id=orphan.resource_id,
+                        resource_name=orphan.resource_name,
+                        region=orphan.region,  # "global" for M365
+                        estimated_monthly_cost=orphan.estimated_monthly_cost,
+                        resource_metadata=orphan.resource_metadata,
+                    )
+                    db.add(orphan_resource)
+
+                # Calculate total waste
+                total_waste = sum(o.estimated_monthly_cost for o in all_orphans)
+
+                # Update scan with results
+                scan.status = ScanStatus.COMPLETED.value
+                scan.total_resources_scanned = total_resources
+                scan.orphan_resources_found = len(all_orphans)
+                scan.estimated_monthly_waste = total_waste
+                scan.completed_at = datetime.now()
+
+                # Update account last_scan_at
+                account.last_scan_at = datetime.now()
+
+                await db.commit()
+
+                # Send email notification if user has enabled notifications
+                result = await db.execute(select(User).where(User.id == account.user_id))
+                user = result.scalar_one_or_none()
+                if user and user.email_scan_notifications:
+                    send_scan_summary_email(
+                        email=user.email,
+                        full_name=user.full_name or "Utilisateur",
+                        account_name=account.account_name,
+                        scan_type=scan.scan_type,
+                        status="completed",
+                        started_at=scan.started_at.strftime("%d/%m/%Y %H:%M") if scan.started_at else "N/A",
+                        completed_at=scan.completed_at.strftime("%d/%m/%Y %H:%M") if scan.completed_at else "N/A",
+                        total_resources_scanned=total_resources,
+                        orphan_resources_found=len(all_orphans),
+                        estimated_monthly_waste=total_waste,
+                        regions_scanned=["global"],
+                    )
+
+                return {
+                    "scan_id": str(scan.id),
+                    "status": "completed",
+                    "total_resources_scanned": total_resources,
+                    "orphan_resources_found": len(all_orphans),
+                    "estimated_monthly_waste": total_waste,
+                    "regions_scanned": ["global"],
                 }
 
             else:

@@ -47,6 +47,10 @@ azure-mgmt-desktopvirtualization==1.1.0  # Azure Virtual Desktop (AVD) managemen
 azure-mgmt-hdinsight==9.0.0  # Azure HDInsight Spark cluster management
 azure-ai-ml==1.19.0  # Azure Machine Learning SDK for Compute Instances
 azure-mgmt-machinelearningservices==1.0.0  # Azure ML Services management
+# azure-storage-fileshare>=12.0.0  # Azure Files ShareServiceClient for file shares operations (not available on ARM64)
+
+# Microsoft 365 SDK
+msgraph-core==1.0.0  # Microsoft Graph API client for SharePoint/OneDrive
 
 # GCP SDK
 google-cloud-compute==1.15.0  # Compute Engine instances, disks, snapshots

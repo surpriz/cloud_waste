@@ -33,11 +33,20 @@ class GCPCredentials(BaseModel):
     service_account_json: str = Field(..., description="GCP Service Account JSON key (as string)")
 
 
+# Microsoft 365 credentials schema (not stored directly, used for encryption)
+class Microsoft365Credentials(BaseModel):
+    """Microsoft 365 credentials schema."""
+
+    tenant_id: str = Field(..., min_length=1, max_length=255, description="Microsoft 365 Tenant ID (e.g., 'contoso.onmicrosoft.com' or GUID)")
+    client_id: str = Field(..., min_length=36, max_length=36, description="Entra ID App Registration Client ID (GUID)")
+    client_secret: str = Field(..., min_length=1, max_length=256, description="Entra ID App Registration Client Secret")
+
+
 # Base schema
 class CloudAccountBase(BaseModel):
     """Base cloud account schema."""
 
-    provider: str = Field(..., pattern="^(aws|azure|gcp)$")
+    provider: str = Field(..., pattern="^(aws|azure|gcp|microsoft365)$")
     account_name: str = Field(..., min_length=1, max_length=255)
     account_identifier: str = Field(..., min_length=1, max_length=255)
     regions: list[str] | None = Field(
@@ -108,6 +117,26 @@ class CloudAccountCreate(CloudAccountBase):
         description="GCP Service Account JSON key (required for GCP)",
     )
 
+    # Microsoft 365 credentials (will be encrypted before storage)
+    microsoft365_tenant_id: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=255,
+        description="Microsoft 365 Tenant ID (required for Microsoft 365)",
+    )
+    microsoft365_client_id: str | None = Field(
+        default=None,
+        min_length=36,
+        max_length=36,
+        description="Entra ID App Registration Client ID (required for Microsoft 365)",
+    )
+    microsoft365_client_secret: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=256,
+        description="Entra ID App Registration Client Secret (required for Microsoft 365)",
+    )
+
 
 # Schema for updating cloud account
 class CloudAccountUpdate(BaseModel):
@@ -132,6 +161,11 @@ class CloudAccountUpdate(BaseModel):
     # Allow updating GCP credentials
     gcp_project_id: str | None = Field(default=None, min_length=6, max_length=30)
     gcp_service_account_json: str | None = None
+
+    # Allow updating Microsoft 365 credentials
+    microsoft365_tenant_id: str | None = Field(default=None, min_length=1, max_length=255)
+    microsoft365_client_id: str | None = Field(default=None, min_length=36, max_length=36)
+    microsoft365_client_secret: str | None = Field(default=None, min_length=1, max_length=256)
 
     # Scheduled scan settings
     scheduled_scan_enabled: bool | None = None
@@ -169,3 +203,4 @@ class CloudAccountWithCredentials(CloudAccount):
     aws_credentials: AWSCredentials | None = None
     azure_credentials: AzureCredentials | None = None
     gcp_credentials: GCPCredentials | None = None
+    microsoft365_credentials: Microsoft365Credentials | None = None

@@ -35,7 +35,7 @@ export interface AuthTokens {
 export interface CloudAccount {
   id: string;
   user_id: string;
-  provider: "aws" | "azure" | "gcp";
+  provider: "aws" | "azure" | "gcp" | "microsoft365";
   account_name: string;
   account_identifier: string;
   regions: string[] | null;
@@ -53,7 +53,7 @@ export interface CloudAccount {
 }
 
 export interface CloudAccountCreate {
-  provider: "aws" | "azure" | "gcp";
+  provider: "aws" | "azure" | "gcp" | "microsoft365";
   account_name: string;
   account_identifier: string;
 
@@ -70,6 +70,11 @@ export interface CloudAccountCreate {
   // GCP credentials
   gcp_project_id?: string;
   gcp_service_account_json?: string;
+
+  // Microsoft 365 credentials
+  microsoft365_tenant_id?: string;
+  microsoft365_client_id?: string;
+  microsoft365_client_secret?: string;
 
   regions?: string[];
   resource_groups?: string[];

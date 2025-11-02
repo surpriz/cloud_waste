@@ -12,6 +12,7 @@ from app.schemas.cloud_account import (
     AWSCredentials,
     AzureCredentials,
     GCPCredentials,
+    Microsoft365Credentials,
     CloudAccountCreate,
     CloudAccountUpdate,
     CloudAccountWithCredentials,
@@ -126,6 +127,21 @@ async def create_cloud_account(
             "project_id": account_in.gcp_project_id,
             "service_account_json": account_in.gcp_service_account_json,
         }
+    elif account_in.provider == "microsoft365":
+        if (
+            not account_in.microsoft365_tenant_id
+            or not account_in.microsoft365_client_id
+            or not account_in.microsoft365_client_secret
+        ):
+            raise ValueError(
+                "Microsoft 365 credentials (tenant_id, client_id, client_secret) are required"
+            )
+
+        credentials_dict = {
+            "tenant_id": account_in.microsoft365_tenant_id,
+            "client_id": account_in.microsoft365_client_id,
+            "client_secret": account_in.microsoft365_client_secret,
+        }
 
     # Encrypt credentials
     credentials_json = json.dumps(credentials_dict)
@@ -219,6 +235,26 @@ async def update_cloud_account(
         update_data.pop("gcp_project_id", None)
         update_data.pop("gcp_service_account_json", None)
 
+    # Handle Microsoft 365 credentials update if all three fields provided
+    if (
+        "microsoft365_tenant_id" in update_data
+        and "microsoft365_client_id" in update_data
+        and "microsoft365_client_secret" in update_data
+    ):
+        credentials_dict = {
+            "tenant_id": update_data.pop("microsoft365_tenant_id"),
+            "client_id": update_data.pop("microsoft365_client_id"),
+            "client_secret": update_data.pop("microsoft365_client_secret"),
+        }
+        credentials_json = json.dumps(credentials_dict)
+        encrypted_credentials = credential_encryption.encrypt(credentials_json)
+        update_data["credentials_encrypted"] = encrypted_credentials
+    else:
+        # Remove individual M365 credential fields if not all provided
+        update_data.pop("microsoft365_tenant_id", None)
+        update_data.pop("microsoft365_client_id", None)
+        update_data.pop("microsoft365_client_secret", None)
+
     # Update fields
     for field, value in update_data.items():
         setattr(db_account, field, value)
@@ -272,6 +308,7 @@ async def get_decrypted_credentials(
     aws_credentials = None
     azure_credentials = None
     gcp_credentials = None
+    microsoft365_credentials = None
 
     if db_account.provider == "aws":
         aws_credentials = AWSCredentials(
@@ -290,6 +327,12 @@ async def get_decrypted_credentials(
         gcp_credentials = GCPCredentials(
             project_id=credentials_dict["project_id"],
             service_account_json=credentials_dict["service_account_json"],
+        )
+    elif db_account.provider == "microsoft365":
+        microsoft365_credentials = Microsoft365Credentials(
+            tenant_id=credentials_dict["tenant_id"],
+            client_id=credentials_dict["client_id"],
+            client_secret=credentials_dict["client_secret"],
         )
 
     # Create response with decrypted credentials
@@ -313,4 +356,5 @@ async def get_decrypted_credentials(
         aws_credentials=aws_credentials,
         azure_credentials=azure_credentials,
         gcp_credentials=gcp_credentials,
+        microsoft365_credentials=microsoft365_credentials,
     )
