@@ -228,6 +228,12 @@ class GCPProvider(CloudProviderBase):
         """Not applicable for GCP."""
         return []
 
+    async def scan_fargate_tasks(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """GCP doesn't have Fargate (AWS ECS-specific service)."""
+        return []
+
     # AWS-specific EBS volume methods (not applicable to GCP)
     async def scan_volumes_on_stopped_instances(
         self, region: str, detection_rules: dict | None = None

@@ -16167,6 +16167,12 @@ class AzureProvider(CloudProviderBase):
         """
         return await self.scan_azure_cosmosdb_table_api(region, detection_rules)
 
+    async def scan_fargate_tasks(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """Azure doesn't have Fargate (AWS ECS-specific service). Azure uses Container Instances/Container Apps instead."""
+        return []
+
     async def scan_idle_s3_buckets(
         self, detection_rules: dict | None = None
     ) -> list[OrphanResourceData]:
