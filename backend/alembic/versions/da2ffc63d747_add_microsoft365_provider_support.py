@@ -22,64 +22,22 @@ def upgrade() -> None:
     """
     Add support for Microsoft 365 provider.
 
-    This migration adds default detection rules for Microsoft 365 resource types
-    (SharePoint sites and OneDrive drives).
-
     Note: The cloud_accounts table already supports any provider string via VARCHAR(50).
-    No schema changes are required. This migration is for documentation and default rules.
-    """
-    # Add default detection rules for Microsoft 365 SharePoint sites
-    op.execute("""
-        INSERT INTO detection_rules (id, user_id, resource_type, rules, created_at, updated_at)
-        SELECT
-            gen_random_uuid(),
-            NULL,
-            'sharepoint_sites',
-            '{
-                "large_files_unused": {"enabled": true, "min_file_size_mb": 100, "min_age_days": 180},
-                "duplicate_files": {"enabled": true},
-                "sites_abandoned": {"enabled": true, "min_inactive_days": 90},
-                "excessive_versions": {"enabled": true, "max_versions_threshold": 50},
-                "recycle_bin_old": {"enabled": true, "max_retention_days": 30}
-            }'::jsonb,
-            NOW(),
-            NOW()
-        WHERE NOT EXISTS (
-            SELECT 1 FROM detection_rules WHERE resource_type = 'sharepoint_sites' AND user_id IS NULL
-        );
-    """)
+    No schema changes are required. This is a placeholder migration for tracking
+    MS365 provider support in the migration history.
 
-    # Add default detection rules for Microsoft 365 OneDrive drives
-    op.execute("""
-        INSERT INTO detection_rules (id, user_id, resource_type, rules, created_at, updated_at)
-        SELECT
-            gen_random_uuid(),
-            NULL,
-            'onedrive_drives',
-            '{
-                "large_files_unused": {"enabled": true, "min_file_size_mb": 100, "min_age_days": 180},
-                "disabled_users": {"enabled": true, "retention_days": 93},
-                "temp_files_accumulated": {"enabled": true, "min_age_days": 7, "file_patterns": [".tmp", "~$", ".bak", ".swp"]},
-                "excessive_sharing": {"enabled": true, "min_age_days": 90},
-                "duplicate_attachments": {"enabled": true}
-            }'::jsonb,
-            NOW(),
-            NOW()
-        WHERE NOT EXISTS (
-            SELECT 1 FROM detection_rules WHERE resource_type = 'onedrive_drives' AND user_id IS NULL
-        );
-    """)
+    Default detection rules for MS365 resource types (sharepoint_sites, onedrive_drives)
+    are applied per-user when they create an MS365 account.
+    """
+    # No database changes needed - MS365 uses existing schema
+    pass
 
 
 def downgrade() -> None:
     """
     Remove Microsoft 365 provider support.
 
-    This removes the default detection rules for Microsoft 365 resource types.
+    No database changes to revert - MS365 uses existing schema.
     """
-    # Remove default detection rules for Microsoft 365
-    op.execute("""
-        DELETE FROM detection_rules
-        WHERE resource_type IN ('sharepoint_sites', 'onedrive_drives')
-        AND user_id IS NULL;
-    """)
+    # No database changes to revert
+    pass
