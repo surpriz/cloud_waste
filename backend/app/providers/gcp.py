@@ -8,7 +8,7 @@ from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from google.cloud import compute_v1, logging_v2, monitoring_v3
+from google.cloud import compute_v1, logging, monitoring_v3
 from google.oauth2 import service_account
 from google.protobuf.timestamp_pb2 import Timestamp
 
@@ -1574,10 +1574,10 @@ class GCPProvider(CloudProviderBase):
             )
         return self._snapshots_client
 
-    def _get_logging_client(self) -> logging_v2.Client:
+    def _get_logging_client(self) -> logging.Client:
         """Get or create Cloud Logging client."""
         if not hasattr(self, "_logging_client") or self._logging_client is None:
-            self._logging_client = logging_v2.Client(
+            self._logging_client = logging.Client(
                 project=self.project_id, credentials=self._get_credentials()
             )
         return self._logging_client
