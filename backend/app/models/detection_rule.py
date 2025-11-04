@@ -2440,6 +2440,179 @@ DEFAULT_DETECTION_RULES = {
         "confidence_critical_days": 90,
         "description": "Network Interface (NIC) not attached to VM >30 days - small waste but governance issue ($4.32/month per NIC)",
     },
+    # === GCP COMPUTE ENGINE INSTANCES (10 SCENARIOS) ===
+    # Phase 1 - Simple Detection (7 scenarios)
+    "compute_instance_stopped": {
+        "enabled": True,
+        "min_age_days": 30,  # Instance stopped for 30+ days
+        "exclude_labels": {},  # Labels to exclude (e.g., {"environment": "backup"})
+        "confidence_medium_days": 30,
+        "confidence_high_days": 60,
+        "confidence_critical_days": 90,
+        "description": "GCP Compute Engine instances stopped >30 days - paying for attached disks ($0.04-0.17/GB/month)",
+    },
+    "compute_instance_idle": {
+        "enabled": True,
+        "cpu_threshold": 5.0,  # CPU % max for idle detection
+        "lookback_days": 14,  # Analysis period
+        "min_datapoints": 50,  # Minimum Cloud Monitoring data points
+        "exclude_labels": {},
+        "confidence_high_days": 14,
+        "description": "GCP Compute Engine instances with CPU <5% for 14+ days - 95%+ waste",
+    },
+    "compute_instance_overprovisioned": {
+        "enabled": True,
+        "cpu_min_threshold": 5.0,  # Minimum CPU to avoid overlap with idle
+        "cpu_max_threshold": 30.0,  # Maximum CPU for over-provisioning
+        "lookback_days": 14,
+        "downgrade_ratio": 0.5,  # Recommend 50% vCPU reduction
+        "confidence_medium_days": 14,
+        "description": "GCP Compute Engine instances with CPU 5-30% - downgrade opportunities",
+    },
+    "compute_instance_old_generation": {
+        "enabled": True,
+        "old_generations": ["n1"],  # Machine generations considered old
+        "preferred_generation": "n2d",  # Recommended modern generation
+        "min_savings_threshold": 10.0,  # Minimum savings in $/month
+        "confidence_medium_days": 7,
+        "description": "GCP Compute Engine n1 instances - migrate to n2/n2d for 20-30% better cost/performance",
+    },
+    "compute_instance_no_spot": {
+        "enabled": True,
+        "spot_eligible_labels": ["batch", "dev", "test", "staging"],  # Workloads eligible for Spot
+        "min_savings_threshold": 20.0,  # Minimum savings in $/month
+        "exclude_production": True,  # Exclude instances with env=production label
+        "confidence_high_days": 7,
+        "description": "GCP Compute Engine instances eligible for Spot VMs - 60-91% savings potential",
+    },
+    "compute_instance_untagged": {
+        "enabled": True,
+        "required_labels": ["environment", "owner", "cost-center"],  # Required labels
+        "governance_waste_pct": 0.05,  # 5% governance waste estimate
+        "enforce_values": {},  # Optional: enforce label values (e.g., {"environment": ["dev", "staging", "prod"]})
+        "confidence_medium_days": 7,
+        "description": "GCP Compute Engine instances missing required labels - governance and visibility issues",
+    },
+    "compute_instance_devtest_247": {
+        "enabled": True,
+        "devtest_labels": ["dev", "test", "staging", "development"],  # Dev/test environment labels
+        "min_uptime_days": 7,  # Minimum continuous uptime for detection
+        "business_hours_per_day": 12,  # Optimal hours per day (8am-8pm)
+        "business_days_per_week": 5,  # Optimal days per week (Mon-Fri)
+        "confidence_high_days": 7,
+        "description": "GCP Compute Engine dev/test instances running 24/7 - 64% savings with scheduled start/stop",
+    },
+    # Phase 2 - Advanced Detection with Cloud Monitoring (3 scenarios)
+    "compute_instance_memory_waste": {
+        "enabled": True,
+        "memory_threshold": 40.0,  # Memory % max for over-provisioning
+        "lookback_days": 14,
+        "min_datapoints": 50,
+        "require_monitoring_agent": True,  # Requires Cloud Monitoring Agent
+        "confidence_high_days": 14,
+        "description": "GCP Compute Engine instances with memory <40% - downgrade to highcpu variant",
+    },
+    "compute_instance_rightsizing": {
+        "enabled": True,
+        "min_savings_pct": 10.0,  # Minimum savings % for recommendation
+        "safety_margin_cpu": 1.5,  # CPU safety margin multiplier
+        "safety_margin_ram": 1.3,  # RAM safety margin multiplier
+        "lookback_days": 14,
+        "confidence_high_days": 14,
+        "description": "GCP Compute Engine instances with rightsizing opportunities - holistic CPU+RAM analysis",
+    },
+    "compute_instance_burstable_waste": {
+        "enabled": True,
+        "max_burst_pct": 5.0,  # % time above baseline for burst detection
+        "lookback_days": 14,
+        "e2_baseline_cpu": {"e2-micro": 12.5, "e2-small": 25.0, "e2-medium": 50.0},
+        "confidence_high_days": 14,
+        "description": "GCP Compute Engine e2 instances not using burst capability - downgrade to f1/g1",
+    },
+    # === GCP PERSISTENT DISKS (10 SCENARIOS) ===
+    # Phase 1 - Simple Detection (7 scenarios)
+    "persistent_disk_unattached": {
+        "enabled": True,
+        "min_age_days": 7,  # Disk unattached for 7+ days
+        "exclude_labels": {},  # Labels to exclude (e.g., {"backup": "true"})
+        "confidence_medium_days": 7,
+        "confidence_high_days": 30,
+        "confidence_critical_days": 90,
+        "description": "GCP Persistent Disks unattached >7 days - 100% waste ($0.04-0.17/GB/month depending on type) 💰💰 P0",
+    },
+    "persistent_disk_attached_stopped": {
+        "enabled": True,
+        "min_age_days": 30,  # Instance stopped for 30+ days
+        "exclude_boot_disks": False,  # Whether to exclude boot disks
+        "confidence_medium_days": 30,
+        "confidence_high_days": 60,
+        "confidence_critical_days": 90,
+        "description": "GCP Persistent Disks attached to stopped instances >30 days - 100% waste 💰💰 P0",
+    },
+    "persistent_disk_never_used": {
+        "enabled": True,
+        "min_age_days": 7,  # Disk age before detection
+        "zero_io_threshold": 0,  # Max I/O operations (0 = none)
+        "confidence_medium_days": 7,
+        "confidence_high_days": 30,
+        "description": "GCP Persistent Disks with zero I/O since creation >7 days - never used 💰💰 P1",
+    },
+    "persistent_disk_orphan_snapshots": {
+        "enabled": True,
+        "min_age_days": 30,  # Snapshot age before detection
+        "exclude_labels": {},  # Labels to exclude (e.g., {"backup": "long-term"})
+        "confidence_medium_days": 30,
+        "description": "GCP Disk Snapshots whose source disk no longer exists >30 days - orphaned ($0.026/GB/month) 💰 P2",
+    },
+    "persistent_disk_old_type": {
+        "enabled": True,
+        "min_io_threshold": 100,  # Minimum IOPS/day to consider active
+        "lookback_days": 7,  # Period for I/O analysis
+        "performance_waste_factor": 0.6,  # % of upgrade cost as waste (60%)
+        "confidence_medium_days": 7,
+        "description": "GCP pd-standard disks with active workloads - performance waste, recommend pd-balanced 💰 P2",
+    },
+    "persistent_disk_overprovisioned_type": {
+        "enabled": True,
+        "iops_utilization_threshold": 0.5,  # 50% of pd-balanced capacity
+        "lookback_days": 14,  # Analysis period
+        "min_savings_threshold": 10.0,  # Minimum $/month savings
+        "confidence_high_days": 14,
+        "description": "GCP pd-ssd disks using <50% of pd-balanced capacity - downgrade to save 41% 💰💰 P1",
+    },
+    "persistent_disk_untagged": {
+        "enabled": True,
+        "required_labels": ["environment", "owner", "cost-center"],  # Required labels
+        "governance_waste_pct": 0.05,  # 5% of disk cost as governance waste
+        "confidence_medium_days": 0,
+        "description": "GCP Persistent Disks missing required labels - governance waste (5% disk cost) 💰 P2",
+    },
+    # Phase 2 - Advanced Detection (3 scenarios)
+    "persistent_disk_underutilized": {
+        "enabled": True,
+        "utilization_threshold": 10.0,  # % max throughput utilization
+        "lookback_days": 14,  # Analysis period
+        "min_datapoints": 50,  # Minimum Cloud Monitoring data points
+        "confidence_high_days": 14,
+        "description": "GCP Persistent Disks with <10% throughput utilization - downgrade type 💰💰 P1",
+    },
+    "persistent_disk_oversized": {
+        "enabled": True,
+        "free_space_threshold": 80.0,  # % minimum free space for detection
+        "safety_buffer": 1.30,  # Size safety margin (1.30 = +30%)
+        "min_savings_threshold": 5.0,  # Minimum $/month savings
+        "lookback_days": 14,  # Analysis period
+        "confidence_high_days": 14,
+        "description": "GCP Persistent Disks with >80% free space - resize to save costs (requires agent) 💰💰 P1",
+    },
+    "persistent_disk_readonly": {
+        "enabled": True,
+        "max_write_ops_threshold": 10,  # Max write operations over period
+        "lookback_days": 30,  # Analysis period
+        "min_savings_threshold": 5.0,  # Minimum $/month savings
+        "confidence_high_days": 30,
+        "description": "GCP Persistent Disks with zero writes for 30 days - convert to snapshot to save 35-85% 💰💰 P1",
+    },
 }
 
 

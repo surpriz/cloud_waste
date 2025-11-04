@@ -573,8 +573,24 @@ const RESOURCE_CATEGORIES = {
     analytics: ["kinesis_stream", "msk_cluster", "opensearch_domain"],
   },
   gcp: {
-    compute: ["gce_instance_stopped", "gce_instance_idle", "gke_cluster_idle"],
-    storage: ["persistent_disk_unattached", "gcs_bucket_empty", "disk_snapshot_old"],
+    compute: [
+      // Compute Engine Instances (10 scenarios)
+      "compute_instance_stopped", "compute_instance_idle", "compute_instance_overprovisioned",
+      "compute_instance_old_generation", "compute_instance_no_spot", "compute_instance_untagged",
+      "compute_instance_devtest_247", "compute_instance_memory_waste", "compute_instance_rightsizing",
+      "compute_instance_burstable_waste",
+      // GKE Clusters
+      "gke_cluster_idle"
+    ],
+    storage: [
+      // Persistent Disks (10 scenarios)
+      "persistent_disk_unattached", "persistent_disk_attached_stopped", "persistent_disk_never_used",
+      "persistent_disk_orphan_snapshots", "persistent_disk_old_type", "persistent_disk_overprovisioned_type",
+      "persistent_disk_untagged", "persistent_disk_underutilized", "persistent_disk_oversized",
+      "persistent_disk_readonly",
+      // GCS Buckets
+      "gcs_bucket_empty"
+    ],
     networking: ["static_ip_unattached", "nat_gateway_unused"],
     database: ["cloud_sql_stopped", "cloud_sql_idle"],
   },
@@ -720,29 +736,73 @@ const CATEGORY_LABELS = {
   }
 };
 
-// GCP Resource Icons & Labels (empty for now - will be populated when detection scenarios are added)
+// GCP Resource Icons & Labels
 const GCP_RESOURCE_ICONS: { [key: string]: any } = {
-  gce_instance_stopped: Server,
-  gce_instance_idle: Server,
+  // Compute Engine Instances (10 scenarios)
+  compute_instance_stopped: Server,
+  compute_instance_idle: Activity,
+  compute_instance_overprovisioned: TrendingDown,
+  compute_instance_old_generation: AlertTriangle,
+  compute_instance_no_spot: DollarSign,
+  compute_instance_untagged: Tag,
+  compute_instance_devtest_247: Clock,
+  compute_instance_memory_waste: Server,
+  compute_instance_rightsizing: TrendingDown,
+  compute_instance_burstable_waste: Activity,
+  // GKE Clusters
   gke_cluster_idle: Server,
+  // Persistent Disks (10 scenarios)
   persistent_disk_unattached: HardDrive,
+  persistent_disk_attached_stopped: Server,
+  persistent_disk_never_used: Activity,
+  persistent_disk_orphan_snapshots: Camera,
+  persistent_disk_old_type: AlertTriangle,
+  persistent_disk_overprovisioned_type: TrendingDown,
+  persistent_disk_untagged: Tag,
+  persistent_disk_underutilized: Activity,
+  persistent_disk_oversized: HardDrive,
+  persistent_disk_readonly: FileText,
+  // GCS Buckets
   gcs_bucket_empty: HardDrive,
-  disk_snapshot_old: Camera,
+  // Networking
   static_ip_unattached: Globe,
   nat_gateway_unused: Network,
+  // Database
   cloud_sql_stopped: Database,
   cloud_sql_idle: Database,
 };
 
 const GCP_RESOURCE_LABELS: { [key: string]: string } = {
-  gce_instance_stopped: "Compute Engine Instances (Stopped)",
-  gce_instance_idle: "Compute Engine Instances (Idle)",
+  // Compute Engine Instances (10 scenarios)
+  compute_instance_stopped: "Compute Engine Instance (Stopped >30 days) 💰💰 P1",
+  compute_instance_idle: "Compute Engine Instance (Idle CPU <5%) 💰💰💰💰 P0",
+  compute_instance_overprovisioned: "Compute Engine Instance (Over-Provisioned CPU 5-30%) 💰💰💰 P0",
+  compute_instance_old_generation: "Compute Engine Instance (Old Generation n1) 💰💰 P1",
+  compute_instance_no_spot: "Compute Engine Instance (No Spot Usage) 💰💰💰💰 P0",
+  compute_instance_untagged: "Compute Engine Instance (Missing Labels) ⚠️ P2",
+  compute_instance_devtest_247: "Compute Engine Instance (Dev/Test 24/7) 💰💰💰💰 P0",
+  compute_instance_memory_waste: "Compute Engine Instance (Memory Waste <40%) 📊💰💰 P1",
+  compute_instance_rightsizing: "Compute Engine Instance (Rightsizing Opportunity) 📊💰💰💰 P0",
+  compute_instance_burstable_waste: "Compute Engine Instance (Burstable Waste e2) 📊💰💰 P1",
+  // GKE Clusters
   gke_cluster_idle: "GKE Clusters (Idle)",
-  persistent_disk_unattached: "Persistent Disks (Unattached)",
+  // Persistent Disks (10 scenarios)
+  persistent_disk_unattached: "Persistent Disk (Unattached >7 days) 💰💰💰💰 P0",
+  persistent_disk_attached_stopped: "Persistent Disk (Attached to Stopped Instance >30 days) 💰💰💰💰 P0",
+  persistent_disk_never_used: "Persistent Disk (Never Used - Zero I/O >7 days) 💰💰💰 P1",
+  persistent_disk_orphan_snapshots: "Disk Snapshot (Orphan - Source Deleted >30 days) 💰 P2",
+  persistent_disk_old_type: "Persistent Disk (pd-standard with Active Workload) 💰 P2",
+  persistent_disk_overprovisioned_type: "Persistent Disk (pd-ssd <50% Capacity → pd-balanced) 💰💰💰 P1",
+  persistent_disk_untagged: "Persistent Disk (Missing Required Labels) ⚠️ P2",
+  persistent_disk_underutilized: "Persistent Disk (Underutilized <10% Throughput) 📊💰💰💰 P1",
+  persistent_disk_oversized: "Persistent Disk (Oversized >80% Free Space) 📊💰💰💰 P1",
+  persistent_disk_readonly: "Persistent Disk (Read-Only 30 days → Snapshot) 📊💰💰💰 P1",
+  // GCS Buckets
   gcs_bucket_empty: "Cloud Storage Buckets (Empty)",
-  disk_snapshot_old: "Disk Snapshots (Old)",
+  // Networking
   static_ip_unattached: "Static IPs (Unattached)",
   nat_gateway_unused: "Cloud NAT (Unused)",
+  // Database
   cloud_sql_stopped: "Cloud SQL (Stopped)",
   cloud_sql_idle: "Cloud SQL (Idle)",
 };
