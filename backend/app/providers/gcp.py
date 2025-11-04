@@ -3478,7 +3478,7 @@ class GCPProvider(CloudProviderBase):
 
         return resources
 
-    async def scan_redundant_disk_snapshots(
+    async def scan_redundant_snapshots(
         self, region: str, detection_rules: dict | None = None
     ) -> list[OrphanResourceData]:
         """
@@ -3599,7 +3599,7 @@ class GCPProvider(CloudProviderBase):
 
         return resources
 
-    async def scan_old_unused_disk_snapshots(
+    async def scan_old_unused_snapshots(
         self, region: str, detection_rules: dict | None = None
     ) -> list[OrphanResourceData]:
         """
@@ -3779,7 +3779,7 @@ class GCPProvider(CloudProviderBase):
 
         return resources
 
-    async def scan_deleted_vm_snapshots(
+    async def scan_snapshots_from_deleted_instances(
         self, region: str, detection_rules: dict | None = None
     ) -> list[OrphanResourceData]:
         """
@@ -3894,7 +3894,7 @@ class GCPProvider(CloudProviderBase):
 
         return resources
 
-    async def scan_failed_disk_snapshots(
+    async def scan_incomplete_failed_snapshots(
         self, region: str, detection_rules: dict | None = None
     ) -> list[OrphanResourceData]:
         """
@@ -3968,7 +3968,7 @@ class GCPProvider(CloudProviderBase):
 
         return resources
 
-    async def scan_untagged_disk_snapshots(
+    async def scan_untagged_snapshots(
         self, region: str, detection_rules: dict | None = None
     ) -> list[OrphanResourceData]:
         """
@@ -4059,7 +4059,7 @@ class GCPProvider(CloudProviderBase):
 
         return resources
 
-    async def scan_excessive_retention_nonprod_snapshots(
+    async def scan_excessive_retention_snapshots(
         self, region: str, detection_rules: dict | None = None
     ) -> list[OrphanResourceData]:
         """
@@ -4148,7 +4148,7 @@ class GCPProvider(CloudProviderBase):
 
         return resources
 
-    async def scan_duplicate_disk_snapshots(
+    async def scan_duplicate_snapshots(
         self, region: str, detection_rules: dict | None = None
     ) -> list[OrphanResourceData]:
         """
@@ -4379,6 +4379,12 @@ class GCPProvider(CloudProviderBase):
             pass
 
         return resources
+
+    async def scan_unused_ami_snapshots(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """Not applicable for GCP (AWS AMI-specific)."""
+        return []
 
     # AWS-specific EC2 instance methods (not applicable to GCP)
     async def scan_oversized_instances(
