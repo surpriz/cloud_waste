@@ -57,6 +57,7 @@ google-cloud-compute==1.15.0  # Compute Engine instances, disks, snapshots
 google-cloud-storage==2.14.0  # Cloud Storage buckets
 google-cloud-monitoring==2.18.0  # Cloud Monitoring metrics
 google-cloud-logging==3.11.0  # Cloud Logging for snapshot restore verification
+google-cloud-container==2.48.0  # GKE (Google Kubernetes Engine) clusters management
 google-auth==2.26.2  # GCP authentication
 
 # Validation

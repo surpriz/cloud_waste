@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { User, Bell, Shield, Trash2, Save, Key, Sliders, RotateCcw, HardDrive, Globe, Camera, Server, Activity, Zap, Database, ArrowLeft, Network, AlertTriangle, TrendingDown, Archive, TestTube, Copy, Clock, Cpu, Users, FileText, Search, ChevronDown, Box, XCircle, Tag, DollarSign } from "lucide-react";
+import { User, Bell, Shield, Trash2, Save, Key, Sliders, RotateCcw, HardDrive, Globe, Camera, Server, Activity, Zap, Database, ArrowLeft, Network, AlertTriangle, TrendingDown, Archive, TestTube, Copy, Clock, Cpu, Users, FileText, Search, ChevronDown, Box, XCircle, Tag, DollarSign, AlertCircle, Layers, Calendar, TrendingUp, PackageOpen } from "lucide-react";
 import Link from "next/link";
 import { useNotifications } from "@/hooks/useNotifications";
 import { Toast } from "@/components/ui/Toast";
@@ -579,8 +579,17 @@ const RESOURCE_CATEGORIES = {
       "compute_instance_old_generation", "compute_instance_no_spot", "compute_instance_untagged",
       "compute_instance_devtest_247", "compute_instance_memory_waste", "compute_instance_rightsizing",
       "compute_instance_burstable_waste",
-      // GKE Clusters
-      "gke_cluster_idle"
+      // GKE Clusters (10 scenarios)
+      "gke_cluster_empty",
+      "gke_cluster_nodes_inactive",
+      "gke_cluster_nodepool_overprovisioned",
+      "gke_cluster_old_machine_type",
+      "gke_cluster_devtest_247",
+      "gke_cluster_no_autoscaling",
+      "gke_cluster_untagged",
+      "gke_cluster_nodes_underutilized",
+      "gke_cluster_pods_overrequested",
+      "gke_cluster_no_workloads"
     ],
     storage: [
       // Persistent Disks (10 scenarios)
@@ -754,8 +763,17 @@ const GCP_RESOURCE_ICONS: { [key: string]: any } = {
   compute_instance_memory_waste: Server,
   compute_instance_rightsizing: TrendingDown,
   compute_instance_burstable_waste: Activity,
-  // GKE Clusters
-  gke_cluster_idle: Server,
+  // GKE Clusters (10 scenarios)
+  gke_cluster_empty: Server,
+  gke_cluster_nodes_inactive: AlertCircle,
+  gke_cluster_nodepool_overprovisioned: Layers,
+  gke_cluster_old_machine_type: Clock,
+  gke_cluster_devtest_247: Calendar,
+  gke_cluster_no_autoscaling: TrendingUp,
+  gke_cluster_untagged: Tag,
+  gke_cluster_nodes_underutilized: Activity,
+  gke_cluster_pods_overrequested: PackageOpen,
+  gke_cluster_no_workloads: XCircle,
   // Persistent Disks (10 scenarios)
   persistent_disk_unattached: HardDrive,
   persistent_disk_attached_stopped: Server,
@@ -800,8 +818,17 @@ const GCP_RESOURCE_LABELS: { [key: string]: string } = {
   compute_instance_memory_waste: "Compute Engine Instance (Memory Waste <40%) 📊💰💰 P1",
   compute_instance_rightsizing: "Compute Engine Instance (Rightsizing Opportunity) 📊💰💰💰 P0",
   compute_instance_burstable_waste: "Compute Engine Instance (Burstable Waste e2) 📊💰💰 P1",
-  // GKE Clusters
-  gke_cluster_idle: "GKE Clusters (Idle)",
+  // GKE Clusters (10 scenarios)
+  gke_cluster_empty: "GKE Cluster (Empty - no nodes) 💰💰💰💰 P0",
+  gke_cluster_nodes_inactive: "GKE Cluster (All Nodes Inactive/Not-Ready) 💰💰💰💰 P0",
+  gke_cluster_nodepool_overprovisioned: "GKE Cluster (Node Pool Over-Provisioned) 💰💰💰💰 P0",
+  gke_cluster_old_machine_type: "GKE Cluster (Old Machine Type n1) 💰💰💰 P1",
+  gke_cluster_devtest_247: "GKE Cluster (Dev/Test 24/7) 💰💰💰 P1",
+  gke_cluster_no_autoscaling: "GKE Cluster (No Autoscaling) 💰💰💰 P1",
+  gke_cluster_untagged: "GKE Cluster (Untagged - missing labels) 💰 P2",
+  gke_cluster_nodes_underutilized: "GKE Cluster (Nodes Underutilized) 💰💰💰 P1",
+  gke_cluster_pods_overrequested: "GKE Cluster (Pods Over-Requested) 💰💰 P2",
+  gke_cluster_no_workloads: "GKE Cluster (No Workloads) 💰💰💰💰 P0",
   // Persistent Disks (10 scenarios)
   persistent_disk_unattached: "Persistent Disk (Unattached >7 days) 💰💰💰💰 P0",
   persistent_disk_attached_stopped: "Persistent Disk (Attached to Stopped Instance >30 days) 💰💰💰💰 P0",

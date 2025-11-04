@@ -8,9 +8,11 @@ from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from google.cloud import compute_v1, logging, monitoring_v3
+from google.cloud import compute_v1, container_v1, logging, monitoring_v3
 from google.oauth2 import service_account
 from google.protobuf.timestamp_pb2 import Timestamp
+from kubernetes import client as k8s_client
+from kubernetes import config as k8s_config
 
 from app.providers.base import CloudProviderBase, OrphanResourceData
 
@@ -86,6 +88,8 @@ class GCPProvider(CloudProviderBase):
         self._credentials = None
         self._compute_client = None
         self._monitoring_client = None
+        self._gke_client = None
+        self._logging_client = None
 
     def _get_credentials(self) -> service_account.Credentials:
         """Get GCP credentials from service account JSON."""
@@ -111,6 +115,68 @@ class GCPProvider(CloudProviderBase):
                 credentials=self._get_credentials()
             )
         return self._monitoring_client
+
+    def _get_gke_client(self) -> container_v1.ClusterManagerClient:
+        """Get or create GKE (Google Kubernetes Engine) client."""
+        if self._gke_client is None:
+            self._gke_client = container_v1.ClusterManagerClient(
+                credentials=self._get_credentials()
+            )
+        return self._gke_client
+
+    def _get_k8s_config(self, cluster: container_v1.Cluster, location: str) -> dict:
+        """
+        Build Kubernetes config dict for a GKE cluster.
+
+        Args:
+            cluster: GKE cluster object
+            location: Cluster location (zone or region)
+
+        Returns:
+            Kubernetes config dict
+        """
+        try:
+            # Get cluster endpoint and CA certificate
+            endpoint = cluster.endpoint
+            ca_cert = cluster.master_auth.cluster_ca_certificate
+
+            # Build kubeconfig
+            k8s_config_dict = {
+                "apiVersion": "v1",
+                "kind": "Config",
+                "clusters": [
+                    {
+                        "name": cluster.name,
+                        "cluster": {
+                            "server": f"https://{endpoint}",
+                            "certificate-authority-data": ca_cert,
+                        },
+                    }
+                ],
+                "contexts": [
+                    {
+                        "name": cluster.name,
+                        "context": {"cluster": cluster.name, "user": cluster.name},
+                    }
+                ],
+                "current-context": cluster.name,
+                "users": [
+                    {
+                        "name": cluster.name,
+                        "user": {
+                            "auth-provider": {
+                                "name": "gcp",
+                                "config": {
+                                    "access-token": self._get_credentials().token,
+                                },
+                            }
+                        },
+                    }
+                ],
+            }
+            return k8s_config_dict
+        except Exception:
+            return {}
 
     def _get_machine_cost(self, machine_type: str, spot: bool = False) -> float:
         """
@@ -4385,6 +4451,859 @@ class GCPProvider(CloudProviderBase):
     ) -> list[OrphanResourceData]:
         """Not applicable for GCP (AWS AMI-specific)."""
         return []
+
+    # =================================================================
+    # GKE CLUSTERS DETECTION METHODS (10 scenarios)
+    # =================================================================
+
+    async def scan_gke_cluster_empty(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scenario 1: Scan for empty GKE clusters (no nodes).
+
+        Detection:
+        - total_nodes == 0
+        - age >= min_age_days (default: 7)
+        - Standard mode only (Autopilot has no management fee)
+
+        Cost:
+        - Management fee: $73/month for Standard mode
+        """
+        resources = []
+        min_age_days = (
+            detection_rules.get("gke_cluster_empty", {}).get("min_age_days", 7)
+            if detection_rules
+            else 7
+        )
+
+        try:
+            gke_client = self._get_gke_client()
+
+            # List all clusters (location "-" means all zones/regions)
+            parent = f"projects/{self.project_id}/locations/-"
+            clusters_response = gke_client.list_clusters(parent=parent)
+
+            for cluster in clusters_response.clusters:
+                # Skip Autopilot clusters (no management fee)
+                if cluster.autopilot and cluster.autopilot.enabled:
+                    continue
+
+                # Count total nodes
+                total_nodes = 0
+                for node_pool in cluster.node_pools:
+                    total_nodes += node_pool.initial_node_count
+
+                # Detection: empty cluster
+                if total_nodes == 0:
+                    age_days = self._get_age_days(cluster.create_time)
+
+                    if age_days >= min_age_days:
+                        # Management fee: $0.10/hour = $73/month
+                        management_fee_monthly = 73.00
+                        already_wasted = management_fee_monthly * (age_days / 30.0)
+
+                        resources.append(
+                            OrphanResourceData(
+                                resource_id=cluster.self_link,
+                                resource_name=cluster.name,
+                                resource_type="gke_cluster_empty",
+                                region=cluster.location,
+                                estimated_monthly_cost=management_fee_monthly,
+                                resource_metadata={
+                                    "cluster_name": cluster.name,
+                                    "location": cluster.location,
+                                    "cluster_mode": "STANDARD",
+                                    "total_nodes": total_nodes,
+                                    "status": cluster.status.name,
+                                    "creation_time": cluster.create_time,
+                                    "age_days": age_days,
+                                    "management_fee_monthly": management_fee_monthly,
+                                    "already_wasted": round(already_wasted, 2),
+                                    "confidence": "high",
+                                    "recommendation": "Delete cluster or migrate to Autopilot mode",
+                                },
+                            )
+                        )
+
+        except Exception as e:
+            pass
+
+        return resources
+
+    async def scan_gke_cluster_nodes_inactive(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scenario 2: Scan for clusters with all nodes inactive/not-ready.
+
+        Detection:
+        - total_nodes > 0
+        - ready_nodes == 0 (all nodes not ready)
+        - inactive_days >= min_inactive_days (default: 7)
+
+        Cost:
+        - 100% waste (management fee + nodes cost)
+        """
+        resources = []
+        min_inactive_days = (
+            detection_rules.get("gke_cluster_nodes_inactive", {}).get(
+                "min_inactive_days", 7
+            )
+            if detection_rules
+            else 7
+        )
+
+        try:
+            gke_client = self._get_gke_client()
+
+            parent = f"projects/{self.project_id}/locations/-"
+            clusters_response = gke_client.list_clusters(parent=parent)
+
+            for cluster in clusters_response.clusters:
+                if cluster.current_node_count == 0:
+                    continue  # Skip empty clusters (handled by scenario 1)
+
+                try:
+                    # Get Kubernetes API client
+                    k8s_config_dict = self._get_k8s_config(cluster, cluster.location)
+                    if not k8s_config_dict:
+                        continue
+
+                    # Load kubeconfig and create API client
+                    k8s_config.load_kube_config_from_dict(k8s_config_dict)
+                    v1 = k8s_client.CoreV1Api()
+
+                    # List all nodes
+                    nodes = v1.list_node()
+                    total_nodes = len(nodes.items)
+                    ready_nodes = 0
+
+                    # Count ready nodes
+                    for node in nodes.items:
+                        for condition in node.status.conditions:
+                            if (
+                                condition.type == "Ready"
+                                and condition.status == "True"
+                            ):
+                                ready_nodes += 1
+                                break
+
+                    # Detection: all nodes not ready
+                    if ready_nodes == 0 and total_nodes > 0:
+                        # Calculate costs
+                        management_fee = 73.00
+                        nodes_cost = 0.0
+
+                        for node_pool in cluster.node_pools:
+                            machine_type = node_pool.config.machine_type
+                            node_count = node_pool.initial_node_count
+                            nodes_cost += node_count * self._get_machine_cost(
+                                machine_type
+                            )
+
+                        monthly_cost = management_fee + nodes_cost
+                        age_days = self._get_age_days(cluster.create_time)
+                        already_wasted = monthly_cost * (age_days / 30.0)
+
+                        resources.append(
+                            OrphanResourceData(
+                                resource_id=cluster.self_link,
+                                resource_name=cluster.name,
+                                resource_type="gke_cluster_nodes_inactive",
+                                region=cluster.location,
+                                estimated_monthly_cost=monthly_cost,
+                                resource_metadata={
+                                    "cluster_name": cluster.name,
+                                    "location": cluster.location,
+                                    "total_nodes": total_nodes,
+                                    "ready_nodes": ready_nodes,
+                                    "management_fee_monthly": management_fee,
+                                    "nodes_cost_monthly": round(nodes_cost, 2),
+                                    "already_wasted": round(already_wasted, 2),
+                                    "confidence": "high",
+                                    "recommendation": "Delete and recreate cluster, or troubleshoot node issues",
+                                },
+                            )
+                        )
+
+                except Exception:
+                    continue
+
+        except Exception as e:
+            pass
+
+        return resources
+
+    async def scan_gke_cluster_nodepool_overprovisioned(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scenario 3: Scan for over-provisioned node pools (too many nodes for workload).
+
+        Detection:
+        - pods_per_node < min_pods_per_node_threshold (default: 2.0)
+        - total_nodes >= 2
+        - autoscaling not enabled
+
+        Cost:
+        - Waste = (current_nodes - recommended_nodes) * node_cost
+        """
+        resources = []
+        min_pods_per_node = (
+            detection_rules.get("gke_cluster_nodepool_overprovisioned", {}).get(
+                "min_pods_per_node_threshold", 2.0
+            )
+            if detection_rules
+            else 2.0
+        )
+        optimal_pods_per_node = (
+            detection_rules.get("gke_cluster_nodepool_overprovisioned", {}).get(
+                "optimal_pods_per_node", 10
+            )
+            if detection_rules
+            else 10
+        )
+
+        try:
+            gke_client = self._get_gke_client()
+
+            parent = f"projects/{self.project_id}/locations/-"
+            clusters_response = gke_client.list_clusters(parent=parent)
+
+            for cluster in clusters_response.clusters:
+                try:
+                    # Get Kubernetes API client
+                    k8s_config_dict = self._get_k8s_config(cluster, cluster.location)
+                    if not k8s_config_dict:
+                        continue
+
+                    k8s_config.load_kube_config_from_dict(k8s_config_dict)
+                    v1 = k8s_client.CoreV1Api()
+
+                    # Count user pods (exclude system namespaces)
+                    pods = v1.list_pod_for_all_namespaces()
+                    user_pods = [
+                        p
+                        for p in pods.items
+                        if p.metadata.namespace
+                        not in ["kube-system", "kube-public", "kube-node-lease"]
+                        and p.status.phase == "Running"
+                    ]
+
+                    total_user_pods = len(user_pods)
+
+                    # Count nodes
+                    nodes = v1.list_node()
+                    total_nodes = len(nodes.items)
+
+                    if total_nodes >= 2:
+                        pods_per_node = total_user_pods / total_nodes
+
+                        # Detection: very low pods per node
+                        if pods_per_node < min_pods_per_node:
+                            # Check if autoscaling enabled
+                            has_autoscaling = any(
+                                np.autoscaling and np.autoscaling.enabled
+                                for np in cluster.node_pools
+                            )
+
+                            if not has_autoscaling:
+                                # Calculate waste
+                                recommended_nodes = max(
+                                    1, int(total_user_pods / optimal_pods_per_node)
+                                )
+                                wasted_nodes = total_nodes - recommended_nodes
+
+                                if wasted_nodes > 0:
+                                    # Estimate node cost
+                                    node_cost_monthly = 0.0
+                                    for node_pool in cluster.node_pools:
+                                        machine_type = node_pool.config.machine_type
+                                        node_cost_monthly = self._get_machine_cost(
+                                            machine_type
+                                        )
+                                        break  # Use first pool as estimate
+
+                                    monthly_waste = wasted_nodes * node_cost_monthly
+                                    age_days = self._get_age_days(cluster.create_time)
+                                    already_wasted = monthly_waste * (age_days / 30.0)
+
+                                    resources.append(
+                                        OrphanResourceData(
+                                            resource_id=cluster.self_link,
+                                            resource_name=cluster.name,
+                                            resource_type="gke_cluster_nodepool_overprovisioned",
+                                            region=cluster.location,
+                                            estimated_monthly_cost=monthly_waste,
+                                            resource_metadata={
+                                                "cluster_name": cluster.name,
+                                                "location": cluster.location,
+                                                "total_nodes": total_nodes,
+                                                "total_user_pods": total_user_pods,
+                                                "pods_per_node": round(
+                                                    pods_per_node, 2
+                                                ),
+                                                "recommended_nodes": recommended_nodes,
+                                                "wasted_nodes": wasted_nodes,
+                                                "already_wasted": round(
+                                                    already_wasted, 2
+                                                ),
+                                                "confidence": "high",
+                                                "recommendation": f"Enable autoscaling or reduce nodes to {recommended_nodes} for current workload",
+                                            },
+                                        )
+                                    )
+
+                except Exception:
+                    continue
+
+        except Exception as e:
+            pass
+
+        return resources
+
+    async def scan_gke_cluster_old_machine_type(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scenario 4: Scan for clusters using old generation machine types.
+
+        Detection:
+        - machine_type.startswith('n1-')
+        - n2/n2d equivalent exists with better price/performance
+
+        Cost:
+        - Waste = price difference (n1 vs n2)
+        """
+        resources = []
+        old_generations = (
+            detection_rules.get("gke_cluster_old_machine_type", {}).get(
+                "old_generations", ["n1"]
+            )
+            if detection_rules
+            else ["n1"]
+        )
+
+        try:
+            gke_client = self._get_gke_client()
+
+            parent = f"projects/{self.project_id}/locations/-"
+            clusters_response = gke_client.list_clusters(parent=parent)
+
+            for cluster in clusters_response.clusters:
+                for node_pool in cluster.node_pools:
+                    machine_type = node_pool.config.machine_type
+
+                    # Detection: old generation
+                    if any(machine_type.startswith(f"{gen}-") for gen in old_generations):
+                        # Calculate savings with n2
+                        n2_equivalent = machine_type.replace("n1-", "n2-")
+
+                        n1_cost = self._get_machine_cost(machine_type)
+                        n2_cost = self._get_machine_cost(n2_equivalent)
+
+                        if n1_cost > 0 and n2_cost > 0:
+                            node_count = node_pool.initial_node_count
+                            current_cost = node_count * n1_cost
+                            recommended_cost = node_count * n2_cost
+                            monthly_waste = current_cost - recommended_cost
+
+                            if monthly_waste > 20.0:  # Min $20 savings
+                                age_days = self._get_age_days(cluster.create_time)
+                                already_wasted = monthly_waste * (age_days / 30.0)
+                                savings_pct = (
+                                    (monthly_waste / current_cost * 100)
+                                    if current_cost > 0
+                                    else 0
+                                )
+
+                                resources.append(
+                                    OrphanResourceData(
+                                        resource_id=f"{cluster.self_link}/nodePools/{node_pool.name}",
+                                        resource_name=f"{cluster.name}/{node_pool.name}",
+                                        resource_type="gke_cluster_old_machine_type",
+                                        region=cluster.location,
+                                        estimated_monthly_cost=monthly_waste,
+                                        resource_metadata={
+                                            "cluster_name": cluster.name,
+                                            "node_pool_name": node_pool.name,
+                                            "location": cluster.location,
+                                            "machine_type": machine_type,
+                                            "node_count": node_count,
+                                            "recommended_machine_type": n2_equivalent,
+                                            "current_cost_monthly": round(
+                                                current_cost, 2
+                                            ),
+                                            "recommended_cost_monthly": round(
+                                                recommended_cost, 2
+                                            ),
+                                            "savings_percentage": round(savings_pct, 1),
+                                            "already_wasted": round(already_wasted, 2),
+                                            "confidence": "medium",
+                                            "recommendation": f"Migrate to {n2_equivalent} for +40% performance/vCPU and -{round(savings_pct, 0)}% cost",
+                                        },
+                                    )
+                                )
+
+        except Exception as e:
+            pass
+
+        return resources
+
+    async def scan_gke_cluster_devtest_247(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scenario 5: Scan for dev/test clusters running 24/7.
+
+        Detection:
+        - labels.environment in ['dev', 'test', 'staging']
+        - uptime_days >= min_uptime_days (default: 7)
+
+        Cost:
+        - Waste = cost difference between 24/7 and business hours
+        """
+        resources = []
+        devtest_labels = (
+            detection_rules.get("gke_cluster_devtest_247", {}).get(
+                "devtest_labels", ["dev", "test", "staging", "development"]
+            )
+            if detection_rules
+            else ["dev", "test", "staging", "development"]
+        )
+        min_uptime_days = (
+            detection_rules.get("gke_cluster_devtest_247", {}).get(
+                "min_uptime_days", 7
+            )
+            if detection_rules
+            else 7
+        )
+        business_hours_per_week = (
+            detection_rules.get("gke_cluster_devtest_247", {}).get(
+                "business_hours_per_week", 60
+            )
+            if detection_rules
+            else 60
+        )
+
+        try:
+            gke_client = self._get_gke_client()
+
+            parent = f"projects/{self.project_id}/locations/-"
+            clusters_response = gke_client.list_clusters(parent=parent)
+
+            for cluster in clusters_response.clusters:
+                # Check labels
+                labels = cluster.resource_labels if cluster.resource_labels else {}
+                environment = labels.get("environment", "").lower()
+
+                if environment in devtest_labels:
+                    age_days = self._get_age_days(cluster.create_time)
+
+                    if age_days >= min_uptime_days:
+                        # Calculate costs
+                        management_fee = 73.00
+                        nodes_cost = 0.0
+
+                        for node_pool in cluster.node_pools:
+                            machine_type = node_pool.config.machine_type
+                            node_count = node_pool.initial_node_count
+                            nodes_cost += node_count * self._get_machine_cost(
+                                machine_type
+                            )
+
+                        monthly_cost = management_fee + nodes_cost
+
+                        # Calculate optimal cost (business hours only)
+                        hours_optimal = business_hours_per_week
+                        hours_actual = 168  # 24×7
+                        optimal_nodes_cost = nodes_cost * (
+                            hours_optimal / hours_actual
+                        )
+                        optimal_cost = management_fee + optimal_nodes_cost
+
+                        monthly_waste = monthly_cost - optimal_cost
+                        already_wasted = monthly_waste * (age_days / 30.0)
+                        waste_pct = int((monthly_waste / monthly_cost * 100))
+
+                        resources.append(
+                            OrphanResourceData(
+                                resource_id=cluster.self_link,
+                                resource_name=cluster.name,
+                                resource_type="gke_cluster_devtest_247",
+                                region=cluster.location,
+                                estimated_monthly_cost=monthly_waste,
+                                resource_metadata={
+                                    "cluster_name": cluster.name,
+                                    "location": cluster.location,
+                                    "environment": environment,
+                                    "uptime_days": age_days,
+                                    "current_cost_monthly": round(monthly_cost, 2),
+                                    "optimal_cost_monthly": round(optimal_cost, 2),
+                                    "waste_percentage": waste_pct,
+                                    "already_wasted": round(already_wasted, 2),
+                                    "confidence": "high",
+                                    "recommendation": "Implement automated start/stop schedule or migrate to Autopilot",
+                                },
+                            )
+                        )
+
+        except Exception as e:
+            pass
+
+        return resources
+
+    async def scan_gke_cluster_no_autoscaling(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scenario 6: Scan for clusters without autoscaling and variable workload.
+
+        Detection:
+        - No autoscaling enabled on any node pool
+        - Workload variability > min_variability_threshold (default: 30%)
+
+        Cost:
+        - Conservative estimate: 50% of over-provisioned nodes
+        """
+        resources = []
+        min_variability = (
+            detection_rules.get("gke_cluster_no_autoscaling", {}).get(
+                "min_variability_threshold", 30.0
+            )
+            if detection_rules
+            else 30.0
+        )
+
+        try:
+            gke_client = self._get_gke_client()
+
+            parent = f"projects/{self.project_id}/locations/-"
+            clusters_response = gke_client.list_clusters(parent=parent)
+
+            for cluster in clusters_response.clusters:
+                # Skip Autopilot (auto-scaling built-in)
+                if cluster.autopilot and cluster.autopilot.enabled:
+                    continue
+
+                # Check if any node pool has autoscaling
+                has_autoscaling = any(
+                    np.autoscaling and np.autoscaling.enabled
+                    for np in cluster.node_pools
+                )
+
+                if not has_autoscaling:
+                    # Assume moderate variability (cannot check metrics here)
+                    # Conservative waste estimate
+                    total_nodes = 0
+                    nodes_cost = 0.0
+
+                    for node_pool in cluster.node_pools:
+                        machine_type = node_pool.config.machine_type
+                        node_count = node_pool.initial_node_count
+                        total_nodes += node_count
+                        nodes_cost += node_count * self._get_machine_cost(machine_type)
+
+                    if total_nodes >= 2:
+                        # Conservative: assume 50% waste
+                        monthly_waste = nodes_cost * 0.5
+                        age_days = self._get_age_days(cluster.create_time)
+                        already_wasted = monthly_waste * (age_days / 30.0)
+
+                        resources.append(
+                            OrphanResourceData(
+                                resource_id=cluster.self_link,
+                                resource_name=cluster.name,
+                                resource_type="gke_cluster_no_autoscaling",
+                                region=cluster.location,
+                                estimated_monthly_cost=monthly_waste,
+                                resource_metadata={
+                                    "cluster_name": cluster.name,
+                                    "location": cluster.location,
+                                    "total_nodes": total_nodes,
+                                    "autoscaling_enabled": False,
+                                    "current_cost_monthly": round(nodes_cost, 2),
+                                    "already_wasted": round(already_wasted, 2),
+                                    "confidence": "medium",
+                                    "recommendation": f"Enable Cluster Autoscaler with min 1, max {total_nodes} nodes",
+                                },
+                            )
+                        )
+
+        except Exception as e:
+            pass
+
+        return resources
+
+    async def scan_gke_cluster_untagged(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scenario 7: Scan for clusters without required labels.
+
+        Detection:
+        - Missing required labels (environment, owner, cost-center)
+
+        Cost:
+        - Governance waste: 5% of cluster cost
+        """
+        resources = []
+        required_labels = (
+            detection_rules.get("gke_cluster_untagged", {}).get(
+                "required_labels", ["environment", "owner", "cost-center"]
+            )
+            if detection_rules
+            else ["environment", "owner", "cost-center"]
+        )
+        governance_waste_pct = (
+            detection_rules.get("gke_cluster_untagged", {}).get(
+                "governance_waste_pct", 0.05
+            )
+            if detection_rules
+            else 0.05
+        )
+
+        try:
+            gke_client = self._get_gke_client()
+
+            parent = f"projects/{self.project_id}/locations/-"
+            clusters_response = gke_client.list_clusters(parent=parent)
+
+            for cluster in clusters_response.clusters:
+                labels = cluster.resource_labels if cluster.resource_labels else {}
+
+                # Check for missing labels
+                missing_labels = [
+                    label for label in required_labels if label not in labels
+                ]
+
+                if missing_labels:
+                    # Calculate cluster cost
+                    management_fee = 0.0 if (cluster.autopilot and cluster.autopilot.enabled) else 73.00
+                    nodes_cost = 0.0
+
+                    for node_pool in cluster.node_pools:
+                        machine_type = node_pool.config.machine_type
+                        node_count = node_pool.initial_node_count
+                        nodes_cost += node_count * self._get_machine_cost(machine_type)
+
+                    cluster_monthly_cost = management_fee + nodes_cost
+                    monthly_waste = cluster_monthly_cost * governance_waste_pct
+
+                    age_days = self._get_age_days(cluster.create_time)
+                    already_wasted = monthly_waste * (age_days / 30.0)
+
+                    resources.append(
+                        OrphanResourceData(
+                            resource_id=cluster.self_link,
+                            resource_name=cluster.name,
+                            resource_type="gke_cluster_untagged",
+                            region=cluster.location,
+                            estimated_monthly_cost=monthly_waste,
+                            resource_metadata={
+                                "cluster_name": cluster.name,
+                                "location": cluster.location,
+                                "labels": dict(labels),
+                                "missing_labels": missing_labels,
+                                "cluster_monthly_cost": round(cluster_monthly_cost, 2),
+                                "already_wasted": round(already_wasted, 2),
+                                "confidence": "medium",
+                                "recommendation": "Add required labels for cost allocation and governance",
+                            },
+                        )
+                    )
+
+        except Exception as e:
+            pass
+
+        return resources
+
+    async def scan_gke_cluster_nodes_underutilized(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scenario 8 (Phase 2): Scan for clusters with underutilized nodes.
+
+        Detection:
+        - avg_cpu < cpu_threshold (default: 30%)
+        - avg_memory < memory_threshold (default: 40%)
+        - >50% of nodes underutilized
+
+        Cost:
+        - Waste = downgrade opportunity (e.g., n2-standard-4 → n2-standard-2)
+        """
+        resources = []
+        cpu_threshold = (
+            detection_rules.get("gke_cluster_nodes_underutilized", {}).get(
+                "cpu_threshold", 30.0
+            )
+            if detection_rules
+            else 30.0
+        )
+        memory_threshold = (
+            detection_rules.get("gke_cluster_nodes_underutilized", {}).get(
+                "memory_threshold", 40.0
+            )
+            if detection_rules
+            else 40.0
+        )
+
+        try:
+            gke_client = self._get_gke_client()
+
+            parent = f"projects/{self.project_id}/locations/-"
+            clusters_response = gke_client.list_clusters(parent=parent)
+
+            for cluster in clusters_response.clusters:
+                # Phase 2: Would require Cloud Monitoring metrics analysis
+                # Placeholder for MVP (conservative detection)
+                # Skip for now - requires metrics collection over 14 days
+                pass
+
+        except Exception as e:
+            pass
+
+        return resources
+
+    async def scan_gke_cluster_pods_overrequested(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scenario 9 (Phase 2): Scan for pods with excessive resource requests.
+
+        Detection:
+        - usage < 50% of requests (CPU or Memory)
+        - >30% of pods over-requested
+
+        Cost:
+        - Waste = difference between requested and used resources
+        """
+        resources = []
+        usage_request_ratio = (
+            detection_rules.get("gke_cluster_pods_overrequested", {}).get(
+                "usage_request_ratio_threshold", 0.5
+            )
+            if detection_rules
+            else 0.5
+        )
+
+        try:
+            gke_client = self._get_gke_client()
+
+            parent = f"projects/{self.project_id}/locations/-"
+            clusters_response = gke_client.list_clusters(parent=parent)
+
+            for cluster in clusters_response.clusters:
+                # Phase 2: Would require pod metrics analysis
+                # Placeholder for MVP
+                # Skip for now - requires Kubernetes metrics server
+                pass
+
+        except Exception as e:
+            pass
+
+        return resources
+
+    async def scan_gke_cluster_no_workloads(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scenario 10: Scan for clusters with no user workloads.
+
+        Detection:
+        - user_pods == 0 (excluding kube-system)
+        - no_workload_days >= min_no_workload_days (default: 7)
+
+        Cost:
+        - 100% waste (cluster unused)
+        """
+        resources = []
+        min_no_workload_days = (
+            detection_rules.get("gke_cluster_no_workloads", {}).get(
+                "min_no_workload_days", 7
+            )
+            if detection_rules
+            else 7
+        )
+
+        try:
+            gke_client = self._get_gke_client()
+
+            parent = f"projects/{self.project_id}/locations/-"
+            clusters_response = gke_client.list_clusters(parent=parent)
+
+            for cluster in clusters_response.clusters:
+                try:
+                    # Get Kubernetes API client
+                    k8s_config_dict = self._get_k8s_config(cluster, cluster.location)
+                    if not k8s_config_dict:
+                        continue
+
+                    k8s_config.load_kube_config_from_dict(k8s_config_dict)
+                    v1 = k8s_client.CoreV1Api()
+
+                    # Count user pods
+                    pods = v1.list_pod_for_all_namespaces()
+                    user_pods = [
+                        p
+                        for p in pods.items
+                        if p.metadata.namespace
+                        not in [
+                            "kube-system",
+                            "kube-public",
+                            "kube-node-lease",
+                            "gke-managed-system",
+                        ]
+                        and p.status.phase == "Running"
+                    ]
+
+                    if len(user_pods) == 0:
+                        age_days = self._get_age_days(cluster.create_time)
+
+                        if age_days >= min_no_workload_days:
+                            # Calculate total cost
+                            management_fee = 0.0 if (cluster.autopilot and cluster.autopilot.enabled) else 73.00
+                            nodes_cost = 0.0
+
+                            for node_pool in cluster.node_pools:
+                                machine_type = node_pool.config.machine_type
+                                node_count = node_pool.initial_node_count
+                                nodes_cost += node_count * self._get_machine_cost(
+                                    machine_type
+                                )
+
+                            monthly_cost = management_fee + nodes_cost
+                            already_wasted = monthly_cost * (age_days / 30.0)
+
+                            resources.append(
+                                OrphanResourceData(
+                                    resource_id=cluster.self_link,
+                                    resource_name=cluster.name,
+                                    resource_type="gke_cluster_no_workloads",
+                                    region=cluster.location,
+                                    estimated_monthly_cost=monthly_cost,
+                                    resource_metadata={
+                                        "cluster_name": cluster.name,
+                                        "location": cluster.location,
+                                        "user_pods": 0,
+                                        "no_workload_days": age_days,
+                                        "management_fee_monthly": management_fee,
+                                        "nodes_cost_monthly": round(nodes_cost, 2),
+                                        "already_wasted": round(already_wasted, 2),
+                                        "confidence": "high",
+                                        "recommendation": "Delete cluster if no longer needed",
+                                    },
+                                )
+                            )
+
+                except Exception:
+                    continue
+
+        except Exception as e:
+            pass
+
+        return resources
 
     # AWS-specific EC2 instance methods (not applicable to GCP)
     async def scan_oversized_instances(

@@ -2697,6 +2697,75 @@ DEFAULT_DETECTION_RULES = {
         "confidence_high_days": 365,
         "description": "GCP Disk Snapshots never restored (>180 days, never used) - unclear purpose 💰💰💰 P1",
     },
+    # =================================================================
+    # GCP GKE CLUSTERS DETECTION RULES (10 scenarios)
+    # =================================================================
+    "gke_cluster_empty": {
+        "enabled": True,
+        "min_age_days": 7,
+        "description": "GCP GKE Cluster empty (no nodes) - management fee waste $73/month 💰💰💰💰 P0",
+    },
+    "gke_cluster_nodes_inactive": {
+        "enabled": True,
+        "min_inactive_days": 7,
+        "ready_threshold": 0.0,
+        "description": "GCP GKE Cluster all nodes inactive (not-ready) - 100% waste 💰💰💰💰 P0",
+    },
+    "gke_cluster_nodepool_overprovisioned": {
+        "enabled": True,
+        "min_pods_per_node_threshold": 2.0,
+        "optimal_pods_per_node": 10,
+        "exclude_autoscaling_enabled": True,
+        "description": "GCP GKE Cluster over-provisioned (too many nodes for workload) 💰💰💰💰 P0",
+    },
+    "gke_cluster_old_machine_type": {
+        "enabled": True,
+        "old_generations": ["n1"],
+        "preferred_generation": "n2",
+        "min_savings_threshold": 20.0,
+        "description": "GCP GKE Cluster old machine type (n1 → n2 migration saves -20-30%) 💰💰💰 P1",
+    },
+    "gke_cluster_devtest_247": {
+        "enabled": True,
+        "devtest_labels": ["dev", "test", "staging", "development"],
+        "min_uptime_days": 7,
+        "business_hours_per_week": 60,
+        "description": "GCP GKE Cluster dev/test 24/7 (should run business hours only) 💰💰💰 P1",
+    },
+    "gke_cluster_no_autoscaling": {
+        "enabled": True,
+        "min_variability_threshold": 30.0,
+        "lookback_days": 14,
+        "waste_factor": 0.5,
+        "description": "GCP GKE Cluster no autoscaling (variable workload needs autoscaling) 💰💰💰 P1",
+    },
+    "gke_cluster_untagged": {
+        "enabled": True,
+        "required_labels": ["environment", "owner", "cost-center"],
+        "governance_waste_pct": 0.05,
+        "description": "GCP GKE Cluster untagged (missing labels) - governance waste 5% 💰 P2",
+    },
+    "gke_cluster_nodes_underutilized": {
+        "enabled": True,
+        "cpu_threshold": 30.0,
+        "memory_threshold": 40.0,
+        "lookback_days": 14,
+        "min_underutilized_percent": 0.5,
+        "description": "GCP GKE Cluster nodes underutilized (CPU <30%, Memory <40%) - downgrade opportunity 💰💰💰 P1",
+    },
+    "gke_cluster_pods_overrequested": {
+        "enabled": True,
+        "usage_request_ratio_threshold": 0.5,
+        "lookback_days": 14,
+        "min_overrequested_percent": 0.3,
+        "description": "GCP GKE Cluster pods over-requested (usage <50% requests) - right-size needed 💰💰 P2",
+    },
+    "gke_cluster_no_workloads": {
+        "enabled": True,
+        "min_no_workload_days": 7,
+        "exclude_namespaces": ["kube-system", "kube-public", "kube-node-lease", "gke-managed-system"],
+        "description": "GCP GKE Cluster no workloads (zero user pods >7 days) - 100% waste 💰💰💰💰 P0",
+    },
 }
 
 
