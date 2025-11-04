@@ -2,11 +2,13 @@
 
 import asyncio
 import json
+import re
 import time
+from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from google.cloud import compute_v1, monitoring_v3
+from google.cloud import compute_v1, logging_v2, monitoring_v3
 from google.oauth2 import service_account
 from google.protobuf.timestamp_pb2 import Timestamp
 
@@ -1571,6 +1573,14 @@ class GCPProvider(CloudProviderBase):
                 credentials=self._get_credentials()
             )
         return self._snapshots_client
+
+    def _get_logging_client(self) -> logging_v2.Client:
+        """Get or create Cloud Logging client."""
+        if not hasattr(self, "_logging_client") or self._logging_client is None:
+            self._logging_client = logging_v2.Client(
+                project=self.project_id, credentials=self._get_credentials()
+            )
+        return self._logging_client
 
     def _get_disk_pricing(self, disk_type: str) -> float:
         """Get pricing per GB/month for disk type (us-central1 pricing)."""
@@ -3350,54 +3360,1025 @@ class GCPProvider(CloudProviderBase):
         """Not applicable for GCP (AWS Elastic IP-specific)."""
         return []
 
-    # AWS-specific EBS snapshot methods (not applicable to GCP)
-    async def scan_redundant_snapshots(
-        self, region: str, detection_rules: dict | None = None
-    ) -> list[OrphanResourceData]:
-        """Not applicable for GCP (AWS EBS-specific)."""
-        return []
+    # ==================== DISK SNAPSHOTS (10 SCENARIOS) ====================
 
-    async def scan_old_unused_snapshots(
+    async def scan_orphaned_disk_snapshots(
         self, region: str, detection_rules: dict | None = None
     ) -> list[OrphanResourceData]:
-        """Not applicable for GCP (AWS EBS-specific)."""
-        return []
+        """
+        Scenario 1: Scan for orphaned disk snapshots (source disk deleted >30 days).
 
-    async def scan_snapshots_from_deleted_instances(
-        self, region: str, detection_rules: dict | None = None
-    ) -> list[OrphanResourceData]:
-        """Not applicable for GCP (AWS EBS-specific)."""
-        return []
+        Detection:
+        - Source disk no longer exists
+        - Age >= min_age_days (default: 30)
+        - Status = READY
 
-    async def scan_incomplete_failed_snapshots(
-        self, region: str, detection_rules: dict | None = None
-    ) -> list[OrphanResourceData]:
-        """Not applicable for GCP (AWS EBS-specific)."""
-        return []
+        Cost:
+        - 100% waste (source gone, purpose unclear)
+        - $0.026/GB/month (standard) or $0.032/GB/month (multi-regional)
+        """
+        resources = []
+        min_age_days = (
+            detection_rules.get("gcp_disk_snapshot_orphaned", {}).get("min_age_days", 30)
+            if detection_rules
+            else 30
+        )
 
-    async def scan_untagged_snapshots(
-        self, region: str, detection_rules: dict | None = None
-    ) -> list[OrphanResourceData]:
-        """Not applicable for GCP (AWS EBS-specific)."""
-        return []
+        try:
+            snapshots_client = self._get_snapshots_client()
+            disks_client = self._get_disks_client()
 
-    async def scan_excessive_retention_snapshots(
-        self, region: str, detection_rules: dict | None = None
-    ) -> list[OrphanResourceData]:
-        """Not applicable for GCP (AWS EBS-specific)."""
-        return []
+            # List all snapshots
+            request = compute_v1.ListSnapshotsRequest(project=self.project_id)
+            snapshots = snapshots_client.list(request=request)
 
-    async def scan_duplicate_snapshots(
-        self, region: str, detection_rules: dict | None = None
-    ) -> list[OrphanResourceData]:
-        """Not applicable for GCP (AWS EBS-specific)."""
-        return []
+            for snapshot in snapshots:
+                if snapshot.status != "READY":
+                    continue
 
-    async def scan_unused_ami_snapshots(
+                source_disk = snapshot.source_disk
+                if not source_disk:
+                    continue
+
+                # Extract zone and disk name from URI
+                # Format: https://www.googleapis.com/compute/v1/projects/{project}/zones/{zone}/disks/{disk}
+                parts = source_disk.split("/")
+                if len(parts) < 4:
+                    continue
+
+                zone = parts[-3]
+                disk_name = parts[-1]
+
+                # Check if source disk exists
+                source_disk_exists = False
+                try:
+                    disk_request = compute_v1.GetDiskRequest(
+                        project=self.project_id, zone=zone, disk=disk_name
+                    )
+                    disks_client.get(request=disk_request)
+                    source_disk_exists = True
+                except Exception:
+                    # Disk not found (404) = orphaned snapshot
+                    pass
+
+                if not source_disk_exists:
+                    age_days = self._get_age_days(snapshot.creation_timestamp)
+
+                    if age_days >= min_age_days:
+                        # Calculate cost
+                        size_gb = snapshot.storage_bytes / (1024**3)
+
+                        # Determine storage type
+                        storage_locations = snapshot.storage_locations or []
+                        price_per_gb = (
+                            0.032 if len(storage_locations) > 1 else 0.026
+                        )  # Multi-regional vs standard
+
+                        monthly_cost = size_gb * price_per_gb
+                        already_wasted = monthly_cost * (age_days / 30.0)
+
+                        # Confidence level
+                        if age_days >= 90:
+                            confidence = "critical"
+                        elif age_days >= 30:
+                            confidence = "high"
+                        else:
+                            confidence = "medium"
+
+                        resources.append(
+                            OrphanResourceData(
+                                resource_id=str(snapshot.id),
+                                resource_name=snapshot.name,
+                                resource_type="gcp_disk_snapshot_orphaned",
+                                region="global",  # Snapshots are global resources
+                                estimated_monthly_cost=monthly_cost,
+                                resource_metadata={
+                                    "creation_time": snapshot.creation_timestamp,
+                                    "age_days": age_days,
+                                    "source_disk": source_disk,
+                                    "source_disk_exists": False,
+                                    "storage_bytes": snapshot.storage_bytes,
+                                    "size_gb": round(size_gb, 2),
+                                    "storage_locations": storage_locations,
+                                    "storage_type": "multi-regional"
+                                    if len(storage_locations) > 1
+                                    else "standard",
+                                    "status": snapshot.status,
+                                    "price_per_gb": price_per_gb,
+                                    "already_wasted": round(already_wasted, 2),
+                                    "confidence": confidence,
+                                    "recommendation": "Delete orphaned snapshot - source disk no longer exists",
+                                },
+                            )
+                        )
+
+        except Exception as e:
+            # Log error but don't fail entire scan
+            pass
+
+        return resources
+
+    async def scan_redundant_disk_snapshots(
         self, region: str, detection_rules: dict | None = None
     ) -> list[OrphanResourceData]:
-        """Not applicable for GCP (AWS AMI-specific)."""
-        return []
+        """
+        Scenario 2: Scan for redundant disk snapshots (>5 snapshots per disk).
+
+        Detection:
+        - snapshot_count > max_snapshots_per_disk (default: 5)
+        - Source disk still exists (not orphaned)
+
+        Cost:
+        - Excess snapshots waste
+        - Recommend keeping last 3-5 snapshots
+        """
+        resources = []
+        max_snapshots = (
+            detection_rules.get("gcp_disk_snapshot_redundant", {}).get(
+                "max_snapshots_per_disk", 5
+            )
+            if detection_rules
+            else 5
+        )
+        recommended_count = (
+            detection_rules.get("gcp_disk_snapshot_redundant", {}).get(
+                "recommended_snapshots_count", 3
+            )
+            if detection_rules
+            else 3
+        )
+
+        try:
+            snapshots_client = self._get_snapshots_client()
+
+            # List all snapshots
+            request = compute_v1.ListSnapshotsRequest(project=self.project_id)
+            snapshots = list(snapshots_client.list(request=request))
+
+            # Group snapshots by source_disk
+            snapshots_by_disk = defaultdict(list)
+            for snapshot in snapshots:
+                if snapshot.source_disk and snapshot.status == "READY":
+                    snapshots_by_disk[snapshot.source_disk].append(snapshot)
+
+            # Check for redundant snapshots
+            for source_disk, snapshots_list in snapshots_by_disk.items():
+                snapshot_count = len(snapshots_list)
+
+                if snapshot_count > max_snapshots:
+                    # Sort by creation time (newest first)
+                    snapshots_list.sort(
+                        key=lambda s: s.creation_timestamp, reverse=True
+                    )
+
+                    # Snapshots to keep (recommended count)
+                    snapshots_to_keep = snapshots_list[:recommended_count]
+
+                    # Excess snapshots
+                    snapshots_excess = snapshots_list[recommended_count:]
+                    excess_count = len(snapshots_excess)
+
+                    # Calculate excess storage
+                    excess_storage_gb = sum(
+                        [s.storage_bytes / (1024**3) for s in snapshots_excess]
+                    )
+
+                    # Average price per GB
+                    price_per_gb = 0.026
+
+                    monthly_waste = excess_storage_gb * price_per_gb
+
+                    # Average age of excess snapshots
+                    avg_age_excess = sum(
+                        [self._get_age_days(s.creation_timestamp) for s in snapshots_excess]
+                    ) / len(snapshots_excess)
+                    avg_months = avg_age_excess / 30.0
+                    already_wasted = monthly_waste * avg_months
+
+                    # Confidence level
+                    if snapshot_count >= 10:
+                        confidence = "high"
+                    elif snapshot_count >= 7:
+                        confidence = "medium"
+                    else:
+                        confidence = "low"
+
+                    resources.append(
+                        OrphanResourceData(
+                            resource_id=f"redundant-{source_disk.split('/')[-1]}",
+                            resource_name=source_disk.split("/")[-1],
+                            resource_type="gcp_disk_snapshot_redundant",
+                            region="global",
+                            estimated_monthly_cost=monthly_waste,
+                            resource_metadata={
+                                "source_disk": source_disk,
+                                "snapshot_count": snapshot_count,
+                                "recommended_count": recommended_count,
+                                "excess_count": excess_count,
+                                "snapshots_list": [
+                                    {
+                                        "snapshot_id": str(s.id),
+                                        "snapshot_name": s.name,
+                                        "creation_time": s.creation_timestamp,
+                                        "size_gb": round(s.storage_bytes / (1024**3), 2),
+                                        "status": s.status,
+                                    }
+                                    for s in snapshots_list[:10]  # Limit to 10 for metadata
+                                ],
+                                "excess_storage_gb": round(excess_storage_gb, 2),
+                                "avg_age_excess_days": round(avg_age_excess, 0),
+                                "already_wasted": round(already_wasted, 2),
+                                "confidence": confidence,
+                                "recommendation": f"Delete {excess_count} oldest snapshots - keep last {recommended_count} for recovery",
+                            },
+                        )
+                    )
+
+        except Exception as e:
+            pass
+
+        return resources
+
+    async def scan_old_unused_disk_snapshots(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scenario 3: Scan for old unused disk snapshots (>365 days, never restored).
+
+        Detection:
+        - Age >= old_snapshot_threshold_days (default: 365)
+        - Status = READY
+        - Never restored (basic check without logging for Phase 1)
+
+        Cost:
+        - Waste = cost since 365 days (retention excessive)
+        """
+        resources = []
+        old_snapshot_threshold_days = (
+            detection_rules.get("gcp_disk_snapshot_old_unused", {}).get(
+                "old_snapshot_threshold_days", 365
+            )
+            if detection_rules
+            else 365
+        )
+
+        try:
+            snapshots_client = self._get_snapshots_client()
+
+            # List all snapshots
+            request = compute_v1.ListSnapshotsRequest(project=self.project_id)
+            snapshots = snapshots_client.list(request=request)
+
+            for snapshot in snapshots:
+                if snapshot.status != "READY":
+                    continue
+
+                age_days = self._get_age_days(snapshot.creation_timestamp)
+
+                if age_days >= old_snapshot_threshold_days:
+                    # Calculate cost
+                    size_gb = snapshot.storage_bytes / (1024**3)
+
+                    # Determine storage type
+                    storage_locations = snapshot.storage_locations or []
+                    price_per_gb = 0.032 if len(storage_locations) > 1 else 0.026
+
+                    monthly_cost = size_gb * price_per_gb
+
+                    # Waste = cost since threshold
+                    waste_days = age_days - old_snapshot_threshold_days
+                    waste_months = waste_days / 30.0
+                    already_wasted = monthly_cost * waste_months
+
+                    # Confidence level
+                    if age_days >= 730:  # 2+ years
+                        confidence = "critical"
+                    elif age_days >= 540:  # 18+ months
+                        confidence = "high"
+                    else:
+                        confidence = "medium"
+
+                    resources.append(
+                        OrphanResourceData(
+                            resource_id=str(snapshot.id),
+                            resource_name=snapshot.name,
+                            resource_type="gcp_disk_snapshot_old_unused",
+                            region="global",
+                            estimated_monthly_cost=monthly_cost,
+                            resource_metadata={
+                                "creation_time": snapshot.creation_timestamp,
+                                "age_days": age_days,
+                                "source_disk": snapshot.source_disk or "N/A",
+                                "size_gb": round(size_gb, 2),
+                                "restore_count": 0,  # Basic assumption
+                                "last_restore_date": None,
+                                "waste_months": round(waste_months, 2),
+                                "already_wasted": round(already_wasted, 2),
+                                "confidence": confidence,
+                                "recommendation": f"Delete old snapshot - {age_days} days old, likely never restored",
+                            },
+                        )
+                    )
+
+        except Exception as e:
+            pass
+
+        return resources
+
+    async def scan_no_retention_policy_snapshots(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scenario 4: Scan for snapshots without retention policy (manual snapshots).
+
+        Detection:
+        - source_snapshot_schedule_policy IS NULL (manual snapshot)
+        - labels.retention_days IS NULL
+        - Age >= manual_snapshot_threshold_days (default: 90)
+
+        Cost:
+        - Governance waste (5% of cost)
+        - Risk of accumulation
+        """
+        resources = []
+        manual_snapshot_threshold_days = (
+            detection_rules.get("gcp_disk_snapshot_no_retention_policy", {}).get(
+                "manual_snapshot_threshold_days", 90
+            )
+            if detection_rules
+            else 90
+        )
+        governance_waste_pct = 0.05
+
+        try:
+            snapshots_client = self._get_snapshots_client()
+
+            # List all snapshots
+            request = compute_v1.ListSnapshotsRequest(project=self.project_id)
+            snapshots = snapshots_client.list(request=request)
+
+            for snapshot in snapshots:
+                if snapshot.status != "READY":
+                    continue
+
+                # Check if manual snapshot (no automated policy)
+                if hasattr(snapshot, "source_snapshot_schedule_policy") and snapshot.source_snapshot_schedule_policy:
+                    continue  # Skip automated snapshots
+
+                # Check if has retention label
+                labels = snapshot.labels if hasattr(snapshot, "labels") and snapshot.labels else {}
+                if "retention_days" in labels or "retention" in labels:
+                    continue  # Has retention management
+
+                age_days = self._get_age_days(snapshot.creation_timestamp)
+
+                if age_days >= manual_snapshot_threshold_days:
+                    # Calculate cost
+                    size_gb = snapshot.storage_bytes / (1024**3)
+                    storage_locations = snapshot.storage_locations or []
+                    price_per_gb = 0.032 if len(storage_locations) > 1 else 0.026
+
+                    monthly_cost = size_gb * price_per_gb
+                    governance_waste_monthly = monthly_cost * governance_waste_pct
+
+                    # Projection: if created monthly without cleanup
+                    projected_annual_accumulation_gb = size_gb * 12
+                    projected_annual_cost = projected_annual_accumulation_gb * price_per_gb
+
+                    confidence = "high" if age_days >= 180 else "medium"
+
+                    resources.append(
+                        OrphanResourceData(
+                            resource_id=str(snapshot.id),
+                            resource_name=snapshot.name,
+                            resource_type="gcp_disk_snapshot_no_retention_policy",
+                            region="global",
+                            estimated_monthly_cost=governance_waste_monthly,
+                            resource_metadata={
+                                "creation_time": snapshot.creation_timestamp,
+                                "age_days": age_days,
+                                "source_snapshot_schedule_policy": None,
+                                "is_manual": True,
+                                "labels": labels,
+                                "retention_policy": None,
+                                "size_gb": round(size_gb, 2),
+                                "full_monthly_cost": round(monthly_cost, 2),
+                                "governance_waste_monthly": round(governance_waste_monthly, 2),
+                                "projected_annual_accumulation_gb": round(
+                                    projected_annual_accumulation_gb, 2
+                                ),
+                                "projected_annual_cost": round(projected_annual_cost, 2),
+                                "confidence": confidence,
+                                "recommendation": "Add retention policy or label with retention_days to prevent accumulation",
+                            },
+                        )
+                    )
+
+        except Exception as e:
+            pass
+
+        return resources
+
+    async def scan_deleted_vm_snapshots(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scenario 5: Scan for snapshots of deleted VMs/instances.
+
+        Detection:
+        - labels.instance_name or description contains instance name
+        - Instance not found in any zone
+        - Age >= deleted_vm_threshold_days (default: 30)
+
+        Cost:
+        - 100% waste (VM deleted, snapshot purpose unclear)
+        """
+        resources = []
+        deleted_vm_threshold_days = (
+            detection_rules.get("gcp_disk_snapshot_deleted_vm", {}).get(
+                "deleted_vm_threshold_days", 30
+            )
+            if detection_rules
+            else 30
+        )
+
+        try:
+            snapshots_client = self._get_snapshots_client()
+            compute_client = self._get_compute_client()
+
+            # List all snapshots
+            request = compute_v1.ListSnapshotsRequest(project=self.project_id)
+            snapshots = snapshots_client.list(request=request)
+
+            # Get all zones for checking instance existence
+            zones = []
+            for region_name in self.regions or []:
+                zones.extend(
+                    [
+                        f"{region_name}-a",
+                        f"{region_name}-b",
+                        f"{region_name}-c",
+                        f"{region_name}-f",
+                    ]
+                )
+
+            for snapshot in snapshots:
+                if snapshot.status != "READY":
+                    continue
+
+                # Extract instance name from labels or description
+                labels = snapshot.labels if hasattr(snapshot, "labels") and snapshot.labels else {}
+                description = snapshot.description if hasattr(snapshot, "description") else ""
+
+                instance_name = labels.get("instance_name") or labels.get("vm_name")
+
+                if not instance_name and description:
+                    # Try to parse instance name from description
+                    match = re.search(r"instance\s+([a-z0-9-]+)", description, re.IGNORECASE)
+                    if match:
+                        instance_name = match.group(1)
+
+                if instance_name:
+                    # Check if instance exists in any zone
+                    instance_exists = False
+                    for zone in zones:
+                        try:
+                            instance_request = compute_v1.GetInstanceRequest(
+                                project=self.project_id,
+                                zone=zone,
+                                instance=instance_name,
+                            )
+                            compute_client.get(request=instance_request)
+                            instance_exists = True
+                            break
+                        except Exception:
+                            continue
+
+                    if not instance_exists:
+                        age_days = self._get_age_days(snapshot.creation_timestamp)
+
+                        if age_days >= deleted_vm_threshold_days:
+                            # Calculate cost
+                            size_gb = snapshot.storage_bytes / (1024**3)
+                            storage_locations = snapshot.storage_locations or []
+                            price_per_gb = 0.032 if len(storage_locations) > 1 else 0.026
+
+                            monthly_cost = size_gb * price_per_gb
+                            already_wasted = monthly_cost * (age_days / 30.0)
+
+                            confidence = "high" if age_days >= 60 else "medium"
+
+                            resources.append(
+                                OrphanResourceData(
+                                    resource_id=str(snapshot.id),
+                                    resource_name=snapshot.name,
+                                    resource_type="gcp_disk_snapshot_deleted_vm",
+                                    region="global",
+                                    estimated_monthly_cost=monthly_cost,
+                                    resource_metadata={
+                                        "creation_time": snapshot.creation_timestamp,
+                                        "age_days": age_days,
+                                        "labels": labels,
+                                        "instance_name": instance_name,
+                                        "instance_exists": False,
+                                        "size_gb": round(size_gb, 2),
+                                        "already_wasted": round(already_wasted, 2),
+                                        "confidence": confidence,
+                                        "recommendation": "Delete snapshot - source VM deleted (purpose unclear)",
+                                    },
+                                )
+                            )
+
+        except Exception as e:
+            pass
+
+        return resources
+
+    async def scan_failed_disk_snapshots(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scenario 6: Scan for failed disk snapshots.
+
+        Detection:
+        - Status = FAILED
+        - Age >= failed_snapshot_threshold_days (default: 7)
+
+        Cost:
+        - 100% waste (unusable but storage consumed)
+        """
+        resources = []
+        failed_snapshot_threshold_days = (
+            detection_rules.get("gcp_disk_snapshot_failed", {}).get(
+                "failed_snapshot_threshold_days", 7
+            )
+            if detection_rules
+            else 7
+        )
+
+        try:
+            snapshots_client = self._get_snapshots_client()
+
+            # List all snapshots
+            request = compute_v1.ListSnapshotsRequest(project=self.project_id)
+            snapshots = snapshots_client.list(request=request)
+
+            for snapshot in snapshots:
+                if snapshot.status == "FAILED":
+                    age_days = self._get_age_days(snapshot.creation_timestamp)
+
+                    if age_days >= failed_snapshot_threshold_days:
+                        # Calculate cost
+                        size_gb = snapshot.storage_bytes / (1024**3)
+                        storage_locations = snapshot.storage_locations or []
+                        price_per_gb = 0.032 if len(storage_locations) > 1 else 0.026
+
+                        monthly_cost = size_gb * price_per_gb
+                        already_wasted = monthly_cost * (age_days / 30.0)
+
+                        # Get status message if available
+                        status_message = (
+                            snapshot.status_message
+                            if hasattr(snapshot, "status_message")
+                            else "Snapshot creation failed"
+                        )
+
+                        resources.append(
+                            OrphanResourceData(
+                                resource_id=str(snapshot.id),
+                                resource_name=snapshot.name,
+                                resource_type="gcp_disk_snapshot_failed",
+                                region="global",
+                                estimated_monthly_cost=monthly_cost,
+                                resource_metadata={
+                                    "creation_time": snapshot.creation_timestamp,
+                                    "age_days": age_days,
+                                    "status": snapshot.status,
+                                    "status_message": status_message,
+                                    "size_gb": round(size_gb, 2),
+                                    "already_wasted": round(already_wasted, 2),
+                                    "confidence": "high",
+                                    "recommendation": "Delete failed snapshot - unusable and consuming storage",
+                                },
+                            )
+                        )
+
+        except Exception as e:
+            pass
+
+        return resources
+
+    async def scan_untagged_disk_snapshots(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scenario 7: Scan for untagged disk snapshots (missing labels).
+
+        Detection:
+        - Missing required labels
+        - Status = READY
+        - Age >= min_age_days (default: 7)
+
+        Cost:
+        - Governance waste (5% of cost)
+        """
+        resources = []
+        required_labels = (
+            detection_rules.get("gcp_disk_snapshot_untagged", {}).get(
+                "required_labels", ["environment", "owner", "purpose"]
+            )
+            if detection_rules
+            else ["environment", "owner", "purpose"]
+        )
+        min_age_days = (
+            detection_rules.get("gcp_disk_snapshot_untagged", {}).get("min_age_days", 7)
+            if detection_rules
+            else 7
+        )
+        governance_waste_pct = 0.05
+
+        try:
+            snapshots_client = self._get_snapshots_client()
+
+            # List all snapshots
+            request = compute_v1.ListSnapshotsRequest(project=self.project_id)
+            snapshots = snapshots_client.list(request=request)
+
+            for snapshot in snapshots:
+                if snapshot.status != "READY":
+                    continue
+
+                age_days = self._get_age_days(snapshot.creation_timestamp)
+
+                if age_days >= min_age_days:
+                    # Check labels
+                    labels = snapshot.labels if hasattr(snapshot, "labels") and snapshot.labels else {}
+
+                    # Identify missing labels
+                    missing_labels = [label for label in required_labels if label not in labels]
+
+                    if missing_labels:
+                        # Calculate cost
+                        size_gb = snapshot.storage_bytes / (1024**3)
+                        storage_locations = snapshot.storage_locations or []
+                        price_per_gb = 0.032 if len(storage_locations) > 1 else 0.026
+
+                        monthly_cost = size_gb * price_per_gb
+                        governance_waste = monthly_cost * governance_waste_pct
+
+                        # Waste cumulated since creation
+                        age_months = age_days / 30.0
+                        already_wasted = governance_waste * age_months
+
+                        confidence = "medium" if len(missing_labels) >= 2 else "low"
+
+                        resources.append(
+                            OrphanResourceData(
+                                resource_id=str(snapshot.id),
+                                resource_name=snapshot.name,
+                                resource_type="gcp_disk_snapshot_untagged",
+                                region="global",
+                                estimated_monthly_cost=governance_waste,
+                                resource_metadata={
+                                    "creation_time": snapshot.creation_timestamp,
+                                    "age_days": age_days,
+                                    "labels": labels,
+                                    "missing_labels": missing_labels,
+                                    "size_gb": round(size_gb, 2),
+                                    "full_monthly_cost": round(monthly_cost, 2),
+                                    "governance_waste_monthly": round(governance_waste, 2),
+                                    "already_wasted": round(already_wasted, 2),
+                                    "confidence": confidence,
+                                    "recommendation": "Add required labels for governance and cleanup decisions",
+                                },
+                            )
+                        )
+
+        except Exception as e:
+            pass
+
+        return resources
+
+    async def scan_excessive_retention_nonprod_snapshots(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scenario 8: Scan for excessive retention non-prod snapshots.
+
+        Detection:
+        - labels.environment in ['dev', 'test', 'staging']
+        - Age > nonprod_retention_days (default: 90)
+
+        Cost:
+        - Waste = cost since nonprod_retention_days
+        """
+        resources = []
+        nonprod_labels = (
+            detection_rules.get("gcp_disk_snapshot_excessive_retention_nonprod", {}).get(
+                "nonprod_labels", ["dev", "test", "staging", "development"]
+            )
+            if detection_rules
+            else ["dev", "test", "staging", "development"]
+        )
+        nonprod_retention_days = (
+            detection_rules.get("gcp_disk_snapshot_excessive_retention_nonprod", {}).get(
+                "nonprod_retention_days", 90
+            )
+            if detection_rules
+            else 90
+        )
+
+        try:
+            snapshots_client = self._get_snapshots_client()
+
+            # List all snapshots
+            request = compute_v1.ListSnapshotsRequest(project=self.project_id)
+            snapshots = snapshots_client.list(request=request)
+
+            for snapshot in snapshots:
+                if snapshot.status != "READY":
+                    continue
+
+                # Check environment label
+                labels = snapshot.labels if hasattr(snapshot, "labels") and snapshot.labels else {}
+                environment = labels.get("environment", "").lower()
+
+                if environment in nonprod_labels:
+                    age_days = self._get_age_days(snapshot.creation_timestamp)
+
+                    if age_days > nonprod_retention_days:
+                        # Calculate cost
+                        size_gb = snapshot.storage_bytes / (1024**3)
+                        storage_locations = snapshot.storage_locations or []
+                        price_per_gb = 0.032 if len(storage_locations) > 1 else 0.026
+
+                        monthly_cost = size_gb * price_per_gb
+
+                        # Excess retention
+                        excess_days = age_days - nonprod_retention_days
+                        excess_months = excess_days / 30.0
+                        already_wasted = monthly_cost * excess_months
+
+                        confidence = "high" if age_days >= 180 else "medium"
+
+                        resources.append(
+                            OrphanResourceData(
+                                resource_id=str(snapshot.id),
+                                resource_name=snapshot.name,
+                                resource_type="gcp_disk_snapshot_excessive_retention_nonprod",
+                                region="global",
+                                estimated_monthly_cost=monthly_cost,
+                                resource_metadata={
+                                    "creation_time": snapshot.creation_timestamp,
+                                    "age_days": age_days,
+                                    "labels": labels,
+                                    "environment": environment,
+                                    "size_gb": round(size_gb, 2),
+                                    "recommended_retention_days": nonprod_retention_days,
+                                    "excess_days": excess_days,
+                                    "already_wasted": round(already_wasted, 2),
+                                    "confidence": confidence,
+                                    "recommendation": f"Delete dev snapshot - {age_days} days old (dev retention should be max {nonprod_retention_days} days)",
+                                },
+                            )
+                        )
+
+        except Exception as e:
+            pass
+
+        return resources
+
+    async def scan_duplicate_disk_snapshots(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scenario 9: Scan for duplicate disk snapshots (created <1h apart).
+
+        Detection:
+        - Same source_disk
+        - time_diff <= duplicate_time_window_hours (default: 1.0)
+        - size_diff <= size_tolerance_gb (default: 1.0)
+
+        Cost:
+        - Waste = older duplicate snapshot cost
+        """
+        resources = []
+        duplicate_time_window_hours = (
+            detection_rules.get("gcp_disk_snapshot_duplicate", {}).get(
+                "duplicate_time_window_hours", 1.0
+            )
+            if detection_rules
+            else 1.0
+        )
+        size_tolerance_gb = (
+            detection_rules.get("gcp_disk_snapshot_duplicate", {}).get("size_tolerance_gb", 1.0)
+            if detection_rules
+            else 1.0
+        )
+
+        try:
+            snapshots_client = self._get_snapshots_client()
+
+            # List all snapshots
+            request = compute_v1.ListSnapshotsRequest(project=self.project_id)
+            snapshots = list(snapshots_client.list(request=request))
+
+            # Group snapshots by source_disk
+            snapshots_by_disk = defaultdict(list)
+            for snapshot in snapshots:
+                if snapshot.source_disk and snapshot.status == "READY":
+                    snapshots_by_disk[snapshot.source_disk].append(snapshot)
+
+            # Check for duplicates
+            for source_disk, snapshots_list in snapshots_by_disk.items():
+                # Sort by timestamp
+                snapshots_list.sort(key=lambda s: s.creation_timestamp)
+
+                # Compare adjacent snapshots
+                for i in range(len(snapshots_list) - 1):
+                    snap1 = snapshots_list[i]
+                    snap2 = snapshots_list[i + 1]
+
+                    # Calculate time difference
+                    time1 = self._parse_timestamp(snap1.creation_timestamp)
+                    time2 = self._parse_timestamp(snap2.creation_timestamp)
+                    time_diff_hours = (time2 - time1).total_seconds() / 3600
+
+                    # Calculate size difference
+                    size1_gb = snap1.storage_bytes / (1024**3)
+                    size2_gb = snap2.storage_bytes / (1024**3)
+                    size_diff_gb = abs(size2_gb - size1_gb)
+
+                    # Detection if duplicate
+                    if (
+                        time_diff_hours <= duplicate_time_window_hours
+                        and size_diff_gb <= size_tolerance_gb
+                    ):
+                        # Delete oldest (snap1), keep newest (snap2)
+                        waste_gb = size1_gb
+                        price_per_gb = 0.026
+                        monthly_waste = waste_gb * price_per_gb
+
+                        # Cost wasted since creation snap1
+                        age_days = self._get_age_days(snap1.creation_timestamp)
+                        age_months = age_days / 30.0
+                        already_wasted = monthly_waste * age_months
+
+                        resources.append(
+                            OrphanResourceData(
+                                resource_id=f"duplicate-{str(snap1.id)}-{str(snap2.id)}",
+                                resource_name=f"duplicate_pair_{snap1.name}",
+                                resource_type="gcp_disk_snapshot_duplicate",
+                                region="global",
+                                estimated_monthly_cost=monthly_waste,
+                                resource_metadata={
+                                    "source_disk": source_disk,
+                                    "duplicate_snapshots": [
+                                        {
+                                            "snapshot_id": str(snap1.id),
+                                            "snapshot_name": snap1.name,
+                                            "creation_time": snap1.creation_timestamp,
+                                            "size_gb": round(size1_gb, 2),
+                                            "status": snap1.status,
+                                            "keep": False,
+                                        },
+                                        {
+                                            "snapshot_id": str(snap2.id),
+                                            "snapshot_name": snap2.name,
+                                            "creation_time": snap2.creation_timestamp,
+                                            "size_gb": round(size2_gb, 2),
+                                            "status": snap2.status,
+                                            "keep": True,
+                                        },
+                                    ],
+                                    "time_diff_hours": round(time_diff_hours, 2),
+                                    "size_diff_gb": round(size_diff_gb, 2),
+                                    "waste_snapshot_size_gb": round(waste_gb, 2),
+                                    "already_wasted": round(already_wasted, 2),
+                                    "confidence": "high",
+                                    "recommendation": f"Delete older duplicate snapshot ({snap1.name}) - created {round(time_diff_hours * 60, 0)} min apart with same content",
+                                },
+                            )
+                        )
+
+        except Exception as e:
+            pass
+
+        return resources
+
+    async def scan_never_restored_snapshots(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scenario 10: Scan for never restored snapshots (>180 days + Cloud Logging check).
+
+        Detection:
+        - Age >= never_restored_threshold_days (default: 180)
+        - restore_count == 0 (via Cloud Logging)
+        - Status = READY
+
+        Cost:
+        - Waste = cost since threshold
+        """
+        resources = []
+        never_restored_threshold_days = (
+            detection_rules.get("gcp_disk_snapshot_never_restored", {}).get(
+                "never_restored_threshold_days", 180
+            )
+            if detection_rules
+            else 180
+        )
+        check_restore_logs = (
+            detection_rules.get("gcp_disk_snapshot_never_restored", {}).get(
+                "check_restore_logs", True
+            )
+            if detection_rules
+            else True
+        )
+
+        try:
+            snapshots_client = self._get_snapshots_client()
+
+            # List all snapshots
+            request = compute_v1.ListSnapshotsRequest(project=self.project_id)
+            snapshots = snapshots_client.list(request=request)
+
+            # Get logging client if needed
+            logging_client = self._get_logging_client() if check_restore_logs else None
+
+            for snapshot in snapshots:
+                if snapshot.status != "READY":
+                    continue
+
+                age_days = self._get_age_days(snapshot.creation_timestamp)
+
+                if age_days >= never_restored_threshold_days:
+                    restore_count = 0
+
+                    # Check Cloud Logging for restore operations
+                    if check_restore_logs and logging_client:
+                        try:
+                            # Query logs for disk create from snapshot
+                            creation_timestamp = self._parse_timestamp(snapshot.creation_timestamp)
+                            filter_str = f'''
+                            resource.type="gce_disk"
+                            AND protoPayload.methodName="v1.compute.disks.insert"
+                            AND protoPayload.request.sourceSnapshot:"{snapshot.name}"
+                            AND timestamp>="{creation_timestamp.isoformat()}"
+                            '''
+
+                            entries = list(
+                                logging_client.list_entries(
+                                    filter_=filter_str, max_results=1
+                                )
+                            )
+                            restore_count = len(entries)
+                        except Exception:
+                            # Logging check failed, assume not restored
+                            restore_count = 0
+
+                    # If never restored
+                    if restore_count == 0:
+                        # Calculate cost
+                        size_gb = snapshot.storage_bytes / (1024**3)
+                        storage_locations = snapshot.storage_locations or []
+                        price_per_gb = 0.032 if len(storage_locations) > 1 else 0.026
+
+                        monthly_cost = size_gb * price_per_gb
+
+                        # Waste = cost since threshold
+                        waste_days = age_days - never_restored_threshold_days
+                        waste_months = waste_days / 30.0
+                        already_wasted = monthly_cost * waste_months
+
+                        confidence = "high" if age_days >= 365 else "medium"
+
+                        resources.append(
+                            OrphanResourceData(
+                                resource_id=str(snapshot.id),
+                                resource_name=snapshot.name,
+                                resource_type="gcp_disk_snapshot_never_restored",
+                                region="global",
+                                estimated_monthly_cost=monthly_cost,
+                                resource_metadata={
+                                    "creation_time": snapshot.creation_timestamp,
+                                    "age_days": age_days,
+                                    "source_disk": snapshot.source_disk or "N/A",
+                                    "size_gb": round(size_gb, 2),
+                                    "restore_count": restore_count,
+                                    "last_restore_date": None,
+                                    "waste_months": round(waste_months, 2),
+                                    "already_wasted": round(already_wasted, 2),
+                                    "confidence": confidence,
+                                    "recommendation": f"Delete snapshot - {age_days} days old, never restored (unclear purpose)",
+                                },
+                            )
+                        )
+
+        except Exception as e:
+            pass
+
+        return resources
 
     # AWS-specific EC2 instance methods (not applicable to GCP)
     async def scan_oversized_instances(

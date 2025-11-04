@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { User, Bell, Shield, Trash2, Save, Key, Sliders, RotateCcw, HardDrive, Globe, Camera, Server, Activity, Zap, Database, ArrowLeft, Network, AlertTriangle, TrendingDown, Archive, TestTube, Copy, Clock, Cpu, Users, FileText, Search, ChevronDown, Box } from "lucide-react";
+import { User, Bell, Shield, Trash2, Save, Key, Sliders, RotateCcw, HardDrive, Globe, Camera, Server, Activity, Zap, Database, ArrowLeft, Network, AlertTriangle, TrendingDown, Archive, TestTube, Copy, Clock, Cpu, Users, FileText, Search, ChevronDown, Box, XCircle, Tag } from "lucide-react";
 import Link from "next/link";
 import { useNotifications } from "@/hooks/useNotifications";
 import { Toast } from "@/components/ui/Toast";
@@ -588,6 +588,11 @@ const RESOURCE_CATEGORIES = {
       "persistent_disk_orphan_snapshots", "persistent_disk_old_type", "persistent_disk_overprovisioned_type",
       "persistent_disk_untagged", "persistent_disk_underutilized", "persistent_disk_oversized",
       "persistent_disk_readonly",
+      // Disk Snapshots (10 scenarios)
+      "gcp_disk_snapshot_orphaned", "gcp_disk_snapshot_redundant", "gcp_disk_snapshot_old_unused",
+      "gcp_disk_snapshot_no_retention_policy", "gcp_disk_snapshot_deleted_vm", "gcp_disk_snapshot_failed",
+      "gcp_disk_snapshot_untagged", "gcp_disk_snapshot_excessive_retention_nonprod", "gcp_disk_snapshot_duplicate",
+      "gcp_disk_snapshot_never_restored",
       // GCS Buckets
       "gcs_bucket_empty"
     ],
@@ -762,6 +767,17 @@ const GCP_RESOURCE_ICONS: { [key: string]: any } = {
   persistent_disk_underutilized: Activity,
   persistent_disk_oversized: HardDrive,
   persistent_disk_readonly: FileText,
+  // Disk Snapshots (10 scenarios)
+  gcp_disk_snapshot_orphaned: Camera,
+  gcp_disk_snapshot_redundant: Camera,
+  gcp_disk_snapshot_old_unused: Clock,
+  gcp_disk_snapshot_no_retention_policy: AlertTriangle,
+  gcp_disk_snapshot_deleted_vm: Server,
+  gcp_disk_snapshot_failed: XCircle,
+  gcp_disk_snapshot_untagged: Tag,
+  gcp_disk_snapshot_excessive_retention_nonprod: Clock,
+  gcp_disk_snapshot_duplicate: Copy,
+  gcp_disk_snapshot_never_restored: Clock,
   // GCS Buckets
   gcs_bucket_empty: HardDrive,
   // Networking
@@ -797,6 +813,17 @@ const GCP_RESOURCE_LABELS: { [key: string]: string } = {
   persistent_disk_underutilized: "Persistent Disk (Underutilized <10% Throughput) 📊💰💰💰 P1",
   persistent_disk_oversized: "Persistent Disk (Oversized >80% Free Space) 📊💰💰💰 P1",
   persistent_disk_readonly: "Persistent Disk (Read-Only 30 days → Snapshot) 📊💰💰💰 P1",
+  // Disk Snapshots (10 scenarios)
+  gcp_disk_snapshot_orphaned: "Disk Snapshot (Orphaned - Source Disk Deleted >30 days) 💰💰💰💰 P0",
+  gcp_disk_snapshot_redundant: "Disk Snapshot (Redundant >5 per Disk) 💰💰💰 P0",
+  gcp_disk_snapshot_old_unused: "Disk Snapshot (Old Unused >365 days, Never Restored) 💰💰💰 P1",
+  gcp_disk_snapshot_no_retention_policy: "Disk Snapshot (No Retention Policy - Manual) 💰💰 P2",
+  gcp_disk_snapshot_deleted_vm: "Disk Snapshot (VM Deleted - Purpose Unclear) 💰💰💰💰 P0",
+  gcp_disk_snapshot_failed: "Disk Snapshot (Failed - Unusable) 💰💰💰💰 P0",
+  gcp_disk_snapshot_untagged: "Disk Snapshot (Missing Required Labels) 💰 P3",
+  gcp_disk_snapshot_excessive_retention_nonprod: "Disk Snapshot (Dev/Test >90 days Retention) 💰💰💰 P1",
+  gcp_disk_snapshot_duplicate: "Disk Snapshot (Duplicate - Created <1h Apart) 💰💰💰 P0",
+  gcp_disk_snapshot_never_restored: "Disk Snapshot (Never Restored >180 days) 💰💰💰 P1",
   // GCS Buckets
   gcs_bucket_empty: "Cloud Storage Buckets (Empty)",
   // Networking
