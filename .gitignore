@@ -106,6 +106,6 @@ coverage/
 *.scss.map
 
 #Directories and files to ignore
-docs/
+#docs/
 claude_code_rules.md
 CLAUDE.md
