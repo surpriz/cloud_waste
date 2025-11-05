@@ -4505,6 +4505,1347 @@ class GCPProvider(CloudProviderBase):
 
         return resources
 
+    # ================================================================
+    # CLOUD SPANNER DETECTION METHODS (10 scenarios)
+    # ================================================================
+
+    async def scan_cloud_spanner_underutilized(
+        self, region: str | None = None, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scenario 1: Detect Cloud Spanner instances under-utilized (CPU <30%).
+
+        Waste: Instances provisioned with excessive nodes/PU compared to actual usage.
+        Detection: avg_cpu <30% over 14 days
+        Cost: Difference between current and optimal PU ($1,314/month typical)
+        Priority: HIGH (P1) 💰💰💰
+        """
+        resources = []
+
+        try:
+            from google.cloud import spanner_admin_instance_v1
+            from google.cloud import monitoring_v3
+            from datetime import datetime, timezone, timedelta
+
+            # Get detection parameters
+            cpu_threshold = 30.0
+            target_cpu = 65.0  # Google recommendation
+            lookback_days = 14
+            min_savings_threshold = 100.0
+            if detection_rules and "cloud_spanner_underutilized" in detection_rules:
+                rules = detection_rules["cloud_spanner_underutilized"]
+                cpu_threshold = rules.get("cpu_threshold", 30.0)
+                target_cpu = rules.get("target_cpu", 65.0)
+                lookback_days = rules.get("lookback_days", 14)
+                min_savings_threshold = rules.get("min_savings_threshold", 100.0)
+
+            spanner_client = spanner_admin_instance_v1.InstanceAdminClient(credentials=self.credentials)
+            monitoring_client = monitoring_v3.MetricServiceClient(credentials=self.credentials)
+
+            # List all Cloud Spanner instances
+            try:
+                parent = f"projects/{self.project_id}"
+                instances = spanner_client.list_instances(parent=parent)
+
+                for instance in instances:
+                    if instance.state != spanner_admin_instance_v1.Instance.State.READY:
+                        continue
+
+                    instance_id = instance.name.split('/')[-1]
+                    instance_config = instance.config
+
+                    # Get current capacity
+                    if instance.node_count > 0:
+                        current_pu = instance.node_count * 1000
+                        current_nodes = instance.node_count
+                    else:
+                        current_pu = instance.processing_units
+                        current_nodes = 0
+
+                    # Query CPU metrics
+                    end_time = datetime.now(timezone.utc)
+                    start_time = end_time - timedelta(days=lookback_days)
+
+                    try:
+                        interval = monitoring_v3.TimeInterval({
+                            "end_time": {"seconds": int(end_time.timestamp())},
+                            "start_time": {"seconds": int(start_time.timestamp())}
+                        })
+
+                        cpu_filter = (
+                            f'resource.type="spanner_instance" '
+                            f'AND resource.labels.instance_id="{instance_id}" '
+                            f'AND metric.type="spanner.googleapis.com/instance/cpu/utilization"'
+                        )
+
+                        cpu_request = monitoring_v3.ListTimeSeriesRequest({
+                            "name": f"projects/{self.project_id}",
+                            "filter": cpu_filter,
+                            "interval": interval,
+                            "view": monitoring_v3.ListTimeSeriesRequest.TimeSeriesView.FULL
+                        })
+
+                        cpu_values = []
+                        for series in monitoring_client.list_time_series(request=cpu_request):
+                            for point in series.points:
+                                cpu_values.append(point.value.double_value * 100)
+
+                        if not cpu_values:
+                            continue
+
+                        avg_cpu = sum(cpu_values) / len(cpu_values)
+                        max_cpu = max(cpu_values)
+
+                        # Detect under-utilization
+                        if avg_cpu < cpu_threshold:
+                            # Calculate optimal PU for target CPU
+                            optimal_pu = int(current_pu * (avg_cpu / target_cpu))
+                            optimal_pu = max(100, optimal_pu)
+
+                            if optimal_pu >= current_pu:
+                                continue
+
+                            # Calculate costs
+                            is_multiregional = any(x in instance_config for x in ['nam', 'eur', 'asia'])
+                            cost_per_pu = 2.19 if is_multiregional else 0.657
+
+                            current_cost = current_pu * cost_per_pu
+                            optimal_cost = optimal_pu * cost_per_pu
+                            monthly_waste = current_cost - optimal_cost
+
+                            if monthly_waste < min_savings_threshold:
+                                continue
+
+                            # Calculate age
+                            created_at = instance.create_time
+                            if created_at:
+                                age_days = (datetime.now(timezone.utc) - created_at).days
+                                already_wasted = monthly_waste * (age_days / 30)
+                            else:
+                                age_days = 0
+                                already_wasted = 0
+
+                            confidence = "HIGH" if avg_cpu < 20 else "MEDIUM"
+
+                            resources.append(OrphanResourceData(
+                                resource_id=instance_id,
+                                resource_type="cloud_spanner_underutilized",
+                                resource_name=instance_id,
+                                region=instance_config.split('/')[-1] if '/' in instance_config else instance_config,
+                                estimated_monthly_cost=monthly_waste,
+                                resource_metadata={
+                                    "instance_id": instance_id,
+                                    "instance_config": instance_config,
+                                    "is_multiregional": is_multiregional,
+                                    "state": "READY",
+                                    "current_node_count": current_nodes,
+                                    "current_processing_units": current_pu,
+                                    "cpu_metrics": {
+                                        "avg_cpu_14d": round(avg_cpu, 1),
+                                        "max_cpu_14d": round(max_cpu, 1)
+                                    },
+                                    "recommended_processing_units": optimal_pu,
+                                    "current_cost_monthly": round(current_cost, 2),
+                                    "recommended_cost_monthly": round(optimal_cost, 2),
+                                    "already_wasted": round(already_wasted, 2),
+                                    "annual_cost": round(monthly_waste * 12, 2),
+                                    "confidence": confidence,
+                                    "recommendation": f"Reduce from {current_pu} PU to {optimal_pu} PU to save ${monthly_waste * 12:.2f}/year. CPU avg {avg_cpu:.1f}%.",
+                                    "waste_reason": f"Under-utilized: CPU {avg_cpu:.1f}% < {cpu_threshold}%, optimal {optimal_pu} PU vs {current_pu} PU current"
+                                }
+                            ))
+
+                    except Exception as e:
+                        logger.warning(f"Could not fetch metrics for Spanner instance {instance_id}: {e}")
+                        continue
+
+            except Exception as e:
+                logger.error(f"Error listing Cloud Spanner instances: {e}")
+
+        except Exception as e:
+            logger.error(f"Error scanning for under-utilized Cloud Spanner: {e}")
+
+        return resources
+
+    async def scan_cloud_spanner_unnecessary_multiregional(
+        self, region: str | None = None, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scenario 2: Detect unnecessary multi-regional Cloud Spanner instances.
+
+        Waste: Multi-regional costs 3.3x more than regional but not needed for dev/test.
+        Detection: Multi-regional config + dev/test labels OR >90% requests from one region
+        Cost: ~$4,799/month waste (multi-regional vs regional)
+        Priority: CRITICAL (P0) 💰💰💰💰
+        """
+        resources = []
+
+        try:
+            from google.cloud import spanner_admin_instance_v1
+
+            # Get detection parameters
+            devtest_labels = ["dev", "test", "staging", "development"]
+            regional_concentration_threshold = 90.0
+            lookback_days = 14
+            if detection_rules and "cloud_spanner_unnecessary_multiregional" in detection_rules:
+                rules = detection_rules["cloud_spanner_unnecessary_multiregional"]
+                devtest_labels = rules.get("devtest_labels", devtest_labels)
+                regional_concentration_threshold = rules.get("regional_concentration_threshold", 90.0)
+                lookback_days = rules.get("lookback_days", 14)
+
+            spanner_client = spanner_admin_instance_v1.InstanceAdminClient(credentials=self.credentials)
+
+            # List all instances
+            try:
+                parent = f"projects/{self.project_id}"
+                instances = spanner_client.list_instances(parent=parent)
+
+                for instance in instances:
+                    if instance.state != spanner_admin_instance_v1.Instance.State.READY:
+                        continue
+
+                    instance_id = instance.name.split('/')[-1]
+                    instance_config = instance.config
+
+                    # Check if multi-regional
+                    is_multiregional = any(x in instance_config for x in ['nam', 'eur', 'asia'])
+
+                    if not is_multiregional:
+                        continue
+
+                    # Check labels
+                    labels = dict(instance.labels) if instance.labels else {}
+                    environment = labels.get('environment', '').lower()
+
+                    # Detect if dev/test
+                    is_devtest = environment in devtest_labels
+
+                    if is_devtest:
+                        # Multi-regional for dev/test = clear waste
+                        # Get current capacity
+                        if instance.node_count > 0:
+                            current_pu = instance.node_count * 1000
+                        else:
+                            current_pu = instance.processing_units
+
+                        # Calculate costs
+                        multiregional_cost_per_pu = 2.19
+                        regional_cost_per_pu = 0.657
+
+                        current_cost = current_pu * multiregional_cost_per_pu
+                        recommended_cost = current_pu * regional_cost_per_pu
+                        monthly_waste = current_cost - recommended_cost
+
+                        # Storage and backups also more expensive
+                        # Estimate 500GB storage, 1TB backups
+                        storage_size_gb = 500
+                        backup_size_gb = 1000
+
+                        storage_waste = storage_size_gb * (0.50 - 0.30)
+                        backup_waste = backup_size_gb * (0.30 - 0.20)
+
+                        total_monthly_waste = monthly_waste + storage_waste + backup_waste
+
+                        # Calculate age
+                        created_at = instance.create_time
+                        if created_at:
+                            age_days = (datetime.now(timezone.utc) - created_at).days
+                            already_wasted = total_monthly_waste * (age_days / 30)
+                        else:
+                            age_days = 0
+                            already_wasted = 0
+
+                        savings_pct = (total_monthly_waste / (current_cost + storage_size_gb * 0.50 + backup_size_gb * 0.30) * 100)
+
+                        resources.append(OrphanResourceData(
+                            resource_id=instance_id,
+                            resource_type="cloud_spanner_unnecessary_multiregional",
+                            resource_name=instance_id,
+                            region=instance_config.split('/')[-1] if '/' in instance_config else instance_config,
+                            estimated_monthly_cost=total_monthly_waste,
+                            resource_metadata={
+                                "instance_id": instance_id,
+                                "instance_config": instance_config,
+                                "is_multiregional": True,
+                                "state": "READY",
+                                "processing_units": current_pu,
+                                "labels": labels,
+                                "environment": environment,
+                                "storage_size_gb": storage_size_gb,
+                                "current_cost_monthly": round(current_cost + storage_size_gb * 0.50 + backup_size_gb * 0.30, 2),
+                                "recommended_config": "regional",
+                                "recommended_cost_monthly": round(recommended_cost + storage_size_gb * 0.30 + backup_size_gb * 0.20, 2),
+                                "already_wasted": round(already_wasted, 2),
+                                "savings_percentage": round(savings_pct, 1),
+                                "annual_cost": round(total_monthly_waste * 12, 2),
+                                "confidence": "HIGH",
+                                "recommendation": f"Migrate to regional configuration to save ${total_monthly_waste * 12:.2f}/year. Dev/test doesn't need multi-regional (3.3x cost).",
+                                "waste_reason": f"Multi-regional for {environment} environment - regional would be 67% cheaper"
+                            }
+                        ))
+
+            except Exception as e:
+                logger.error(f"Error listing Cloud Spanner instances: {e}")
+
+        except Exception as e:
+            logger.error(f"Error scanning for unnecessary multi-regional Cloud Spanner: {e}")
+
+        return resources
+
+    async def scan_cloud_spanner_devtest_overprovisioned(
+        self, region: str | None = None, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scenario 3: Detect dev/test Cloud Spanner instances over-provisioned.
+
+        Waste: Dev/test environments using production-sized instances (≥1 node).
+        Detection: labels.environment in ['dev', 'test'] AND processing_units >=1000
+        Cost: ~$1,774/month waste (3 nodes vs 300 PU recommended)
+        Priority: HIGH (P1) 💰💰💰
+        """
+        resources = []
+
+        try:
+            from google.cloud import spanner_admin_instance_v1
+            from datetime import datetime, timezone
+
+            # Get detection parameters
+            devtest_labels = ["dev", "test", "staging", "development"]
+            devtest_pu_threshold = 1000  # 1+ node
+            recommended_devtest_pu = 300
+            min_savings_threshold = 100.0
+            if detection_rules and "cloud_spanner_devtest_overprovisioned" in detection_rules:
+                rules = detection_rules["cloud_spanner_devtest_overprovisioned"]
+                devtest_labels = rules.get("devtest_labels", devtest_labels)
+                devtest_pu_threshold = rules.get("devtest_pu_threshold", 1000)
+                recommended_devtest_pu = rules.get("recommended_devtest_pu", 300)
+                min_savings_threshold = rules.get("min_savings_threshold", 100.0)
+
+            spanner_client = spanner_admin_instance_v1.InstanceAdminClient(credentials=self.credentials)
+
+            # List all instances
+            try:
+                parent = f"projects/{self.project_id}"
+                instances = spanner_client.list_instances(parent=parent)
+
+                for instance in instances:
+                    if instance.state != spanner_admin_instance_v1.Instance.State.READY:
+                        continue
+
+                    instance_id = instance.name.split('/')[-1]
+                    instance_config = instance.config
+
+                    # Check labels
+                    labels = dict(instance.labels) if instance.labels else {}
+                    environment = labels.get('environment', '').lower()
+
+                    # Detect dev/test
+                    if environment not in devtest_labels:
+                        continue
+
+                    # Get current capacity
+                    if instance.node_count > 0:
+                        current_pu = instance.node_count * 1000
+                    else:
+                        current_pu = instance.processing_units
+
+                    # Check if over-provisioned
+                    if current_pu < devtest_pu_threshold:
+                        continue
+
+                    # Calculate costs
+                    is_multiregional = any(x in instance_config for x in ['nam', 'eur', 'asia'])
+                    cost_per_pu = 2.19 if is_multiregional else 0.657
+
+                    current_cost = current_pu * cost_per_pu
+                    recommended_cost = recommended_devtest_pu * cost_per_pu
+                    monthly_waste = current_cost - recommended_cost
+
+                    if monthly_waste < min_savings_threshold:
+                        continue
+
+                    # Calculate age
+                    created_at = instance.create_time
+                    if created_at:
+                        age_days = (datetime.now(timezone.utc) - created_at).days
+                        already_wasted = monthly_waste * (age_days / 30)
+                    else:
+                        age_days = 0
+                        already_wasted = 0
+
+                    savings_pct = (monthly_waste / current_cost * 100) if current_cost > 0 else 0
+
+                    resources.append(OrphanResourceData(
+                        resource_id=instance_id,
+                        resource_type="cloud_spanner_devtest_overprovisioned",
+                        resource_name=instance_id,
+                        region=instance_config.split('/')[-1] if '/' in instance_config else instance_config,
+                        estimated_monthly_cost=monthly_waste,
+                        resource_metadata={
+                            "instance_id": instance_id,
+                            "instance_config": instance_config,
+                            "state": "READY",
+                            "processing_units": current_pu,
+                            "labels": labels,
+                            "environment": environment,
+                            "current_cost_monthly": round(current_cost, 2),
+                            "recommended_processing_units": recommended_devtest_pu,
+                            "recommended_cost_monthly": round(recommended_cost, 2),
+                            "already_wasted": round(already_wasted, 2),
+                            "savings_percentage": round(savings_pct, 0),
+                            "annual_cost": round(monthly_waste * 12, 2),
+                            "confidence": "HIGH",
+                            "recommendation": f"Reduce to {recommended_devtest_pu} PU for dev/test environment to save ${monthly_waste * 12:.2f}/year ({savings_pct:.0f}% savings).",
+                            "waste_reason": f"Dev/test over-provisioned: {current_pu} PU when {recommended_devtest_pu} PU sufficient"
+                        }
+                    ))
+
+            except Exception as e:
+                logger.error(f"Error listing Cloud Spanner instances: {e}")
+
+        except Exception as e:
+            logger.error(f"Error scanning for dev/test over-provisioned Cloud Spanner: {e}")
+
+        return resources
+
+    async def scan_cloud_spanner_idle(
+        self, region: str | None = None, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scenario 4: Detect idle Cloud Spanner instances (zero API requests).
+
+        Waste: Instances with zero queries = 100% waste.
+        Detection: total_api_requests == 0 for 14 days
+        Cost: Full instance cost ($727/month typical) - 100% waste
+        Priority: CRITICAL (P0) 💰💰💰💰
+        """
+        resources = []
+
+        try:
+            from google.cloud import spanner_admin_instance_v1
+            from google.cloud import monitoring_v3
+            from datetime import datetime, timezone, timedelta
+
+            # Get detection parameters
+            lookback_days = 14
+            min_age_days = 7
+            min_requests_threshold = 0
+            if detection_rules and "cloud_spanner_idle" in detection_rules:
+                rules = detection_rules["cloud_spanner_idle"]
+                lookback_days = rules.get("lookback_days", 14)
+                min_age_days = rules.get("min_age_days", 7)
+                min_requests_threshold = rules.get("min_requests_threshold", 0)
+
+            spanner_client = spanner_admin_instance_v1.InstanceAdminClient(credentials=self.credentials)
+            monitoring_client = monitoring_v3.MetricServiceClient(credentials=self.credentials)
+
+            # List all instances
+            try:
+                parent = f"projects/{self.project_id}"
+                instances = spanner_client.list_instances(parent=parent)
+
+                for instance in instances:
+                    if instance.state != spanner_admin_instance_v1.Instance.State.READY:
+                        continue
+
+                    instance_id = instance.name.split('/')[-1]
+                    instance_config = instance.config
+
+                    # Check age
+                    created_at = instance.create_time
+                    if created_at:
+                        age_days = (datetime.now(timezone.utc) - created_at).days
+                    else:
+                        age_days = 0
+
+                    if age_days < min_age_days:
+                        continue
+
+                    # Query API request metrics
+                    end_time = datetime.now(timezone.utc)
+                    start_time = end_time - timedelta(days=lookback_days)
+
+                    try:
+                        interval = monitoring_v3.TimeInterval({
+                            "end_time": {"seconds": int(end_time.timestamp())},
+                            "start_time": {"seconds": int(start_time.timestamp())}
+                        })
+
+                        api_filter = (
+                            f'resource.type="spanner_instance" '
+                            f'AND resource.labels.instance_id="{instance_id}" '
+                            f'AND metric.type="spanner.googleapis.com/instance/api_request_count"'
+                        )
+
+                        api_request = monitoring_v3.ListTimeSeriesRequest({
+                            "name": f"projects/{self.project_id}",
+                            "filter": api_filter,
+                            "interval": interval,
+                            "view": monitoring_v3.ListTimeSeriesRequest.TimeSeriesView.FULL
+                        })
+
+                        total_requests = 0
+                        for series in monitoring_client.list_time_series(request=api_request):
+                            for point in series.points:
+                                total_requests += point.value.int64_value or 0
+
+                        # Detect idle
+                        if total_requests <= min_requests_threshold:
+                            # Calculate full cost (100% waste)
+                            if instance.node_count > 0:
+                                current_pu = instance.node_count * 1000
+                            else:
+                                current_pu = instance.processing_units
+
+                            is_multiregional = any(x in instance_config for x in ['nam', 'eur', 'asia'])
+                            cost_per_pu = 2.19 if is_multiregional else 0.657
+
+                            nodes_cost = current_pu * cost_per_pu
+
+                            # Estimate storage and backups
+                            storage_size_gb = 100  # Minimal
+                            storage_pricing = 0.50 if is_multiregional else 0.30
+                            backup_pricing = 0.30 if is_multiregional else 0.20
+
+                            storage_cost = storage_size_gb * storage_pricing
+                            backup_cost = (storage_size_gb * 2) * backup_pricing
+
+                            monthly_cost = nodes_cost + storage_cost + backup_cost
+                            already_wasted = monthly_cost * (age_days / 30)
+
+                            resources.append(OrphanResourceData(
+                                resource_id=instance_id,
+                                resource_type="cloud_spanner_idle",
+                                resource_name=instance_id,
+                                region=instance_config.split('/')[-1] if '/' in instance_config else instance_config,
+                                estimated_monthly_cost=monthly_cost,
+                                resource_metadata={
+                                    "instance_id": instance_id,
+                                    "instance_config": instance_config,
+                                    "state": "READY",
+                                    "processing_units": current_pu,
+                                    "api_metrics": {
+                                        "total_requests_14d": total_requests
+                                    },
+                                    "age_days": age_days,
+                                    "already_wasted": round(already_wasted, 2),
+                                    "annual_cost": round(monthly_cost * 12, 2),
+                                    "confidence": "HIGH",
+                                    "recommendation": f"DELETE instance to save ${monthly_cost * 12:.2f}/year. Zero API requests in {lookback_days} days (100% waste).",
+                                    "waste_reason": f"Idle instance: 0 API requests for {lookback_days}+ days"
+                                }
+                            ))
+
+                    except Exception as e:
+                        logger.warning(f"Could not fetch API metrics for Spanner instance {instance_id}: {e}")
+                        continue
+
+            except Exception as e:
+                logger.error(f"Error listing Cloud Spanner instances: {e}")
+
+        except Exception as e:
+            logger.error(f"Error scanning for idle Cloud Spanner: {e}")
+
+        return resources
+
+    async def scan_cloud_spanner_pu_suboptimal(
+        self, region: str | None = None, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scenario 5: Detect suboptimal Processing Units configuration.
+
+        Waste: Nodes have fixed granularity (1000 PU increments), PU offers 100 PU granularity.
+        Detection: Instance using nodes when PU would be more cost-efficient
+        Cost: ~$263/month savings (2000 PU → 1600 PU optimal)
+        Priority: LOW (P2) 💰
+        """
+        resources = []
+
+        try:
+            from google.cloud import spanner_admin_instance_v1
+            from google.cloud import monitoring_v3
+            from datetime import datetime, timezone, timedelta
+
+            # Get detection parameters
+            target_cpu = 65.0
+            lookback_days = 14
+            min_savings_threshold = 50.0
+            if detection_rules and "cloud_spanner_pu_suboptimal" in detection_rules:
+                rules = detection_rules["cloud_spanner_pu_suboptimal"]
+                target_cpu = rules.get("target_cpu", 65.0)
+                lookback_days = rules.get("lookback_days", 14)
+                min_savings_threshold = rules.get("min_savings_threshold", 50.0)
+
+            spanner_client = spanner_admin_instance_v1.InstanceAdminClient(credentials=self.credentials)
+            monitoring_client = monitoring_v3.MetricServiceClient(credentials=self.credentials)
+
+            # List all instances with nodes (not PU)
+            try:
+                parent = f"projects/{self.project_id}"
+                instances = spanner_client.list_instances(parent=parent)
+
+                node_based_instances = [i for i in instances if i.node_count > 0]
+
+                for instance in node_based_instances:
+                    if instance.state != spanner_admin_instance_v1.Instance.State.READY:
+                        continue
+
+                    instance_id = instance.name.split('/')[-1]
+                    instance_config = instance.config
+                    current_nodes = instance.node_count
+                    current_pu = current_nodes * 1000
+
+                    # Query CPU metrics
+                    end_time = datetime.now(timezone.utc)
+                    start_time = end_time - timedelta(days=lookback_days)
+
+                    try:
+                        interval = monitoring_v3.TimeInterval({
+                            "end_time": {"seconds": int(end_time.timestamp())},
+                            "start_time": {"seconds": int(start_time.timestamp())}
+                        })
+
+                        cpu_filter = (
+                            f'resource.type="spanner_instance" '
+                            f'AND resource.labels.instance_id="{instance_id}" '
+                            f'AND metric.type="spanner.googleapis.com/instance/cpu/utilization"'
+                        )
+
+                        cpu_request = monitoring_v3.ListTimeSeriesRequest({
+                            "name": f"projects/{self.project_id}",
+                            "filter": cpu_filter,
+                            "interval": interval,
+                            "view": monitoring_v3.ListTimeSeriesRequest.TimeSeriesView.FULL
+                        })
+
+                        cpu_values = []
+                        for series in monitoring_client.list_time_series(request=cpu_request):
+                            for point in series.points:
+                                cpu_values.append(point.value.double_value * 100)
+
+                        if not cpu_values:
+                            continue
+
+                        avg_cpu = sum(cpu_values) / len(cpu_values)
+
+                        # Calculate optimal PU
+                        optimal_pu = int(current_pu * (avg_cpu / target_cpu))
+                        optimal_pu = max(100, optimal_pu)
+
+                        # Round to nearest 100 PU
+                        optimal_pu = ((optimal_pu + 99) // 100) * 100
+
+                        # Check if PU would offer savings
+                        if optimal_pu % 1000 != 0 and optimal_pu < current_pu:
+                            # Calculate costs
+                            is_multiregional = any(x in instance_config for x in ['nam', 'eur', 'asia'])
+                            cost_per_pu = 2.19 if is_multiregional else 0.657
+
+                            current_cost = current_pu * cost_per_pu
+                            optimal_cost = optimal_pu * cost_per_pu
+                            monthly_waste = current_cost - optimal_cost
+
+                            if monthly_waste < min_savings_threshold:
+                                continue
+
+                            # Calculate age
+                            created_at = instance.create_time
+                            if created_at:
+                                age_days = (datetime.now(timezone.utc) - created_at).days
+                                already_wasted = monthly_waste * (age_days / 30)
+                            else:
+                                age_days = 0
+                                already_wasted = 0
+
+                            savings_pct = (monthly_waste / current_cost * 100) if current_cost > 0 else 0
+
+                            resources.append(OrphanResourceData(
+                                resource_id=instance_id,
+                                resource_type="cloud_spanner_pu_suboptimal",
+                                resource_name=instance_id,
+                                region=instance_config.split('/')[-1] if '/' in instance_config else instance_config,
+                                estimated_monthly_cost=monthly_waste,
+                                resource_metadata={
+                                    "instance_id": instance_id,
+                                    "instance_config": instance_config,
+                                    "state": "READY",
+                                    "current_node_count": current_nodes,
+                                    "current_processing_units": current_pu,
+                                    "cpu_metrics": {
+                                        "avg_cpu_14d": round(avg_cpu, 1)
+                                    },
+                                    "recommended_processing_units": optimal_pu,
+                                    "current_cost_monthly": round(current_cost, 2),
+                                    "recommended_cost_monthly": round(optimal_cost, 2),
+                                    "already_wasted": round(already_wasted, 2),
+                                    "savings_percentage": round(savings_pct, 0),
+                                    "annual_cost": round(monthly_waste * 12, 2),
+                                    "confidence": "MEDIUM",
+                                    "recommendation": f"Switch to Processing Units for better granularity ({current_nodes} nodes → {optimal_pu} PU) to save ${monthly_waste * 12:.2f}/year.",
+                                    "waste_reason": f"Suboptimal granularity: nodes fixed at 1000 PU increments, {optimal_pu} PU would be more efficient"
+                                }
+                            ))
+
+                    except Exception as e:
+                        logger.warning(f"Could not fetch CPU metrics for Spanner instance {instance_id}: {e}")
+                        continue
+
+            except Exception as e:
+                logger.error(f"Error listing Cloud Spanner instances: {e}")
+
+        except Exception as e:
+            logger.error(f"Error scanning for suboptimal PU Cloud Spanner: {e}")
+
+        return resources
+
+    async def scan_cloud_spanner_empty_databases(
+        self, region: str | None = None, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scenario 6: Detect Cloud Spanner instances with empty databases.
+
+        Waste: Instances with databases but no tables = unused infrastructure.
+        Detection: Databases exist BUT no DDL statements (no tables)
+        Cost: Full instance cost ($663/month typical) - 100% waste
+        Priority: HIGH (P1) 💰💰💰
+        """
+        resources = []
+
+        try:
+            from google.cloud import spanner_admin_instance_v1
+            from google.cloud import spanner_admin_database_v1
+            from datetime import datetime, timezone
+
+            # Get detection parameters
+            min_age_days = 7
+            if detection_rules and "cloud_spanner_empty_databases" in detection_rules:
+                rules = detection_rules["cloud_spanner_empty_databases"]
+                min_age_days = rules.get("min_age_days", 7)
+
+            spanner_client = spanner_admin_instance_v1.InstanceAdminClient(credentials=self.credentials)
+            database_admin_client = spanner_admin_database_v1.DatabaseAdminClient(credentials=self.credentials)
+
+            # List all instances
+            try:
+                parent = f"projects/{self.project_id}"
+                instances = spanner_client.list_instances(parent=parent)
+
+                for instance in instances:
+                    if instance.state != spanner_admin_instance_v1.Instance.State.READY:
+                        continue
+
+                    # Check age
+                    created_at = instance.create_time
+                    if created_at:
+                        age_days = (datetime.now(timezone.utc) - created_at).days
+                    else:
+                        age_days = 0
+
+                    if age_days < min_age_days:
+                        continue
+
+                    instance_id = instance.name.split('/')[-1]
+                    instance_config = instance.config
+                    instance_path = instance.name
+
+                    # List databases
+                    try:
+                        databases = database_admin_client.list_databases(parent=instance_path)
+                        database_list = list(databases)
+
+                        if len(database_list) == 0:
+                            # No databases at all
+                            continue
+
+                        # Check each database for tables
+                        empty_databases = 0
+                        for database in database_list:
+                            database_path = database.name
+
+                            # Get DDL
+                            db_ddl = database_admin_client.get_database_ddl(database=database_path)
+
+                            # If no DDL statements = no tables
+                            if not db_ddl.statements or len(db_ddl.statements) == 0:
+                                empty_databases += 1
+
+                        # Detect if all databases are empty
+                        if empty_databases == len(database_list) and len(database_list) > 0:
+                            # Calculate full cost (100% waste)
+                            if instance.node_count > 0:
+                                current_pu = instance.node_count * 1000
+                            else:
+                                current_pu = instance.processing_units
+
+                            is_multiregional = any(x in instance_config for x in ['nam', 'eur', 'asia'])
+                            cost_per_pu = 2.19 if is_multiregional else 0.657
+
+                            nodes_cost = current_pu * cost_per_pu
+
+                            # Minimal storage
+                            storage_size_gb = 10
+                            storage_pricing = 0.50 if is_multiregional else 0.30
+                            backup_pricing = 0.30 if is_multiregional else 0.20
+
+                            storage_cost = storage_size_gb * storage_pricing
+                            backup_cost = (storage_size_gb * 1.5) * backup_pricing
+
+                            monthly_cost = nodes_cost + storage_cost + backup_cost
+                            already_wasted = monthly_cost * (age_days / 30)
+
+                            resources.append(OrphanResourceData(
+                                resource_id=instance_id,
+                                resource_type="cloud_spanner_empty_databases",
+                                resource_name=instance_id,
+                                region=instance_config.split('/')[-1] if '/' in instance_config else instance_config,
+                                estimated_monthly_cost=monthly_cost,
+                                resource_metadata={
+                                    "instance_id": instance_id,
+                                    "instance_config": instance_config,
+                                    "state": "READY",
+                                    "processing_units": current_pu,
+                                    "total_databases": len(database_list),
+                                    "empty_databases": empty_databases,
+                                    "age_days": age_days,
+                                    "already_wasted": round(already_wasted, 2),
+                                    "annual_cost": round(monthly_cost * 12, 2),
+                                    "confidence": "HIGH",
+                                    "recommendation": f"DELETE instance to save ${monthly_cost * 12:.2f}/year. All {len(database_list)} database(s) are empty (no tables).",
+                                    "waste_reason": f"All databases empty: {empty_databases}/{len(database_list)} databases have no tables"
+                                }
+                            ))
+
+                    except Exception as e:
+                        logger.warning(f"Could not fetch databases for Spanner instance {instance_id}: {e}")
+                        continue
+
+            except Exception as e:
+                logger.error(f"Error listing Cloud Spanner instances: {e}")
+
+        except Exception as e:
+            logger.error(f"Error scanning for empty database Cloud Spanner: {e}")
+
+        return resources
+
+    async def scan_cloud_spanner_untagged(
+        self, region: str | None = None, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scenario 7: Detect untagged Cloud Spanner instances.
+
+        Waste: Missing required labels = governance waste.
+        Detection: Missing required labels (environment, owner, cost-center)
+        Cost: 5% of instance cost (governance overhead)
+        Priority: LOW (P3) 💰
+        """
+        resources = []
+
+        try:
+            from google.cloud import spanner_admin_instance_v1
+            from datetime import datetime, timezone
+
+            # Get detection parameters
+            required_labels = ["environment", "owner", "cost-center"]
+            governance_waste_pct = 0.05
+            if detection_rules and "cloud_spanner_untagged" in detection_rules:
+                rules = detection_rules["cloud_spanner_untagged"]
+                required_labels = rules.get("required_labels", required_labels)
+                governance_waste_pct = rules.get("governance_waste_pct", 0.05)
+
+            spanner_client = spanner_admin_instance_v1.InstanceAdminClient(credentials=self.credentials)
+
+            # List all instances
+            try:
+                parent = f"projects/{self.project_id}"
+                instances = spanner_client.list_instances(parent=parent)
+
+                for instance in instances:
+                    instance_id = instance.name.split('/')[-1]
+                    instance_config = instance.config
+
+                    # Check labels
+                    labels = dict(instance.labels) if instance.labels else {}
+
+                    # Identify missing labels
+                    missing_labels = [label for label in required_labels if label not in labels]
+
+                    if not missing_labels:
+                        continue
+
+                    # Calculate governance waste
+                    if instance.node_count > 0:
+                        current_pu = instance.node_count * 1000
+                    else:
+                        current_pu = instance.processing_units
+
+                    is_multiregional = any(x in instance_config for x in ['nam', 'eur', 'asia'])
+                    cost_per_pu = 2.19 if is_multiregional else 0.657
+
+                    nodes_cost = current_pu * cost_per_pu
+                    monthly_waste = nodes_cost * governance_waste_pct
+
+                    # Calculate age
+                    created_at = instance.create_time
+                    if created_at:
+                        age_days = (datetime.now(timezone.utc) - created_at).days
+                        already_wasted = monthly_waste * (age_days / 30)
+                    else:
+                        age_days = 0
+                        already_wasted = 0
+
+                    resources.append(OrphanResourceData(
+                        resource_id=instance_id,
+                        resource_type="cloud_spanner_untagged",
+                        resource_name=instance_id,
+                        region=instance_config.split('/')[-1] if '/' in instance_config else instance_config,
+                        estimated_monthly_cost=monthly_waste,
+                        resource_metadata={
+                            "instance_id": instance_id,
+                            "instance_config": instance_config,
+                            "state": instance.state.name,
+                            "processing_units": current_pu,
+                            "labels": labels,
+                            "missing_labels": missing_labels,
+                            "instance_monthly_cost": round(nodes_cost, 2),
+                            "already_wasted": round(already_wasted, 2),
+                            "annual_cost": round(monthly_waste * 12, 2),
+                            "confidence": "MEDIUM",
+                            "recommendation": f"Add required labels for cost allocation and governance. Missing: {', '.join(missing_labels)}.",
+                            "waste_reason": f"Missing {len(missing_labels)} required labels - governance waste"
+                        }
+                    ))
+
+            except Exception as e:
+                logger.error(f"Error listing Cloud Spanner instances: {e}")
+
+        except Exception as e:
+            logger.error(f"Error scanning for untagged Cloud Spanner: {e}")
+
+        return resources
+
+    async def scan_cloud_spanner_low_cpu(
+        self, region: str | None = None, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scenario 8: Detect Cloud Spanner instances with very low CPU (<20%).
+
+        Waste: Severely under-utilized instances - aggressive reduction opportunity.
+        Detection: avg_cpu <20% over 14 days
+        Cost: ~$2,497/month waste (5 nodes → 1200 PU optimal)
+        Priority: CRITICAL (P0) 💰💰💰💰
+        """
+        resources = []
+
+        try:
+            from google.cloud import spanner_admin_instance_v1
+            from google.cloud import monitoring_v3
+            from datetime import datetime, timezone, timedelta
+
+            # Get detection parameters
+            cpu_threshold = 20.0
+            target_cpu = 65.0
+            lookback_days = 14
+            if detection_rules and "cloud_spanner_low_cpu" in detection_rules:
+                rules = detection_rules["cloud_spanner_low_cpu"]
+                cpu_threshold = rules.get("cpu_threshold", 20.0)
+                target_cpu = rules.get("target_cpu", 65.0)
+                lookback_days = rules.get("lookback_days", 14)
+
+            spanner_client = spanner_admin_instance_v1.InstanceAdminClient(credentials=self.credentials)
+            monitoring_client = monitoring_v3.MetricServiceClient(credentials=self.credentials)
+
+            # List all instances
+            try:
+                parent = f"projects/{self.project_id}"
+                instances = spanner_client.list_instances(parent=parent)
+
+                for instance in instances:
+                    if instance.state != spanner_admin_instance_v1.Instance.State.READY:
+                        continue
+
+                    instance_id = instance.name.split('/')[-1]
+                    instance_config = instance.config
+
+                    # Get current capacity
+                    if instance.node_count > 0:
+                        current_pu = instance.node_count * 1000
+                    else:
+                        current_pu = instance.processing_units
+
+                    # Query CPU metrics
+                    end_time = datetime.now(timezone.utc)
+                    start_time = end_time - timedelta(days=lookback_days)
+
+                    try:
+                        interval = monitoring_v3.TimeInterval({
+                            "end_time": {"seconds": int(end_time.timestamp())},
+                            "start_time": {"seconds": int(start_time.timestamp())}
+                        })
+
+                        cpu_filter = (
+                            f'resource.type="spanner_instance" '
+                            f'AND resource.labels.instance_id="{instance_id}" '
+                            f'AND metric.type="spanner.googleapis.com/instance/cpu/utilization"'
+                        )
+
+                        cpu_request = monitoring_v3.ListTimeSeriesRequest({
+                            "name": f"projects/{self.project_id}",
+                            "filter": cpu_filter,
+                            "interval": interval,
+                            "view": monitoring_v3.ListTimeSeriesRequest.TimeSeriesView.FULL
+                        })
+
+                        cpu_values = []
+                        for series in monitoring_client.list_time_series(request=cpu_request):
+                            for point in series.points:
+                                cpu_values.append(point.value.double_value * 100)
+
+                        if not cpu_values:
+                            continue
+
+                        avg_cpu = sum(cpu_values) / len(cpu_values)
+                        max_cpu = max(cpu_values)
+
+                        # Detect very low CPU
+                        if avg_cpu < cpu_threshold:
+                            # Calculate optimal PU (aggressive reduction)
+                            optimal_pu = int(current_pu * (avg_cpu / target_cpu))
+                            optimal_pu = max(100, optimal_pu)
+
+                            if optimal_pu >= current_pu:
+                                continue
+
+                            # Calculate costs
+                            is_multiregional = any(x in instance_config for x in ['nam', 'eur', 'asia'])
+                            cost_per_pu = 2.19 if is_multiregional else 0.657
+
+                            current_cost = current_pu * cost_per_pu
+                            optimal_cost = optimal_pu * cost_per_pu
+                            monthly_waste = current_cost - optimal_cost
+
+                            # Calculate age
+                            created_at = instance.create_time
+                            if created_at:
+                                age_days = (datetime.now(timezone.utc) - created_at).days
+                                already_wasted = monthly_waste * (age_days / 30)
+                            else:
+                                age_days = 0
+                                already_wasted = 0
+
+                            savings_pct = (monthly_waste / current_cost * 100) if current_cost > 0 else 0
+
+                            resources.append(OrphanResourceData(
+                                resource_id=instance_id,
+                                resource_type="cloud_spanner_low_cpu",
+                                resource_name=instance_id,
+                                region=instance_config.split('/')[-1] if '/' in instance_config else instance_config,
+                                estimated_monthly_cost=monthly_waste,
+                                resource_metadata={
+                                    "instance_id": instance_id,
+                                    "instance_config": instance_config,
+                                    "state": "READY",
+                                    "processing_units": current_pu,
+                                    "cpu_metrics": {
+                                        "avg_cpu_14d": round(avg_cpu, 1),
+                                        "max_cpu_14d": round(max_cpu, 1)
+                                    },
+                                    "recommended_processing_units": optimal_pu,
+                                    "current_cost_monthly": round(current_cost, 2),
+                                    "recommended_cost_monthly": round(optimal_cost, 2),
+                                    "already_wasted": round(already_wasted, 2),
+                                    "savings_percentage": round(savings_pct, 0),
+                                    "annual_cost": round(monthly_waste * 12, 2),
+                                    "confidence": "HIGH",
+                                    "recommendation": f"Reduce from {current_pu} PU to {optimal_pu} PU to save ${monthly_waste * 12:.2f}/year ({savings_pct:.0f}% savings). Very low CPU {avg_cpu:.1f}%.",
+                                    "waste_reason": f"Very low CPU: {avg_cpu:.1f}% < {cpu_threshold}%, aggressive reduction recommended"
+                                }
+                            ))
+
+                    except Exception as e:
+                        logger.warning(f"Could not fetch CPU metrics for Spanner instance {instance_id}: {e}")
+                        continue
+
+            except Exception as e:
+                logger.error(f"Error listing Cloud Spanner instances: {e}")
+
+        except Exception as e:
+            logger.error(f"Error scanning for low CPU Cloud Spanner: {e}")
+
+        return resources
+
+    async def scan_cloud_spanner_storage_overprovisioned(
+        self, region: str | None = None, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scenario 9: Detect Cloud Spanner with small storage (<100GB) vs Cloud SQL.
+
+        Waste: Cloud Spanner is overkill for small datasets - Cloud SQL is cheaper.
+        Detection: avg_storage_gb <100 AND growth_rate <5%
+        Cost: ~$585/month savings (Spanner → Cloud SQL migration)
+        Priority: LOW (P2) 💰💰 (Migration complexity)
+        """
+        resources = []
+
+        try:
+            from google.cloud import spanner_admin_instance_v1
+            from google.cloud import monitoring_v3
+            from datetime import datetime, timezone, timedelta
+
+            # Get detection parameters
+            max_storage_gb = 100
+            max_growth_rate_pct = 5.0
+            lookback_days = 30
+            if detection_rules and "cloud_spanner_storage_overprovisioned" in detection_rules:
+                rules = detection_rules["cloud_spanner_storage_overprovisioned"]
+                max_storage_gb = rules.get("max_storage_gb", 100)
+                max_growth_rate_pct = rules.get("max_growth_rate_pct", 5.0)
+                lookback_days = rules.get("lookback_days", 30)
+
+            spanner_client = spanner_admin_instance_v1.InstanceAdminClient(credentials=self.credentials)
+            monitoring_client = monitoring_v3.MetricServiceClient(credentials=self.credentials)
+
+            # List all instances
+            try:
+                parent = f"projects/{self.project_id}"
+                instances = spanner_client.list_instances(parent=parent)
+
+                for instance in instances:
+                    if instance.state != spanner_admin_instance_v1.Instance.State.READY:
+                        continue
+
+                    instance_id = instance.name.split('/')[-1]
+                    instance_config = instance.config
+
+                    # Query storage metrics
+                    end_time = datetime.now(timezone.utc)
+                    start_time = end_time - timedelta(days=lookback_days)
+
+                    try:
+                        interval = monitoring_v3.TimeInterval({
+                            "end_time": {"seconds": int(end_time.timestamp())},
+                            "start_time": {"seconds": int(start_time.timestamp())}
+                        })
+
+                        storage_filter = (
+                            f'resource.type="spanner_instance" '
+                            f'AND resource.labels.instance_id="{instance_id}" '
+                            f'AND metric.type="spanner.googleapis.com/instance/storage/used_bytes"'
+                        )
+
+                        storage_request = monitoring_v3.ListTimeSeriesRequest({
+                            "name": f"projects/{self.project_id}",
+                            "filter": storage_filter,
+                            "interval": interval,
+                            "view": monitoring_v3.ListTimeSeriesRequest.TimeSeriesView.FULL
+                        })
+
+                        storage_values = []
+                        for series in monitoring_client.list_time_series(request=storage_request):
+                            for point in series.points:
+                                storage_values.append(point.value.int64_value)
+
+                        if not storage_values:
+                            continue
+
+                        avg_storage_bytes = sum(storage_values) / len(storage_values)
+                        avg_storage_gb = avg_storage_bytes / (1024**3)
+
+                        # Analyze growth rate
+                        if len(storage_values) >= 8:
+                            first_week = sum(storage_values[:len(storage_values)//4]) / (len(storage_values)//4)
+                            last_week = sum(storage_values[-len(storage_values)//4:]) / (len(storage_values)//4)
+                            growth_rate = ((last_week - first_week) / first_week * 100) if first_week > 0 else 0
+                        else:
+                            growth_rate = 0
+
+                        # Detect small storage with low growth
+                        if avg_storage_gb < max_storage_gb and growth_rate < max_growth_rate_pct:
+                            # Calculate Spanner cost
+                            if instance.node_count > 0:
+                                current_pu = instance.node_count * 1000
+                            else:
+                                current_pu = instance.processing_units
+
+                            is_multiregional = any(x in instance_config for x in ['nam', 'eur', 'asia'])
+                            cost_per_pu = 2.19 if is_multiregional else 0.657
+                            storage_pricing = 0.50 if is_multiregional else 0.30
+                            backup_pricing = 0.30 if is_multiregional else 0.20
+
+                            spanner_nodes_cost = current_pu * cost_per_pu
+                            spanner_storage_cost = avg_storage_gb * storage_pricing
+                            spanner_backup_cost = (avg_storage_gb * 2) * backup_pricing
+                            spanner_total = spanner_nodes_cost + spanner_storage_cost + spanner_backup_cost
+
+                            # Cloud SQL equivalent (db-n1-standard-2)
+                            cloudsql_instance_cost = 92.40
+                            cloudsql_storage_cost = avg_storage_gb * 0.17
+                            cloudsql_backup_cost = (avg_storage_gb * 1.5) * 0.08
+                            cloudsql_total = cloudsql_instance_cost + cloudsql_storage_cost + cloudsql_backup_cost
+
+                            # Calculate potential savings
+                            monthly_waste = spanner_total - cloudsql_total
+
+                            if monthly_waste > 0:
+                                resources.append(OrphanResourceData(
+                                    resource_id=instance_id,
+                                    resource_type="cloud_spanner_storage_overprovisioned",
+                                    resource_name=instance_id,
+                                    region=instance_config.split('/')[-1] if '/' in instance_config else instance_config,
+                                    estimated_monthly_cost=monthly_waste,
+                                    resource_metadata={
+                                        "instance_id": instance_id,
+                                        "instance_config": instance_config,
+                                        "state": "READY",
+                                        "processing_units": current_pu,
+                                        "storage_metrics": {
+                                            "avg_storage_gb": round(avg_storage_gb, 1),
+                                            "growth_rate_30d_pct": round(growth_rate, 1)
+                                        },
+                                        "current_cost_monthly": round(spanner_total, 2),
+                                        "alternative_cloudsql_cost_monthly": round(cloudsql_total, 2),
+                                        "annual_savings": round(monthly_waste * 12, 2),
+                                        "confidence": "LOW",
+                                        "migration_complexity": "high",
+                                        "recommendation": f"Consider migrating to Cloud SQL for small datasets (<{max_storage_gb}GB). Potential savings ${monthly_waste * 12:.2f}/year.",
+                                        "waste_reason": f"Small storage {avg_storage_gb:.0f}GB - Cloud Spanner overkill, Cloud SQL would be cheaper"
+                                    }
+                                ))
+
+                    except Exception as e:
+                        logger.warning(f"Could not fetch storage metrics for Spanner instance {instance_id}: {e}")
+                        continue
+
+            except Exception as e:
+                logger.error(f"Error listing Cloud Spanner instances: {e}")
+
+        except Exception as e:
+            logger.error(f"Error scanning for storage over-provisioned Cloud Spanner: {e}")
+
+        return resources
+
+    async def scan_cloud_spanner_excessive_backups(
+        self, region: str | None = None, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scenario 10: Detect excessive backup retention.
+
+        Waste: Backups >90 days for dev/test or >365 days for prod.
+        Detection: Backups age >threshold based on environment labels
+        Cost: ~$100/month waste (500GB old backups)
+        Priority: LOW (P3) 💰
+        """
+        resources = []
+
+        try:
+            from google.cloud import spanner_admin_instance_v1
+            from google.cloud import spanner_admin_database_v1
+            from datetime import datetime, timezone
+
+            # Get detection parameters
+            excessive_retention_days_devtest = 90
+            excessive_retention_days_prod = 365
+            devtest_labels = ["dev", "test", "staging", "development"]
+            if detection_rules and "cloud_spanner_excessive_backups" in detection_rules:
+                rules = detection_rules["cloud_spanner_excessive_backups"]
+                excessive_retention_days_devtest = rules.get("excessive_retention_days_devtest", 90)
+                excessive_retention_days_prod = rules.get("excessive_retention_days_prod", 365)
+                devtest_labels = rules.get("devtest_labels", devtest_labels)
+
+            spanner_client = spanner_admin_instance_v1.InstanceAdminClient(credentials=self.credentials)
+            database_admin_client = spanner_admin_database_v1.DatabaseAdminClient(credentials=self.credentials)
+
+            # List all instances
+            try:
+                parent = f"projects/{self.project_id}"
+                instances = spanner_client.list_instances(parent=parent)
+
+                for instance in instances:
+                    instance_id = instance.name.split('/')[-1]
+                    instance_config = instance.config
+                    instance_path = instance.name
+
+                    # Check labels
+                    labels = dict(instance.labels) if instance.labels else {}
+                    environment = labels.get('environment', '').lower()
+
+                    is_devtest = environment in devtest_labels
+                    retention_threshold = excessive_retention_days_devtest if is_devtest else excessive_retention_days_prod
+
+                    # List backups
+                    try:
+                        backups = database_admin_client.list_backups(parent=instance_path)
+
+                        total_backup_size_gb = 0
+                        old_backups = []
+                        old_backup_size_gb = 0
+
+                        for backup in backups:
+                            backup_size_bytes = backup.size_bytes
+                            backup_size_gb = backup_size_bytes / (1024**3)
+                            total_backup_size_gb += backup_size_gb
+
+                            # Calculate age
+                            creation_time = backup.create_time
+                            age_days = (datetime.now(timezone.utc) - creation_time).days
+
+                            # Identify old backups
+                            if age_days >= retention_threshold:
+                                old_backups.append({
+                                    'name': backup.name.split('/')[-1],
+                                    'age_days': age_days,
+                                    'size_gb': backup_size_gb
+                                })
+                                old_backup_size_gb += backup_size_gb
+
+                        # Detect excessive backups
+                        if len(old_backups) > 0:
+                            # Calculate waste
+                            is_multiregional = any(x in instance_config for x in ['nam', 'eur', 'asia'])
+                            backup_pricing = 0.30 if is_multiregional else 0.20
+
+                            monthly_waste = old_backup_size_gb * backup_pricing
+
+                            # Estimate waste over last 3 months
+                            already_wasted = monthly_waste * 3
+
+                            resources.append(OrphanResourceData(
+                                resource_id=instance_id,
+                                resource_type="cloud_spanner_excessive_backups",
+                                resource_name=instance_id,
+                                region=instance_config.split('/')[-1] if '/' in instance_config else instance_config,
+                                estimated_monthly_cost=monthly_waste,
+                                resource_metadata={
+                                    "instance_id": instance_id,
+                                    "instance_config": instance_config,
+                                    "labels": labels,
+                                    "environment": environment if environment else "unknown",
+                                    "backup_analysis": {
+                                        "total_backups": len(list(backups)),
+                                        "old_backups": len(old_backups),
+                                        "total_backup_size_gb": round(total_backup_size_gb, 1),
+                                        "old_backup_size_gb": round(old_backup_size_gb, 1),
+                                        "oldest_backup_age_days": max([b['age_days'] for b in old_backups]) if old_backups else 0
+                                    },
+                                    "already_wasted": round(already_wasted, 2),
+                                    "annual_cost": round(monthly_waste * 12, 2),
+                                    "confidence": "MEDIUM",
+                                    "recommendation": f"Delete backups >{retention_threshold} days for {environment if environment else 'this'} environment to save ${monthly_waste * 12:.2f}/year.",
+                                    "waste_reason": f"Excessive backup retention: {len(old_backups)} backups >{retention_threshold} days"
+                                }
+                            ))
+
+                    except Exception as e:
+                        logger.warning(f"Could not fetch backups for Spanner instance {instance_id}: {e}")
+                        continue
+
+            except Exception as e:
+                logger.error(f"Error listing Cloud Spanner instances: {e}")
+
+        except Exception as e:
+            logger.error(f"Error scanning for excessive backups Cloud Spanner: {e}")
+
+        return resources
+
     async def scan_cloud_nat_gateway_idle(
         self, region: str | None = None, detection_rules: dict | None = None
     ) -> list[OrphanResourceData]:

@@ -3245,6 +3245,77 @@ DEFAULT_DETECTION_RULES = {
         "devtest_labels": ["dev", "test", "staging", "development"],
         "description": "GCP Cloud SQL unnecessary HA on dev/test - disable for +100% savings ($184/month typical) 💰💰💰💰 P0",
     },
+    # =================================================================
+    # GCP CLOUD SPANNER DETECTION RULES (10 scenarios)
+    # =================================================================
+    "cloud_spanner_underutilized": {
+        "enabled": True,
+        "cpu_threshold": 30.0,
+        "target_cpu": 65.0,
+        "lookback_days": 14,
+        "min_savings_threshold": 100.0,
+        "description": "GCP Cloud Spanner under-utilized - CPU<30% 14+ days, reduce PU for savings ($1,314/month typical) 💰💰💰 P1",
+    },
+    "cloud_spanner_unnecessary_multiregional": {
+        "enabled": True,
+        "devtest_labels": ["dev", "test", "staging", "development"],
+        "single_region_threshold_pct": 90.0,
+        "description": "GCP Cloud Spanner unnecessary multi-regional - dev/test or >90% single region, 3.3x cost waste ($4,799/month) 💰💰💰💰 P0",
+    },
+    "cloud_spanner_devtest_overprovisioned": {
+        "enabled": True,
+        "devtest_labels": ["dev", "test", "staging", "development"],
+        "node_threshold": 1000,
+        "recommended_pu": 300,
+        "description": "GCP Cloud Spanner dev/test over-provisioned - ≥1 node for dev/test, use 300 PU ($1,774/month waste) 💰💰💰 P1",
+    },
+    "cloud_spanner_idle": {
+        "enabled": True,
+        "lookback_days": 14,
+        "zero_requests_threshold": 0,
+        "description": "GCP Cloud Spanner idle - 0 API requests 14+ days, 100% waste ($727/month typical) 💰💰💰💰 P0",
+    },
+    "cloud_spanner_pu_suboptimal": {
+        "enabled": True,
+        "pu_granularity": 100,
+        "node_granularity": 1000,
+        "min_savings_threshold": 50.0,
+        "description": "GCP Cloud Spanner suboptimal PU config - nodes have 1000 PU granularity, use PU for 100 PU flexibility ($263/month savings) 💰 P2",
+    },
+    "cloud_spanner_empty_databases": {
+        "enabled": True,
+        "min_age_days": 7,
+        "description": "GCP Cloud Spanner empty databases - no tables/data, 100% waste ($663/month typical) 💰💰💰 P1",
+    },
+    "cloud_spanner_untagged": {
+        "enabled": True,
+        "required_labels": ["environment", "owner", "cost-center"],
+        "governance_waste_pct": 0.05,
+        "description": "GCP Cloud Spanner missing required labels - 5% governance waste 💰 P3",
+    },
+    "cloud_spanner_low_cpu": {
+        "enabled": True,
+        "cpu_threshold": 20.0,
+        "target_cpu": 65.0,
+        "lookback_days": 14,
+        "min_savings_threshold": 200.0,
+        "description": "GCP Cloud Spanner very low CPU - <20% 14+ days, aggressive reduction opportunity ($2,497/month typical) 💰💰💰💰 P0",
+    },
+    "cloud_spanner_storage_overprovisioned": {
+        "enabled": True,
+        "storage_threshold_gb": 100,
+        "growth_rate_threshold_pct": 5.0,
+        "lookback_days": 30,
+        "cloud_sql_alternative_cost_per_gb": 0.17,
+        "description": "GCP Cloud Spanner small storage - <100GB & <5% growth, migrate to Cloud SQL for savings ($585/month) 💰💰 P2",
+    },
+    "cloud_spanner_excessive_backups": {
+        "enabled": True,
+        "devtest_retention_days": 90,
+        "prod_retention_days": 365,
+        "devtest_labels": ["dev", "test", "staging", "development"],
+        "description": "GCP Cloud Spanner excessive backup retention - >90d dev/test or >365d prod ($100/month typical) 💰 P3",
+    },
 }
 
 

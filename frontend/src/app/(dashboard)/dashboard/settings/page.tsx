@@ -657,7 +657,12 @@ const RESOURCE_CATEGORIES = {
       "cloud_sql_stopped", "cloud_sql_idle", "cloud_sql_overprovisioned",
       "cloud_sql_old_machine_type", "cloud_sql_devtest_247", "cloud_sql_unused_replicas",
       "cloud_sql_untagged", "cloud_sql_zero_io", "cloud_sql_storage_overprovisioned",
-      "cloud_sql_unnecessary_ha"
+      "cloud_sql_unnecessary_ha",
+      // Cloud Spanner (10 scenarios)
+      "cloud_spanner_underutilized", "cloud_spanner_unnecessary_multiregional", "cloud_spanner_devtest_overprovisioned",
+      "cloud_spanner_idle", "cloud_spanner_pu_suboptimal", "cloud_spanner_empty_databases",
+      "cloud_spanner_untagged", "cloud_spanner_low_cpu", "cloud_spanner_storage_overprovisioned",
+      "cloud_spanner_excessive_backups"
     ],
   },
   azure: {
@@ -878,6 +883,16 @@ const GCP_RESOURCE_ICONS: { [key: string]: any } = {
   // Database
   cloud_sql_stopped: Database,
   cloud_sql_idle: Database,
+  cloud_spanner_underutilized: Database,
+  cloud_spanner_unnecessary_multiregional: Database,
+  cloud_spanner_devtest_overprovisioned: Database,
+  cloud_spanner_idle: Database,
+  cloud_spanner_pu_suboptimal: Database,
+  cloud_spanner_empty_databases: Database,
+  cloud_spanner_untagged: Database,
+  cloud_spanner_low_cpu: Database,
+  cloud_spanner_storage_overprovisioned: Database,
+  cloud_spanner_excessive_backups: Database,
 };
 
 const GCP_RESOURCE_LABELS: { [key: string]: string } = {
@@ -1013,6 +1028,17 @@ const GCP_RESOURCE_LABELS: { [key: string]: string } = {
   cloud_sql_zero_io: "Cloud SQL (Zero I/O - Empty Database) 💰💰💰💰 P0",
   cloud_sql_storage_overprovisioned: "Cloud SQL (Storage >80% Free - Reduce Size) 💰💰💰 P1",
   cloud_sql_unnecessary_ha: "Cloud SQL (Unnecessary HA on Dev/Test) 💰💰💰💰 P0",
+  // Database - Cloud Spanner (10 scenarios)
+  cloud_spanner_underutilized: "Cloud Spanner (Under-Utilized CPU<30% - Reduce PU) 💰💰💰 P1",
+  cloud_spanner_unnecessary_multiregional: "Cloud Spanner (Unnecessary Multi-Regional - 3.3x Cost Waste) 💰💰💰💰 P0",
+  cloud_spanner_devtest_overprovisioned: "Cloud Spanner (Dev/Test Over-Provisioned ≥1 Node) 💰💰💰 P1",
+  cloud_spanner_idle: "Cloud Spanner (Idle - 0 API Requests 14+ days) 💰💰💰💰 P0",
+  cloud_spanner_pu_suboptimal: "Cloud Spanner (Suboptimal PU Config - Use 100 PU Granularity) 💰 P2",
+  cloud_spanner_empty_databases: "Cloud Spanner (Empty Databases - No Tables) 💰💰💰 P1",
+  cloud_spanner_untagged: "Cloud Spanner (Missing Required Labels) 💰 P3",
+  cloud_spanner_low_cpu: "Cloud Spanner (Very Low CPU<20% - Aggressive Reduction) 💰💰💰💰 P0",
+  cloud_spanner_storage_overprovisioned: "Cloud Spanner (Small Storage <100GB - Migrate to Cloud SQL) 💰💰 P2",
+  cloud_spanner_excessive_backups: "Cloud Spanner (Excessive Backup Retention >90d/365d) 💰 P3",
 };
 
 // Microsoft 365 Resource Icons & Labels
