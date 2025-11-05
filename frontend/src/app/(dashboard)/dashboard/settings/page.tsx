@@ -589,7 +589,18 @@ const RESOURCE_CATEGORIES = {
       "gke_cluster_untagged",
       "gke_cluster_nodes_underutilized",
       "gke_cluster_pods_overrequested",
-      "gke_cluster_no_workloads"
+      "gke_cluster_no_workloads",
+      // Cloud Run Services (10 scenarios)
+      "gcp_cloud_run_never_used",
+      "gcp_cloud_run_idle_min_instances",
+      "gcp_cloud_run_overprovisioned",
+      "gcp_cloud_run_nonprod_min_instances",
+      "gcp_cloud_run_cpu_always_allocated",
+      "gcp_cloud_run_untagged",
+      "gcp_cloud_run_excessive_max_instances",
+      "gcp_cloud_run_low_concurrency",
+      "gcp_cloud_run_excessive_min_instances",
+      "gcp_cloud_run_multi_region_redundant"
     ],
     storage: [
       // Persistent Disks (10 scenarios)
@@ -774,6 +785,17 @@ const GCP_RESOURCE_ICONS: { [key: string]: any } = {
   gke_cluster_nodes_underutilized: Activity,
   gke_cluster_pods_overrequested: PackageOpen,
   gke_cluster_no_workloads: XCircle,
+  // Cloud Run Services (10 scenarios)
+  gcp_cloud_run_never_used: Server,
+  gcp_cloud_run_idle_min_instances: Activity,
+  gcp_cloud_run_overprovisioned: TrendingDown,
+  gcp_cloud_run_nonprod_min_instances: Clock,
+  gcp_cloud_run_cpu_always_allocated: Cpu,
+  gcp_cloud_run_untagged: Tag,
+  gcp_cloud_run_excessive_max_instances: AlertCircle,
+  gcp_cloud_run_low_concurrency: Zap,
+  gcp_cloud_run_excessive_min_instances: Activity,
+  gcp_cloud_run_multi_region_redundant: Globe,
   // Persistent Disks (10 scenarios)
   persistent_disk_unattached: HardDrive,
   persistent_disk_attached_stopped: Server,
@@ -829,6 +851,17 @@ const GCP_RESOURCE_LABELS: { [key: string]: string } = {
   gke_cluster_nodes_underutilized: "GKE Cluster (Nodes Underutilized) 💰💰💰 P1",
   gke_cluster_pods_overrequested: "GKE Cluster (Pods Over-Requested) 💰💰 P2",
   gke_cluster_no_workloads: "GKE Cluster (No Workloads) 💰💰💰💰 P0",
+  // Cloud Run Services (10 scenarios)
+  gcp_cloud_run_never_used: "Cloud Run Service (Never Used - 0 Requests 30+ days) 💰💰💰💰 P0",
+  gcp_cloud_run_idle_min_instances: "Cloud Run Service (Idle with min_instances > 0) 💰💰💰💰 P0",
+  gcp_cloud_run_overprovisioned: "Cloud Run Service (Overprovisioned CPU/Memory < 20%) 💰💰💰 P1",
+  gcp_cloud_run_nonprod_min_instances: "Cloud Run Service (Dev/Test with min_instances > 0) 💰💰💰💰 P0",
+  gcp_cloud_run_cpu_always_allocated: "Cloud Run Service (CPU Always Allocated + Sporadic Traffic) 💰💰💰 P1",
+  gcp_cloud_run_untagged: "Cloud Run Service (Missing Required Labels) 💰 P2",
+  gcp_cloud_run_excessive_max_instances: "Cloud Run Service (Excessive max_instances > 100) 💰💰💰💰 P0",
+  gcp_cloud_run_low_concurrency: "Cloud Run Service (Low Concurrency <= 10) 💰💰💰 P1",
+  gcp_cloud_run_excessive_min_instances: "Cloud Run Service (Excessive min_instances >= 5) 💰💰💰 P1",
+  gcp_cloud_run_multi_region_redundant: "Cloud Run Service (Multi-Region Redundant) 💰💰💰 P1",
   // Persistent Disks (10 scenarios)
   persistent_disk_unattached: "Persistent Disk (Unattached >7 days) 💰💰💰💰 P0",
   persistent_disk_attached_stopped: "Persistent Disk (Attached to Stopped Instance >30 days) 💰💰💰💰 P0",

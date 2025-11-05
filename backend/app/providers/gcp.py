@@ -8,7 +8,7 @@ from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from google.cloud import compute_v1, container_v1, logging, monitoring_v3
+from google.cloud import compute_v1, container_v1, logging, monitoring_v3, run_v2
 from google.oauth2 import service_account
 from google.protobuf.timestamp_pb2 import Timestamp
 from kubernetes import client as k8s_client
@@ -90,6 +90,7 @@ class GCPProvider(CloudProviderBase):
         self._monitoring_client = None
         self._gke_client = None
         self._logging_client = None
+        self._run_client = None
 
     def _get_credentials(self) -> service_account.Credentials:
         """Get GCP credentials from service account JSON."""
@@ -123,6 +124,14 @@ class GCPProvider(CloudProviderBase):
                 credentials=self._get_credentials()
             )
         return self._gke_client
+
+    def _get_run_client(self) -> run_v2.ServicesClient:
+        """Get or create Cloud Run client."""
+        if self._run_client is None:
+            self._run_client = run_v2.ServicesClient(
+                credentials=self._get_credentials()
+            )
+        return self._run_client
 
     def _get_k8s_config(self, cluster: container_v1.Cluster, location: str) -> dict:
         """
@@ -229,6 +238,37 @@ class GCPProvider(CloudProviderBase):
     def _get_zone_name(self, zone_url: str) -> str:
         """Extract zone name from full URL."""
         return zone_url.split("/")[-1]
+
+    def _parse_cloud_run_cpu(self, cpu_str: str) -> float:
+        """
+        Parse Cloud Run CPU value to float.
+
+        Args:
+            cpu_str: CPU value (e.g., '1', '2', '1000m', '2000m')
+
+        Returns:
+            CPU as float (e.g., 1.0, 2.0, 1.0, 2.0)
+        """
+        if 'm' in str(cpu_str):
+            # Millicores (e.g., '1000m' = 1 vCPU)
+            return int(str(cpu_str).replace('m', '')) / 1000
+        return float(cpu_str)
+
+    def _parse_cloud_run_memory(self, memory_str: str) -> float:
+        """
+        Parse Cloud Run memory value to GiB.
+
+        Args:
+            memory_str: Memory value (e.g., '512Mi', '1Gi', '2048Mi')
+
+        Returns:
+            Memory in GiB (e.g., 0.5, 1.0, 2.0)
+        """
+        if 'Gi' in memory_str:
+            return float(memory_str.replace('Gi', ''))
+        elif 'Mi' in memory_str:
+            return float(memory_str.replace('Mi', '')) / 1024
+        return 0.5  # Default 512Mi
 
     async def _get_cpu_metrics(
         self, instance_id: str, zone: str, lookback_days: int = 14
@@ -5301,6 +5341,1118 @@ class GCPProvider(CloudProviderBase):
                     continue
 
         except Exception as e:
+            pass
+
+        return resources
+
+    # ==================== CLOUD RUN SERVICES SCENARIOS ====================
+
+    async def scan_cloud_run_never_used(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scenario 1: Scan for Cloud Run services with zero requests for 30+ days.
+
+        Detection:
+        - request_count == 0 for lookback period
+        - age >= min_age_days (default: 30)
+
+        Cost:
+        - 100% waste if min_instances > 0
+        - Minimal waste if min_instances == 0
+        """
+        resources = []
+        min_age_days = (
+            detection_rules.get("cloud_run_never_used", {}).get("min_age_days", 30)
+            if detection_rules
+            else 30
+        )
+        lookback_days = (
+            detection_rules.get("cloud_run_never_used", {}).get("lookback_days", 30)
+            if detection_rules
+            else 30
+        )
+
+        try:
+            run_client = self._get_run_client()
+            monitoring_client = self._get_monitoring_client()
+
+            parent = f"projects/{self.project_id}/locations/{region}"
+            services = run_client.list_services(parent=parent)
+
+            for service in services:
+                try:
+                    service_name = service.name.split('/')[-1]
+
+                    # Query request_count metrics
+                    now = time.time()
+                    end_time = Timestamp(seconds=int(now))
+                    start_time = Timestamp(seconds=int(now - lookback_days * 24 * 3600))
+
+                    interval = monitoring_v3.TimeInterval(
+                        {"end_time": end_time, "start_time": start_time}
+                    )
+
+                    filter_str = (
+                        f'resource.type = "cloud_run_revision" '
+                        f'AND resource.labels.service_name = "{service_name}" '
+                        f'AND resource.labels.location = "{region}" '
+                        f'AND metric.type = "run.googleapis.com/request_count"'
+                    )
+
+                    request = monitoring_v3.ListTimeSeriesRequest(
+                        name=f"projects/{self.project_id}",
+                        filter=filter_str,
+                        interval=interval,
+                    )
+
+                    time_series = monitoring_client.list_time_series(request=request)
+
+                    # Sum all requests
+                    total_requests = 0
+                    for series in time_series:
+                        for point in series.points:
+                            total_requests += point.value.int64_value or point.value.double_value or 0
+
+                    # If zero requests, calculate waste
+                    if total_requests == 0:
+                        age_days = self._get_age_days(service.create_time)
+
+                        if age_days >= min_age_days:
+                            template = service.template
+                            scaling = template.scaling
+                            min_instances = scaling.min_instance_count if scaling else 0
+
+                            container = template.containers[0] if template.containers else None
+                            if container:
+                                vcpu = self._parse_cloud_run_cpu(container.resources.limits.get('cpu', '1'))
+                                memory_gib = self._parse_cloud_run_memory(container.resources.limits.get('memory', '512Mi'))
+
+                                # Cloud Run pricing: $0.00002400/vCPU-sec ($62.21/vCPU/month) + $0.00000250/GiB-sec ($6.48/GiB/month)
+                                cpu_cost_monthly = vcpu * 62.21
+                                memory_cost_monthly = memory_gib * 6.48
+                                cost_per_instance = cpu_cost_monthly + memory_cost_monthly
+
+                                monthly_cost = min_instances * cost_per_instance
+                                already_wasted = monthly_cost * (age_days / 30.0)
+                            else:
+                                monthly_cost = 50.0  # Estimation
+                                already_wasted = monthly_cost * (age_days / 30.0)
+
+                            confidence = "critical" if age_days >= 90 else "high" if age_days >= 60 else "medium"
+
+                            resources.append(
+                                OrphanResourceData(
+                                    resource_id=service.name,
+                                    resource_name=service_name,
+                                    resource_type="gcp_cloud_run_never_used",
+                                    region=region,
+                                    estimated_monthly_cost=monthly_cost,
+                                    resource_metadata={
+                                        "service_name": service_name,
+                                        "service_uri": service.uri,
+                                        "region": region,
+                                        "min_instances": min_instances,
+                                        "total_requests": 0,
+                                        "lookback_days": lookback_days,
+                                        "age_days": age_days,
+                                        "already_wasted": round(already_wasted, 2),
+                                        "confidence": confidence,
+                                        "recommendation": "Delete service (zero requests)",
+                                    },
+                                )
+                            )
+
+                except Exception:
+                    continue
+
+        except Exception:
+            pass
+
+        return resources
+
+    async def scan_cloud_run_idle_min_instances(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scenario 2: Scan for Cloud Run services with min_instances > 0 but low traffic.
+
+        Detection:
+        - min_instances > 0
+        - avg_requests_per_min < traffic_threshold_rpm (default: 10 req/min)
+
+        Cost:
+        - Waste = current cost - optimal cost (min_instances = 0)
+        """
+        resources = []
+        traffic_threshold_rpm = (
+            detection_rules.get("cloud_run_idle_min_instances", {}).get("traffic_threshold_rpm", 10)
+            if detection_rules
+            else 10
+        )
+        lookback_days = (
+            detection_rules.get("cloud_run_idle_min_instances", {}).get("lookback_days", 14)
+            if detection_rules
+            else 14
+        )
+
+        try:
+            run_client = self._get_run_client()
+            monitoring_client = self._get_monitoring_client()
+
+            parent = f"projects/{self.project_id}/locations/{region}"
+            services = run_client.list_services(parent=parent)
+
+            for service in services:
+                try:
+                    service_name = service.name.split('/')[-1]
+                    template = service.template
+                    scaling = template.scaling
+                    min_instances = scaling.min_instance_count if scaling else 0
+
+                    if min_instances > 0:
+                        # Query request metrics
+                        now = time.time()
+                        end_time = Timestamp(seconds=int(now))
+                        start_time = Timestamp(seconds=int(now - lookback_days * 24 * 3600))
+
+                        interval = monitoring_v3.TimeInterval(
+                            {"end_time": end_time, "start_time": start_time}
+                        )
+
+                        filter_str = (
+                            f'resource.type = "cloud_run_revision" '
+                            f'AND resource.labels.service_name = "{service_name}" '
+                            f'AND resource.labels.location = "{region}" '
+                            f'AND metric.type = "run.googleapis.com/request_count"'
+                        )
+
+                        request = monitoring_v3.ListTimeSeriesRequest(
+                            name=f"projects/{self.project_id}",
+                            filter=filter_str,
+                            interval=interval,
+                        )
+
+                        time_series = monitoring_client.list_time_series(request=request)
+
+                        total_requests = 0
+                        for series in time_series:
+                            for point in series.points:
+                                total_requests += point.value.int64_value or point.value.double_value or 0
+
+                        avg_requests_per_min = total_requests / (lookback_days * 24 * 60)
+
+                        if avg_requests_per_min < traffic_threshold_rpm:
+                            container = template.containers[0] if template.containers else None
+                            if container:
+                                vcpu = self._parse_cloud_run_cpu(container.resources.limits.get('cpu', '1'))
+                                memory_gib = self._parse_cloud_run_memory(container.resources.limits.get('memory', '512Mi'))
+
+                                cost_per_instance = (vcpu * 62.21) + (memory_gib * 6.48)
+                                monthly_cost_current = min_instances * cost_per_instance
+                                monthly_cost_optimal = 0  # min_instances = 0
+                                monthly_waste = monthly_cost_current - monthly_cost_optimal
+                            else:
+                                monthly_waste = 75.0
+
+                            confidence = "critical" if avg_requests_per_min < 1 else "high" if avg_requests_per_min < 5 else "medium"
+
+                            resources.append(
+                                OrphanResourceData(
+                                    resource_id=service.name,
+                                    resource_name=service_name,
+                                    resource_type="gcp_cloud_run_idle_min_instances",
+                                    region=region,
+                                    estimated_monthly_cost=monthly_waste,
+                                    resource_metadata={
+                                        "service_name": service_name,
+                                        "service_uri": service.uri,
+                                        "region": region,
+                                        "min_instances_current": min_instances,
+                                        "recommended_min_instances": 0,
+                                        "avg_requests_per_min": round(avg_requests_per_min, 2),
+                                        "traffic_threshold_rpm": traffic_threshold_rpm,
+                                        "monthly_waste": round(monthly_waste, 2),
+                                        "confidence": confidence,
+                                        "recommendation": "Set min_instances = 0 (low traffic)",
+                                    },
+                                )
+                            )
+
+                except Exception:
+                    continue
+
+        except Exception:
+            pass
+
+        return resources
+
+    async def scan_cloud_run_overprovisioned(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scenario 3: Scan for Cloud Run services with low CPU/memory utilization.
+
+        Detection:
+        - avg_cpu_utilization < cpu_threshold (default: 20%)
+        - avg_memory_utilization < memory_threshold (default: 20%)
+
+        Cost:
+        - Right-size CPU/memory to reduce costs
+        """
+        resources = []
+        cpu_threshold = (
+            detection_rules.get("cloud_run_overprovisioned", {}).get("cpu_threshold", 20)
+            if detection_rules
+            else 20
+        )
+        memory_threshold = (
+            detection_rules.get("cloud_run_overprovisioned", {}).get("memory_threshold", 20)
+            if detection_rules
+            else 20
+        )
+        lookback_days = (
+            detection_rules.get("cloud_run_overprovisioned", {}).get("lookback_days", 14)
+            if detection_rules
+            else 14
+        )
+
+        try:
+            run_client = self._get_run_client()
+            monitoring_client = self._get_monitoring_client()
+
+            parent = f"projects/{self.project_id}/locations/{region}"
+            services = run_client.list_services(parent=parent)
+
+            for service in services:
+                try:
+                    service_name = service.name.split('/')[-1]
+
+                    # Query CPU utilization
+                    now = time.time()
+                    end_time = Timestamp(seconds=int(now))
+                    start_time = Timestamp(seconds=int(now - lookback_days * 24 * 3600))
+
+                    interval = monitoring_v3.TimeInterval(
+                        {"end_time": end_time, "start_time": start_time}
+                    )
+
+                    filter_cpu = (
+                        f'resource.type = "cloud_run_revision" '
+                        f'AND resource.labels.service_name = "{service_name}" '
+                        f'AND metric.type = "run.googleapis.com/container/cpu/utilizations"'
+                    )
+
+                    request_cpu = monitoring_v3.ListTimeSeriesRequest(
+                        name=f"projects/{self.project_id}",
+                        filter=filter_cpu,
+                        interval=interval,
+                    )
+
+                    cpu_time_series = monitoring_client.list_time_series(request=request_cpu)
+
+                    cpu_values = []
+                    for series in cpu_time_series:
+                        for point in series.points:
+                            cpu_values.append(point.value.double_value * 100)
+
+                    avg_cpu = sum(cpu_values) / len(cpu_values) if cpu_values else 0
+
+                    # Query Memory utilization
+                    filter_memory = (
+                        f'resource.type = "cloud_run_revision" '
+                        f'AND resource.labels.service_name = "{service_name}" '
+                        f'AND metric.type = "run.googleapis.com/container/memory/utilizations"'
+                    )
+
+                    request_memory = monitoring_v3.ListTimeSeriesRequest(
+                        name=f"projects/{self.project_id}",
+                        filter=filter_memory,
+                        interval=interval,
+                    )
+
+                    memory_time_series = monitoring_client.list_time_series(request=request_memory)
+
+                    memory_values = []
+                    for series in memory_time_series:
+                        for point in series.points:
+                            memory_values.append(point.value.double_value * 100)
+
+                    avg_memory = sum(memory_values) / len(memory_values) if memory_values else 0
+
+                    if avg_cpu < cpu_threshold and avg_memory < memory_threshold and len(cpu_values) > 0:
+                        template = service.template
+                        container = template.containers[0] if template.containers else None
+
+                        if container:
+                            vcpu_current = self._parse_cloud_run_cpu(container.resources.limits.get('cpu', '1'))
+                            memory_current_gib = self._parse_cloud_run_memory(container.resources.limits.get('memory', '512Mi'))
+
+                            # Recommend 50% reduction
+                            vcpu_recommended = max(0.5, vcpu_current * 0.5)
+                            memory_recommended_gib = max(0.25, memory_current_gib * 0.5)
+
+                            cost_current = (vcpu_current * 62.21) + (memory_current_gib * 6.48)
+                            cost_optimal = (vcpu_recommended * 62.21) + (memory_recommended_gib * 6.48)
+                            monthly_waste = cost_current - cost_optimal
+
+                            confidence = "high" if avg_cpu < 10 and avg_memory < 10 else "medium"
+
+                            resources.append(
+                                OrphanResourceData(
+                                    resource_id=service.name,
+                                    resource_name=service_name,
+                                    resource_type="gcp_cloud_run_overprovisioned",
+                                    region=region,
+                                    estimated_monthly_cost=monthly_waste,
+                                    resource_metadata={
+                                        "service_name": service_name,
+                                        "service_uri": service.uri,
+                                        "region": region,
+                                        "avg_cpu_utilization": round(avg_cpu, 2),
+                                        "avg_memory_utilization": round(avg_memory, 2),
+                                        "vcpu_current": vcpu_current,
+                                        "vcpu_recommended": vcpu_recommended,
+                                        "memory_current_gib": memory_current_gib,
+                                        "memory_recommended_gib": memory_recommended_gib,
+                                        "monthly_waste": round(monthly_waste, 2),
+                                        "confidence": confidence,
+                                        "recommendation": f"Reduce CPU to {vcpu_recommended} vCPU, Memory to {memory_recommended_gib} GiB",
+                                    },
+                                )
+                            )
+
+                except Exception:
+                    continue
+
+        except Exception:
+            pass
+
+        return resources
+
+    async def scan_cloud_run_nonprod_min_instances(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scenario 4: Scan for dev/test Cloud Run services with min_instances > 0.
+
+        Detection:
+        - environment label = 'dev' or 'test'
+        - min_instances > 0
+
+        Cost:
+        - 100% waste (non-prod shouldn't have min_instances)
+        """
+        resources = []
+
+        try:
+            run_client = self._get_run_client()
+
+            parent = f"projects/{self.project_id}/locations/{region}"
+            services = run_client.list_services(parent=parent)
+
+            for service in services:
+                try:
+                    service_name = service.name.split('/')[-1]
+                    labels = dict(service.labels) if service.labels else {}
+                    environment = labels.get('environment', '').lower()
+
+                    template = service.template
+                    scaling = template.scaling
+                    min_instances = scaling.min_instance_count if scaling else 0
+
+                    if environment in ['dev', 'test', 'staging'] and min_instances > 0:
+                        container = template.containers[0] if template.containers else None
+
+                        if container:
+                            vcpu = self._parse_cloud_run_cpu(container.resources.limits.get('cpu', '1'))
+                            memory_gib = self._parse_cloud_run_memory(container.resources.limits.get('memory', '512Mi'))
+
+                            cost_per_instance = (vcpu * 62.21) + (memory_gib * 6.48)
+                            monthly_waste = min_instances * cost_per_instance
+                        else:
+                            monthly_waste = 75.0
+
+                        confidence = "critical" if min_instances >= 3 else "high"
+
+                        resources.append(
+                            OrphanResourceData(
+                                resource_id=service.name,
+                                resource_name=service_name,
+                                resource_type="gcp_cloud_run_nonprod_min_instances",
+                                region=region,
+                                estimated_monthly_cost=monthly_waste,
+                                resource_metadata={
+                                    "service_name": service_name,
+                                    "service_uri": service.uri,
+                                    "region": region,
+                                    "environment": environment,
+                                    "min_instances_current": min_instances,
+                                    "recommended_min_instances": 0,
+                                    "monthly_waste": round(monthly_waste, 2),
+                                    "confidence": confidence,
+                                    "recommendation": "Set min_instances = 0 (non-prod environment)",
+                                },
+                            )
+                        )
+
+                except Exception:
+                    continue
+
+        except Exception:
+            pass
+
+        return resources
+
+    async def scan_cloud_run_cpu_always_allocated(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scenario 5: Scan for Cloud Run services with 'CPU always allocated' mode but sporadic traffic.
+
+        Detection:
+        - cpu_allocation_mode = 'CPU_ALWAYS' (billing 24/7)
+        - avg_requests_per_min < traffic_threshold_rpm (default: 100 req/min)
+
+        Cost:
+        - Waste = cost difference between 'always' and 'during requests' modes (40-60% savings)
+        """
+        resources = []
+        traffic_threshold_rpm = (
+            detection_rules.get("cloud_run_cpu_always_allocated", {}).get("traffic_threshold_rpm", 100)
+            if detection_rules
+            else 100
+        )
+        lookback_days = (
+            detection_rules.get("cloud_run_cpu_always_allocated", {}).get("lookback_days", 14)
+            if detection_rules
+            else 14
+        )
+
+        try:
+            run_client = self._get_run_client()
+            monitoring_client = self._get_monitoring_client()
+
+            parent = f"projects/{self.project_id}/locations/{region}"
+            services = run_client.list_services(parent=parent)
+
+            for service in services:
+                try:
+                    service_name = service.name.split('/')[-1]
+                    template = service.template
+                    container = template.containers[0] if template.containers else None
+
+                    if container:
+                        # Check CPU allocation mode (startup_cpu_boost indicates always allocated)
+                        cpu_always = hasattr(container, 'startup_cpu_boost') and container.startup_cpu_boost
+
+                        if cpu_always:
+                            # Query request metrics
+                            now = time.time()
+                            end_time = Timestamp(seconds=int(now))
+                            start_time = Timestamp(seconds=int(now - lookback_days * 24 * 3600))
+
+                            interval = monitoring_v3.TimeInterval(
+                                {"end_time": end_time, "start_time": start_time}
+                            )
+
+                            filter_str = (
+                                f'resource.type = "cloud_run_revision" '
+                                f'AND resource.labels.service_name = "{service_name}" '
+                                f'AND metric.type = "run.googleapis.com/request_count"'
+                            )
+
+                            request = monitoring_v3.ListTimeSeriesRequest(
+                                name=f"projects/{self.project_id}",
+                                filter=filter_str,
+                                interval=interval,
+                            )
+
+                            time_series = monitoring_client.list_time_series(request=request)
+
+                            total_requests = 0
+                            for series in time_series:
+                                for point in series.points:
+                                    total_requests += point.value.int64_value or point.value.double_value or 0
+
+                            avg_requests_per_min = total_requests / (lookback_days * 24 * 60)
+
+                            if avg_requests_per_min < traffic_threshold_rpm:
+                                vcpu = self._parse_cloud_run_cpu(container.resources.limits.get('cpu', '1'))
+                                memory_gib = self._parse_cloud_run_memory(container.resources.limits.get('memory', '512Mi'))
+
+                                cost_always = (vcpu * 62.21) + (memory_gib * 6.48)
+                                cost_during_requests = cost_always * 0.5  # ~50% savings
+                                monthly_waste = cost_always - cost_during_requests
+
+                                confidence = "high" if avg_requests_per_min < 50 else "medium"
+
+                                resources.append(
+                                    OrphanResourceData(
+                                        resource_id=service.name,
+                                        resource_name=service_name,
+                                        resource_type="gcp_cloud_run_cpu_always_allocated",
+                                        region=region,
+                                        estimated_monthly_cost=monthly_waste,
+                                        resource_metadata={
+                                            "service_name": service_name,
+                                            "service_uri": service.uri,
+                                            "region": region,
+                                            "cpu_allocation_mode": "always",
+                                            "avg_requests_per_min": round(avg_requests_per_min, 2),
+                                            "monthly_waste": round(monthly_waste, 2),
+                                            "confidence": confidence,
+                                            "recommendation": "Switch to 'CPU during requests only' mode",
+                                        },
+                                    )
+                                )
+
+                except Exception:
+                    continue
+
+        except Exception:
+            pass
+
+        return resources
+
+    async def scan_cloud_run_untagged(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scenario 6: Scan for Cloud Run services without required labels.
+
+        Detection:
+        - Missing required labels (environment, team, owner, etc.)
+
+        Cost:
+        - Financial risk (no cost tracking/chargeback)
+        """
+        resources = []
+        required_labels = (
+            detection_rules.get("cloud_run_untagged", {}).get("required_labels", ["environment"])
+            if detection_rules
+            else ["environment"]
+        )
+
+        try:
+            run_client = self._get_run_client()
+
+            parent = f"projects/{self.project_id}/locations/{region}"
+            services = run_client.list_services(parent=parent)
+
+            for service in services:
+                try:
+                    service_name = service.name.split('/')[-1]
+                    labels = dict(service.labels) if service.labels else {}
+
+                    missing_labels = [label for label in required_labels if label not in labels]
+
+                    if missing_labels:
+                        template = service.template
+                        container = template.containers[0] if template.containers else None
+                        scaling = template.scaling
+                        min_instances = scaling.min_instance_count if scaling else 0
+
+                        if container:
+                            vcpu = self._parse_cloud_run_cpu(container.resources.limits.get('cpu', '1'))
+                            memory_gib = self._parse_cloud_run_memory(container.resources.limits.get('memory', '512Mi'))
+
+                            cost_per_instance = (vcpu * 62.21) + (memory_gib * 6.48)
+                            monthly_cost = max(min_instances * cost_per_instance, 10.0)
+                        else:
+                            monthly_cost = 50.0
+
+                        confidence = "medium"
+
+                        resources.append(
+                            OrphanResourceData(
+                                resource_id=service.name,
+                                resource_name=service_name,
+                                resource_type="gcp_cloud_run_untagged",
+                                region=region,
+                                estimated_monthly_cost=monthly_cost,
+                                resource_metadata={
+                                    "service_name": service_name,
+                                    "service_uri": service.uri,
+                                    "region": region,
+                                    "existing_labels": labels,
+                                    "missing_labels": missing_labels,
+                                    "monthly_cost": round(monthly_cost, 2),
+                                    "confidence": confidence,
+                                    "recommendation": f"Add labels: {', '.join(missing_labels)}",
+                                },
+                            )
+                        )
+
+                except Exception:
+                    continue
+
+        except Exception:
+            pass
+
+        return resources
+
+    async def scan_cloud_run_excessive_max_instances(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scenario 7: Scan for Cloud Run services with excessive max_instances (runaway cost risk).
+
+        Detection:
+        - max_instances > max_instances_threshold (default: 100)
+
+        Cost:
+        - Financial risk (potential runaway costs)
+        """
+        resources = []
+        max_instances_threshold = (
+            detection_rules.get("cloud_run_excessive_max_instances", {}).get("max_instances_threshold", 100)
+            if detection_rules
+            else 100
+        )
+
+        try:
+            run_client = self._get_run_client()
+
+            parent = f"projects/{self.project_id}/locations/{region}"
+            services = run_client.list_services(parent=parent)
+
+            for service in services:
+                try:
+                    service_name = service.name.split('/')[-1]
+                    template = service.template
+                    scaling = template.scaling
+                    max_instances = scaling.max_instance_count if scaling else 100
+
+                    if max_instances > max_instances_threshold:
+                        container = template.containers[0] if template.containers else None
+
+                        if container:
+                            vcpu = self._parse_cloud_run_cpu(container.resources.limits.get('cpu', '1'))
+                            memory_gib = self._parse_cloud_run_memory(container.resources.limits.get('memory', '512Mi'))
+
+                            cost_per_instance = (vcpu * 62.21) + (memory_gib * 6.48)
+                            risk_cost = max_instances * cost_per_instance
+                        else:
+                            risk_cost = max_instances * 75.0
+
+                        confidence = "critical" if max_instances > 500 else "high" if max_instances > 200 else "medium"
+
+                        resources.append(
+                            OrphanResourceData(
+                                resource_id=service.name,
+                                resource_name=service_name,
+                                resource_type="gcp_cloud_run_excessive_max_instances",
+                                region=region,
+                                estimated_monthly_cost=risk_cost,
+                                resource_metadata={
+                                    "service_name": service_name,
+                                    "service_uri": service.uri,
+                                    "region": region,
+                                    "max_instances_current": max_instances,
+                                    "recommended_max_instances": max_instances_threshold,
+                                    "risk_cost_monthly": round(risk_cost, 2),
+                                    "confidence": confidence,
+                                    "recommendation": f"Reduce max_instances from {max_instances} to {max_instances_threshold}",
+                                },
+                            )
+                        )
+
+                except Exception:
+                    continue
+
+        except Exception:
+            pass
+
+        return resources
+
+    async def scan_cloud_run_low_concurrency(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scenario 8: Scan for Cloud Run services with low concurrency (inefficient).
+
+        Detection:
+        - container_concurrency <= concurrency_threshold (default: 10)
+
+        Cost:
+        - 5-10x more instances needed = 5-10x higher costs
+        """
+        resources = []
+        concurrency_threshold = (
+            detection_rules.get("cloud_run_low_concurrency", {}).get("concurrency_threshold", 10)
+            if detection_rules
+            else 10
+        )
+
+        try:
+            run_client = self._get_run_client()
+
+            parent = f"projects/{self.project_id}/locations/{region}"
+            services = run_client.list_services(parent=parent)
+
+            for service in services:
+                try:
+                    service_name = service.name.split('/')[-1]
+                    template = service.template
+                    container = template.containers[0] if template.containers else None
+
+                    if container:
+                        concurrency = getattr(template, 'max_instance_request_concurrency', 80)
+
+                        if concurrency <= concurrency_threshold:
+                            vcpu = self._parse_cloud_run_cpu(container.resources.limits.get('cpu', '1'))
+                            memory_gib = self._parse_cloud_run_memory(container.resources.limits.get('memory', '512Mi'))
+
+                            # With concurrency 1 vs 80, need 80x more instances
+                            inefficiency_factor = 80 / max(concurrency, 1)
+
+                            cost_per_instance = (vcpu * 62.21) + (memory_gib * 6.48)
+                            monthly_waste = cost_per_instance * (inefficiency_factor - 1) * 0.5  # Conservative estimate
+
+                            confidence = "high" if concurrency == 1 else "medium"
+
+                            resources.append(
+                                OrphanResourceData(
+                                    resource_id=service.name,
+                                    resource_name=service_name,
+                                    resource_type="gcp_cloud_run_low_concurrency",
+                                    region=region,
+                                    estimated_monthly_cost=monthly_waste,
+                                    resource_metadata={
+                                        "service_name": service_name,
+                                        "service_uri": service.uri,
+                                        "region": region,
+                                        "concurrency_current": concurrency,
+                                        "recommended_concurrency": 80,
+                                        "inefficiency_factor": round(inefficiency_factor, 2),
+                                        "monthly_waste": round(monthly_waste, 2),
+                                        "confidence": confidence,
+                                        "recommendation": f"Increase concurrency from {concurrency} to 80-250",
+                                    },
+                                )
+                            )
+
+                except Exception:
+                    continue
+
+        except Exception:
+            pass
+
+        return resources
+
+    async def scan_cloud_run_excessive_min_instances(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scenario 9: Scan for Cloud Run services with excessive min_instances for fast cold start + low traffic.
+
+        Detection:
+        - min_instances >= min_instances_threshold (default: 5)
+        - avg_cold_start_seconds < cold_start_threshold_seconds (default: 2.0)
+        - avg_requests_per_min < traffic_threshold_rpm (default: 100)
+
+        Cost:
+        - Over-optimization waste (min_instances excessive for cold start speed)
+        """
+        resources = []
+        min_instances_threshold = (
+            detection_rules.get("cloud_run_excessive_min_instances", {}).get("min_instances_threshold", 5)
+            if detection_rules
+            else 5
+        )
+        cold_start_threshold_seconds = (
+            detection_rules.get("cloud_run_excessive_min_instances", {}).get("cold_start_threshold_seconds", 2.0)
+            if detection_rules
+            else 2.0
+        )
+        traffic_threshold_rpm = (
+            detection_rules.get("cloud_run_excessive_min_instances", {}).get("traffic_threshold_rpm", 100)
+            if detection_rules
+            else 100
+        )
+        lookback_days = (
+            detection_rules.get("cloud_run_excessive_min_instances", {}).get("lookback_days", 14)
+            if detection_rules
+            else 14
+        )
+
+        try:
+            run_client = self._get_run_client()
+            monitoring_client = self._get_monitoring_client()
+
+            parent = f"projects/{self.project_id}/locations/{region}"
+            services = run_client.list_services(parent=parent)
+
+            for service in services:
+                try:
+                    service_name = service.name.split('/')[-1]
+                    template = service.template
+                    scaling = template.scaling
+                    min_instances = scaling.min_instance_count if scaling else 0
+
+                    if min_instances >= min_instances_threshold:
+                        # Query request metrics
+                        now = time.time()
+                        end_time = Timestamp(seconds=int(now))
+                        start_time = Timestamp(seconds=int(now - lookback_days * 24 * 3600))
+
+                        interval = monitoring_v3.TimeInterval(
+                            {"end_time": end_time, "start_time": start_time}
+                        )
+
+                        filter_requests = (
+                            f'resource.type = "cloud_run_revision" '
+                            f'AND resource.labels.service_name = "{service_name}" '
+                            f'AND metric.type = "run.googleapis.com/request_count"'
+                        )
+
+                        request_requests = monitoring_v3.ListTimeSeriesRequest(
+                            name=f"projects/{self.project_id}",
+                            filter=filter_requests,
+                            interval=interval,
+                        )
+
+                        requests_time_series = monitoring_client.list_time_series(request=request_requests)
+
+                        total_requests = 0
+                        for series in requests_time_series:
+                            for point in series.points:
+                                total_requests += point.value.int64_value or point.value.double_value or 0
+
+                        avg_requests_per_min = total_requests / (lookback_days * 24 * 60)
+
+                        # Query cold start latency
+                        filter_startup = (
+                            f'resource.type = "cloud_run_revision" '
+                            f'AND resource.labels.service_name = "{service_name}" '
+                            f'AND metric.type = "run.googleapis.com/container/startup_latencies"'
+                        )
+
+                        request_startup = monitoring_v3.ListTimeSeriesRequest(
+                            name=f"projects/{self.project_id}",
+                            filter=filter_startup,
+                            interval=interval,
+                        )
+
+                        startup_time_series = monitoring_client.list_time_series(request=request_startup)
+
+                        startup_values = []
+                        for series in startup_time_series:
+                            for point in series.points:
+                                startup_values.append(
+                                    point.value.distribution_value.mean if hasattr(point.value, 'distribution_value') else 1.0
+                                )
+
+                        avg_cold_start_seconds = sum(startup_values) / len(startup_values) if startup_values else 1.0
+
+                        if avg_requests_per_min < traffic_threshold_rpm and avg_cold_start_seconds < cold_start_threshold_seconds:
+                            container = template.containers[0] if template.containers else None
+
+                            if container:
+                                vcpu = self._parse_cloud_run_cpu(container.resources.limits.get('cpu', '1'))
+                                memory_gib = self._parse_cloud_run_memory(container.resources.limits.get('memory', '512Mi'))
+
+                                cost_per_instance = (vcpu * 62.21) + (memory_gib * 6.48)
+                                monthly_cost_current = min_instances * cost_per_instance
+
+                                recommended_min = 0 if avg_cold_start_seconds < 1.0 else 1
+                                monthly_cost_optimal = recommended_min * cost_per_instance
+
+                                monthly_waste = monthly_cost_current - monthly_cost_optimal
+                            else:
+                                monthly_waste = 100.0
+
+                            confidence = "critical" if min_instances >= 10 else "high" if min_instances >= 7 else "medium"
+
+                            resources.append(
+                                OrphanResourceData(
+                                    resource_id=service.name,
+                                    resource_name=service_name,
+                                    resource_type="gcp_cloud_run_excessive_min_instances",
+                                    region=region,
+                                    estimated_monthly_cost=monthly_waste,
+                                    resource_metadata={
+                                        "service_name": service_name,
+                                        "service_uri": service.uri,
+                                        "region": region,
+                                        "min_instances_current": min_instances,
+                                        "recommended_min_instances": 0 if avg_cold_start_seconds < 1.0 else 1,
+                                        "avg_requests_per_min": round(avg_requests_per_min, 2),
+                                        "avg_cold_start_seconds": round(avg_cold_start_seconds, 2),
+                                        "monthly_waste": round(monthly_waste, 2),
+                                        "confidence": confidence,
+                                        "recommendation": f"Reduce min_instances from {min_instances} to {0 if avg_cold_start_seconds < 1.0 else 1}",
+                                    },
+                                )
+                            )
+
+                except Exception:
+                    continue
+
+        except Exception:
+            pass
+
+        return resources
+
+    async def scan_cloud_run_multi_region_redundant(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scenario 10: Scan for Cloud Run services deployed in multiple regions but traffic concentrated in one.
+
+        Detection:
+        - Same service deployed in 3+ regions
+        - 80%+ traffic concentrated in 1 region
+
+        Cost:
+        - Waste = cost of redundant regions
+        """
+        resources = []
+        traffic_concentration_threshold = (
+            detection_rules.get("cloud_run_multi_region_redundant", {}).get("traffic_concentration_threshold", 80.0)
+            if detection_rules
+            else 80.0
+        )
+        region_count_threshold = (
+            detection_rules.get("cloud_run_multi_region_redundant", {}).get("region_count_threshold", 3)
+            if detection_rules
+            else 3
+        )
+        lookback_days = (
+            detection_rules.get("cloud_run_multi_region_redundant", {}).get("lookback_days", 14)
+            if detection_rules
+            else 14
+        )
+
+        try:
+            run_client = self._get_run_client()
+            monitoring_client = self._get_monitoring_client()
+
+            # Get all regions
+            regions_to_scan = self.regions if self.regions else await self.get_available_regions()
+
+            # Group services by name across regions
+            services_by_name = defaultdict(list)
+
+            for scan_region in regions_to_scan:
+                try:
+                    parent = f"projects/{self.project_id}/locations/{scan_region}"
+                    services = run_client.list_services(parent=parent)
+
+                    for service in services:
+                        service_name = service.name.split('/')[-1]
+                        services_by_name[service_name].append({
+                            "region": scan_region,
+                            "service": service,
+                        })
+                except Exception:
+                    continue
+
+            # Analyze multi-region services
+            for service_name, region_services in services_by_name.items():
+                try:
+                    if len(region_services) < region_count_threshold:
+                        continue
+
+                    # Query request_count per region
+                    now = time.time()
+                    end_time = Timestamp(seconds=int(now))
+                    start_time = Timestamp(seconds=int(now - lookback_days * 24 * 3600))
+
+                    interval = monitoring_v3.TimeInterval(
+                        {"end_time": end_time, "start_time": start_time}
+                    )
+
+                    region_requests = {}
+
+                    for region_service in region_services:
+                        service_region = region_service["region"]
+
+                        filter_requests = (
+                            f'resource.type = "cloud_run_revision" '
+                            f'AND resource.labels.service_name = "{service_name}" '
+                            f'AND resource.labels.location = "{service_region}" '
+                            f'AND metric.type = "run.googleapis.com/request_count"'
+                        )
+
+                        request_requests = monitoring_v3.ListTimeSeriesRequest(
+                            name=f"projects/{self.project_id}",
+                            filter=filter_requests,
+                            interval=interval,
+                        )
+
+                        requests_time_series = monitoring_client.list_time_series(request=request_requests)
+
+                        total_requests = 0
+                        for series in requests_time_series:
+                            for point in series.points:
+                                total_requests += point.value.int64_value or point.value.double_value or 0
+
+                        region_requests[service_region] = total_requests
+
+                    total_all_regions = sum(region_requests.values())
+
+                    if total_all_regions == 0:
+                        continue
+
+                    # Find primary region (most traffic)
+                    primary_region = max(region_requests, key=region_requests.get)
+                    primary_region_requests = region_requests[primary_region]
+                    traffic_concentration = (primary_region_requests / total_all_regions * 100) if total_all_regions > 0 else 0
+
+                    if traffic_concentration >= traffic_concentration_threshold:
+                        redundant_regions = [r for r in region_requests.keys() if r != primary_region]
+
+                        # Get primary service config
+                        primary_service = next(rs["service"] for rs in region_services if rs["region"] == primary_region)
+                        template = primary_service.template
+                        scaling = template.scaling
+                        min_instances = scaling.min_instance_count if scaling else 0
+
+                        container = template.containers[0] if template.containers else None
+
+                        if container:
+                            vcpu = self._parse_cloud_run_cpu(container.resources.limits.get('cpu', '1'))
+                            memory_gib = self._parse_cloud_run_memory(container.resources.limits.get('memory', '512Mi'))
+
+                            cost_per_instance = (vcpu * 62.21) + (memory_gib * 6.48)
+
+                            if min_instances > 0:
+                                cost_per_region = min_instances * cost_per_instance
+                            else:
+                                cost_per_region = 10.0
+
+                            monthly_waste = len(redundant_regions) * cost_per_region
+                        else:
+                            monthly_waste = len(redundant_regions) * 75.0
+
+                        confidence = "critical" if traffic_concentration >= 95 else "high" if traffic_concentration >= 90 else "medium"
+
+                        resources.append(
+                            OrphanResourceData(
+                                resource_id=f"{service_name}_multi_region",
+                                resource_name=service_name,
+                                resource_type="gcp_cloud_run_multi_region_redundant",
+                                region=primary_region,
+                                estimated_monthly_cost=monthly_waste,
+                                resource_metadata={
+                                    "service_name": service_name,
+                                    "total_regions": len(region_services),
+                                    "primary_region": primary_region,
+                                    "redundant_regions": redundant_regions,
+                                    "traffic_concentration": round(traffic_concentration, 2),
+                                    "monthly_waste": round(monthly_waste, 2),
+                                    "confidence": confidence,
+                                    "recommendation": f"Remove deployments in {len(redundant_regions)} regions: {', '.join(redundant_regions)}",
+                                },
+                            )
+                        )
+
+                except Exception:
+                    continue
+
+        except Exception:
             pass
 
         return resources

@@ -2766,6 +2766,69 @@ DEFAULT_DETECTION_RULES = {
         "exclude_namespaces": ["kube-system", "kube-public", "kube-node-lease", "gke-managed-system"],
         "description": "GCP GKE Cluster no workloads (zero user pods >7 days) - 100% waste 💰💰💰💰 P0",
     },
+    # =================================================================
+    # GCP CLOUD RUN SERVICES DETECTION RULES (10 scenarios - 100% coverage)
+    # =================================================================
+    "gcp_cloud_run_never_used": {
+        "enabled": True,
+        "min_age_days": 30,
+        "lookback_days": 30,
+        "description": "GCP Cloud Run service never used (0 requests for 30+ days) - delete service 💰💰💰💰 P0",
+    },
+    "gcp_cloud_run_idle_min_instances": {
+        "enabled": True,
+        "traffic_threshold_rpm": 10,
+        "lookback_days": 14,
+        "description": "GCP Cloud Run service idle with min_instances > 0 (low traffic) - set min_instances = 0 💰💰💰💰 P0",
+    },
+    "gcp_cloud_run_overprovisioned": {
+        "enabled": True,
+        "cpu_threshold": 20,
+        "memory_threshold": 20,
+        "lookback_days": 14,
+        "description": "GCP Cloud Run service overprovisioned (CPU/Memory < 20%) - right-size resources 💰💰💰 P1",
+    },
+    "gcp_cloud_run_nonprod_min_instances": {
+        "enabled": True,
+        "devtest_environments": ["dev", "test", "staging"],
+        "description": "GCP Cloud Run dev/test service with min_instances > 0 - set min_instances = 0 💰💰💰💰 P0",
+    },
+    "gcp_cloud_run_cpu_always_allocated": {
+        "enabled": True,
+        "traffic_threshold_rpm": 100,
+        "lookback_days": 14,
+        "description": "GCP Cloud Run service with 'CPU always allocated' mode + sporadic traffic - switch to 'CPU during requests only' 💰💰💰 P1",
+    },
+    "gcp_cloud_run_untagged": {
+        "enabled": True,
+        "required_labels": ["environment"],
+        "description": "GCP Cloud Run service untagged (missing labels) - governance waste 5% 💰 P2",
+    },
+    "gcp_cloud_run_excessive_max_instances": {
+        "enabled": True,
+        "max_instances_threshold": 100,
+        "description": "GCP Cloud Run service excessive max_instances (> 100) - runaway cost risk 💰💰💰💰 P0",
+    },
+    "gcp_cloud_run_low_concurrency": {
+        "enabled": True,
+        "concurrency_threshold": 10,
+        "description": "GCP Cloud Run service low concurrency (<= 10) - inefficient, 5-10x more instances needed 💰💰💰 P1",
+    },
+    "gcp_cloud_run_excessive_min_instances": {
+        "enabled": True,
+        "min_instances_threshold": 5,
+        "cold_start_threshold_seconds": 2.0,
+        "traffic_threshold_rpm": 100,
+        "lookback_days": 14,
+        "description": "GCP Cloud Run service excessive min_instances (>= 5) for fast cold start + low traffic - over-optimization waste 💰💰💰 P1",
+    },
+    "gcp_cloud_run_multi_region_redundant": {
+        "enabled": True,
+        "traffic_concentration_threshold": 80.0,
+        "region_count_threshold": 3,
+        "lookback_days": 14,
+        "description": "GCP Cloud Run service deployed in 3+ regions but 80%+ traffic in 1 region - remove redundant regions 💰💰💰 P1",
+    },
 }
 
 
