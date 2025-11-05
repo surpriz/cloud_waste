@@ -628,7 +628,12 @@ const RESOURCE_CATEGORIES = {
       "gcp_cloud_storage_empty", "gcp_cloud_storage_wrong_class", "gcp_cloud_storage_versioning_waste",
       "gcp_cloud_storage_incomplete_uploads", "gcp_cloud_storage_untagged", "gcp_cloud_storage_never_accessed",
       "gcp_cloud_storage_no_lifecycle", "gcp_cloud_storage_duplicates", "gcp_cloud_storage_autoclass_misconfig",
-      "gcp_cloud_storage_excessive_redundancy"
+      "gcp_cloud_storage_excessive_redundancy",
+      // Cloud Filestore (10 scenarios)
+      "gcp_filestore_underutilized", "gcp_filestore_wrong_tier", "gcp_filestore_idle",
+      "gcp_filestore_overprovisioned", "gcp_filestore_untagged", "gcp_filestore_no_backup_policy",
+      "gcp_filestore_legacy_tier", "gcp_filestore_multi_share_consolidation", "gcp_filestore_snapshot_waste",
+      "gcp_filestore_wrong_nfs_protocol"
     ],
     networking: ["static_ip_unattached", "nat_gateway_unused"],
     database: ["cloud_sql_stopped", "cloud_sql_idle"],
@@ -931,6 +936,17 @@ const GCP_RESOURCE_LABELS: { [key: string]: string } = {
   gcp_cloud_storage_duplicates: "Cloud Storage Object (Duplicate MD5 Hash) 💰💰 P1",
   gcp_cloud_storage_autoclass_misconfig: "Cloud Storage Bucket (Autoclass Misconfiguration) 💰💰💰 P1",
   gcp_cloud_storage_excessive_redundancy: "Cloud Storage Bucket (Multi-Region for Dev/Test) 💰💰💰 P1",
+  // Cloud Filestore (10 scenarios)
+  gcp_filestore_underutilized: "Cloud Filestore (<30% Capacity Utilization 14+ days) 💰💰💰 P0",
+  gcp_filestore_wrong_tier: "Cloud Filestore (Enterprise for Dev/Test) 💰💰💰 P0",
+  gcp_filestore_idle: "Cloud Filestore (Idle - 0 Connections 7+ days) 💰💰💰 P1",
+  gcp_filestore_overprovisioned: "Cloud Filestore (<10% Capacity Utilization 30+ days) 💰💰💰 P0",
+  gcp_filestore_untagged: "Cloud Filestore (Missing Required Labels) 🏷️ P2",
+  gcp_filestore_no_backup_policy: "Cloud Filestore (No Backup Policy) 💰💰 P2",
+  gcp_filestore_legacy_tier: "Cloud Filestore (Legacy Basic HDD Tier) 💰💰 P1",
+  gcp_filestore_multi_share_consolidation: "Cloud Filestore (Enterprise ≤2 Shares) 💰💰💰 P1",
+  gcp_filestore_snapshot_waste: "Cloud Filestore (Old Snapshots 90+ days) 💰💰 P1",
+  gcp_filestore_wrong_nfs_protocol: "Cloud Filestore (NFSv3 Instead of v4.1) ⚡ P3",
   // Networking
   static_ip_unattached: "Static IPs (Unattached)",
   nat_gateway_unused: "Cloud NAT (Unused)",

@@ -2937,6 +2937,56 @@ DEFAULT_DETECTION_RULES = {
         "min_size_gb": 50.0,
         "description": "GCP Cloud Storage multi-region/dual-region for dev/test data - move to regional for 23-30% savings 💰💰💰 P1",
     },
+    # GCP Cloud Filestore Detection Rules
+    "gcp_filestore_underutilized": {
+        "enabled": True,
+        "utilization_threshold": 0.30,
+        "lookback_days": 14,
+        "description": "GCP Filestore instances with <30% capacity utilization for 14+ days - downsize to save 50-80% 💰💰💰 P0",
+    },
+    "gcp_filestore_wrong_tier": {
+        "enabled": True,
+        "description": "GCP Filestore Enterprise tier for dev/test environments - migrate to Zonal for 70% savings 💰💰💰 P0",
+    },
+    "gcp_filestore_idle": {
+        "enabled": True,
+        "lookback_days": 7,
+        "max_connections": 0,
+        "max_total_iops": 10,
+        "description": "GCP Filestore instances with 0 connections + minimal I/O for 7+ days - delete unused instances 💰💰💰 P1",
+    },
+    "gcp_filestore_overprovisioned": {
+        "enabled": True,
+        "utilization_threshold": 0.10,
+        "lookback_days": 30,
+        "description": "GCP Filestore instances with <10% capacity utilization for 30+ days - severe overprovisioning 💰💰💰 P0",
+    },
+    "gcp_filestore_untagged": {
+        "enabled": True,
+        "required_labels": ["environment", "owner", "cost-center"],
+        "description": "GCP Filestore instances missing required labels (environment, owner, cost-center) - add labels for governance 🏷️ P2",
+    },
+    "gcp_filestore_no_backup_policy": {
+        "enabled": True,
+        "description": "GCP Filestore instances without backup policy configured - risk + potential backup cost waste 💰💰 P2",
+    },
+    "gcp_filestore_legacy_tier": {
+        "enabled": True,
+        "description": "GCP Filestore using legacy Basic HDD tier - migrate to Zonal for 10% savings (same performance) 💰💰 P1",
+    },
+    "gcp_filestore_multi_share_consolidation": {
+        "enabled": True,
+        "description": "GCP Filestore Enterprise tier with ≤2 shares - replace with separate Zonal instances for 50-70% savings 💰💰💰 P1",
+    },
+    "gcp_filestore_snapshot_waste": {
+        "enabled": True,
+        "min_age_days": 90,
+        "description": "GCP Filestore old snapshots (90+ days) never restored - delete to save backup storage costs 💰💰 P1",
+    },
+    "gcp_filestore_wrong_nfs_protocol": {
+        "enabled": True,
+        "description": "GCP Filestore using NFSv3 instead of NFSv4.1 - upgrade for better performance (no cost change) ⚡ P3",
+    },
 }
 
 
