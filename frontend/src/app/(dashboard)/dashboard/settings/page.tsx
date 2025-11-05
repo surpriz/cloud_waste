@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { User, Bell, Shield, Trash2, Save, Key, Sliders, RotateCcw, HardDrive, Globe, Camera, Server, Activity, Zap, Database, ArrowLeft, Network, AlertTriangle, TrendingDown, Archive, TestTube, Copy, Clock, Cpu, Users, FileText, Search, ChevronDown, Box, XCircle, Tag, DollarSign, AlertCircle, Layers, Calendar, TrendingUp, PackageOpen } from "lucide-react";
+import { User, Bell, Shield, Trash2, Save, Key, Sliders, RotateCcw, HardDrive, Globe, Camera, Server, Activity, Zap, Database, ArrowLeft, Network, AlertTriangle, TrendingDown, Archive, TestTube, Copy, Clock, Cpu, Users, FileText, Search, ChevronDown, Box, XCircle, Tag, DollarSign, AlertCircle, Layers, Calendar, TrendingUp, PackageOpen, Workflow } from "lucide-react";
 import Link from "next/link";
 import { useNotifications } from "@/hooks/useNotifications";
 import { Toast } from "@/components/ui/Toast";
@@ -684,7 +684,24 @@ const RESOURCE_CATEGORIES = {
       "bigquery_never_queried_tables", "bigquery_active_storage_waste", "bigquery_empty_datasets",
       "bigquery_no_expiration", "bigquery_unpartitioned_large_tables", "bigquery_unclustered_large_tables",
       "bigquery_untagged_datasets", "bigquery_expensive_queries", "bigquery_ondemand_vs_flatrate",
-      "bigquery_unused_materialized_views"
+      "bigquery_unused_materialized_views",
+      // Dataproc Clusters (10 scenarios)
+      "dataproc_cluster_idle", "dataproc_cluster_stopped", "dataproc_cluster_no_autoscaling",
+      "dataproc_cluster_single_node_prod", "dataproc_cluster_unnecessary_ssd", "dataproc_cluster_no_scheduled_delete",
+      "dataproc_cluster_low_cpu_utilization", "dataproc_cluster_low_memory_utilization",
+      "dataproc_cluster_oversized_workers", "dataproc_cluster_underutilized_hdfs",
+      // Dataflow Jobs (10 scenarios)
+      "dataflow_job_failed_with_resources", "dataflow_streaming_job_idle", "dataflow_batch_without_flexrs",
+      "dataflow_oversized_disk", "dataflow_no_max_workers", "dataflow_streaming_without_engine",
+      "dataflow_job_low_cpu_utilization", "dataflow_job_low_throughput", "dataflow_job_oversized_workers",
+      "dataflow_streaming_high_backlog"
+    ],
+    ai_ml: [
+      // Vertex AI Endpoints (10 scenarios)
+      "vertex_ai_zero_predictions", "vertex_ai_idle_endpoints", "vertex_ai_gpu_waste",
+      "vertex_ai_overprovisioned_machines", "vertex_ai_devtest_247", "vertex_ai_old_model_versions",
+      "vertex_ai_untagged_endpoints", "vertex_ai_unused_traffic_split", "vertex_ai_failed_training_jobs",
+      "vertex_ai_unused_feature_store"
     ],
   },
   azure: {
@@ -957,6 +974,39 @@ const GCP_RESOURCE_ICONS: { [key: string]: any } = {
   bigquery_expensive_queries: Database,
   bigquery_ondemand_vs_flatrate: Database,
   bigquery_unused_materialized_views: Database,
+  // Dataproc Clusters (10 scenarios)
+  dataproc_cluster_idle: Server,
+  dataproc_cluster_stopped: Server,
+  dataproc_cluster_no_autoscaling: Server,
+  dataproc_cluster_single_node_prod: Server,
+  dataproc_cluster_unnecessary_ssd: Server,
+  dataproc_cluster_no_scheduled_delete: Server,
+  dataproc_cluster_low_cpu_utilization: Server,
+  dataproc_cluster_low_memory_utilization: Server,
+  dataproc_cluster_oversized_workers: Server,
+  dataproc_cluster_underutilized_hdfs: Server,
+  // Dataflow Jobs (10 scenarios)
+  dataflow_job_failed_with_resources: Workflow,
+  dataflow_streaming_job_idle: Workflow,
+  dataflow_batch_without_flexrs: Workflow,
+  dataflow_oversized_disk: Workflow,
+  dataflow_no_max_workers: Workflow,
+  dataflow_streaming_without_engine: Workflow,
+  dataflow_job_low_cpu_utilization: Workflow,
+  dataflow_job_low_throughput: Workflow,
+  dataflow_job_oversized_workers: Workflow,
+  dataflow_streaming_high_backlog: Workflow,
+  // Vertex AI Endpoints (10 scenarios)
+  vertex_ai_zero_predictions: Cpu,
+  vertex_ai_idle_endpoints: Activity,
+  vertex_ai_gpu_waste: Cpu,
+  vertex_ai_overprovisioned_machines: TrendingDown,
+  vertex_ai_devtest_247: Clock,
+  vertex_ai_old_model_versions: AlertTriangle,
+  vertex_ai_untagged_endpoints: Tag,
+  vertex_ai_unused_traffic_split: Layers,
+  vertex_ai_failed_training_jobs: XCircle,
+  vertex_ai_unused_feature_store: Database,
 };
 
 const GCP_RESOURCE_LABELS: { [key: string]: string } = {
@@ -1147,6 +1197,39 @@ const GCP_RESOURCE_LABELS: { [key: string]: string } = {
   bigquery_expensive_queries: "BigQuery Queries (>10TB Scanned - 70% Optimization) 💰💰💰💰💰 P0",
   bigquery_ondemand_vs_flatrate: "BigQuery Pricing (On-Demand vs Flat-Rate >$2k/month) 💰💰💰💰 P1",
   bigquery_unused_materialized_views: "BigQuery Materialized Views (Never Queried 30+ days) 💰💰💰 P2",
+  // Dataproc Clusters (10 scenarios)
+  dataproc_cluster_idle: "Dataproc Cluster (Idle 14+ days - No Jobs) 💰💰💰💰💰 P0",
+  dataproc_cluster_stopped: "Dataproc Cluster (Stopped 30+ days - Persistent Disks) 💰💰 P1",
+  dataproc_cluster_no_autoscaling: "Dataproc Cluster (Production Without Autoscaling) 💰💰💰💰 P1",
+  dataproc_cluster_single_node_prod: "Dataproc Cluster (Single-Node in Production) 💰💰💰 P2",
+  dataproc_cluster_unnecessary_ssd: "Dataproc Cluster (SSD in Dev/Test - 76% Overpay) 💰💰💰💰 P1",
+  dataproc_cluster_no_scheduled_delete: "Dataproc Cluster (No TTL Configured) 💰💰💰 P2",
+  dataproc_cluster_low_cpu_utilization: "Dataproc Cluster (Low CPU <30% - Downsize) 💰💰💰💰 P1",
+  dataproc_cluster_low_memory_utilization: "Dataproc Cluster (Low Memory <30% - Downgrade) 💰💰💰 P1",
+  dataproc_cluster_oversized_workers: "Dataproc Cluster (Oversized Workers - Low YARN) 💰💰💰💰💰 P0",
+  dataproc_cluster_underutilized_hdfs: "Dataproc Cluster (HDFS <20% Utilized) 💰💰 P2",
+  // Dataflow Jobs (10 scenarios)
+  dataflow_job_failed_with_resources: "Dataflow Job (FAILED 7+ days - Active Resources) 💰💰💰💰💰 P0",
+  dataflow_streaming_job_idle: "Dataflow Streaming Job (Idle 14+ days - Throughput ~0) 💰💰 P1",
+  dataflow_batch_without_flexrs: "Dataflow Batch Job (No FlexRS - 40% Discount Missing) 💰💰💰💰 P1",
+  dataflow_oversized_disk: "Dataflow Job (Oversized Disks >50GB) 💰💰 P2",
+  dataflow_no_max_workers: "Dataflow Job (No Max Workers - Runaway Risk) 💰💰💰 P2",
+  dataflow_streaming_without_engine: "Dataflow Streaming (No Streaming Engine - 20-30% Savings) 💰💰💰 P1",
+  dataflow_job_low_cpu_utilization: "Dataflow Job (Low CPU <20% - Downsize Machine) 💰💰💰💰💰 P0",
+  dataflow_job_low_throughput: "Dataflow Job (Low Throughput - Excessive Workers) 💰💰💰💰💰 P0",
+  dataflow_job_oversized_workers: "Dataflow Job (Oversized Workers - Low CPU) 💰💰💰💰 P1",
+  dataflow_streaming_high_backlog: "Dataflow Streaming (High Backlog - Pipeline Inefficiency) 💰💰💰 P2",
+  // Vertex AI Endpoints (10 scenarios)
+  vertex_ai_zero_predictions: "Vertex AI Endpoint (0 Predictions 30+ Days - Never Used) 💰💰💰💰💰 P0",
+  vertex_ai_idle_endpoints: "Vertex AI Endpoint (Idle <10 Predictions/Day - Batch 96% Cheaper) 💰💰💰💰 P1",
+  vertex_ai_gpu_waste: "Vertex AI Endpoint (GPU <30% Utilization - CPU Sufficient) 💰💰💰💰💰 P0",
+  vertex_ai_overprovisioned_machines: "Vertex AI Endpoint (Overprovisioned <10% CPU - Downgrade) 💰💰💰💰 P1",
+  vertex_ai_devtest_247: "Vertex AI Endpoint (Dev/Test 24/7 - Should be 8h/Day) 💰💰💰 P2",
+  vertex_ai_old_model_versions: "Vertex AI Endpoint (Model 180+ Days Old - Quality Risk) 💰💰 P2",
+  vertex_ai_untagged_endpoints: "Vertex AI Endpoint (Missing Labels - Governance Risk) 💰 P3",
+  vertex_ai_unused_traffic_split: "Vertex AI Endpoint (Traffic Split 0% - A/B Test Complete) 💰💰💰 P2",
+  vertex_ai_failed_training_jobs: "Vertex AI Training (3+ Same Errors - Recurring Issues) 💰💰💰💰 P1",
+  vertex_ai_unused_feature_store: "Vertex AI Feature Store (0 Requests 30+ Days - Storage Waste) 💰💰 P2",
 };
 
 // Microsoft 365 Resource Icons & Labels

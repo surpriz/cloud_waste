@@ -65,6 +65,9 @@ google-cloud-firestore==2.14.0  # Cloud Firestore (NoSQL document database) for 
 google-cloud-bigtable==2.19.0  # Cloud Bigtable Admin API for waste detection
 google-cloud-redis==2.19.0  # Cloud Memorystore for Redis management
 google-cloud-bigquery==3.25.0  # BigQuery data warehouse for analytics waste detection
+google-cloud-dataproc==5.4.0  # Cloud Dataproc (Hadoop/Spark) managed clusters for waste detection
+google-cloud-dataflow==0.7.5  # Cloud Dataflow (Apache Beam) streaming/batch jobs for waste detection
+google-cloud-aiplatform==1.38.1  # Vertex AI (ML endpoints, training jobs, feature store) for waste detection
 google-auth==2.26.2  # GCP authentication
 
 # Validation

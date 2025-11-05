@@ -3565,6 +3565,211 @@ DEFAULT_DETECTION_RULES = {
         "refresh_scan_percentage": 0.10,
         "description": "BigQuery unused materialized views - never queried 30+ days, storage + refresh waste ($10-500/month) 💰💰💰 P2 [5% impact]",
     },
+    # GCP DATAPROC CLUSTERS DETECTION RULES (10 scenarios)
+    # Impact: $20,000-$100,000/year per organization (avg $2,345/cluster/year)
+    # Documentation: docs/gcp/GCP_DATAPROC_CLUSTERS_SCENARIOS_100.md
+    "dataproc_cluster_idle": {
+        "enabled": True,
+        "min_idle_days": 14,
+        "check_job_history": True,
+        "description": "Dataproc cluster idle - RUNNING with no jobs 14+ days, 100% waste ($476/month typical) 💰💰💰💰💰 P0 [40% impact]",
+    },
+    "dataproc_cluster_stopped": {
+        "enabled": True,
+        "min_stopped_days": 30,
+        "include_stopped_clusters": True,
+        "description": "Dataproc cluster stopped - persistent disks 30+ days, disk costs only ($60/month) 💰💰 P1 [10% impact]",
+    },
+    "dataproc_cluster_no_autoscaling": {
+        "enabled": True,
+        "prod_environments": ["prod", "production", "prd"],
+        "min_age_days": 30,
+        "min_worker_count": 2,
+        "description": "Dataproc production without autoscaling - 40% worker savings potential ($219/month) 💰💰💰💰 P1 [25% impact]",
+    },
+    "dataproc_cluster_single_node_prod": {
+        "enabled": True,
+        "prod_environments": ["prod", "production", "prd"],
+        "min_age_days": 7,
+        "description": "Dataproc single-node in production - no HA, single point of failure 💰💰💰 P2 [5% impact]",
+    },
+    "dataproc_cluster_unnecessary_ssd": {
+        "enabled": True,
+        "dev_environments": ["dev", "test", "staging", "qa", "development", "sandbox"],
+        "min_age_days": 30,
+        "description": "Dataproc SSD in dev/test - 76% disk savings with pd-standard ($195/month) 💰💰💰💰 P1 [15% impact]",
+    },
+    "dataproc_cluster_no_scheduled_delete": {
+        "enabled": True,
+        "min_age_days": 7,
+        "recommended_idle_ttl": 3600,
+        "recommended_max_age": 14,
+        "description": "Dataproc without TTL - risk of forgotten clusters running indefinitely 💰💰💰 P2 [5% impact]",
+    },
+    "dataproc_cluster_low_cpu_utilization": {
+        "enabled": True,
+        "min_observation_days": 30,
+        "max_cpu_threshold": 30.0,
+        "description": "Dataproc low CPU utilization - <30% avg, downsize machine type ($328/month) 💰💰💰💰 P1 [20% impact]",
+    },
+    "dataproc_cluster_low_memory_utilization": {
+        "enabled": True,
+        "min_observation_days": 30,
+        "max_memory_threshold": 30.0,
+        "description": "Dataproc low memory utilization - <30% avg, highmem→standard ($197/month) 💰💰💰 P1 [15% impact]",
+    },
+    "dataproc_cluster_oversized_workers": {
+        "enabled": True,
+        "min_observation_days": 30,
+        "max_container_utilization_threshold": 60.0,
+        "min_reduction_threshold": 2,
+        "description": "Dataproc oversized workers - low YARN utilization, reduce worker count ($632/month) 💰💰💰💰💰 P0 [30% impact]",
+    },
+    "dataproc_cluster_underutilized_hdfs": {
+        "enabled": True,
+        "min_observation_days": 30,
+        "max_hdfs_utilization_threshold": 20.0,
+        "min_disk_size_gb": 100,
+        "description": "Dataproc HDFS under-utilized - <20% storage usage, reduce disk size ($80/month) 💰💰 P2 [10% impact]",
+    },
+    # GCP DATAFLOW JOBS DETECTION RULES (10 scenarios)
+    # Impact: $50,000-$200,000/year per organization (avg $7,500/20 jobs/month)
+    # Documentation: docs/gcp/GCP_DATAFLOW_JOBS_SCENARIOS_100.md
+    "dataflow_job_failed_with_resources": {
+        "enabled": True,
+        "min_failed_days": 7,
+        "check_active_workers": True,
+        "description": "Dataflow job FAILED with active resources - 7+ days, 100% waste ($1,047/month typical) 💰💰💰💰💰 P0 [40% impact]",
+    },
+    "dataflow_streaming_job_idle": {
+        "enabled": True,
+        "min_idle_days": 14,
+        "max_throughput_threshold": 10.0,
+        "description": "Dataflow streaming job idle - throughput ~0, 14+ days ($141/month) 💰💰 P1 [15% impact]",
+    },
+    "dataflow_batch_without_flexrs": {
+        "enabled": True,
+        "min_job_count": 5,
+        "min_age_days": 30,
+        "exclude_time_critical": True,
+        "description": "Dataflow batch without FlexRS - recurring jobs without 40% discount ($266/month savings) 💰💰💰💰 P1 [20% impact]",
+    },
+    "dataflow_oversized_disk": {
+        "enabled": True,
+        "max_recommended_disk_gb": 50,
+        "min_age_days": 7,
+        "check_shuffle_enabled": True,
+        "description": "Dataflow oversized persistent disks - >50GB with Shuffle ($43/month) 💰💰 P2 [10% impact]",
+    },
+    "dataflow_no_max_workers": {
+        "enabled": True,
+        "min_age_days": 7,
+        "recommended_max_workers": 50,
+        "exclude_dev_jobs": True,
+        "description": "Dataflow without max workers - autoscaling without limit, runaway cost risk 💰💰💰 P2 [5% impact]",
+    },
+    "dataflow_streaming_without_engine": {
+        "enabled": True,
+        "min_age_days": 14,
+        "min_num_workers": 3,
+        "description": "Dataflow streaming without Streaming Engine - 20-30% savings opportunity ($73/month) 💰💰💰 P1 [15% impact]",
+    },
+    "dataflow_job_low_cpu_utilization": {
+        "enabled": True,
+        "min_observation_days": 30,
+        "max_cpu_threshold": 20.0,
+        "description": "Dataflow low CPU utilization - <20% avg, downsize machine type ($2,028/month) 💰💰💰💰💰 P0 [25% impact]",
+    },
+    "dataflow_job_low_throughput": {
+        "enabled": True,
+        "min_observation_days": 30,
+        "min_throughput_per_worker_threshold": 100.0,
+        "description": "Dataflow low throughput - excessive workers for workload ($3,038/month) 💰💰💰💰💰 P0 [30% impact]",
+    },
+    "dataflow_job_oversized_workers": {
+        "enabled": True,
+        "min_observation_days": 30,
+        "max_cpu_utilization_threshold": 30.0,
+        "min_reduction_threshold": 3,
+        "description": "Dataflow oversized workers - too many workers for charge ($1,418/month) 💰💰💰💰 P1 [20% impact]",
+    },
+    "dataflow_streaming_high_backlog": {
+        "enabled": True,
+        "min_observation_days": 14,
+        "max_backlog_threshold": 1073741824,
+        "max_system_lag_seconds": 300,
+        "description": "Dataflow high persistent backlog - pipeline inefficiency, qualitative alert 💰💰💰 P2 [10% impact]",
+    },
+    # GCP VERTEX AI ENDPOINTS DETECTION RULES (10 scenarios)
+    # Impact: $30,000-$150,000/year per organization (avg $500-3,000/endpoint/month)
+    # Documentation: docs/gcp/GCP_VERTEX_AI_SCENARIOS_100.md
+    "vertex_ai_zero_predictions": {
+        "enabled": True,
+        "zero_predictions_days": 30,
+        "min_age_days": 7,
+        "min_cost_threshold": 50.0,
+        "description": "Vertex AI endpoint (0 predictions 30+ days) - 100% waste ($56-1,072/month) 💰💰💰💰💰 P0 [30-40% impact]",
+    },
+    "vertex_ai_idle_endpoints": {
+        "enabled": True,
+        "idle_threshold_predictions_per_day": 10.0,
+        "lookback_days": 30,
+        "batch_cost_threshold_pct": 0.10,
+        "description": "Vertex AI idle endpoint (<10 predictions/day) - batch 96% cheaper ($107/month waste) 💰💰💰💰 P1 [15-20% impact]",
+    },
+    "vertex_ai_gpu_waste": {
+        "enabled": True,
+        "gpu_utilization_threshold": 30.0,
+        "lookback_days": 14,
+        "min_gpu_cost_threshold": 100.0,
+        "description": "Vertex AI GPU waste (<30% utilization) - CPU sufficient ($350-1,460/month) 💰💰💰💰💰 P0 [20-25% impact]",
+    },
+    "vertex_ai_overprovisioned_machines": {
+        "enabled": True,
+        "cpu_threshold": 10.0,
+        "lookback_days": 14,
+        "min_savings_threshold": 50.0,
+        "description": "Vertex AI overprovisioned (<10% CPU) - downgrade machine ($112/month waste) 💰💰💰💰 P1 [10-15% impact]",
+    },
+    "vertex_ai_devtest_247": {
+        "enabled": True,
+        "devtest_labels": ["dev", "test", "staging", "development"],
+        "recommended_hours_per_day": 8,
+        "recommended_days_per_month": 22,
+        "description": "Vertex AI dev/test 24/7 - should be 8h/day ($85/month waste) 💰💰💰 P2 [10% impact]",
+    },
+    "vertex_ai_old_model_versions": {
+        "enabled": True,
+        "old_model_threshold_days": 180,
+        "governance_waste_pct": 0.05,
+        "description": "Vertex AI old model (180+ days) - quality/performance risk ($23/month governance) 💰💰 P2 [5% impact]",
+    },
+    "vertex_ai_untagged_endpoints": {
+        "enabled": True,
+        "required_labels": ["environment", "owner", "model", "cost-center"],
+        "governance_waste_pct": 0.05,
+        "description": "Vertex AI untagged endpoint - missing labels ($5-50/month governance) 💰 P3 [5% impact]",
+    },
+    "vertex_ai_unused_traffic_split": {
+        "enabled": True,
+        "min_traffic_split_age_days": 7,
+        "overhead_waste_pct": 0.02,
+        "description": "Vertex AI traffic split 0% - A/B test completed ($9/month overhead) 💰💰💰 P2 [3-5% impact]",
+    },
+    "vertex_ai_failed_training_jobs": {
+        "enabled": True,
+        "lookback_days": 30,
+        "repeated_failure_threshold": 3,
+        "min_cost_threshold": 5.0,
+        "description": "Vertex AI failed training (3+ same errors) - recurring issues ($3-50/month) 💰💰💰💰 P1 [5-10% impact]",
+    },
+    "vertex_ai_unused_feature_store": {
+        "enabled": True,
+        "lookback_days": 30,
+        "min_age_days": 7,
+        "min_storage_gb": 1.0,
+        "description": "Vertex AI feature store unused (0 requests 30+ days) - storage waste ($70-500/month) 💰💰 P2 [3-5% impact]",
+    },
 }
 
 
