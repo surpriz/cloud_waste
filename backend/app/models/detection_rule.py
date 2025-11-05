@@ -2767,6 +2767,72 @@ DEFAULT_DETECTION_RULES = {
         "description": "GCP Static External IP orphaned (resource deleted) - 100% waste $2.88/month per IP 💰💰💰💰 P0",
     },
     # =================================================================
+    # GCP CLOUD LOAD BALANCERS DETECTION RULES (10 scenarios - Networking)
+    # =================================================================
+    # Impact: $5,000-$25,000/year per organization
+    # Pricing: Forwarding rules ($0.025/hour first 5, $0.010/hour additional)
+    # Phase 1: Simple detection (7 scenarios) - 90% of waste
+    # Phase 2: Advanced analysis (3 scenarios) - 10% of waste
+    # =================================================================
+    "gcp_lb_zero_backends": {
+        "enabled": True,
+        "min_age_days": 7,
+        "confidence_medium_days": 7,
+        "confidence_high_days": 30,
+        "confidence_critical_days": 90,
+        "description": "GCP Load Balancer with zero backends (empty backend service) - 100% waste $18-54/month 💰💰💰💰 P0",
+    },
+    "gcp_lb_all_backends_unhealthy": {
+        "enabled": True,
+        "min_unhealthy_days": 7,
+        "confidence_medium_days": 7,
+        "confidence_high_days": 30,
+        "confidence_critical_days": 90,
+        "description": "GCP Load Balancer all backends UNHEALTHY (7+ days) - 100% waste $18-54/month 💰💰💰💰 P0",
+    },
+    "gcp_lb_orphaned_forwarding_rules": {
+        "enabled": True,
+        "description": "GCP Load Balancer orphaned forwarding rules (target deleted) - 100% waste $7-18/month per rule 💰💰💰💰 P0",
+    },
+    "gcp_lb_zero_traffic": {
+        "enabled": True,
+        "idle_days": 30,
+        "description": "GCP Load Balancer zero traffic (30+ days idle) - 100% waste $18-25/month 💰💰💰 P1",
+    },
+    "gcp_lb_devtest_unused": {
+        "enabled": True,
+        "idle_days": 14,
+        "devtest_labels": ["dev", "test", "staging", "development"],
+        "description": "GCP Load Balancer dev/test unused (14+ days idle) - 100% waste $18-25/month 💰💰 P2",
+    },
+    "gcp_lb_untagged": {
+        "enabled": True,
+        "required_labels": ["environment", "team", "application"],
+        "governance_waste_pct": 0.05,
+        "description": "GCP Load Balancer untagged (missing labels) - governance waste 💰 P2",
+    },
+    "gcp_lb_wrong_type": {
+        "enabled": True,
+        "single_region_threshold_pct": 0.95,
+        "lookback_days": 30,
+        "description": "GCP Load Balancer wrong type (Global LB for single-region traffic) - over-engineering waste 💰💰 P2",
+    },
+    "gcp_lb_multiple_single_backend": {
+        "enabled": True,
+        "description": "GCP Load Balancer multiple for single backend (consolidation opportunity) - savings $18+/month 💰💰 P1",
+    },
+    "gcp_lb_overprovisioned_backends": {
+        "enabled": True,
+        "cpu_threshold": 0.20,
+        "lookback_days": 7,
+        "description": "GCP Load Balancer over-provisioned backends (CPU <20%) - potential savings $50+/month per excess backend 💰💰 P1",
+    },
+    "gcp_lb_premium_tier_nonprod": {
+        "enabled": True,
+        "nonprod_labels": ["dev", "test", "staging", "development"],
+        "description": "GCP Load Balancer Premium tier on non-prod (use Standard tier) - 29% egress savings 💰💰 P2",
+    },
+    # =================================================================
     # GCP GKE CLUSTERS DETECTION RULES (10 scenarios)
     # =================================================================
     "gke_cluster_empty": {

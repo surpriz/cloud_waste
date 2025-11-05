@@ -641,6 +641,11 @@ const RESOURCE_CATEGORIES = {
       "gcp_static_ip_premium_nonprod", "gcp_static_ip_untagged", "gcp_static_ip_old_never_used",
       "gcp_static_ip_wrong_type", "gcp_static_ip_multiple_per_resource", "gcp_static_ip_devtest_not_released",
       "gcp_static_ip_orphaned",
+      // Cloud Load Balancers (10 scenarios)
+      "gcp_lb_zero_backends", "gcp_lb_all_backends_unhealthy", "gcp_lb_orphaned_forwarding_rules",
+      "gcp_lb_zero_traffic", "gcp_lb_devtest_unused", "gcp_lb_untagged",
+      "gcp_lb_wrong_type", "gcp_lb_multiple_single_backend", "gcp_lb_overprovisioned_backends",
+      "gcp_lb_premium_tier_nonprod",
       // Cloud NAT (TODO)
       "nat_gateway_unused"
     ],
@@ -966,6 +971,17 @@ const GCP_RESOURCE_LABELS: { [key: string]: string } = {
   gcp_static_ip_multiple_per_resource: "Static External IP (Multiple per Resource) 💰💰 P1",
   gcp_static_ip_devtest_not_released: "Static External IP (Dev/Test Not Released) 💰💰💰💰 P0",
   gcp_static_ip_orphaned: "Static External IP (Orphaned - Resource Deleted) 💰💰💰💰 P0",
+  // Networking - Cloud Load Balancers (10 scenarios)
+  gcp_lb_zero_backends: "Cloud Load Balancer (Zero Backends - Empty Service) 💰💰💰💰 P0",
+  gcp_lb_all_backends_unhealthy: "Cloud Load Balancer (All Backends UNHEALTHY 7+ days) 💰💰💰💰 P0",
+  gcp_lb_orphaned_forwarding_rules: "Cloud Load Balancer (Orphaned Forwarding Rules) 💰💰💰💰 P0",
+  gcp_lb_zero_traffic: "Cloud Load Balancer (Zero Traffic 30+ days) 💰💰💰 P1",
+  gcp_lb_devtest_unused: "Cloud Load Balancer (Dev/Test Unused 14+ days) 💰💰 P2",
+  gcp_lb_untagged: "Cloud Load Balancer (Missing Required Labels) 💰 P2",
+  gcp_lb_wrong_type: "Cloud Load Balancer (Global for Single-Region Traffic) 💰💰 P2",
+  gcp_lb_multiple_single_backend: "Cloud Load Balancer (Multiple for Single Backend) 💰💰 P1",
+  gcp_lb_overprovisioned_backends: "Cloud Load Balancer (Over-Provisioned Backends <20% CPU) 💰💰 P1",
+  gcp_lb_premium_tier_nonprod: "Cloud Load Balancer (Premium Tier on Non-Prod) 💰💰 P2",
   // Networking - Cloud NAT
   nat_gateway_unused: "Cloud NAT (Unused)",
   // Database

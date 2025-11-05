@@ -10532,6 +10532,1227 @@ class GCPProvider(CloudProviderBase):
 
         return resources
 
+    # =================================================================
+    # GCP Cloud Load Balancers Detection (10 scenarios - Networking)
+    # =================================================================
+    # Phase 1: Simple detection scenarios (7 scenarios)
+    # Phase 2: Advanced analysis scenarios (3 scenarios)
+    # Impact: $5,000-$25,000/year per organization
+    # Pricing: Forwarding rules ($0.025/hour first 5, $0.010/hour additional)
+    # =================================================================
+
+    async def scan_lb_zero_backends(
+        self, region: str | None = None, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scenario 1: Detect Load Balancers with zero backends.
+
+        Waste: Backend service exists and forwarding rules are active,
+        but the backends list is EMPTY (backends = []).
+
+        Common causes:
+        - Migration incomplete (old backends deleted, new not attached)
+        - Manual scaling down (last backend removed, service forgotten)
+        - IaC error (Terraform/Ansible deletes instance groups but not backend service)
+        - Test environment (backend service created for testing, never populated)
+
+        Detection: backend_service.backends == [] AND forwarding_rules exist
+        Cost: $18-54/month per empty backend service (forwarding rules + health checks)
+        Priority: CRITICAL (P0) 💰💰💰💰 - 40% of total LB waste
+        """
+        resources = []
+
+        # Extract detection parameters
+        min_age_days = detection_rules.get("min_age_days", 7) if detection_rules else 7
+        confidence_medium_days = detection_rules.get("confidence_medium_days", 7) if detection_rules else 7
+        confidence_high_days = detection_rules.get("confidence_high_days", 30) if detection_rules else 30
+        confidence_critical_days = detection_rules.get("confidence_critical_days", 90) if detection_rules else 90
+
+        try:
+            # Initialize clients
+            backend_services_client = compute_v1.BackendServicesClient()
+            forwarding_rules_client = compute_v1.GlobalForwardingRulesClient()
+            regional_fr_client = compute_v1.ForwardingRulesClient()
+            target_http_proxies_client = compute_v1.TargetHttpProxiesClient()
+            target_https_proxies_client = compute_v1.TargetHttpsProxiesClient()
+            url_maps_client = compute_v1.UrlMapsClient()
+
+            # List all global backend services
+            request = compute_v1.ListBackendServicesRequest(project=self.project_id)
+            backend_services = backend_services_client.list(request=request)
+
+            for backend_service in backend_services:
+                # Check if backends list is empty
+                if not backend_service.backends or len(backend_service.backends) == 0:
+                    # Calculate age
+                    created_at = datetime.fromisoformat(
+                        backend_service.creation_timestamp.replace('Z', '+00:00')
+                    )
+                    age_days = (datetime.now(timezone.utc) - created_at).days
+
+                    if age_days < min_age_days:
+                        continue
+
+                    # Find associated forwarding rules
+                    associated_forwarding_rules = []
+
+                    # Check global forwarding rules
+                    global_frs = forwarding_rules_client.list(project=self.project_id)
+                    for fr in global_frs:
+                        # Get target proxy and check if it points to this backend service
+                        if 'targetHttpProxies' in fr.target or 'targetHttpsProxies' in fr.target:
+                            try:
+                                proxy_name = fr.target.split('/')[-1]
+
+                                if 'targetHttpProxies' in fr.target:
+                                    proxy = target_http_proxies_client.get(
+                                        project=self.project_id,
+                                        target_http_proxy=proxy_name
+                                    )
+                                    url_map_link = proxy.url_map
+                                else:
+                                    proxy = target_https_proxies_client.get(
+                                        project=self.project_id,
+                                        target_https_proxy=proxy_name
+                                    )
+                                    url_map_link = proxy.url_map
+
+                                # Get URL map
+                                url_map_name = url_map_link.split('/')[-1]
+                                url_map = url_maps_client.get(
+                                    project=self.project_id,
+                                    url_map=url_map_name
+                                )
+
+                                # Check if URL map references this backend service
+                                if (url_map.default_service == backend_service.self_link or
+                                    any(backend_service.self_link in str(pm)
+                                        for pm in url_map.path_matchers)):
+                                    associated_forwarding_rules.append(fr.name)
+                            except Exception:
+                                continue
+
+                    # Only flag as waste if forwarding rules exist
+                    if len(associated_forwarding_rules) > 0:
+                        # Calculate waste
+                        num_forwarding_rules = len(associated_forwarding_rules)
+
+                        # Forwarding rules cost: first 5 = $0.025/hour flat, additional = $0.010/hour each
+                        if num_forwarding_rules <= 5:
+                            hourly_forwarding_cost = 0.025
+                        else:
+                            hourly_forwarding_cost = 0.025 + ((num_forwarding_rules - 5) * 0.010)
+
+                        monthly_forwarding_cost = hourly_forwarding_cost * 24 * 30
+
+                        # Health checks still run (waste)
+                        # Assume 1 health check per backend service at $0.002 per check, every 10 seconds
+                        health_check_monthly = 0.002 * (60 / 10) * 60 * 24 * 30  # ~$5.18/month
+
+                        monthly_cost = monthly_forwarding_cost + health_check_monthly
+                        annual_cost = monthly_cost * 12
+                        already_wasted = (age_days / 30) * monthly_cost
+
+                        # Determine confidence
+                        if age_days >= confidence_critical_days:
+                            confidence = "CRITICAL"
+                        elif age_days >= confidence_high_days:
+                            confidence = "HIGH"
+                        elif age_days >= confidence_medium_days:
+                            confidence = "MEDIUM"
+                        else:
+                            confidence = "LOW"
+
+                        resources.append(
+                            OrphanResourceData(
+                                resource_id=backend_service.name,
+                                resource_type="gcp_lb_zero_backends",
+                                resource_name=backend_service.name,
+                                region="global",
+                                estimated_monthly_cost=round(monthly_cost, 2),
+                                resource_metadata={
+                                    "backend_service_id": str(backend_service.id),
+                                    "self_link": backend_service.self_link,
+                                    "protocol": backend_service.protocol,
+                                    "load_balancing_scheme": backend_service.load_balancing_scheme,
+                                    "num_backends": 0,
+                                    "associated_forwarding_rules": associated_forwarding_rules,
+                                    "num_forwarding_rules": num_forwarding_rules,
+                                    "age_days": age_days,
+                                    "created_at": backend_service.creation_timestamp,
+                                    "monthly_forwarding_cost": round(monthly_forwarding_cost, 2),
+                                    "monthly_health_check_cost": round(health_check_monthly, 2),
+                                    "annual_cost": round(annual_cost, 2),
+                                    "already_wasted": round(already_wasted, 2),
+                                    "confidence": confidence,
+                                    "waste_percentage": 100,  # 100% waste - no backends can serve traffic
+                                    "impact": "CRITICAL - Forwarding rules active but cannot route traffic",
+                                    "recommendation": "Delete backend service and all associated forwarding rules, target proxies, and URL maps",
+                                    "gcloud_delete_command": f"gcloud compute backend-services delete {backend_service.name} --global",
+                                    "prevention": "Use IaC lifecycle policies to ensure backends exist before creating backend service"
+                                },
+                            )
+                        )
+
+        except Exception as e:
+            logger.error(f"Error in scan_lb_zero_backends: {e}")
+
+        return resources
+
+    async def scan_lb_all_backends_unhealthy(
+        self, region: str | None = None, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scenario 2: Detect Load Balancers where ALL backends are UNHEALTHY.
+
+        Waste: Backend service has backends attached, but ALL are UNHEALTHY for 7+ days.
+        Load Balancer remains active and charged, but cannot route any traffic (503 errors).
+
+        Common causes:
+        - Health check misconfigured (wrong port, path, or response code)
+        - Application down (service crashed, never restarted)
+        - Firewall rules blocking health check probes (source IP 35.191.0.0/16, 130.211.0.0/22)
+        - Network misconfiguration (backends unreachable from LB)
+        - Intentional shutdown (backends stopped for maintenance, never restarted)
+
+        Detection: ALL backends health_state == 'UNHEALTHY' for min_unhealthy_days
+        Cost: $18-54/month (forwarding rules + health checks)
+        Priority: HIGH (P0) 💰💰💰💰 - 20% of total LB waste
+        """
+        resources = []
+
+        # Extract detection parameters
+        min_unhealthy_days = detection_rules.get("min_unhealthy_days", 7) if detection_rules else 7
+        confidence_medium_days = detection_rules.get("confidence_medium_days", 7) if detection_rules else 7
+        confidence_high_days = detection_rules.get("confidence_high_days", 30) if detection_rules else 30
+        confidence_critical_days = detection_rules.get("confidence_critical_days", 90) if detection_rules else 90
+
+        try:
+            # Initialize clients
+            backend_services_client = compute_v1.BackendServicesClient()
+
+            # List all backend services
+            request = compute_v1.ListBackendServicesRequest(project=self.project_id)
+            backend_services = backend_services_client.list(request=request)
+
+            for backend_service in backend_services:
+                # Skip if no backends
+                if not backend_service.backends or len(backend_service.backends) == 0:
+                    continue
+
+                try:
+                    # Get health status for all backends
+                    health_request = compute_v1.GetHealthBackendServiceRequest(
+                        project=self.project_id,
+                        backend_service=backend_service.name,
+                        resource_group_reference=compute_v1.ResourceGroupReference()
+                    )
+
+                    health_response = backend_services_client.get_health(request=health_request)
+
+                    # Check if ALL backends are unhealthy
+                    health_statuses = []
+                    for health_status_item in health_response.health_status:
+                        health_state = health_status_item.health_state
+                        health_statuses.append(health_state)
+
+                    # Check if all are UNHEALTHY
+                    all_unhealthy = len(health_statuses) > 0 and all(
+                        state == compute_v1.HealthStatus.HealthState.UNHEALTHY
+                        for state in health_statuses
+                    )
+
+                    if all_unhealthy:
+                        # Calculate age (estimate unhealthy duration based on creation time)
+                        created_at = datetime.fromisoformat(
+                            backend_service.creation_timestamp.replace('Z', '+00:00')
+                        )
+                        age_days = (datetime.now(timezone.utc) - created_at).days
+
+                        # For production: track unhealthy state via Cloud Monitoring
+                        # For MVP: use age as proxy for unhealthy duration
+                        unhealthy_days_estimate = min(age_days, 30)  # Conservative estimate
+
+                        if unhealthy_days_estimate >= min_unhealthy_days:
+                            # Calculate waste
+                            num_backends = len(health_statuses)
+
+                            # Forwarding rule cost (assume 1-2 rules per backend service)
+                            avg_forwarding_rules = 1.5
+                            monthly_forwarding_cost = 0.025 * 24 * 30  # $18/month minimum
+
+                            # Health checks still running
+                            health_check_monthly = num_backends * 0.002 * (60/10) * 60 * 24 * 30
+
+                            monthly_cost = monthly_forwarding_cost + health_check_monthly
+                            annual_cost = monthly_cost * 12
+                            already_wasted = (unhealthy_days_estimate / 30) * monthly_cost
+
+                            # Determine confidence
+                            if unhealthy_days_estimate >= confidence_critical_days:
+                                confidence = "CRITICAL"
+                            elif unhealthy_days_estimate >= confidence_high_days:
+                                confidence = "HIGH"
+                            elif unhealthy_days_estimate >= confidence_medium_days:
+                                confidence = "MEDIUM"
+                            else:
+                                confidence = "LOW"
+
+                            resources.append(
+                                OrphanResourceData(
+                                    resource_id=backend_service.name,
+                                    resource_type="gcp_lb_all_backends_unhealthy",
+                                    resource_name=backend_service.name,
+                                    region="global",
+                                    estimated_monthly_cost=round(monthly_cost, 2),
+                                    resource_metadata={
+                                        "backend_service_id": str(backend_service.id),
+                                        "protocol": backend_service.protocol,
+                                        "num_backends": num_backends,
+                                        "unhealthy_backends": num_backends,
+                                        "health_statuses": [str(s) for s in health_statuses],
+                                        "unhealthy_days_estimate": unhealthy_days_estimate,
+                                        "age_days": age_days,
+                                        "monthly_forwarding_cost": round(monthly_forwarding_cost, 2),
+                                        "monthly_health_check_cost": round(health_check_monthly, 2),
+                                        "annual_cost": round(annual_cost, 2),
+                                        "already_wasted": round(already_wasted, 2),
+                                        "confidence": confidence,
+                                        "waste_percentage": 100,  # Cannot serve any traffic
+                                        "impact": "CRITICAL - All backends UNHEALTHY, LB returns 503 errors",
+                                        "recommendation": "Fix health checks (check port, path, firewall rules) OR delete backend service if no longer needed",
+                                        "debug_command": f"gcloud compute backend-services get-health {backend_service.name} --global",
+                                        "health_check_troubleshooting": "Verify health check probes can reach backends from IPs 35.191.0.0/16 and 130.211.0.0/22"
+                                    },
+                                )
+                            )
+
+                except Exception as e:
+                    # If get_health fails, continue to next backend service
+                    logger.debug(f"Could not get health for {backend_service.name}: {e}")
+                    continue
+
+        except Exception as e:
+            logger.error(f"Error in scan_lb_all_backends_unhealthy: {e}")
+
+        return resources
+
+    async def scan_lb_orphaned_forwarding_rules(
+        self, region: str | None = None, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scenario 3: Detect orphaned forwarding rules (THE TRAP #1 for GKE).
+
+        Waste: Forwarding rules pointing to non-existent targets (deleted target proxies,
+        backend services, etc.). This is THE MOST FREQUENT waste scenario in GKE environments.
+
+        Common causes:
+        - kubectl delete service doesn't always delete GCP forwarding rules
+        - Terraform destroy incomplete (backend deleted, forwarding rule forgotten)
+        - Migration (new LB created, old forwarding rule not deleted)
+        - Human error (manual deletion in wrong order)
+
+        Detection: Forwarding rule exists but fr.target returns 404 Not Found
+        Cost: $7-18/month per orphaned rule
+        Priority: CRITICAL (P0) 💰💰💰💰 - 30-40% of total LB waste (especially GKE)
+
+        Impact: In GKE-heavy environments, 60-70% of forwarding rules can be orphaned
+        after several months of operations!
+        """
+        resources = []
+
+        try:
+            # Initialize clients
+            global_fr_client = compute_v1.GlobalForwardingRulesClient()
+            regional_fr_client = compute_v1.ForwardingRulesClient()
+            regions_client = compute_v1.RegionsClient()
+            target_http_proxies_client = compute_v1.TargetHttpProxiesClient()
+            target_https_proxies_client = compute_v1.TargetHttpsProxiesClient()
+            target_tcp_proxies_client = compute_v1.TargetTcpProxiesClient()
+            target_ssl_proxies_client = compute_v1.TargetSslProxiesClient()
+            backend_services_client = compute_v1.BackendServicesClient()
+            regional_backend_services_client = compute_v1.RegionBackendServicesClient()
+
+            # Check global forwarding rules
+            global_frs = global_fr_client.list(project=self.project_id)
+            for fr in global_frs:
+                target_exists = await self._check_target_exists(
+                    fr.target,
+                    target_http_proxies_client,
+                    target_https_proxies_client,
+                    target_tcp_proxies_client,
+                    target_ssl_proxies_client,
+                    backend_services_client,
+                    regional_backend_services_client,
+                    None
+                )
+
+                if not target_exists:
+                    # Calculate age
+                    created_at = datetime.fromisoformat(
+                        fr.creation_timestamp.replace('Z', '+00:00')
+                    )
+                    age_days = (datetime.now(timezone.utc) - created_at).days
+
+                    # Cost per orphaned rule
+                    monthly_cost = 0.025 * 24 * 30  # $18/month (minimum, within first 5 rules)
+                    annual_cost = monthly_cost * 12
+                    already_wasted = (age_days / 30) * monthly_cost
+
+                    # Confidence is CRITICAL for orphaned resources
+                    confidence = "CRITICAL"
+
+                    resources.append(
+                        OrphanResourceData(
+                            resource_id=fr.name,
+                            resource_type="gcp_lb_orphaned_forwarding_rules",
+                            resource_name=fr.name,
+                            region="global",
+                            estimated_monthly_cost=round(monthly_cost, 2),
+                            resource_metadata={
+                                "forwarding_rule_id": str(fr.id),
+                                "ip_address": fr.IP_address if hasattr(fr, 'IP_address') else fr.IPAddress,
+                                "target": fr.target,
+                                "target_exists": False,
+                                "scope": "GLOBAL",
+                                "port_range": fr.port_range if hasattr(fr, 'port_range') else None,
+                                "age_days": age_days,
+                                "created_at": fr.creation_timestamp,
+                                "annual_cost": round(annual_cost, 2),
+                                "already_wasted": round(already_wasted, 2),
+                                "confidence": confidence,
+                                "waste_percentage": 100,  # 100% waste - target doesn't exist
+                                "impact": "CRITICAL - Forwarding rule active but points to deleted target",
+                                "recommendation": "Delete orphaned forwarding rule immediately",
+                                "gcloud_delete_command": f"gcloud compute forwarding-rules delete {fr.name} --global",
+                                "gke_note": "Common in GKE environments after kubectl delete service - check for orphaned rules regularly"
+                            },
+                        )
+                    )
+
+            # Check regional forwarding rules
+            regions = regions_client.list(project=self.project_id)
+            for gcp_region in regions:
+                try:
+                    regional_frs = regional_fr_client.list(
+                        project=self.project_id,
+                        region=gcp_region.name
+                    )
+
+                    for fr in regional_frs:
+                        target_exists = await self._check_target_exists(
+                            fr.target,
+                            target_http_proxies_client,
+                            target_https_proxies_client,
+                            target_tcp_proxies_client,
+                            target_ssl_proxies_client,
+                            backend_services_client,
+                            regional_backend_services_client,
+                            gcp_region.name
+                        )
+
+                        if not target_exists:
+                            created_at = datetime.fromisoformat(
+                                fr.creation_timestamp.replace('Z', '+00:00')
+                            )
+                            age_days = (datetime.now(timezone.utc) - created_at).days
+
+                            monthly_cost = 0.025 * 24 * 30  # $18/month
+                            annual_cost = monthly_cost * 12
+                            already_wasted = (age_days / 30) * monthly_cost
+
+                            resources.append(
+                                OrphanResourceData(
+                                    resource_id=fr.name,
+                                    resource_type="gcp_lb_orphaned_forwarding_rules",
+                                    resource_name=fr.name,
+                                    region=gcp_region.name,
+                                    estimated_monthly_cost=round(monthly_cost, 2),
+                                    resource_metadata={
+                                        "forwarding_rule_id": str(fr.id),
+                                        "ip_address": fr.IP_address if hasattr(fr, 'IP_address') else fr.IPAddress,
+                                        "target": fr.target,
+                                        "target_exists": False,
+                                        "scope": "REGIONAL",
+                                        "age_days": age_days,
+                                        "annual_cost": round(annual_cost, 2),
+                                        "already_wasted": round(already_wasted, 2),
+                                        "confidence": "CRITICAL",
+                                        "waste_percentage": 100,
+                                        "recommendation": "Delete orphaned forwarding rule",
+                                        "gcloud_delete_command": f"gcloud compute forwarding-rules delete {fr.name} --region={gcp_region.name}"
+                                    },
+                                )
+                            )
+
+                except Exception as e:
+                    logger.error(f"Error scanning region {gcp_region.name} for orphaned forwarding rules: {e}")
+                    continue
+
+        except Exception as e:
+            logger.error(f"Error in scan_lb_orphaned_forwarding_rules: {e}")
+
+        return resources
+
+    async def _check_target_exists(
+        self,
+        target_link: str,
+        target_http_proxies_client,
+        target_https_proxies_client,
+        target_tcp_proxies_client,
+        target_ssl_proxies_client,
+        backend_services_client,
+        regional_backend_services_client,
+        region: str | None
+    ) -> bool:
+        """Helper method to check if a forwarding rule target exists."""
+        try:
+            if 'targetHttpProxies' in target_link:
+                proxy_name = target_link.split('/')[-1]
+                target_http_proxies_client.get(
+                    project=self.project_id,
+                    target_http_proxy=proxy_name
+                )
+                return True
+            elif 'targetHttpsProxies' in target_link:
+                proxy_name = target_link.split('/')[-1]
+                target_https_proxies_client.get(
+                    project=self.project_id,
+                    target_https_proxy=proxy_name
+                )
+                return True
+            elif 'targetTcpProxies' in target_link:
+                proxy_name = target_link.split('/')[-1]
+                target_tcp_proxies_client.get(
+                    project=self.project_id,
+                    target_tcp_proxy=proxy_name
+                )
+                return True
+            elif 'targetSslProxies' in target_link:
+                proxy_name = target_link.split('/')[-1]
+                target_ssl_proxies_client.get(
+                    project=self.project_id,
+                    target_ssl_proxy=proxy_name
+                )
+                return True
+            elif 'backendServices' in target_link:
+                bs_name = target_link.split('/')[-1]
+                if region:
+                    regional_backend_services_client.get(
+                        project=self.project_id,
+                        region=region,
+                        backend_service=bs_name
+                    )
+                else:
+                    backend_services_client.get(
+                        project=self.project_id,
+                        backend_service=bs_name
+                    )
+                return True
+            else:
+                return True  # Unknown target type, assume exists
+        except Exception:
+            return False  # Target doesn't exist → ORPHANED!
+
+    async def scan_lb_zero_traffic(
+        self, region: str | None = None, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scenario 4: Detect Load Balancers with zero request traffic.
+
+        Waste: Load Balancer properly configured, backends healthy, but NO TRAFFIC
+        for 30+ days. Application decommissioned, DNS moved, or feature flag disabled.
+
+        Common causes:
+        - Application decommissioned (DNS points elsewhere)
+        - Staging environment unused
+        - Feature flag disabled (service not called)
+        - Migration to new LB (old LB forgotten)
+
+        Detection: 0 requests via Cloud Monitoring for idle_days
+        Metric: loadbalancing.googleapis.com/https/request_count
+        Cost: $18-25/month (forwarding rules + health checks)
+        Priority: MEDIUM-HIGH (P1) 💰💰💰 - 15% of total LB waste
+        """
+        resources = []
+
+        # Extract detection parameters
+        idle_days = detection_rules.get("idle_days", 30) if detection_rules else 30
+
+        try:
+            # Initialize clients
+            monitoring_client = monitoring_v3.MetricServiceClient()
+            forwarding_rules_client = compute_v1.GlobalForwardingRulesClient()
+            project_name = f"projects/{self.project_id}"
+
+            # Time interval for lookback
+            end_time = int(time.time())
+            start_time = end_time - (idle_days * 86400)
+
+            interval = monitoring_v3.TimeInterval({
+                'end_time': {'seconds': end_time},
+                'start_time': {'seconds': start_time}
+            })
+
+            # Query metrics for HTTPS request count
+            metrics_to_check = [
+                'loadbalancing.googleapis.com/https/request_count',
+                'loadbalancing.googleapis.com/tcp/closed_connections'
+            ]
+
+            idle_lbs = []
+
+            for metric_type in metrics_to_check:
+                try:
+                    results = monitoring_client.list_time_series(
+                        request={
+                            'name': project_name,
+                            'filter': f'metric.type = "{metric_type}"',
+                            'interval': interval,
+                            'aggregation': {
+                                'alignment_period': {'seconds': 3600},
+                                'per_series_aligner': monitoring_v3.Aggregation.Aligner.ALIGN_SUM
+                            }
+                        }
+                    )
+
+                    for result in results:
+                        total_requests = sum([point.value.int64_value or point.value.double_value or 0 for point in result.points])
+
+                        if total_requests == 0:
+                            lb_name = result.resource.labels.get('forwarding_rule_name')
+                            if lb_name and lb_name not in idle_lbs:
+                                idle_lbs.append(lb_name)
+
+                except Exception as e:
+                    logger.debug(f"Could not query metric {metric_type}: {e}")
+                    continue
+
+            # Get details for idle LBs
+            all_frs = forwarding_rules_client.list(project=self.project_id)
+            for fr in all_frs:
+                if fr.name in idle_lbs:
+                    # Calculate age
+                    created_at = datetime.fromisoformat(
+                        fr.creation_timestamp.replace('Z', '+00:00')
+                    )
+                    age_days = (datetime.now(timezone.utc) - created_at).days
+
+                    monthly_cost = 0.025 * 24 * 30  # $18/month forwarding rule
+                    # Add health check cost if backends exist (estimate)
+                    monthly_cost += 5.18  # Avg health check cost
+                    annual_cost = monthly_cost * 12
+                    already_wasted = (idle_days / 30) * monthly_cost
+
+                    confidence = "HIGH" if idle_days >= 30 else "MEDIUM"
+
+                    resources.append(
+                        OrphanResourceData(
+                            resource_id=fr.name,
+                            resource_type="gcp_lb_zero_traffic",
+                            resource_name=fr.name,
+                            region="global",
+                            estimated_monthly_cost=round(monthly_cost, 2),
+                            resource_metadata={
+                                "forwarding_rule_id": str(fr.id),
+                                "ip_address": fr.IP_address if hasattr(fr, 'IP_address') else fr.IPAddress,
+                                "target": fr.target,
+                                "idle_days": idle_days,
+                                "total_requests": 0,
+                                "age_days": age_days,
+                                "annual_cost": round(annual_cost, 2),
+                                "already_wasted": round(already_wasted, 2),
+                                "confidence": confidence,
+                                "waste_percentage": 100,
+                                "impact": "HIGH - LB active but receives zero traffic",
+                                "recommendation": "Verify application is truly unused, then delete LB stack",
+                                "investigation_steps": "1. Check DNS records 2. Review application logs 3. Confirm with team before deletion"
+                            },
+                        )
+                    )
+
+        except Exception as e:
+            logger.error(f"Error in scan_lb_zero_traffic: {e}")
+
+        return resources
+
+    async def scan_lb_devtest_unused(
+        self, region: str | None = None, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scenario 5: Detect dev/test Load Balancers unused for 14+ days.
+
+        Waste: Load Balancers tagged with environment=dev/test/staging but idle
+        for extended periods. Dev/test environments often left running unnecessarily.
+
+        Detection: Labels contain dev/test/staging AND zero traffic for idle_days
+        Cost: $18-25/month per idle dev/test LB
+        Priority: MEDIUM (P2) 💰💰 - 10% of total LB waste
+        """
+        resources = []
+
+        # Extract detection parameters
+        idle_days = detection_rules.get("idle_days", 14) if detection_rules else 14
+        devtest_labels = detection_rules.get("devtest_labels", ["dev", "test", "staging", "development"]) if detection_rules else ["dev", "test", "staging", "development"]
+
+        try:
+            # Initialize clients
+            forwarding_rules_client = compute_v1.GlobalForwardingRulesClient()
+            monitoring_client = monitoring_v3.MetricServiceClient()
+
+            # List all forwarding rules
+            frs = forwarding_rules_client.list(project=self.project_id)
+
+            for fr in frs:
+                # Check labels
+                labels = fr.labels if hasattr(fr, 'labels') and fr.labels else {}
+                env = labels.get('environment', '').lower()
+
+                if env in devtest_labels:
+                    # Check traffic via Cloud Monitoring
+                    has_traffic = await self._check_lb_traffic(
+                        fr.name,
+                        idle_days,
+                        monitoring_client
+                    )
+
+                    if not has_traffic:
+                        # Calculate age
+                        created_at = datetime.fromisoformat(
+                            fr.creation_timestamp.replace('Z', '+00:00')
+                        )
+                        age_days = (datetime.now(timezone.utc) - created_at).days
+
+                        monthly_cost = 0.025 * 24 * 30 + 5.18  # Forwarding rule + health checks
+                        annual_cost = monthly_cost * 12
+                        already_wasted = (idle_days / 30) * monthly_cost
+
+                        resources.append(
+                            OrphanResourceData(
+                                resource_id=fr.name,
+                                resource_type="gcp_lb_devtest_unused",
+                                resource_name=fr.name,
+                                region="global",
+                                estimated_monthly_cost=round(monthly_cost, 2),
+                                resource_metadata={
+                                    "forwarding_rule_id": str(fr.id),
+                                    "environment": env,
+                                    "labels": dict(labels),
+                                    "idle_days": idle_days,
+                                    "age_days": age_days,
+                                    "annual_cost": round(annual_cost, 2),
+                                    "already_wasted": round(already_wasted, 2),
+                                    "confidence": "MEDIUM",
+                                    "impact": "MEDIUM - Dev/test LB idle, can be deleted or paused",
+                                    "recommendation": "Delete or pause dev/test environment when not in use",
+                                    "automation_tip": "Use scheduled shutdown scripts for dev/test environments"
+                                },
+                            )
+                        )
+
+        except Exception as e:
+            logger.error(f"Error in scan_lb_devtest_unused: {e}")
+
+        return resources
+
+    async def _check_lb_traffic(
+        self,
+        lb_name: str,
+        lookback_days: int,
+        monitoring_client
+    ) -> bool:
+        """Helper method to check if LB has traffic via Cloud Monitoring."""
+        try:
+            project_name = f"projects/{self.project_id}"
+            end_time = int(time.time())
+            start_time = end_time - (lookback_days * 86400)
+
+            interval = monitoring_v3.TimeInterval({
+                'end_time': {'seconds': end_time},
+                'start_time': {'seconds': start_time}
+            })
+
+            results = monitoring_client.list_time_series(
+                request={
+                    'name': project_name,
+                    'filter': f'metric.type = "loadbalancing.googleapis.com/https/request_count" AND resource.labels.forwarding_rule_name = "{lb_name}"',
+                    'interval': interval,
+                    'aggregation': {
+                        'alignment_period': {'seconds': 3600},
+                        'per_series_aligner': monitoring_v3.Aggregation.Aligner.ALIGN_SUM
+                    }
+                }
+            )
+
+            for result in results:
+                total_requests = sum([point.value.int64_value or 0 for point in result.points])
+                if total_requests > 0:
+                    return True
+
+            return False  # No traffic found
+
+        except Exception:
+            return True  # If monitoring query fails, assume has traffic (conservative)
+
+    async def scan_lb_untagged(
+        self, region: str | None = None, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scenario 6: Detect untagged Load Balancers (missing required labels).
+
+        Waste: Forwarding rules without required labels → unclear ownership →
+        often forgotten and not deleted. Governance waste.
+
+        Detection: Missing required labels (environment, team, application)
+        Cost: $18/month per untagged LB (indirect governance waste)
+        Priority: MEDIUM (P2) 💰 - 5% of total LB waste
+        """
+        resources = []
+
+        # Extract detection parameters
+        required_labels = detection_rules.get("required_labels", ["environment", "team", "application"]) if detection_rules else ["environment", "team", "application"]
+
+        try:
+            # Initialize clients
+            forwarding_rules_client = compute_v1.GlobalForwardingRulesClient()
+
+            # List all forwarding rules
+            frs = forwarding_rules_client.list(project=self.project_id)
+
+            for fr in frs:
+                # Check labels
+                labels = fr.labels if hasattr(fr, 'labels') and fr.labels else {}
+
+                missing_labels = [label for label in required_labels if label not in labels]
+
+                if missing_labels:
+                    # Calculate age
+                    created_at = datetime.fromisoformat(
+                        fr.creation_timestamp.replace('Z', '+00:00')
+                    )
+                    age_days = (datetime.now(timezone.utc) - created_at).days
+
+                    monthly_cost = 0.025 * 24 * 30  # $18/month
+                    # Governance waste is typically estimated at ~5% of resource cost
+                    governance_waste_pct = 0.05
+                    monthly_governance_cost = monthly_cost * governance_waste_pct
+
+                    resources.append(
+                        OrphanResourceData(
+                            resource_id=fr.name,
+                            resource_type="gcp_lb_untagged",
+                            resource_name=fr.name,
+                            region="global",
+                            estimated_monthly_cost=round(monthly_governance_cost, 2),
+                            resource_metadata={
+                                "forwarding_rule_id": str(fr.id),
+                                "ip_address": fr.IP_address if hasattr(fr, 'IP_address') else fr.IPAddress,
+                                "existing_labels": dict(labels),
+                                "missing_labels": missing_labels,
+                                "age_days": age_days,
+                                "confidence": "LOW",
+                                "impact": "LOW - Governance waste due to unclear ownership",
+                                "recommendation": "Add required labels (environment, team, application) OR delete if unknown owner",
+                                "gcloud_add_labels_command": f"gcloud compute forwarding-rules update {fr.name} --global --update-labels=environment=VALUE,team=VALUE,application=VALUE"
+                            },
+                        )
+                    )
+
+        except Exception as e:
+            logger.error(f"Error in scan_lb_untagged: {e}")
+
+        return resources
+
+    async def scan_lb_wrong_type(
+        self, region: str | None = None, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scenario 7: Detect wrong Load Balancer type (Global LB for regional traffic).
+
+        Waste: Global Load Balancer used but >95% traffic comes from single region.
+        Should use Regional LB instead (simpler, lower data processing costs).
+
+        Detection: Global LB with single_region_threshold_pct traffic from one region
+        Cost: Potential savings on data processing costs
+        Priority: MEDIUM (P2) 💰💰 - 5% of total LB waste
+        """
+        resources = []
+
+        # Extract detection parameters
+        single_region_threshold_pct = detection_rules.get("single_region_threshold_pct", 0.95) if detection_rules else 0.95
+        lookback_days = detection_rules.get("lookback_days", 30) if detection_rules else 30
+
+        try:
+            # Initialize clients
+            forwarding_rules_client = compute_v1.GlobalForwardingRulesClient()
+            monitoring_client = monitoring_v3.MetricServiceClient()
+
+            # List global forwarding rules
+            global_frs = forwarding_rules_client.list(project=self.project_id)
+
+            for fr in global_frs:
+                # Check traffic distribution by region via Cloud Monitoring
+                traffic_by_region = await self._get_traffic_by_region(
+                    fr.name,
+                    lookback_days,
+                    monitoring_client
+                )
+
+                if traffic_by_region:
+                    total_traffic = sum(traffic_by_region.values())
+                    if total_traffic > 0:
+                        max_region_traffic = max(traffic_by_region.values())
+                        max_region_pct = max_region_traffic / total_traffic
+
+                        if max_region_pct >= single_region_threshold_pct:
+                            # Over-engineered: Global LB for single-region traffic
+                            max_region_name = [k for k, v in traffic_by_region.items() if v == max_region_traffic][0]
+
+                            # Potential savings (conservative estimate)
+                            monthly_potential_savings = 10.00  # Conservative estimate
+
+                            resources.append(
+                                OrphanResourceData(
+                                    resource_id=fr.name,
+                                    resource_type="gcp_lb_wrong_type",
+                                    resource_name=fr.name,
+                                    region="global",
+                                    estimated_monthly_cost=round(monthly_potential_savings, 2),
+                                    resource_metadata={
+                                        "forwarding_rule_id": str(fr.id),
+                                        "current_type": "GLOBAL",
+                                        "recommended_type": "REGIONAL",
+                                        "primary_region": max_region_name,
+                                        "primary_region_traffic_pct": round(max_region_pct * 100, 2),
+                                        "traffic_by_region": traffic_by_region,
+                                        "lookback_days": lookback_days,
+                                        "confidence": "MEDIUM",
+                                        "impact": "MEDIUM - Over-engineered architecture",
+                                        "recommendation": f"Migrate to Regional Load Balancer in {max_region_name} for simpler architecture",
+                                        "potential_savings": "Lower data processing costs + simpler management"
+                                    },
+                                )
+                            )
+
+        except Exception as e:
+            logger.error(f"Error in scan_lb_wrong_type: {e}")
+
+        return resources
+
+    async def _get_traffic_by_region(
+        self,
+        lb_name: str,
+        lookback_days: int,
+        monitoring_client
+    ) -> dict:
+        """Helper method to get traffic distribution by region."""
+        try:
+            project_name = f"projects/{self.project_id}"
+            end_time = int(time.time())
+            start_time = end_time - (lookback_days * 86400)
+
+            interval = monitoring_v3.TimeInterval({
+                'end_time': {'seconds': end_time},
+                'start_time': {'seconds': start_time}
+            })
+
+            results = monitoring_client.list_time_series(
+                request={
+                    'name': project_name,
+                    'filter': f'metric.type = "loadbalancing.googleapis.com/https/request_count" AND resource.labels.forwarding_rule_name = "{lb_name}"',
+                    'interval': interval,
+                    'aggregation': {
+                        'alignment_period': {'seconds': 3600},
+                        'per_series_aligner': monitoring_v3.Aggregation.Aligner.ALIGN_SUM,
+                        'group_by_fields': ['resource.labels.region']
+                    }
+                }
+            )
+
+            traffic_by_region = {}
+            for result in results:
+                region = result.resource.labels.get('region', 'unknown')
+                total_requests = sum([point.value.int64_value or 0 for point in result.points])
+                traffic_by_region[region] = total_requests
+
+            return traffic_by_region
+
+        except Exception:
+            return {}
+
+    async def scan_lb_multiple_single_backend(
+        self, region: str | None = None, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scenario 8: Detect multiple Load Balancers for single backend (consolidation opportunity).
+
+        Waste: Multiple forwarding rules/LBs pointing to the same backend service.
+        Consolidation possible to reduce costs.
+
+        Detection: Group forwarding rules by backend service, detect >1 LB per backend
+        Cost: Savings from consolidation
+        Priority: MEDIUM (P1) 💰💰 - Phase 2 scenario
+        """
+        resources = []
+
+        try:
+            # Initialize clients
+            forwarding_rules_client = compute_v1.GlobalForwardingRulesClient()
+            target_http_proxies_client = compute_v1.TargetHttpProxiesClient()
+            target_https_proxies_client = compute_v1.TargetHttpsProxiesClient()
+            url_maps_client = compute_v1.UrlMapsClient()
+
+            # Map backend services to forwarding rules
+            backend_to_frs = {}
+
+            # List all forwarding rules
+            frs = forwarding_rules_client.list(project=self.project_id)
+
+            for fr in frs:
+                try:
+                    # Get backend service via target proxy → URL map
+                    if 'targetHttpProxies' in fr.target or 'targetHttpsProxies' in fr.target:
+                        proxy_name = fr.target.split('/')[-1]
+
+                        if 'targetHttpProxies' in fr.target:
+                            proxy = target_http_proxies_client.get(
+                                project=self.project_id,
+                                target_http_proxy=proxy_name
+                            )
+                        else:
+                            proxy = target_https_proxies_client.get(
+                                project=self.project_id,
+                                target_https_proxy=proxy_name
+                            )
+
+                        url_map_name = proxy.url_map.split('/')[-1]
+                        url_map = url_maps_client.get(
+                            project=self.project_id,
+                            url_map=url_map_name
+                        )
+
+                        backend_service = url_map.default_service
+
+                        if backend_service not in backend_to_frs:
+                            backend_to_frs[backend_service] = []
+                        backend_to_frs[backend_service].append(fr.name)
+
+                except Exception:
+                    continue
+
+            # Detect backends with multiple forwarding rules
+            for backend_service, fr_names in backend_to_frs.items():
+                if len(fr_names) > 1:
+                    # Potential consolidation opportunity
+                    monthly_potential_savings = (len(fr_names) - 1) * 18.00  # Save on extra FRs
+
+                    resources.append(
+                        OrphanResourceData(
+                            resource_id=backend_service.split('/')[-1],
+                            resource_type="gcp_lb_multiple_single_backend",
+                            resource_name=backend_service.split('/')[-1],
+                            region="global",
+                            estimated_monthly_cost=round(monthly_potential_savings, 2),
+                            resource_metadata={
+                                "backend_service": backend_service,
+                                "num_forwarding_rules": len(fr_names),
+                                "forwarding_rules": fr_names,
+                                "confidence": "MEDIUM",
+                                "impact": "MEDIUM - Consolidation opportunity",
+                                "recommendation": f"Consolidate {len(fr_names)} forwarding rules into single LB",
+                                "potential_savings": f"Save ${monthly_potential_savings:.2f}/month by consolidating"
+                            },
+                        )
+                    )
+
+        except Exception as e:
+            logger.error(f"Error in scan_lb_multiple_single_backend: {e}")
+
+        return resources
+
+    async def scan_lb_overprovisioned_backends(
+        self, region: str | None = None, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scenario 9: Detect over-provisioned backend capacity (backends under-utilized).
+
+        Waste: Too many backends for actual traffic load. Backends running at <20% CPU.
+
+        Detection: Analyze backend CPU utilization via Cloud Monitoring
+        Cost: Potential savings from reducing backend count
+        Priority: MEDIUM (P1) 💰💰 - Phase 2 scenario
+        """
+        resources = []
+
+        # Extract detection parameters
+        cpu_threshold = detection_rules.get("cpu_threshold", 0.20) if detection_rules else 0.20
+        lookback_days = detection_rules.get("lookback_days", 7) if detection_rules else 7
+
+        try:
+            # Initialize clients
+            backend_services_client = compute_v1.BackendServicesClient()
+            monitoring_client = monitoring_v3.MetricServiceClient()
+
+            # List backend services
+            backend_services = backend_services_client.list(project=self.project_id)
+
+            for backend_service in backend_services:
+                if backend_service.backends and len(backend_service.backends) > 0:
+                    # Check CPU utilization of backends via Cloud Monitoring
+                    avg_cpu = await self._get_backend_avg_cpu(
+                        backend_service.name,
+                        lookback_days,
+                        monitoring_client
+                    )
+
+                    if avg_cpu is not None and avg_cpu < cpu_threshold:
+                        # Over-provisioned: too many backends for load
+                        num_backends = len(backend_service.backends)
+                        recommended_backends = max(1, int(num_backends * (avg_cpu / cpu_threshold)))
+                        excess_backends = num_backends - recommended_backends
+
+                        # Potential savings (conservative estimate per backend)
+                        monthly_savings_per_backend = 50.00  # Rough estimate for e2-medium
+                        monthly_potential_savings = excess_backends * monthly_savings_per_backend
+
+                        resources.append(
+                            OrphanResourceData(
+                                resource_id=backend_service.name,
+                                resource_type="gcp_lb_overprovisioned_backends",
+                                resource_name=backend_service.name,
+                                region="global",
+                                estimated_monthly_cost=round(monthly_potential_savings, 2),
+                                resource_metadata={
+                                    "backend_service_id": str(backend_service.id),
+                                    "num_backends": num_backends,
+                                    "recommended_backends": recommended_backends,
+                                    "excess_backends": excess_backends,
+                                    "avg_cpu_utilization": round(avg_cpu * 100, 2),
+                                    "cpu_threshold": round(cpu_threshold * 100, 2),
+                                    "lookback_days": lookback_days,
+                                    "confidence": "MEDIUM",
+                                    "impact": "MEDIUM - Over-provisioned backend capacity",
+                                    "recommendation": f"Reduce backend count from {num_backends} to {recommended_backends}",
+                                    "potential_annual_savings": round(monthly_potential_savings * 12, 2)
+                                },
+                            )
+                        )
+
+        except Exception as e:
+            logger.error(f"Error in scan_lb_overprovisioned_backends: {e}")
+
+        return resources
+
+    async def _get_backend_avg_cpu(
+        self,
+        backend_service_name: str,
+        lookback_days: int,
+        monitoring_client
+    ) -> float | None:
+        """Helper method to get average CPU utilization of backend instances."""
+        try:
+            project_name = f"projects/{self.project_id}"
+            end_time = int(time.time())
+            start_time = end_time - (lookback_days * 86400)
+
+            interval = monitoring_v3.TimeInterval({
+                'end_time': {'seconds': end_time},
+                'start_time': {'seconds': start_time}
+            })
+
+            results = monitoring_client.list_time_series(
+                request={
+                    'name': project_name,
+                    'filter': 'metric.type = "compute.googleapis.com/instance/cpu/utilization"',
+                    'interval': interval,
+                    'aggregation': {
+                        'alignment_period': {'seconds': 3600},
+                        'per_series_aligner': monitoring_v3.Aggregation.Aligner.ALIGN_MEAN
+                    }
+                }
+            )
+
+            cpu_values = []
+            for result in results:
+                for point in result.points:
+                    cpu_values.append(point.value.double_value)
+
+            if cpu_values:
+                return sum(cpu_values) / len(cpu_values)
+            return None
+
+        except Exception:
+            return None
+
+    async def scan_lb_premium_tier_nonprod(
+        self, region: str | None = None, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scenario 10: Detect Premium network tier on non-production workloads.
+
+        Waste: Using Premium tier (PREMIUM) for dev/test/staging environments.
+        Standard tier provides 29% savings on egress costs.
+
+        Detection: environment != production AND network_tier == PREMIUM
+        Cost: 29% savings on egress costs (Premium $0.12/GB vs Standard $0.085/GB)
+        Priority: MEDIUM (P2) 💰💰 - Phase 2 scenario
+        """
+        resources = []
+
+        # Extract detection parameters
+        nonprod_labels = detection_rules.get("nonprod_labels", ["dev", "test", "staging", "development"]) if detection_rules else ["dev", "test", "staging", "development"]
+
+        try:
+            # Initialize clients
+            forwarding_rules_client = compute_v1.GlobalForwardingRulesClient()
+
+            # List forwarding rules
+            frs = forwarding_rules_client.list(project=self.project_id)
+
+            for fr in frs:
+                # Check network tier
+                network_tier = fr.network_tier if hasattr(fr, 'network_tier') else None
+
+                if network_tier == "PREMIUM":
+                    # Check environment label
+                    labels = fr.labels if hasattr(fr, 'labels') and fr.labels else {}
+                    env = labels.get('environment', '').lower()
+
+                    if env in nonprod_labels:
+                        # Premium tier on non-prod → waste opportunity
+                        # Estimate potential savings (29% on egress costs)
+                        # Conservative estimate: $20/month savings
+                        monthly_potential_savings = 20.00
+
+                        resources.append(
+                            OrphanResourceData(
+                                resource_id=fr.name,
+                                resource_type="gcp_lb_premium_tier_nonprod",
+                                resource_name=fr.name,
+                                region="global",
+                                estimated_monthly_cost=round(monthly_potential_savings, 2),
+                                resource_metadata={
+                                    "forwarding_rule_id": str(fr.id),
+                                    "ip_address": fr.IP_address if hasattr(fr, 'IP_address') else fr.IPAddress,
+                                    "current_network_tier": "PREMIUM",
+                                    "recommended_network_tier": "STANDARD",
+                                    "environment": env,
+                                    "egress_savings_pct": 29,
+                                    "premium_egress_cost": "$0.12/GB",
+                                    "standard_egress_cost": "$0.085/GB",
+                                    "confidence": "MEDIUM",
+                                    "impact": "MEDIUM - Premium tier unnecessary for non-prod",
+                                    "recommendation": "Switch to Standard network tier for dev/test/staging environments",
+                                    "gcloud_command": f"# Recreate forwarding rule with --network-tier=STANDARD"
+                                },
+                            )
+                        )
+
+        except Exception as e:
+            logger.error(f"Error in scan_lb_premium_tier_nonprod: {e}")
+
+        return resources
+
     # AWS-specific EC2 instance methods (not applicable to GCP)
     async def scan_oversized_instances(
         self, region: str, detection_rules: dict | None = None
