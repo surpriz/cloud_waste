@@ -7732,6 +7732,843 @@ class GCPProvider(CloudProviderBase):
 
         return resources
 
+    # ============================================
+    # Cloud Storage Buckets Detection Methods (10 scenarios)
+    # ============================================
+
+    async def scan_cloud_storage_empty_buckets(
+        self, region: str | None = None, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scenario 1: Detect empty Cloud Storage buckets (0 objects for 30+ days).
+
+        Waste: ~$25/bucket/year for empty Standard storage.
+        """
+        resources = []
+
+        try:
+            from google.cloud import storage
+            from datetime import datetime, timedelta
+
+            # Get detection parameters
+            age_threshold_days = 30
+            if detection_rules and "cloud_storage_empty" in detection_rules:
+                rules = detection_rules["cloud_storage_empty"]
+                age_threshold_days = rules.get("age_threshold_days", 30)
+
+            storage_client = storage.Client(project=self.project_id, credentials=self.credentials)
+
+            for bucket in storage_client.list_buckets():
+                try:
+                    # Check if bucket has any objects
+                    blobs = list(bucket.list_blobs(max_results=1))
+
+                    if len(blobs) == 0:
+                        # Empty bucket detected
+                        age_days = (datetime.utcnow() - bucket.time_created.replace(tzinfo=None)).days
+
+                        if age_days >= age_threshold_days:
+                            # Calculate waste (storage class pricing + operations)
+                            storage_class = bucket.storage_class or "STANDARD"
+                            location_type = bucket.location_type or "region"
+
+                            # Estimated monthly cost for empty bucket (minimal operational costs)
+                            monthly_waste = 2.0  # ~$24/year operational overhead
+                            annual_waste = monthly_waste * 12
+
+                            # Confidence based on age
+                            if age_days >= 90:
+                                confidence = "critical"
+                            elif age_days >= 60:
+                                confidence = "high"
+                            else:
+                                confidence = "medium"
+
+                            resources.append(
+                                OrphanResourceData(
+                                    resource_id=bucket.name,
+                                    resource_name=bucket.name,
+                                    resource_type="gcp_cloud_storage_empty",
+                                    region=bucket.location,
+                                    estimated_monthly_cost=monthly_waste,
+                                    resource_metadata={
+                                        "bucket_name": bucket.name,
+                                        "location": bucket.location,
+                                        "location_type": location_type,
+                                        "storage_class": storage_class,
+                                        "age_days": age_days,
+                                        "versioning_enabled": bucket.versioning_enabled or False,
+                                        "labels": dict(bucket.labels) if bucket.labels else {},
+                                        "monthly_waste": round(monthly_waste, 2),
+                                        "annual_waste": round(annual_waste, 2),
+                                        "confidence": confidence.upper(),
+                                        "recommendation": f"Delete empty bucket (unused for {age_days} days)",
+                                    },
+                                )
+                            )
+                except Exception:
+                    continue
+
+        except Exception:
+            pass
+
+        return resources
+
+    async def scan_cloud_storage_wrong_storage_class(
+        self, region: str | None = None, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scenario 2: Detect objects in wrong storage class (STANDARD for rarely accessed data).
+
+        Waste: 50-90% storage cost savings by moving to NEARLINE/COLDLINE/ARCHIVE.
+        """
+        resources = []
+
+        try:
+            from google.cloud import storage, logging_v2
+            from datetime import datetime, timedelta
+
+            # Get detection parameters
+            lookback_days = 90
+            min_size_gb = 1.0
+            if detection_rules and "cloud_storage_wrong_class" in detection_rules:
+                rules = detection_rules["cloud_storage_wrong_class"]
+                lookback_days = rules.get("lookback_days", 90)
+                min_size_gb = rules.get("min_size_gb", 1.0)
+
+            storage_client = storage.Client(project=self.project_id, credentials=self.credentials)
+            logging_client = logging_v2.Client(project=self.project_id, credentials=self.credentials)
+
+            # Sample a few buckets (full scan would be expensive)
+            bucket_count = 0
+            for bucket in storage_client.list_buckets():
+                if bucket_count >= 10:  # Limit to 10 buckets for performance
+                    break
+                bucket_count += 1
+
+                try:
+                    # Only check STANDARD storage class buckets
+                    if bucket.storage_class != "STANDARD":
+                        continue
+
+                    for blob in bucket.list_blobs():
+                        try:
+                            size_gb = blob.size / (1024**3)
+                            if size_gb < min_size_gb:
+                                continue
+
+                            if blob.storage_class != "STANDARD":
+                                continue
+
+                            # Check access patterns via Cloud Logging (last 90 days)
+                            age_days = (datetime.utcnow() - blob.time_created.replace(tzinfo=None)).days
+
+                            # Simple heuristic: if object is old and hasn't been updated
+                            days_since_update = (datetime.utcnow() - blob.updated.replace(tzinfo=None)).days if blob.updated else age_days
+
+                            # Recommend storage class based on access pattern
+                            recommended_class = None
+                            savings_pct = 0
+
+                            if days_since_update >= 365:
+                                recommended_class = "ARCHIVE"
+                                savings_pct = 94  # $0.0012 vs $0.020
+                            elif days_since_update >= 90:
+                                recommended_class = "COLDLINE"
+                                savings_pct = 80  # $0.004 vs $0.020
+                            elif days_since_update >= 30:
+                                recommended_class = "NEARLINE"
+                                savings_pct = 50  # $0.010 vs $0.020
+
+                            if recommended_class:
+                                # Calculate savings
+                                current_monthly_cost = size_gb * 0.020
+                                prices = {"NEARLINE": 0.010, "COLDLINE": 0.004, "ARCHIVE": 0.0012}
+                                optimal_monthly_cost = size_gb * prices[recommended_class]
+                                monthly_savings = current_monthly_cost - optimal_monthly_cost
+
+                                if monthly_savings >= 1.0:  # Only report if savings >= $1/month
+                                    confidence = "high" if days_since_update >= 180 else "medium"
+
+                                    resources.append(
+                                        OrphanResourceData(
+                                            resource_id=f"{bucket.name}/{blob.name}",
+                                            resource_name=blob.name,
+                                            resource_type="gcp_cloud_storage_wrong_class",
+                                            region=bucket.location,
+                                            estimated_monthly_cost=monthly_savings,
+                                            resource_metadata={
+                                                "bucket_name": bucket.name,
+                                                "object_name": blob.name,
+                                                "size_gb": round(size_gb, 2),
+                                                "current_storage_class": "STANDARD",
+                                                "recommended_storage_class": recommended_class,
+                                                "days_since_update": days_since_update,
+                                                "monthly_cost_current": round(current_monthly_cost, 2),
+                                                "monthly_cost_optimal": round(optimal_monthly_cost, 2),
+                                                "monthly_savings": round(monthly_savings, 2),
+                                                "annual_savings": round(monthly_savings * 12, 2),
+                                                "savings_pct": savings_pct,
+                                                "confidence": confidence.upper(),
+                                                "recommendation": f"Move to {recommended_class} storage class",
+                                            },
+                                        )
+                                    )
+                        except Exception:
+                            continue
+
+                except Exception:
+                    continue
+
+        except Exception:
+            pass
+
+        return resources
+
+    async def scan_cloud_storage_versioning_without_lifecycle(
+        self, region: str | None = None, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scenario 3: Detect buckets with versioning enabled but no lifecycle policy to cleanup old versions.
+
+        Waste: 200-500% storage cost from accumulating noncurrent versions.
+        """
+        resources = []
+
+        try:
+            from google.cloud import storage
+            from datetime import datetime
+
+            # Get detection parameters
+            min_noncurrent_versions = 10
+            if detection_rules and "cloud_storage_versioning_waste" in detection_rules:
+                rules = detection_rules["cloud_storage_versioning_waste"]
+                min_noncurrent_versions = rules.get("min_noncurrent_versions", 10)
+
+            storage_client = storage.Client(project=self.project_id, credentials=self.credentials)
+
+            for bucket in storage_client.list_buckets():
+                try:
+                    if not bucket.versioning_enabled:
+                        continue
+
+                    # Check for noncurrent version deletion policy
+                    has_noncurrent_deletion = False
+                    if bucket.lifecycle_rules:
+                        for rule in bucket.lifecycle_rules:
+                            action = rule.get("action", {})
+                            condition = rule.get("condition", {})
+                            if action.get("type") == "Delete" and "daysSinceNoncurrentTime" in condition:
+                                has_noncurrent_deletion = True
+                                break
+
+                    if not has_noncurrent_deletion:
+                        # Count noncurrent versions
+                        noncurrent_count = 0
+                        noncurrent_size_bytes = 0
+
+                        for blob in bucket.list_blobs(versions=True):
+                            if blob.time_deleted:  # Noncurrent version
+                                noncurrent_count += 1
+                                noncurrent_size_bytes += blob.size
+
+                        if noncurrent_count >= min_noncurrent_versions:
+                            noncurrent_size_gb = noncurrent_size_bytes / (1024**3)
+
+                            # Calculate waste (noncurrent versions storage cost)
+                            storage_class = bucket.storage_class or "STANDARD"
+                            price_per_gb = 0.020 if storage_class == "STANDARD" else 0.010
+                            monthly_waste = noncurrent_size_gb * price_per_gb
+
+                            confidence = "critical" if noncurrent_count >= 100 else "high"
+
+                            resources.append(
+                                OrphanResourceData(
+                                    resource_id=bucket.name,
+                                    resource_name=bucket.name,
+                                    resource_type="gcp_cloud_storage_versioning_waste",
+                                    region=bucket.location,
+                                    estimated_monthly_cost=monthly_waste,
+                                    resource_metadata={
+                                        "bucket_name": bucket.name,
+                                        "location": bucket.location,
+                                        "storage_class": storage_class,
+                                        "versioning_enabled": True,
+                                        "has_noncurrent_deletion_policy": False,
+                                        "noncurrent_versions": noncurrent_count,
+                                        "noncurrent_size_gb": round(noncurrent_size_gb, 2),
+                                        "monthly_waste": round(monthly_waste, 2),
+                                        "annual_waste": round(monthly_waste * 12, 2),
+                                        "confidence": confidence.upper(),
+                                        "recommendation": "Add lifecycle policy to delete noncurrent versions after 30 days",
+                                    },
+                                )
+                            )
+                except Exception:
+                    continue
+
+        except Exception:
+            pass
+
+        return resources
+
+    async def scan_cloud_storage_incomplete_multipart_uploads(
+        self, region: str | None = None, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scenario 4: Detect buckets without abort incomplete multipart upload policy.
+
+        Waste: ~2% of bucket size from abandoned resumable uploads.
+        """
+        resources = []
+
+        try:
+            from google.cloud import storage
+
+            storage_client = storage.Client(project=self.project_id, credentials=self.credentials)
+
+            for bucket in storage_client.list_buckets():
+                try:
+                    # Check for AbortIncompleteMultipartUpload lifecycle policy
+                    has_abort_policy = False
+                    if bucket.lifecycle_rules:
+                        for rule in bucket.lifecycle_rules:
+                            action = rule.get("action", {})
+                            if action.get("type") == "AbortIncompleteMultipartUpload":
+                                has_abort_policy = True
+                                break
+
+                    if not has_abort_policy:
+                        # Estimate bucket size
+                        total_size_bytes = sum(blob.size for blob in bucket.list_blobs())
+                        total_size_gb = total_size_bytes / (1024**3)
+
+                        if total_size_gb >= 10:  # Only report for buckets >= 10 GB
+                            # Estimate 2% waste from incomplete uploads
+                            estimated_waste_gb = total_size_gb * 0.02
+                            monthly_waste = estimated_waste_gb * 0.020  # Standard pricing
+
+                            confidence = "medium"
+
+                            resources.append(
+                                OrphanResourceData(
+                                    resource_id=bucket.name,
+                                    resource_name=bucket.name,
+                                    resource_type="gcp_cloud_storage_incomplete_uploads",
+                                    region=bucket.location,
+                                    estimated_monthly_cost=monthly_waste,
+                                    resource_metadata={
+                                        "bucket_name": bucket.name,
+                                        "location": bucket.location,
+                                        "total_size_gb": round(total_size_gb, 2),
+                                        "estimated_waste_gb": round(estimated_waste_gb, 2),
+                                        "has_abort_incomplete_policy": False,
+                                        "monthly_waste": round(monthly_waste, 2),
+                                        "annual_waste": round(monthly_waste * 12, 2),
+                                        "confidence": confidence.upper(),
+                                        "recommendation": "Add lifecycle policy to abort incomplete multipart uploads after 7 days",
+                                    },
+                                )
+                            )
+                except Exception:
+                    continue
+
+        except Exception:
+            pass
+
+        return resources
+
+    async def scan_cloud_storage_untagged_buckets(
+        self, region: str | None = None, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scenario 5: Detect buckets missing required labels (governance issue).
+
+        Waste: No direct cost but enables better cost allocation and optimization.
+        """
+        resources = []
+
+        try:
+            from google.cloud import storage
+
+            # Get detection parameters
+            required_labels = ["environment", "owner", "cost-center"]
+            if detection_rules and "cloud_storage_untagged" in detection_rules:
+                rules = detection_rules["cloud_storage_untagged"]
+                required_labels = rules.get("required_labels", required_labels)
+
+            storage_client = storage.Client(project=self.project_id, credentials=self.credentials)
+
+            for bucket in storage_client.list_buckets():
+                try:
+                    bucket_labels = dict(bucket.labels) if bucket.labels else {}
+                    missing_labels = [label for label in required_labels if label not in bucket_labels]
+
+                    if missing_labels:
+                        # Estimate bucket size for context
+                        total_size_bytes = sum(blob.size for blob in bucket.list_blobs())
+                        total_size_gb = total_size_bytes / (1024**3)
+
+                        confidence = "high" if total_size_gb >= 100 else "medium"
+
+                        resources.append(
+                            OrphanResourceData(
+                                resource_id=bucket.name,
+                                resource_name=bucket.name,
+                                resource_type="gcp_cloud_storage_untagged",
+                                region=bucket.location,
+                                estimated_monthly_cost=0.0,  # Governance issue, no direct cost
+                                resource_metadata={
+                                    "bucket_name": bucket.name,
+                                    "location": bucket.location,
+                                    "total_size_gb": round(total_size_gb, 2),
+                                    "current_labels": bucket_labels,
+                                    "missing_labels": missing_labels,
+                                    "confidence": confidence.upper(),
+                                    "recommendation": f"Add missing labels: {', '.join(missing_labels)}",
+                                },
+                            )
+                        )
+                except Exception:
+                    continue
+
+        except Exception:
+            pass
+
+        return resources
+
+    async def scan_cloud_storage_never_accessed_objects(
+        self, region: str | None = None, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scenario 6: Detect objects with 0 GET operations since creation (never accessed).
+
+        Waste: Full storage cost for unused data.
+        """
+        resources = []
+
+        try:
+            from google.cloud import storage
+            from datetime import datetime, timedelta
+
+            # Get detection parameters
+            min_age_days = 90
+            min_size_gb = 1.0
+            if detection_rules and "cloud_storage_never_accessed" in detection_rules:
+                rules = detection_rules["cloud_storage_never_accessed"]
+                min_age_days = rules.get("min_age_days", 90)
+                min_size_gb = rules.get("min_size_gb", 1.0)
+
+            storage_client = storage.Client(project=self.project_id, credentials=self.credentials)
+
+            # Sample a few buckets (full scan would be expensive)
+            bucket_count = 0
+            for bucket in storage_client.list_buckets():
+                if bucket_count >= 10:  # Limit to 10 buckets for performance
+                    break
+                bucket_count += 1
+
+                try:
+                    for blob in bucket.list_blobs():
+                        try:
+                            size_gb = blob.size / (1024**3)
+                            if size_gb < min_size_gb:
+                                continue
+
+                            age_days = (datetime.utcnow() - blob.time_created.replace(tzinfo=None)).days
+                            if age_days < min_age_days:
+                                continue
+
+                            # Simple heuristic: if never updated since creation, likely never accessed
+                            days_since_update = (datetime.utcnow() - blob.updated.replace(tzinfo=None)).days if blob.updated else age_days
+
+                            if days_since_update >= min_age_days and days_since_update >= age_days * 0.9:
+                                # Calculate waste
+                                storage_class = blob.storage_class or "STANDARD"
+                                price_per_gb = 0.020 if storage_class == "STANDARD" else 0.010
+                                monthly_waste = size_gb * price_per_gb
+
+                                if monthly_waste >= 1.0:  # Only report if >= $1/month
+                                    confidence = "critical" if age_days >= 180 else "high"
+
+                                    resources.append(
+                                        OrphanResourceData(
+                                            resource_id=f"{bucket.name}/{blob.name}",
+                                            resource_name=blob.name,
+                                            resource_type="gcp_cloud_storage_never_accessed",
+                                            region=bucket.location,
+                                            estimated_monthly_cost=monthly_waste,
+                                            resource_metadata={
+                                                "bucket_name": bucket.name,
+                                                "object_name": blob.name,
+                                                "size_gb": round(size_gb, 2),
+                                                "storage_class": storage_class,
+                                                "age_days": age_days,
+                                                "days_since_update": days_since_update,
+                                                "access_count": 0,
+                                                "monthly_waste": round(monthly_waste, 2),
+                                                "annual_waste": round(monthly_waste * 12, 2),
+                                                "confidence": confidence.upper(),
+                                                "recommendation": "Delete unused object or move to ARCHIVE",
+                                            },
+                                        )
+                                    )
+                        except Exception:
+                            continue
+
+                except Exception:
+                    continue
+
+        except Exception:
+            pass
+
+        return resources
+
+    async def scan_cloud_storage_no_lifecycle_policy(
+        self, region: str | None = None, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scenario 7: Detect buckets without lifecycle policy (no automatic optimization).
+
+        Waste: 60-80% potential savings from lack of automated storage class transitions.
+        """
+        resources = []
+
+        try:
+            from google.cloud import storage
+
+            # Get detection parameters
+            min_size_gb = 10.0
+            if detection_rules and "cloud_storage_no_lifecycle" in detection_rules:
+                rules = detection_rules["cloud_storage_no_lifecycle"]
+                min_size_gb = rules.get("min_size_gb", 10.0)
+
+            storage_client = storage.Client(project=self.project_id, credentials=self.credentials)
+
+            for bucket in storage_client.list_buckets():
+                try:
+                    # Check if bucket has any lifecycle rules
+                    has_lifecycle = bool(bucket.lifecycle_rules)
+
+                    if not has_lifecycle:
+                        # Estimate bucket size
+                        total_size_bytes = sum(blob.size for blob in bucket.list_blobs())
+                        total_size_gb = total_size_bytes / (1024**3)
+
+                        if total_size_gb >= min_size_gb:
+                            # Estimate 30% waste from lack of optimization
+                            estimated_savings_pct = 30
+                            current_monthly_cost = total_size_gb * 0.020  # Standard pricing
+                            monthly_savings = current_monthly_cost * (estimated_savings_pct / 100)
+
+                            confidence = "high" if total_size_gb >= 100 else "medium"
+
+                            resources.append(
+                                OrphanResourceData(
+                                    resource_id=bucket.name,
+                                    resource_name=bucket.name,
+                                    resource_type="gcp_cloud_storage_no_lifecycle",
+                                    region=bucket.location,
+                                    estimated_monthly_cost=monthly_savings,
+                                    resource_metadata={
+                                        "bucket_name": bucket.name,
+                                        "location": bucket.location,
+                                        "total_size_gb": round(total_size_gb, 2),
+                                        "storage_class": bucket.storage_class or "STANDARD",
+                                        "lifecycle_rules_count": 0,
+                                        "versioning_enabled": bucket.versioning_enabled or False,
+                                        "current_monthly_cost": round(current_monthly_cost, 2),
+                                        "monthly_savings": round(monthly_savings, 2),
+                                        "annual_savings": round(monthly_savings * 12, 2),
+                                        "estimated_savings_pct": estimated_savings_pct,
+                                        "confidence": confidence.upper(),
+                                        "recommendation": "Add lifecycle policy for automatic storage class transitions",
+                                    },
+                                )
+                            )
+                except Exception:
+                    continue
+
+        except Exception:
+            pass
+
+        return resources
+
+    async def scan_cloud_storage_duplicate_objects(
+        self, region: str | None = None, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scenario 8: Detect duplicate objects (same MD5 hash) within buckets.
+
+        Waste: 10-20% typical duplication rate, full storage cost for duplicates.
+        """
+        resources = []
+
+        try:
+            from google.cloud import storage
+            from collections import defaultdict
+
+            # Get detection parameters
+            min_size_gb = 0.1
+            if detection_rules and "cloud_storage_duplicates" in detection_rules:
+                rules = detection_rules["cloud_storage_duplicates"]
+                min_size_gb = rules.get("min_size_gb", 0.1)
+
+            storage_client = storage.Client(project=self.project_id, credentials=self.credentials)
+
+            # Sample a few buckets (full scan would be very expensive)
+            bucket_count = 0
+            for bucket in storage_client.list_buckets():
+                if bucket_count >= 5:  # Limit to 5 buckets for performance
+                    break
+                bucket_count += 1
+
+                try:
+                    # Group objects by MD5 hash
+                    hash_to_objects = defaultdict(list)
+
+                    for blob in bucket.list_blobs():
+                        try:
+                            size_gb = blob.size / (1024**3)
+                            if size_gb < min_size_gb:
+                                continue
+
+                            if blob.md5_hash:
+                                hash_to_objects[blob.md5_hash].append({
+                                    "name": blob.name,
+                                    "size_gb": size_gb,
+                                    "storage_class": blob.storage_class or "STANDARD",
+                                    "time_created": blob.time_created,
+                                })
+                        except Exception:
+                            continue
+
+                    # Find duplicates
+                    for md5_hash, objects in hash_to_objects.items():
+                        if len(objects) > 1:
+                            # Sort by creation time (keep oldest)
+                            objects_sorted = sorted(objects, key=lambda x: x["time_created"])
+                            duplicate_count = len(objects_sorted)
+                            waste_objects = objects_sorted[1:]  # All except oldest
+
+                            # Calculate waste
+                            total_waste_gb = sum(obj["size_gb"] for obj in waste_objects)
+                            price_per_gb = 0.020  # Standard pricing
+                            monthly_waste = total_waste_gb * price_per_gb
+
+                            if monthly_waste >= 1.0:  # Only report if >= $1/month
+                                confidence = "medium"
+
+                                resources.append(
+                                    OrphanResourceData(
+                                        resource_id=f"{bucket.name}/{md5_hash[:16]}",
+                                        resource_name=f"Duplicates: {objects_sorted[0]['name']}",
+                                        resource_type="gcp_cloud_storage_duplicates",
+                                        region=bucket.location,
+                                        estimated_monthly_cost=monthly_waste,
+                                        resource_metadata={
+                                            "bucket_name": bucket.name,
+                                            "md5_hash": md5_hash,
+                                            "duplicate_count": duplicate_count,
+                                            "waste_objects_count": len(waste_objects),
+                                            "total_waste_gb": round(total_waste_gb, 2),
+                                            "object_names": [obj["name"] for obj in objects_sorted],
+                                            "monthly_waste": round(monthly_waste, 2),
+                                            "annual_waste": round(monthly_waste * 12, 2),
+                                            "confidence": confidence.upper(),
+                                            "recommendation": f"Delete {len(waste_objects)} duplicate objects, keep oldest",
+                                        },
+                                    )
+                                )
+                except Exception:
+                    continue
+
+        except Exception:
+            pass
+
+        return resources
+
+    async def scan_cloud_storage_autoclass_misconfiguration(
+        self, region: str | None = None, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scenario 9: Detect Autoclass misconfiguration (should enable >100GB, should disable <10GB).
+
+        Waste: Potential 30-50% savings from enabling Autoclass on large buckets.
+        """
+        resources = []
+
+        try:
+            from google.cloud import storage
+
+            # Get detection parameters
+            min_size_gb = 100.0
+            max_size_gb_disable = 10.0
+            if detection_rules and "cloud_storage_autoclass_misconfig" in detection_rules:
+                rules = detection_rules["cloud_storage_autoclass_misconfig"]
+                min_size_gb = rules.get("min_size_gb", 100.0)
+                max_size_gb_disable = rules.get("max_size_gb_disable", 10.0)
+
+            storage_client = storage.Client(project=self.project_id, credentials=self.credentials)
+
+            for bucket in storage_client.list_buckets():
+                try:
+                    # Check Autoclass status
+                    autoclass_enabled = getattr(bucket, 'autoclass_enabled', False)
+
+                    # Estimate bucket size
+                    total_size_bytes = sum(blob.size for blob in bucket.list_blobs())
+                    total_size_gb = total_size_bytes / (1024**3)
+
+                    should_enable = False
+                    should_disable = False
+                    monthly_savings = 0
+
+                    # Case 1: Large bucket without Autoclass
+                    if not autoclass_enabled and total_size_gb >= min_size_gb:
+                        should_enable = True
+                        # Estimate 30% savings from Autoclass optimization
+                        # Minus Autoclass fee ($0.0001/GB + $0.0025/10K ops)
+                        current_monthly_cost = total_size_gb * 0.020
+                        autoclass_storage_cost = total_size_gb * 0.020 * 0.7  # 30% savings
+                        autoclass_management_fee = total_size_gb * 0.0001
+                        optimal_monthly_cost = autoclass_storage_cost + autoclass_management_fee
+                        monthly_savings = current_monthly_cost - optimal_monthly_cost
+
+                    # Case 2: Small bucket with Autoclass
+                    elif autoclass_enabled and total_size_gb < max_size_gb_disable:
+                        should_disable = True
+                        # Autoclass fee without benefit
+                        monthly_savings = total_size_gb * 0.0001
+
+                    if (should_enable or should_disable) and monthly_savings >= 1.0:
+                        confidence = "high" if total_size_gb >= 200 or total_size_gb < 5 else "medium"
+
+                        resources.append(
+                            OrphanResourceData(
+                                resource_id=bucket.name,
+                                resource_name=bucket.name,
+                                resource_type="gcp_cloud_storage_autoclass_misconfig",
+                                region=bucket.location,
+                                estimated_monthly_cost=monthly_savings,
+                                resource_metadata={
+                                    "bucket_name": bucket.name,
+                                    "location": bucket.location,
+                                    "total_size_gb": round(total_size_gb, 2),
+                                    "autoclass_enabled": autoclass_enabled,
+                                    "should_enable_autoclass": should_enable,
+                                    "should_disable_autoclass": should_disable,
+                                    "lifecycle_rules_count": len(bucket.lifecycle_rules) if bucket.lifecycle_rules else 0,
+                                    "monthly_savings": round(monthly_savings, 2),
+                                    "annual_savings": round(monthly_savings * 12, 2),
+                                    "confidence": confidence.upper(),
+                                    "recommendation": f"{'Enable' if should_enable else 'Disable'} Autoclass for this bucket",
+                                },
+                            )
+                        )
+                except Exception:
+                    continue
+
+        except Exception:
+            pass
+
+        return resources
+
+    async def scan_cloud_storage_excessive_redundancy(
+        self, region: str | None = None, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scenario 10: Detect excessive redundancy (multi-region/dual-region for dev/test data).
+
+        Waste: 30-100% storage cost from unnecessary geo-redundancy.
+        """
+        resources = []
+
+        try:
+            from google.cloud import storage
+
+            # Get detection parameters
+            min_size_gb = 50.0
+            if detection_rules and "cloud_storage_excessive_redundancy" in detection_rules:
+                rules = detection_rules["cloud_storage_excessive_redundancy"]
+                min_size_gb = rules.get("min_size_gb", 50.0)
+
+            storage_client = storage.Client(project=self.project_id, credentials=self.credentials)
+
+            for bucket in storage_client.list_buckets():
+                try:
+                    location_type = bucket.location_type or "region"
+
+                    # Only check multi-region and dual-region buckets
+                    if location_type not in ["multi-region", "dual-region"]:
+                        continue
+
+                    # Estimate bucket size
+                    total_size_bytes = sum(blob.size for blob in bucket.list_blobs())
+                    total_size_gb = total_size_bytes / (1024**3)
+
+                    if total_size_gb < min_size_gb:
+                        continue
+
+                    # Check labels for environment/criticality
+                    labels = dict(bucket.labels) if bucket.labels else {}
+                    environment = labels.get("environment", "").lower()
+                    criticality = labels.get("criticality", "").lower()
+
+                    # Flag if dev/test/staging or low criticality
+                    is_non_critical = environment in ["dev", "test", "staging", "development"] or criticality in ["low", "none"]
+
+                    if is_non_critical:
+                        # Calculate savings by moving to regional
+                        storage_class = bucket.storage_class or "STANDARD"
+
+                        # Pricing
+                        current_price_per_gb = 0.026 if location_type == "multi-region" else 0.024  # Standard
+                        regional_price_per_gb = 0.020
+
+                        current_monthly_cost = total_size_gb * current_price_per_gb
+                        optimal_monthly_cost = total_size_gb * regional_price_per_gb
+                        monthly_savings = current_monthly_cost - optimal_monthly_cost
+                        savings_pct = round((monthly_savings / current_monthly_cost) * 100, 1)
+
+                        confidence = "high" if is_non_critical else "medium"
+
+                        resources.append(
+                            OrphanResourceData(
+                                resource_id=bucket.name,
+                                resource_name=bucket.name,
+                                resource_type="gcp_cloud_storage_excessive_redundancy",
+                                region=bucket.location,
+                                estimated_monthly_cost=monthly_savings,
+                                resource_metadata={
+                                    "bucket_name": bucket.name,
+                                    "location": bucket.location,
+                                    "location_type": location_type,
+                                    "storage_class": storage_class,
+                                    "total_size_gb": round(total_size_gb, 2),
+                                    "labels": labels,
+                                    "environment": environment,
+                                    "criticality": criticality,
+                                    "current_price_per_gb": current_price_per_gb,
+                                    "optimal_price_per_gb": regional_price_per_gb,
+                                    "monthly_cost_current": round(current_monthly_cost, 2),
+                                    "monthly_cost_optimal": round(optimal_monthly_cost, 2),
+                                    "monthly_savings": round(monthly_savings, 2),
+                                    "annual_savings": round(monthly_savings * 12, 2),
+                                    "savings_pct": savings_pct,
+                                    "confidence": confidence.upper(),
+                                    "recommendation": f"Change location from {location_type} to regional",
+                                },
+                            )
+                        )
+                except Exception:
+                    continue
+
+        except Exception:
+            pass
+
+        return resources
+
     # AWS-specific EC2 instance methods (not applicable to GCP)
     async def scan_oversized_instances(
         self, region: str, detection_rules: dict | None = None

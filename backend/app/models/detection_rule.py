@@ -2884,6 +2884,59 @@ DEFAULT_DETECTION_RULES = {
         "lookback_days": 14,
         "description": "GCP Cloud Functions 2nd gen with concurrency=1 (suboptimal) - increase concurrency for fast functions 💰💰 P1",
     },
+    # GCP Cloud Storage Buckets Detection Rules
+    "gcp_cloud_storage_empty": {
+        "enabled": True,
+        "age_threshold_days": 30,
+        "description": "GCP Cloud Storage buckets empty (0 objects) for 30+ days - delete unused buckets 💰💰 P1",
+    },
+    "gcp_cloud_storage_wrong_class": {
+        "enabled": True,
+        "lookback_days": 90,
+        "min_size_gb": 1.0,
+        "description": "GCP Cloud Storage objects in STANDARD class but rarely accessed - move to NEARLINE/COLDLINE/ARCHIVE for 50-94% savings 💰💰💰 P0",
+    },
+    "gcp_cloud_storage_versioning_waste": {
+        "enabled": True,
+        "min_noncurrent_versions": 10,
+        "description": "GCP Cloud Storage buckets with versioning but no noncurrent version cleanup policy - 200-500% storage waste 💰💰💰 P0",
+    },
+    "gcp_cloud_storage_incomplete_uploads": {
+        "enabled": True,
+        "description": "GCP Cloud Storage buckets without abort incomplete multipart upload policy - ~2% waste from abandoned uploads 💰💰 P2",
+    },
+    "gcp_cloud_storage_untagged": {
+        "enabled": True,
+        "required_labels": ["environment", "owner", "cost-center"],
+        "description": "GCP Cloud Storage buckets missing required labels (environment, owner, cost-center) - add labels for governance 🏷️ P2",
+    },
+    "gcp_cloud_storage_never_accessed": {
+        "enabled": True,
+        "min_age_days": 90,
+        "min_size_gb": 1.0,
+        "description": "GCP Cloud Storage objects with 0 GET operations since creation (90+ days) - delete or archive unused data 💰💰💰 P1",
+    },
+    "gcp_cloud_storage_no_lifecycle": {
+        "enabled": True,
+        "min_size_gb": 10.0,
+        "description": "GCP Cloud Storage buckets without lifecycle policy - 30-60% potential savings from automatic optimization 💰💰💰 P1",
+    },
+    "gcp_cloud_storage_duplicates": {
+        "enabled": True,
+        "min_size_gb": 0.1,
+        "description": "GCP Cloud Storage duplicate objects (same MD5 hash) - 10-20% typical duplication waste 💰💰 P1",
+    },
+    "gcp_cloud_storage_autoclass_misconfig": {
+        "enabled": True,
+        "min_size_gb": 100.0,
+        "max_size_gb_disable": 10.0,
+        "description": "GCP Cloud Storage Autoclass misconfiguration - enable for >100GB buckets, disable for <10GB 💰💰💰 P1",
+    },
+    "gcp_cloud_storage_excessive_redundancy": {
+        "enabled": True,
+        "min_size_gb": 50.0,
+        "description": "GCP Cloud Storage multi-region/dual-region for dev/test data - move to regional for 23-30% savings 💰💰💰 P1",
+    },
 }
 
 

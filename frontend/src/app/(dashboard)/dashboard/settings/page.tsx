@@ -624,8 +624,11 @@ const RESOURCE_CATEGORIES = {
       "gcp_disk_snapshot_no_retention_policy", "gcp_disk_snapshot_deleted_vm", "gcp_disk_snapshot_failed",
       "gcp_disk_snapshot_untagged", "gcp_disk_snapshot_excessive_retention_nonprod", "gcp_disk_snapshot_duplicate",
       "gcp_disk_snapshot_never_restored",
-      // GCS Buckets
-      "gcs_bucket_empty"
+      // Cloud Storage Buckets (10 scenarios)
+      "gcp_cloud_storage_empty", "gcp_cloud_storage_wrong_class", "gcp_cloud_storage_versioning_waste",
+      "gcp_cloud_storage_incomplete_uploads", "gcp_cloud_storage_untagged", "gcp_cloud_storage_never_accessed",
+      "gcp_cloud_storage_no_lifecycle", "gcp_cloud_storage_duplicates", "gcp_cloud_storage_autoclass_misconfig",
+      "gcp_cloud_storage_excessive_redundancy"
     ],
     networking: ["static_ip_unattached", "nat_gateway_unused"],
     database: ["cloud_sql_stopped", "cloud_sql_idle"],
@@ -917,8 +920,17 @@ const GCP_RESOURCE_LABELS: { [key: string]: string } = {
   gcp_disk_snapshot_excessive_retention_nonprod: "Disk Snapshot (Dev/Test >90 days Retention) 💰💰💰 P1",
   gcp_disk_snapshot_duplicate: "Disk Snapshot (Duplicate - Created <1h Apart) 💰💰💰 P0",
   gcp_disk_snapshot_never_restored: "Disk Snapshot (Never Restored >180 days) 💰💰💰 P1",
-  // GCS Buckets
-  gcs_bucket_empty: "Cloud Storage Buckets (Empty)",
+  // Cloud Storage Buckets (10 scenarios)
+  gcp_cloud_storage_empty: "Cloud Storage Bucket (Empty 30+ days) 💰💰 P1",
+  gcp_cloud_storage_wrong_class: "Cloud Storage Object (Wrong Storage Class - STANDARD for cold data) 💰💰💰 P0",
+  gcp_cloud_storage_versioning_waste: "Cloud Storage Bucket (Versioning Without Lifecycle Policy) 💰💰💰 P0",
+  gcp_cloud_storage_incomplete_uploads: "Cloud Storage Bucket (No Abort Incomplete Upload Policy) 💰💰 P2",
+  gcp_cloud_storage_untagged: "Cloud Storage Bucket (Missing Required Labels) 🏷️ P2",
+  gcp_cloud_storage_never_accessed: "Cloud Storage Object (Never Accessed 90+ days) 💰💰💰 P1",
+  gcp_cloud_storage_no_lifecycle: "Cloud Storage Bucket (No Lifecycle Policy) 💰💰💰 P1",
+  gcp_cloud_storage_duplicates: "Cloud Storage Object (Duplicate MD5 Hash) 💰💰 P1",
+  gcp_cloud_storage_autoclass_misconfig: "Cloud Storage Bucket (Autoclass Misconfiguration) 💰💰💰 P1",
+  gcp_cloud_storage_excessive_redundancy: "Cloud Storage Bucket (Multi-Region for Dev/Test) 💰💰💰 P1",
   // Networking
   static_ip_unattached: "Static IPs (Unattached)",
   nat_gateway_unused: "Cloud NAT (Unused)",
