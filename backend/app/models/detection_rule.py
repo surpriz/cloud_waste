@@ -2698,6 +2698,75 @@ DEFAULT_DETECTION_RULES = {
         "description": "GCP Disk Snapshots never restored (>180 days, never used) - unclear purpose 💰💰💰 P1",
     },
     # =================================================================
+    # GCP STATIC EXTERNAL IPS DETECTION RULES (10 scenarios - Networking)
+    # =================================================================
+    "gcp_static_ip_unattached": {
+        "enabled": True,
+        "min_age_days": 7,
+        "confidence_medium_days": 7,
+        "confidence_high_days": 30,
+        "confidence_critical_days": 90,
+        "description": "GCP Static External IP reserved but unattached - 100% waste $2.88/month per IP 💰💰💰💰 P0",
+    },
+    "gcp_static_ip_stopped_vm": {
+        "enabled": True,
+        "min_stopped_days": 7,
+        "confidence_medium_days": 7,
+        "confidence_high_days": 30,
+        "confidence_critical_days": 90,
+        "description": "GCP Static External IP attached to stopped VM - 100% waste $2.88/month per IP 💰💰💰💰 P0",
+    },
+    "gcp_static_ip_idle_resource": {
+        "enabled": True,
+        "cpu_threshold": 0.05,
+        "lookback_days": 7,
+        "confidence_medium_days": 7,
+        "confidence_high_days": 14,
+        "description": "GCP Static External IP attached to idle resource (CPU <5%) - potential waste 💰💰 P1",
+    },
+    "gcp_static_ip_premium_nonprod": {
+        "enabled": True,
+        "nonprod_labels": ["dev", "test", "staging", "development"],
+        "description": "GCP Static External IP premium tier on non-prod - network tier waste ($0.12/GB vs $0.085/GB egress) 💰💰 P2",
+    },
+    "gcp_static_ip_untagged": {
+        "enabled": True,
+        "required_labels": ["environment", "owner", "team"],
+        "min_age_days": 7,
+        "governance_waste_pct": 0.05,
+        "description": "GCP Static External IP untagged (missing labels) - governance waste 💰 P3",
+    },
+    "gcp_static_ip_old_never_used": {
+        "enabled": True,
+        "min_age_days": 90,
+        "confidence_medium_days": 90,
+        "confidence_high_days": 180,
+        "confidence_critical_days": 365,
+        "description": "GCP Static External IP old never used (90+ days unattached) - 100% waste $2.88/month per IP 💰💰💰💰 P0",
+    },
+    "gcp_static_ip_wrong_type": {
+        "enabled": True,
+        "description": "GCP Static External IP wrong type (Global IP on VM instance) - architecture waste 💰💰 P3",
+    },
+    "gcp_static_ip_multiple_per_resource": {
+        "enabled": True,
+        "max_ips_per_resource": 1,
+        "description": "GCP Static External IP multiple per resource - potential over-provisioning 💰💰 P1",
+    },
+    "gcp_static_ip_devtest_not_released": {
+        "enabled": True,
+        "devtest_labels": ["dev", "test", "staging", "development"],
+        "max_age_days": 30,
+        "confidence_medium_days": 30,
+        "confidence_high_days": 60,
+        "confidence_critical_days": 90,
+        "description": "GCP Static External IP dev/test not released (>30 days) - 100% waste $2.88/month per IP 💰💰💰💰 P0",
+    },
+    "gcp_static_ip_orphaned": {
+        "enabled": True,
+        "description": "GCP Static External IP orphaned (resource deleted) - 100% waste $2.88/month per IP 💰💰💰💰 P0",
+    },
+    # =================================================================
     # GCP GKE CLUSTERS DETECTION RULES (10 scenarios)
     # =================================================================
     "gke_cluster_empty": {

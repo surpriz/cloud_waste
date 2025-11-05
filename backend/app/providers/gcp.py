@@ -9443,6 +9443,1095 @@ class GCPProvider(CloudProviderBase):
 
         return resources
 
+    # ============================================================================
+    # GCP Static External IPs Detection (10 scenarios - Networking)
+    # ============================================================================
+
+    async def scan_static_ip_unattached(
+        self, region: str | None = None, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scenario 1: Detect reserved but unattached Static External IPs.
+
+        Waste: Static IPs cost $2.88/month when not attached to a running resource.
+        This is the #1 cause of IP waste (60% of typical waste).
+
+        Detection: status='RESERVED' AND users=[] (empty list)
+        Cost: $2.88/month per IP ($0.004/hour)
+        Priority: CRITICAL (P0) 💰💰💰
+        """
+        resources = []
+
+        try:
+            from google.cloud import compute_v1
+            from datetime import datetime, timezone
+
+            # Get detection parameters
+            min_age_days = 7
+            if detection_rules and "gcp_static_ip_unattached" in detection_rules:
+                rules = detection_rules["gcp_static_ip_unattached"]
+                min_age_days = rules.get("min_age_days", 7)
+
+            addresses_client = compute_v1.AddressesClient(credentials=self.credentials)
+            regions_client = compute_v1.RegionsClient(credentials=self.credentials)
+
+            # Get all active regions
+            regions_to_scan = []
+            for gcp_region in regions_client.list(project=self.project_id):
+                if gcp_region.status == "UP":
+                    regions_to_scan.append(gcp_region.name)
+
+            # Scan regional IPs
+            for gcp_region in regions_to_scan:
+                try:
+                    request = compute_v1.ListAddressesRequest(
+                        project=self.project_id,
+                        region=gcp_region
+                    )
+
+                    for address in addresses_client.list(request=request):
+                        # Check if IP is unattached (empty users list)
+                        if not address.users:
+                            # Calculate age
+                            created_at = datetime.fromisoformat(
+                                address.creation_timestamp.replace('Z', '+00:00')
+                            )
+                            age_days = (datetime.now(timezone.utc) - created_at).days
+
+                            # Filter by minimum age
+                            if age_days >= min_age_days:
+                                # Cost calculation
+                                monthly_cost = 2.88  # $0.004/hour * 24 * 30
+                                annual_cost = monthly_cost * 12
+                                months_wasted = age_days / 30
+                                already_wasted = monthly_cost * months_wasted
+
+                                # Determine confidence
+                                if age_days >= 90:
+                                    confidence = "CRITICAL"
+                                elif age_days >= 30:
+                                    confidence = "HIGH"
+                                elif age_days >= 7:
+                                    confidence = "MEDIUM"
+                                else:
+                                    confidence = "LOW"
+
+                                resources.append(OrphanResourceData(
+                                    resource_id=address.name,
+                                    resource_type="gcp_static_ip_unattached",
+                                    resource_name=address.name,
+                                    region=gcp_region,
+                                    estimated_monthly_cost=monthly_cost,
+                                    resource_metadata={
+                                        "ip_address": address.address,
+                                        "status": address.status,
+                                        "network_tier": address.network_tier,
+                                        "address_type": address.address_type,
+                                        "age_days": age_days,
+                                        "created_at": address.creation_timestamp,
+                                        "already_wasted": round(already_wasted, 2),
+                                        "annual_cost": round(annual_cost, 2),
+                                        "confidence": confidence,
+                                        "labels": dict(address.labels) if address.labels else {},
+                                        "recommendation": f"DELETE immediately to save ${annual_cost:.2f}/year. IP has been unused for {age_days} days.",
+                                        "waste_reason": f"Reserved IP not attached to any resource for {age_days} days"
+                                    }
+                                ))
+
+                except Exception as e:
+                    logger.error(f"Error scanning region {gcp_region} for unattached IPs: {e}")
+                    continue
+
+            # Scan global IPs
+            try:
+                global_client = compute_v1.GlobalAddressesClient(credentials=self.credentials)
+                request = compute_v1.ListGlobalAddressesRequest(project=self.project_id)
+
+                for address in global_client.list(request=request):
+                    if not address.users:
+                        created_at = datetime.fromisoformat(
+                            address.creation_timestamp.replace('Z', '+00:00')
+                        )
+                        age_days = (datetime.now(timezone.utc) - created_at).days
+
+                        if age_days >= min_age_days:
+                            monthly_cost = 2.88
+                            annual_cost = monthly_cost * 12
+                            months_wasted = age_days / 30
+                            already_wasted = monthly_cost * months_wasted
+
+                            if age_days >= 90:
+                                confidence = "CRITICAL"
+                            elif age_days >= 30:
+                                confidence = "HIGH"
+                            elif age_days >= 7:
+                                confidence = "MEDIUM"
+                            else:
+                                confidence = "LOW"
+
+                            resources.append(OrphanResourceData(
+                                resource_id=address.name,
+                                resource_type="gcp_static_ip_unattached",
+                                resource_name=address.name,
+                                region="global",
+                                estimated_monthly_cost=monthly_cost,
+                                resource_metadata={
+                                    "ip_address": address.address,
+                                    "status": address.status,
+                                    "network_tier": address.network_tier,
+                                    "address_type": "EXTERNAL",
+                                    "age_days": age_days,
+                                    "created_at": address.creation_timestamp,
+                                    "already_wasted": round(already_wasted, 2),
+                                    "annual_cost": round(annual_cost, 2),
+                                    "confidence": confidence,
+                                    "labels": dict(address.labels) if address.labels else {},
+                                    "scope": "GLOBAL",
+                                    "recommendation": f"DELETE immediately to save ${annual_cost:.2f}/year. Global IP has been unused for {age_days} days.",
+                                    "waste_reason": f"Reserved global IP not attached to any resource for {age_days} days"
+                                }
+                            ))
+
+            except Exception as e:
+                logger.error(f"Error scanning global IPs: {e}")
+
+        except Exception as e:
+            logger.error(f"Error in scan_static_ip_unattached: {e}")
+
+        return resources
+
+    async def scan_static_ip_stopped_vm(
+        self, region: str | None = None, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scenario 2: Detect Static External IPs attached to stopped VMs.
+
+        Waste: IPs attached to stopped/terminated VMs still cost $2.88/month.
+        The IP status shows 'IN_USE' (misleading!) but VM is not RUNNING.
+
+        Detection: status='IN_USE' AND users[0] points to stopped VM
+        Cost: $2.88/month per IP
+        Priority: CRITICAL (P0) 💰💰💰
+        """
+        resources = []
+
+        try:
+            from google.cloud import compute_v1
+            from datetime import datetime, timezone
+            import re
+
+            # Get detection parameters
+            min_stopped_days = 7
+            if detection_rules and "gcp_static_ip_stopped_vm" in detection_rules:
+                rules = detection_rules["gcp_static_ip_stopped_vm"]
+                min_stopped_days = rules.get("min_stopped_days", 7)
+
+            addresses_client = compute_v1.AddressesClient(credentials=self.credentials)
+            instances_client = compute_v1.InstancesClient(credentials=self.credentials)
+            regions_client = compute_v1.RegionsClient(credentials=self.credentials)
+
+            # Get all active regions
+            regions_to_scan = []
+            for gcp_region in regions_client.list(project=self.project_id):
+                if gcp_region.status == "UP":
+                    regions_to_scan.append(gcp_region.name)
+
+            for gcp_region in regions_to_scan:
+                try:
+                    request = compute_v1.ListAddressesRequest(
+                        project=self.project_id,
+                        region=gcp_region
+                    )
+
+                    for address in addresses_client.list(request=request):
+                        # Check if IP is attached
+                        if address.users and address.status == "IN_USE":
+                            resource_url = address.users[0]
+
+                            # Check if it's a VM instance
+                            if "/instances/" in resource_url:
+                                # Parse zone and instance name
+                                match = re.search(
+                                    r'/zones/([^/]+)/instances/([^/]+)',
+                                    resource_url
+                                )
+
+                                if match:
+                                    zone = match.group(1)
+                                    instance_name = match.group(2)
+
+                                    try:
+                                        # Get VM instance
+                                        instance = instances_client.get(
+                                            project=self.project_id,
+                                            zone=zone,
+                                            instance=instance_name
+                                        )
+
+                                        # Check if VM is stopped/terminated
+                                        if instance.status in ["STOPPED", "TERMINATED", "SUSPENDED"]:
+                                            # Calculate stopped duration
+                                            stopped_days = 0
+                                            if instance.last_stop_timestamp:
+                                                stopped_at = datetime.fromisoformat(
+                                                    instance.last_stop_timestamp.replace('Z', '+00:00')
+                                                )
+                                                stopped_days = (datetime.now(timezone.utc) - stopped_at).days
+
+                                            # Filter by minimum stopped duration
+                                            if stopped_days >= min_stopped_days:
+                                                # Cost calculation
+                                                monthly_cost = 2.88
+                                                annual_cost = monthly_cost * 12
+                                                months_stopped = stopped_days / 30
+                                                already_wasted = monthly_cost * months_stopped
+
+                                                # Confidence
+                                                if stopped_days >= 30:
+                                                    confidence = "CRITICAL"
+                                                elif stopped_days >= 14:
+                                                    confidence = "HIGH"
+                                                elif stopped_days >= 7:
+                                                    confidence = "MEDIUM"
+                                                else:
+                                                    confidence = "LOW"
+
+                                                resources.append(OrphanResourceData(
+                                                    resource_id=address.name,
+                                                    resource_type="gcp_static_ip_stopped_vm",
+                                                    resource_name=address.name,
+                                                    region=gcp_region,
+                                                    estimated_monthly_cost=monthly_cost,
+                                                    resource_metadata={
+                                                        "ip_address": address.address,
+                                                        "status": address.status,
+                                                        "network_tier": address.network_tier,
+                                                        "vm_name": instance_name,
+                                                        "vm_zone": zone,
+                                                        "vm_status": instance.status,
+                                                        "stopped_days": stopped_days,
+                                                        "stopped_at": instance.last_stop_timestamp if instance.last_stop_timestamp else "Unknown",
+                                                        "already_wasted": round(already_wasted, 2),
+                                                        "annual_cost": round(annual_cost, 2),
+                                                        "confidence": confidence,
+                                                        "labels": dict(address.labels) if address.labels else {},
+                                                        "recommendation": f"Option 1: Release IP to save ${annual_cost:.2f}/year. Option 2: Restart VM. Option 3: Replace with ephemeral IP.",
+                                                        "waste_reason": f"IP attached to {instance.status} VM for {stopped_days} days"
+                                                    }
+                                                ))
+
+                                    except Exception as e:
+                                        logger.warning(f"Error checking instance {instance_name}: {e}")
+                                        continue
+
+                except Exception as e:
+                    logger.error(f"Error scanning region {gcp_region} for stopped VM IPs: {e}")
+                    continue
+
+        except Exception as e:
+            logger.error(f"Error in scan_static_ip_stopped_vm: {e}")
+
+        return resources
+
+    async def scan_static_ip_idle_resource(
+        self, region: str | None = None, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scenario 3: Detect Static External IPs attached to idle resources.
+
+        Waste: IPs on running VMs with <5% CPU usage for extended periods.
+        Note: IP is technically free (VM running) but resource may be unnecessary.
+
+        Detection: status='IN_USE' AND VM running AND CPU <5% for 7+ days
+        Cost: $0/month for IP (but flags potentially unnecessary VM)
+        Priority: MEDIUM (P1) 💰
+        """
+        resources = []
+
+        try:
+            from google.cloud import compute_v1, monitoring_v3
+            from datetime import datetime, timezone, timedelta
+            import re
+
+            # Get detection parameters
+            cpu_threshold = 0.05  # 5%
+            lookback_days = 7
+            if detection_rules and "gcp_static_ip_idle_resource" in detection_rules:
+                rules = detection_rules["gcp_static_ip_idle_resource"]
+                cpu_threshold = rules.get("cpu_threshold", 0.05)
+                lookback_days = rules.get("lookback_days", 7)
+
+            addresses_client = compute_v1.AddressesClient(credentials=self.credentials)
+            instances_client = compute_v1.InstancesClient(credentials=self.credentials)
+            monitoring_client = monitoring_v3.MetricServiceClient(credentials=self.credentials)
+            regions_client = compute_v1.RegionsClient(credentials=self.credentials)
+
+            # Get all active regions
+            regions_to_scan = []
+            for gcp_region in regions_client.list(project=self.project_id):
+                if gcp_region.status == "UP":
+                    regions_to_scan.append(gcp_region.name)
+
+            for gcp_region in regions_to_scan:
+                try:
+                    request = compute_v1.ListAddressesRequest(
+                        project=self.project_id,
+                        region=gcp_region
+                    )
+
+                    for address in addresses_client.list(request=request):
+                        if address.users and address.status == "IN_USE":
+                            resource_url = address.users[0]
+
+                            if "/instances/" in resource_url:
+                                match = re.search(
+                                    r'/zones/([^/]+)/instances/([^/]+)',
+                                    resource_url
+                                )
+
+                                if match:
+                                    zone = match.group(1)
+                                    instance_name = match.group(2)
+
+                                    try:
+                                        instance = instances_client.get(
+                                            project=self.project_id,
+                                            zone=zone,
+                                            instance=instance_name
+                                        )
+
+                                        # Only check running VMs
+                                        if instance.status == "RUNNING":
+                                            # Query CPU metrics
+                                            project_name = f"projects/{self.project_id}"
+                                            end_time = datetime.utcnow()
+                                            start_time = end_time - timedelta(days=lookback_days)
+
+                                            interval = monitoring_v3.TimeInterval({
+                                                "end_time": {"seconds": int(end_time.timestamp())},
+                                                "start_time": {"seconds": int(start_time.timestamp())},
+                                            })
+
+                                            filter_str = (
+                                                f'resource.type = "gce_instance" '
+                                                f'AND resource.labels.instance_id = "{instance.id}" '
+                                                f'AND metric.type = "compute.googleapis.com/instance/cpu/utilization"'
+                                            )
+
+                                            aggregation = monitoring_v3.Aggregation({
+                                                "alignment_period": {"seconds": 3600},
+                                                "per_series_aligner": monitoring_v3.Aggregation.Aligner.ALIGN_MEAN,
+                                            })
+
+                                            results = monitoring_client.list_time_series(
+                                                request={
+                                                    "name": project_name,
+                                                    "filter": filter_str,
+                                                    "interval": interval,
+                                                    "aggregation": aggregation,
+                                                }
+                                            )
+
+                                            cpu_values = []
+                                            for result in results:
+                                                for point in result.points:
+                                                    cpu_values.append(point.value.double_value)
+
+                                            if cpu_values:
+                                                avg_cpu = sum(cpu_values) / len(cpu_values)
+
+                                                if avg_cpu < cpu_threshold:
+                                                    resources.append(OrphanResourceData(
+                                                        resource_id=address.name,
+                                                        resource_type="gcp_static_ip_idle_resource",
+                                                        resource_name=address.name,
+                                                        region=gcp_region,
+                                                        estimated_monthly_cost=0.0,  # IP is free (VM running)
+                                                        resource_metadata={
+                                                            "ip_address": address.address,
+                                                            "status": address.status,
+                                                            "network_tier": address.network_tier,
+                                                            "vm_name": instance_name,
+                                                            "vm_zone": zone,
+                                                            "vm_status": "RUNNING",
+                                                            "avg_cpu_utilization": round(avg_cpu, 4),
+                                                            "max_cpu_utilization": round(max(cpu_values), 4),
+                                                            "lookback_days": lookback_days,
+                                                            "confidence": "MEDIUM",
+                                                            "labels": dict(address.labels) if address.labels else {},
+                                                            "recommendation": f"Verify if resource is necessary. VM has {avg_cpu*100:.2f}% avg CPU. Consider stopping or deleting if truly idle.",
+                                                            "waste_reason": f"IP attached to running VM with only {avg_cpu*100:.2f}% average CPU over {lookback_days} days"
+                                                        }
+                                                    ))
+
+                                    except Exception as e:
+                                        logger.warning(f"Error checking idle instance {instance_name}: {e}")
+                                        continue
+
+                except Exception as e:
+                    logger.error(f"Error scanning region {gcp_region} for idle resource IPs: {e}")
+                    continue
+
+        except Exception as e:
+            logger.error(f"Error in scan_static_ip_idle_resource: {e}")
+
+        return resources
+
+    async def scan_static_ip_premium_nonprod(
+        self, region: str | None = None, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scenario 4: Detect Static External IPs using Premium tier for non-production.
+
+        Waste: Premium network tier for dev/test where Standard tier would suffice.
+        Savings: 29% on egress costs ($0.12/GB vs $0.085/GB), not on IP itself.
+
+        Detection: network_tier='PREMIUM' AND labels.environment in ['dev','test','staging']
+        Cost: $0 for IP (same cost), but potential egress savings
+        Priority: LOW (P2) 💰
+        """
+        resources = []
+
+        try:
+            from google.cloud import compute_v1
+
+            addresses_client = compute_v1.AddressesClient(credentials=self.credentials)
+            regions_client = compute_v1.RegionsClient(credentials=self.credentials)
+
+            # Get all active regions
+            regions_to_scan = []
+            for gcp_region in regions_client.list(project=self.project_id):
+                if gcp_region.status == "UP":
+                    regions_to_scan.append(gcp_region.name)
+
+            for gcp_region in regions_to_scan:
+                try:
+                    request = compute_v1.ListAddressesRequest(
+                        project=self.project_id,
+                        region=gcp_region
+                    )
+
+                    for address in addresses_client.list(request=request):
+                        if address.network_tier == "PREMIUM":
+                            labels = dict(address.labels) if address.labels else {}
+                            environment = labels.get("environment", "").lower()
+
+                            # Check if non-critical environment
+                            if environment in ["dev", "test", "staging", "development", "qa"]:
+                                resources.append(OrphanResourceData(
+                                    resource_id=address.name,
+                                    resource_type="gcp_static_ip_premium_nonprod",
+                                    resource_name=address.name,
+                                    region=gcp_region,
+                                    estimated_monthly_cost=0.0,  # IP cost is same for both tiers
+                                    resource_metadata={
+                                        "ip_address": address.address,
+                                        "status": address.status,
+                                        "current_tier": "PREMIUM",
+                                        "recommended_tier": "STANDARD",
+                                        "environment": environment,
+                                        "egress_savings_per_gb": 0.035,  # $0.12 - $0.085
+                                        "labels": labels,
+                                        "confidence": "MEDIUM",
+                                        "recommendation": "Switch to Standard tier to save 29% on egress costs. For 10TB/month egress, save $350/month ($4,200/year).",
+                                        "waste_reason": f"Premium tier used for {environment} environment where Standard tier would suffice"
+                                    }
+                                ))
+
+                except Exception as e:
+                    logger.error(f"Error scanning region {gcp_region} for premium nonprod IPs: {e}")
+                    continue
+
+        except Exception as e:
+            logger.error(f"Error in scan_static_ip_premium_nonprod: {e}")
+
+        return resources
+
+    async def scan_static_ip_untagged(
+        self, region: str | None = None, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scenario 5: Detect Static External IPs missing required labels.
+
+        Waste: Governance issue - can't track ownership or cost allocation.
+        Without labels, orphaned IPs are hard to identify and clean up.
+
+        Detection: Missing required labels (environment, owner, team)
+        Cost: Variable (depends if IP is in use or not)
+        Priority: LOW (P2) 🏷️
+        """
+        resources = []
+
+        try:
+            from google.cloud import compute_v1
+
+            # Get required labels
+            required_labels = ["environment", "owner", "team"]
+            if detection_rules and "gcp_static_ip_untagged" in detection_rules:
+                rules = detection_rules["gcp_static_ip_untagged"]
+                required_labels = rules.get("required_labels", required_labels)
+
+            addresses_client = compute_v1.AddressesClient(credentials=self.credentials)
+            regions_client = compute_v1.RegionsClient(credentials=self.credentials)
+
+            # Get all active regions
+            regions_to_scan = []
+            for gcp_region in regions_client.list(project=self.project_id):
+                if gcp_region.status == "UP":
+                    regions_to_scan.append(gcp_region.name)
+
+            for gcp_region in regions_to_scan:
+                try:
+                    request = compute_v1.ListAddressesRequest(
+                        project=self.project_id,
+                        region=gcp_region
+                    )
+
+                    for address in addresses_client.list(request=request):
+                        labels = dict(address.labels) if address.labels else {}
+
+                        # Check for missing labels
+                        missing_labels = []
+                        for required in required_labels:
+                            if required not in labels or not labels[required]:
+                                missing_labels.append(required)
+
+                        if missing_labels:
+                            # Determine cost based on usage
+                            if not address.users:
+                                annual_cost = 34.56  # $2.88 * 12 (unused)
+                                monthly_cost = 2.88
+                            else:
+                                annual_cost = 0  # In use = free
+                                monthly_cost = 0
+
+                            risk_level = "HIGH" if "owner" in missing_labels else "MEDIUM"
+
+                            resources.append(OrphanResourceData(
+                                resource_id=address.name,
+                                resource_type="gcp_static_ip_untagged",
+                                resource_name=address.name,
+                                region=gcp_region,
+                                estimated_monthly_cost=monthly_cost,
+                                resource_metadata={
+                                    "ip_address": address.address,
+                                    "status": address.status,
+                                    "network_tier": address.network_tier,
+                                    "missing_labels": missing_labels,
+                                    "existing_labels": labels,
+                                    "annual_cost": round(annual_cost, 2),
+                                    "risk_level": risk_level,
+                                    "confidence": "MEDIUM",
+                                    "recommendation": f"Add missing labels: {', '.join(missing_labels)}. Critical for governance and cost allocation.",
+                                    "waste_reason": f"Missing required labels: {', '.join(missing_labels)}"
+                                }
+                            ))
+
+                except Exception as e:
+                    logger.error(f"Error scanning region {gcp_region} for untagged IPs: {e}")
+                    continue
+
+            # Also scan global IPs
+            try:
+                global_client = compute_v1.GlobalAddressesClient(credentials=self.credentials)
+                request = compute_v1.ListGlobalAddressesRequest(project=self.project_id)
+
+                for address in global_client.list(request=request):
+                    labels = dict(address.labels) if address.labels else {}
+
+                    missing_labels = []
+                    for required in required_labels:
+                        if required not in labels or not labels[required]:
+                            missing_labels.append(required)
+
+                    if missing_labels:
+                        if not address.users:
+                            annual_cost = 34.56
+                            monthly_cost = 2.88
+                        else:
+                            annual_cost = 0
+                            monthly_cost = 0
+
+                        risk_level = "HIGH" if "owner" in missing_labels else "MEDIUM"
+
+                        resources.append(OrphanResourceData(
+                            resource_id=address.name,
+                            resource_type="gcp_static_ip_untagged",
+                            resource_name=address.name,
+                            region="global",
+                            estimated_monthly_cost=monthly_cost,
+                            resource_metadata={
+                                "ip_address": address.address,
+                                "status": address.status,
+                                "network_tier": address.network_tier,
+                                "missing_labels": missing_labels,
+                                "existing_labels": labels,
+                                "annual_cost": round(annual_cost, 2),
+                                "risk_level": risk_level,
+                                "scope": "GLOBAL",
+                                "confidence": "MEDIUM",
+                                "recommendation": f"Add missing labels: {', '.join(missing_labels)}",
+                                "waste_reason": f"Global IP missing required labels: {', '.join(missing_labels)}"
+                            }
+                        ))
+
+            except Exception as e:
+                logger.error(f"Error scanning global IPs for untagged: {e}")
+
+        except Exception as e:
+            logger.error(f"Error in scan_static_ip_untagged: {e}")
+
+        return resources
+
+    async def scan_static_ip_old_never_used(
+        self, region: str | None = None, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scenario 6: Detect old Static External IPs that have NEVER been used.
+
+        Waste: IPs reserved 90+ days ago and never attached to any resource.
+        Very high confidence waste - almost certainly forgotten.
+
+        Detection: status='RESERVED' AND users=[] AND age >= 90 days
+        Cost: $2.88/month per IP
+        Priority: CRITICAL (P0) 💰💰💰
+        """
+        resources = []
+
+        try:
+            from google.cloud import compute_v1
+            from datetime import datetime, timezone
+
+            # Get detection parameters
+            min_age_days = 90
+            if detection_rules and "gcp_static_ip_old_never_used" in detection_rules:
+                rules = detection_rules["gcp_static_ip_old_never_used"]
+                min_age_days = rules.get("min_age_days", 90)
+
+            addresses_client = compute_v1.AddressesClient(credentials=self.credentials)
+            regions_client = compute_v1.RegionsClient(credentials=self.credentials)
+
+            # Get all active regions
+            regions_to_scan = []
+            for gcp_region in regions_client.list(project=self.project_id):
+                if gcp_region.status == "UP":
+                    regions_to_scan.append(gcp_region.name)
+
+            for gcp_region in regions_to_scan:
+                try:
+                    request = compute_v1.ListAddressesRequest(
+                        project=self.project_id,
+                        region=gcp_region
+                    )
+
+                    for address in addresses_client.list(request=request):
+                        # Check if IP is unattached
+                        if not address.users:
+                            # Calculate age
+                            created_at = datetime.fromisoformat(
+                                address.creation_timestamp.replace('Z', '+00:00')
+                            )
+                            age_days = (datetime.now(timezone.utc) - created_at).days
+
+                            # Filter by minimum age
+                            if age_days >= min_age_days:
+                                # Cost calculation
+                                monthly_cost = 2.88
+                                annual_cost = monthly_cost * 12
+                                months_wasted = age_days / 30
+                                already_wasted = monthly_cost * months_wasted
+
+                                # High confidence for old IPs
+                                if age_days >= 365:
+                                    confidence = "CRITICAL"
+                                elif age_days >= 180:
+                                    confidence = "HIGH"
+                                else:
+                                    confidence = "MEDIUM"
+
+                                resources.append(OrphanResourceData(
+                                    resource_id=address.name,
+                                    resource_type="gcp_static_ip_old_never_used",
+                                    resource_name=address.name,
+                                    region=gcp_region,
+                                    estimated_monthly_cost=monthly_cost,
+                                    resource_metadata={
+                                        "ip_address": address.address,
+                                        "status": address.status,
+                                        "network_tier": address.network_tier,
+                                        "age_days": age_days,
+                                        "age_years": round(age_days / 365, 1),
+                                        "created_at": address.creation_timestamp,
+                                        "already_wasted": round(already_wasted, 2),
+                                        "annual_cost": round(annual_cost, 2),
+                                        "confidence": confidence,
+                                        "labels": dict(address.labels) if address.labels else {},
+                                        "recommendation": f"DELETE IMMEDIATELY to save ${annual_cost:.2f}/year. IP unused for {age_days} days ({age_days//365} years).",
+                                        "waste_reason": f"Reserved IP never used in {age_days} days - almost certainly forgotten"
+                                    }
+                                ))
+
+                except Exception as e:
+                    logger.error(f"Error scanning region {gcp_region} for old never used IPs: {e}")
+                    continue
+
+        except Exception as e:
+            logger.error(f"Error in scan_static_ip_old_never_used: {e}")
+
+        return resources
+
+    async def scan_static_ip_wrong_type(
+        self, region: str | None = None, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scenario 7: Detect Static External IPs with wrong type (Regional vs Global).
+
+        Waste: Using Global IP for VM instance (should be Regional).
+        Global IPs are scarce and should only be used for Global Load Balancers.
+
+        Detection: Global IP attached to /instances/ (VM)
+        Cost: Same ($2.88/month if unused), but best practice violation
+        Priority: LOW (P3) ⚡
+        """
+        resources = []
+
+        try:
+            from google.cloud import compute_v1
+
+            global_client = compute_v1.GlobalAddressesClient(credentials=self.credentials)
+
+            # Check global IPs
+            request = compute_v1.ListGlobalAddressesRequest(project=self.project_id)
+
+            for address in global_client.list(request=request):
+                if address.users:
+                    resource_url = address.users[0]
+
+                    # Global IP should NOT be attached to VM instance
+                    if "/instances/" in resource_url:
+                        resources.append(OrphanResourceData(
+                            resource_id=address.name,
+                            resource_type="gcp_static_ip_wrong_type",
+                            resource_name=address.name,
+                            region="global",
+                            estimated_monthly_cost=0.0,  # Same cost, just wrong type
+                            resource_metadata={
+                                "ip_address": address.address,
+                                "status": address.status,
+                                "current_type": "GLOBAL",
+                                "recommended_type": "REGIONAL",
+                                "attached_to": resource_url,
+                                "issue": "Global IP cannot be properly attached to VM instance",
+                                "confidence": "HIGH",
+                                "labels": dict(address.labels) if address.labels else {},
+                                "recommendation": "Delete Global IP and create Regional IP instead. Global IPs are for Global Load Balancers only.",
+                                "waste_reason": "Global IP incorrectly used for VM instance (should be Regional)"
+                            }
+                        ))
+
+        except Exception as e:
+            logger.error(f"Error in scan_static_ip_wrong_type: {e}")
+
+        return resources
+
+    async def scan_static_ip_multiple_per_resource(
+        self, region: str | None = None, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scenario 8: Detect resources with multiple Static External IPs.
+
+        Waste: Resources with >1 Static IP when typically 1 suffices.
+        Extra unused IPs cost $2.88/month each.
+
+        Detection: Group by resource_url, count IPs, flag if >1
+        Cost: (num_ips - 1) * $2.88/month if extra IPs are unused
+        Priority: MEDIUM (P1) 💰💰
+        """
+        resources = []
+
+        try:
+            from google.cloud import compute_v1
+
+            addresses_client = compute_v1.AddressesClient(credentials=self.credentials)
+            regions_client = compute_v1.RegionsClient(credentials=self.credentials)
+
+            # Map: resource_url -> list of IPs
+            resource_ips_map = {}
+
+            # Get all active regions
+            regions_to_scan = []
+            for gcp_region in regions_client.list(project=self.project_id):
+                if gcp_region.status == "UP":
+                    regions_to_scan.append(gcp_region.name)
+
+            for gcp_region in regions_to_scan:
+                try:
+                    request = compute_v1.ListAddressesRequest(
+                        project=self.project_id,
+                        region=gcp_region
+                    )
+
+                    for address in addresses_client.list(request=request):
+                        if address.users:
+                            resource_url = address.users[0]
+
+                            if resource_url not in resource_ips_map:
+                                resource_ips_map[resource_url] = []
+
+                            resource_ips_map[resource_url].append({
+                                "ip_name": address.name,
+                                "ip_address": address.address,
+                                "region": gcp_region,
+                                "status": address.status,
+                                "network_tier": address.network_tier
+                            })
+
+                except Exception as e:
+                    logger.error(f"Error scanning region {gcp_region} for multiple IPs: {e}")
+                    continue
+
+            # Find resources with multiple IPs
+            for resource_url, ips in resource_ips_map.items():
+                if len(ips) > 1:
+                    # Parse resource name
+                    resource_name = resource_url.split('/')[-1]
+
+                    # Potential waste if extra IPs are unused
+                    potential_monthly_waste = (len(ips) - 1) * 2.88
+                    potential_annual_waste = potential_monthly_waste * 12
+
+                    resources.append(OrphanResourceData(
+                        resource_id=resource_name,
+                        resource_type="gcp_static_ip_multiple_per_resource",
+                        resource_name=resource_name,
+                        region=ips[0]["region"],
+                        estimated_monthly_cost=potential_monthly_waste,
+                        resource_metadata={
+                            "resource_url": resource_url,
+                            "num_ips": len(ips),
+                            "ips": ips,
+                            "potential_monthly_waste": round(potential_monthly_waste, 2),
+                            "potential_annual_waste": round(potential_annual_waste, 2),
+                            "confidence": "MEDIUM",
+                            "recommendation": f"Resource has {len(ips)} Static IPs. Typically 1 IP suffices. Review if extra IPs are necessary.",
+                            "waste_reason": f"Resource has {len(ips)} Static IPs when typically 1 is sufficient"
+                        }
+                    ))
+
+        except Exception as e:
+            logger.error(f"Error in scan_static_ip_multiple_per_resource: {e}")
+
+        return resources
+
+    async def scan_static_ip_devtest_not_released(
+        self, region: str | None = None, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scenario 9: Detect dev/test Static External IPs not released.
+
+        Waste: IPs reserved for temporary dev/test that are >30 days old.
+        Dev/test IPs should be released after project completion.
+
+        Detection: labels.environment in ['dev','test'] AND age >= 30 days
+        Cost: $2.88/month if unused, $0 if in use but still suspect
+        Priority: CRITICAL (P0) 💰💰💰
+        """
+        resources = []
+
+        try:
+            from google.cloud import compute_v1
+            from datetime import datetime, timezone
+
+            # Get detection parameters
+            max_age_days = 30
+            if detection_rules and "gcp_static_ip_devtest_not_released" in detection_rules:
+                rules = detection_rules["gcp_static_ip_devtest_not_released"]
+                max_age_days = rules.get("max_age_days", 30)
+
+            addresses_client = compute_v1.AddressesClient(credentials=self.credentials)
+            regions_client = compute_v1.RegionsClient(credentials=self.credentials)
+
+            # Get all active regions
+            regions_to_scan = []
+            for gcp_region in regions_client.list(project=self.project_id):
+                if gcp_region.status == "UP":
+                    regions_to_scan.append(gcp_region.name)
+
+            for gcp_region in regions_to_scan:
+                try:
+                    request = compute_v1.ListAddressesRequest(
+                        project=self.project_id,
+                        region=gcp_region
+                    )
+
+                    for address in addresses_client.list(request=request):
+                        labels = dict(address.labels) if address.labels else {}
+                        environment = labels.get("environment", "").lower()
+
+                        # Check if dev/test environment
+                        if environment in ["dev", "test", "staging", "qa", "development"]:
+                            # Calculate age
+                            created_at = datetime.fromisoformat(
+                                address.creation_timestamp.replace('Z', '+00:00')
+                            )
+                            age_days = (datetime.now(timezone.utc) - created_at).days
+
+                            # Filter by age
+                            if age_days >= max_age_days:
+                                # Cost depends on usage
+                                if not address.users:
+                                    monthly_cost = 2.88
+                                    already_wasted = (age_days / 30) * 2.88
+                                else:
+                                    monthly_cost = 0
+                                    already_wasted = 0
+
+                                annual_cost = monthly_cost * 12
+
+                                resources.append(OrphanResourceData(
+                                    resource_id=address.name,
+                                    resource_type="gcp_static_ip_devtest_not_released",
+                                    resource_name=address.name,
+                                    region=gcp_region,
+                                    estimated_monthly_cost=monthly_cost,
+                                    resource_metadata={
+                                        "ip_address": address.address,
+                                        "status": address.status,
+                                        "network_tier": address.network_tier,
+                                        "environment": environment,
+                                        "age_days": age_days,
+                                        "created_at": address.creation_timestamp,
+                                        "already_wasted": round(already_wasted, 2),
+                                        "annual_cost": round(annual_cost, 2),
+                                        "confidence": "HIGH",
+                                        "labels": labels,
+                                        "recommendation": f"Release {environment} IP after project completion. IP is {age_days} days old.",
+                                        "waste_reason": f"Dev/test IP not released after {age_days} days"
+                                    }
+                                ))
+
+                except Exception as e:
+                    logger.error(f"Error scanning region {gcp_region} for devtest IPs: {e}")
+                    continue
+
+        except Exception as e:
+            logger.error(f"Error in scan_static_ip_devtest_not_released: {e}")
+
+        return resources
+
+    async def scan_static_ip_orphaned(
+        self, region: str | None = None, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scenario 10: Detect orphaned Static External IPs (resource deleted).
+
+        Waste: IPs whose attached resource no longer exists.
+        IP shows status='IN_USE' but resource is deleted - critical bug.
+
+        Detection: users[0] points to non-existent resource
+        Cost: $2.88/month per IP
+        Priority: CRITICAL (P0) 💰💰💰
+        """
+        resources = []
+
+        try:
+            from google.cloud import compute_v1
+            from datetime import datetime, timezone
+            import re
+
+            addresses_client = compute_v1.AddressesClient(credentials=self.credentials)
+            instances_client = compute_v1.InstancesClient(credentials=self.credentials)
+            regions_client = compute_v1.RegionsClient(credentials=self.credentials)
+
+            # Get all active regions
+            regions_to_scan = []
+            for gcp_region in regions_client.list(project=self.project_id):
+                if gcp_region.status == "UP":
+                    regions_to_scan.append(gcp_region.name)
+
+            for gcp_region in regions_to_scan:
+                try:
+                    request = compute_v1.ListAddressesRequest(
+                        project=self.project_id,
+                        region=gcp_region
+                    )
+
+                    for address in addresses_client.list(request=request):
+                        if address.users and address.status == "IN_USE":
+                            resource_url = address.users[0]
+                            resource_exists = False
+
+                            try:
+                                # Check if it's a VM instance
+                                if "/instances/" in resource_url:
+                                    match = re.search(
+                                        r'/zones/([^/]+)/instances/([^/]+)',
+                                        resource_url
+                                    )
+
+                                    if match:
+                                        zone = match.group(1)
+                                        instance_name = match.group(2)
+
+                                        try:
+                                            instances_client.get(
+                                                project=self.project_id,
+                                                zone=zone,
+                                                instance=instance_name
+                                            )
+                                            resource_exists = True
+                                        except Exception:
+                                            resource_exists = False  # Instance doesn't exist
+
+                                # TODO: Add checks for other resource types (LB, etc.)
+
+                            except Exception as e:
+                                logger.warning(f"Error checking resource existence: {e}")
+
+                            # If resource doesn't exist, it's orphaned
+                            if not resource_exists:
+                                # Calculate waste
+                                created_at = datetime.fromisoformat(
+                                    address.creation_timestamp.replace('Z', '+00:00')
+                                )
+                                age_days = (datetime.now(timezone.utc) - created_at).days
+
+                                monthly_cost = 2.88
+                                annual_cost = monthly_cost * 12
+                                months_wasted = age_days / 30
+                                already_wasted = monthly_cost * months_wasted
+
+                                resources.append(OrphanResourceData(
+                                    resource_id=address.name,
+                                    resource_type="gcp_static_ip_orphaned",
+                                    resource_name=address.name,
+                                    region=gcp_region,
+                                    estimated_monthly_cost=monthly_cost,
+                                    resource_metadata={
+                                        "ip_address": address.address,
+                                        "status": address.status,
+                                        "network_tier": address.network_tier,
+                                        "orphaned_resource": resource_url,
+                                        "age_days": age_days,
+                                        "created_at": address.creation_timestamp,
+                                        "already_wasted": round(already_wasted, 2),
+                                        "annual_cost": round(annual_cost, 2),
+                                        "confidence": "CRITICAL",
+                                        "labels": dict(address.labels) if address.labels else {},
+                                        "recommendation": f"DELETE IMMEDIATELY to save ${annual_cost:.2f}/year. Resource no longer exists.",
+                                        "waste_reason": f"IP attached to deleted resource: {resource_url}"
+                                    }
+                                ))
+
+                except Exception as e:
+                    logger.error(f"Error scanning region {gcp_region} for orphaned IPs: {e}")
+                    continue
+
+        except Exception as e:
+            logger.error(f"Error in scan_static_ip_orphaned: {e}")
+
+        return resources
+
     # AWS-specific EC2 instance methods (not applicable to GCP)
     async def scan_oversized_instances(
         self, region: str, detection_rules: dict | None = None

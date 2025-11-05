@@ -635,7 +635,15 @@ const RESOURCE_CATEGORIES = {
       "gcp_filestore_legacy_tier", "gcp_filestore_multi_share_consolidation", "gcp_filestore_snapshot_waste",
       "gcp_filestore_wrong_nfs_protocol"
     ],
-    networking: ["static_ip_unattached", "nat_gateway_unused"],
+    networking: [
+      // Static External IPs (10 scenarios)
+      "gcp_static_ip_unattached", "gcp_static_ip_stopped_vm", "gcp_static_ip_idle_resource",
+      "gcp_static_ip_premium_nonprod", "gcp_static_ip_untagged", "gcp_static_ip_old_never_used",
+      "gcp_static_ip_wrong_type", "gcp_static_ip_multiple_per_resource", "gcp_static_ip_devtest_not_released",
+      "gcp_static_ip_orphaned",
+      // Cloud NAT (TODO)
+      "nat_gateway_unused"
+    ],
     database: ["cloud_sql_stopped", "cloud_sql_idle"],
   },
   azure: {
@@ -947,8 +955,18 @@ const GCP_RESOURCE_LABELS: { [key: string]: string } = {
   gcp_filestore_multi_share_consolidation: "Cloud Filestore (Enterprise ≤2 Shares) 💰💰💰 P1",
   gcp_filestore_snapshot_waste: "Cloud Filestore (Old Snapshots 90+ days) 💰💰 P1",
   gcp_filestore_wrong_nfs_protocol: "Cloud Filestore (NFSv3 Instead of v4.1) ⚡ P3",
-  // Networking
-  static_ip_unattached: "Static IPs (Unattached)",
+  // Networking - Static External IPs (10 scenarios)
+  gcp_static_ip_unattached: "Static External IP (Reserved but Unattached) 💰💰💰💰 P0",
+  gcp_static_ip_stopped_vm: "Static External IP (Attached to Stopped VM) 💰💰💰💰 P0",
+  gcp_static_ip_idle_resource: "Static External IP (Attached to Idle Resource) 💰💰 P1",
+  gcp_static_ip_premium_nonprod: "Static External IP (Premium Tier Non-Prod) 💰💰 P2",
+  gcp_static_ip_untagged: "Static External IP (Missing Required Labels) 💰 P3",
+  gcp_static_ip_old_never_used: "Static External IP (Old Never Used 90+ days) 💰💰💰💰 P0",
+  gcp_static_ip_wrong_type: "Static External IP (Wrong Type - Global on VM) 💰💰 P3",
+  gcp_static_ip_multiple_per_resource: "Static External IP (Multiple per Resource) 💰💰 P1",
+  gcp_static_ip_devtest_not_released: "Static External IP (Dev/Test Not Released) 💰💰💰💰 P0",
+  gcp_static_ip_orphaned: "Static External IP (Orphaned - Resource Deleted) 💰💰💰💰 P0",
+  // Networking - Cloud NAT
   nat_gateway_unused: "Cloud NAT (Unused)",
   // Database
   cloud_sql_stopped: "Cloud SQL (Stopped)",
