@@ -3249,17 +3249,2350 @@ class GCPProvider(CloudProviderBase):
         """Scan for unused load balancers (Phase 2)."""
         return []
 
-    async def scan_stopped_databases(
-        self, region: str, detection_rules: dict | None = None
+    async def scan_cloud_sql_stopped(
+        self, region: str | None = None, detection_rules: dict | None = None
     ) -> list[OrphanResourceData]:
-        """Scan for stopped Cloud SQL instances (Phase 2)."""
-        return []
+        """
+        Scenario 1: Detect stopped Cloud SQL instances >30 days.
 
-    async def scan_unused_nat_gateways(
-        self, region: str, detection_rules: dict | None = None
+        Waste: Stopped instances still pay storage + backups (~30-50% of total cost).
+        Detection: state == 'STOPPED' AND age >= 30 days
+        Cost: Storage $0.17/GB + Backups $0.08/GB (~$29-145/month typical)
+        Priority: CRITICAL (P0) 💰💰💰💰
+        """
+        resources = []
+
+        try:
+            from google.cloud import sql_v1
+            from datetime import datetime, timezone
+
+            # Get detection parameters
+            min_age_days = 30
+            if detection_rules and "cloud_sql_stopped" in detection_rules:
+                rules = detection_rules["cloud_sql_stopped"]
+                min_age_days = rules.get("min_age_days", 30)
+
+            sql_client = sql_v1.CloudSqlInstancesServiceClient(credentials=self.credentials)
+
+            # List all Cloud SQL instances
+            try:
+                request = sql_v1.ListInstancesRequest(
+                    project=self.project_id
+                )
+
+                for instance in sql_client.list(request=request):
+                    # Check if instance is stopped
+                    if instance.state != sql_v1.Instance.State.SUSPENDED:  # SUSPENDED = stopped
+                        continue
+
+                    # Calculate age
+                    created_at = instance.create_time
+                    if created_at:
+                        age_days = (datetime.now(timezone.utc) - created_at).days
+                    else:
+                        continue
+
+                    # Filter by minimum age
+                    if age_days < min_age_days:
+                        continue
+
+                    # Calculate costs (storage + backups only, no instance cost)
+                    storage_size_gb = instance.settings.data_disk_size_gb if instance.settings else 100
+                    storage_type = instance.settings.data_disk_type if instance.settings else "PD_SSD"
+
+                    # Storage pricing
+                    storage_pricing = {
+                        "PD_SSD": 0.17,
+                        "PD_HDD": 0.09,
+                    }
+                    storage_cost = storage_size_gb * storage_pricing.get(storage_type, 0.17)
+
+                    # Backup cost (estimate 1.5x database size)
+                    backup_size_gb = storage_size_gb * 1.5
+                    backup_cost = backup_size_gb * 0.08
+
+                    # Total monthly cost
+                    monthly_cost = storage_cost + backup_cost
+
+                    # Calculate waste
+                    months_wasted = age_days / 30
+                    already_wasted = monthly_cost * months_wasted
+
+                    # Determine confidence
+                    if age_days >= 90:
+                        confidence = "CRITICAL"
+                    elif age_days >= 60:
+                        confidence = "HIGH"
+                    elif age_days >= 30:
+                        confidence = "MEDIUM"
+                    else:
+                        confidence = "LOW"
+
+                    resources.append(OrphanResourceData(
+                        resource_id=instance.name,
+                        resource_type="cloud_sql_stopped",
+                        resource_name=instance.name,
+                        region=instance.region if hasattr(instance, 'region') else "global",
+                        estimated_monthly_cost=monthly_cost,
+                        resource_metadata={
+                            "instance_name": instance.name,
+                            "database_version": instance.database_version,
+                            "state": "STOPPED",
+                            "tier": instance.settings.tier if instance.settings else "unknown",
+                            "storage_size_gb": storage_size_gb,
+                            "storage_type": storage_type,
+                            "age_days": age_days,
+                            "stopped_days": age_days,
+                            "storage_cost_monthly": round(storage_cost, 2),
+                            "backup_cost_monthly": round(backup_cost, 2),
+                            "already_wasted": round(already_wasted, 2),
+                            "annual_cost": round(monthly_cost * 12, 2),
+                            "confidence": confidence,
+                            "recommendation": f"Create final snapshot and DELETE instance to save ${monthly_cost * 12:.2f}/year. Stopped for {age_days} days.",
+                            "waste_reason": f"Cloud SQL instance stopped for {age_days} days - paying storage+backups only"
+                        }
+                    ))
+
+            except Exception as e:
+                logger.error(f"Error listing Cloud SQL instances: {e}")
+
+        except Exception as e:
+            logger.error(f"Error scanning for stopped Cloud SQL instances: {e}")
+
+        return resources
+
+    async def scan_cloud_sql_idle(
+        self, region: str | None = None, detection_rules: dict | None = None
     ) -> list[OrphanResourceData]:
-        """Scan for unused Cloud NAT gateways (Phase 2)."""
-        return []
+        """
+        Scenario 2: Detect idle Cloud SQL instances (zero connections).
+
+        Waste: Instances with 0 connections = 100% waste.
+        Detection: state == 'RUNNABLE' AND avg_connections == 0 for 14 days
+        Cost: Full instance + storage + backups ($92-369/month typical)
+        Priority: CRITICAL (P0) 💰💰💰💰
+        """
+        resources = []
+
+        try:
+            from google.cloud import sql_v1
+            from google.cloud import monitoring_v3
+            from datetime import datetime, timezone, timedelta
+
+            # Get detection parameters
+            lookback_days = 14
+            if detection_rules and "cloud_sql_idle" in detection_rules:
+                rules = detection_rules["cloud_sql_idle"]
+                lookback_days = rules.get("lookback_days", 14)
+
+            sql_client = sql_v1.CloudSqlInstancesServiceClient(credentials=self.credentials)
+            monitoring_client = monitoring_v3.MetricServiceClient(credentials=self.credentials)
+
+            # List all RUNNABLE instances
+            try:
+                request = sql_v1.ListInstancesRequest(project=self.project_id)
+
+                for instance in sql_client.list(request=request):
+                    if instance.state != sql_v1.Instance.State.RUNNABLE:
+                        continue
+
+                    instance_name = instance.name
+
+                    # Query connection metrics
+                    end_time = datetime.now(timezone.utc)
+                    start_time = end_time - timedelta(days=lookback_days)
+
+                    try:
+                        interval = monitoring_v3.TimeInterval({
+                            "end_time": {"seconds": int(end_time.timestamp())},
+                            "start_time": {"seconds": int(start_time.timestamp())}
+                        })
+
+                        connections_filter = (
+                            f'resource.type="cloudsql_database" '
+                            f'AND resource.labels.database_id="{self.project_id}:{instance_name}" '
+                            f'AND metric.type="cloudsql.googleapis.com/database/network/connections"'
+                        )
+
+                        connections_request = monitoring_v3.ListTimeSeriesRequest({
+                            "name": f"projects/{self.project_id}",
+                            "filter": connections_filter,
+                            "interval": interval,
+                            "view": monitoring_v3.ListTimeSeriesRequest.TimeSeriesView.FULL
+                        })
+
+                        connection_values = []
+                        for series in monitoring_client.list_time_series(request=connections_request):
+                            for point in series.points:
+                                connection_values.append(point.value.double_value or 0)
+
+                        if not connection_values:
+                            # No metrics available yet
+                            continue
+
+                        avg_connections = sum(connection_values) / len(connection_values)
+                        max_connections = max(connection_values)
+
+                        # Detect idle (zero connections)
+                        if avg_connections == 0 and max_connections == 0:
+                            # Calculate full cost
+                            tier = instance.settings.tier if instance.settings else "db-n1-standard-1"
+
+                            # Machine pricing
+                            machine_pricing = {
+                                "db-f1-micro": 7.67,
+                                "db-g1-small": 25.00,
+                                "db-n1-standard-1": 46.20,
+                                "db-n1-standard-2": 92.40,
+                                "db-n1-standard-4": 184.80,
+                                "db-n1-standard-8": 369.60,
+                                "db-custom-2-7680": 51.10,
+                                "db-custom-4-15360": 102.20,
+                            }
+                            instance_cost = machine_pricing.get(tier, 46.20)
+
+                            # Storage cost
+                            storage_size_gb = instance.settings.data_disk_size_gb if instance.settings else 100
+                            storage_type = instance.settings.data_disk_type if instance.settings else "PD_SSD"
+                            storage_pricing = {"PD_SSD": 0.17, "PD_HDD": 0.09}
+                            storage_cost = storage_size_gb * storage_pricing.get(storage_type, 0.17)
+
+                            # Backup cost
+                            backup_cost = storage_size_gb * 1.5 * 0.08
+
+                            # Check HA
+                            ha_enabled = instance.settings.availability_type == sql_v1.Settings.AvailabilityType.REGIONAL if instance.settings else False
+                            if ha_enabled:
+                                instance_cost *= 2
+
+                            monthly_cost = instance_cost + storage_cost + backup_cost
+
+                            # Calculate waste since creation
+                            created_at = instance.create_time
+                            if created_at:
+                                age_days = (datetime.now(timezone.utc) - created_at).days
+                                already_wasted = monthly_cost * (age_days / 30)
+                            else:
+                                age_days = 0
+                                already_wasted = 0
+
+                            resources.append(OrphanResourceData(
+                                resource_id=instance.name,
+                                resource_type="cloud_sql_idle",
+                                resource_name=instance.name,
+                                region=instance.region if hasattr(instance, 'region') else "global",
+                                estimated_monthly_cost=monthly_cost,
+                                resource_metadata={
+                                    "instance_name": instance.name,
+                                    "database_version": instance.database_version,
+                                    "state": "RUNNABLE",
+                                    "tier": tier,
+                                    "availability_type": "HA" if ha_enabled else "ZONAL",
+                                    "storage_size_gb": storage_size_gb,
+                                    "connection_metrics": {
+                                        "avg_connections_14d": round(avg_connections, 2),
+                                        "max_connections_14d": max_connections
+                                    },
+                                    "age_days": age_days,
+                                    "instance_cost_monthly": round(instance_cost, 2),
+                                    "storage_cost_monthly": round(storage_cost, 2),
+                                    "backup_cost_monthly": round(backup_cost, 2),
+                                    "already_wasted": round(already_wasted, 2),
+                                    "annual_cost": round(monthly_cost * 12, 2),
+                                    "confidence": "HIGH",
+                                    "recommendation": f"DELETE instance to save ${monthly_cost * 12:.2f}/year. Zero connections in {lookback_days} days.",
+                                    "waste_reason": f"Cloud SQL instance idle - 0 connections for {lookback_days}+ days (100% waste)"
+                                }
+                            ))
+
+                    except Exception as e:
+                        logger.warning(f"Could not fetch monitoring data for instance {instance_name}: {e}")
+                        continue
+
+            except Exception as e:
+                logger.error(f"Error listing Cloud SQL instances: {e}")
+
+        except Exception as e:
+            logger.error(f"Error scanning for idle Cloud SQL instances: {e}")
+
+        return resources
+
+    async def scan_cloud_sql_overprovisioned(
+        self, region: str | None = None, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scenario 3: Detect over-provisioned Cloud SQL instances.
+
+        Waste: CPU<30% AND Memory<40% = over-provisioned.
+        Detection: Analyze CloudMonitoring CPU/Memory metrics over 14 days
+        Cost: Difference between current and recommended tier ($92-184/month savings typical)
+        Priority: HIGH (P1) 💰💰💰
+        """
+        resources = []
+
+        try:
+            from google.cloud import sql_v1
+            from google.cloud import monitoring_v3
+            from datetime import datetime, timezone, timedelta
+
+            # Get detection parameters
+            cpu_threshold = 30.0
+            memory_threshold = 40.0
+            lookback_days = 14
+            if detection_rules and "cloud_sql_overprovisioned" in detection_rules:
+                rules = detection_rules["cloud_sql_overprovisioned"]
+                cpu_threshold = rules.get("cpu_threshold", 30.0)
+                memory_threshold = rules.get("memory_threshold", 40.0)
+                lookback_days = rules.get("lookback_days", 14)
+
+            sql_client = sql_v1.CloudSqlInstancesServiceClient(credentials=self.credentials)
+            monitoring_client = monitoring_v3.MetricServiceClient(credentials=self.credentials)
+
+            # List RUNNABLE instances
+            try:
+                request = sql_v1.ListInstancesRequest(project=self.project_id)
+
+                for instance in sql_client.list(request=request):
+                    if instance.state != sql_v1.Instance.State.RUNNABLE:
+                        continue
+
+                    instance_name = instance.name
+                    tier = instance.settings.tier if instance.settings else "db-n1-standard-1"
+
+                    # Query CPU and Memory metrics
+                    end_time = datetime.now(timezone.utc)
+                    start_time = end_time - timedelta(days=lookback_days)
+
+                    try:
+                        interval = monitoring_v3.TimeInterval({
+                            "end_time": {"seconds": int(end_time.timestamp())},
+                            "start_time": {"seconds": int(start_time.timestamp())}
+                        })
+
+                        # CPU metrics
+                        cpu_filter = (
+                            f'resource.type="cloudsql_database" '
+                            f'AND resource.labels.database_id="{self.project_id}:{instance_name}" '
+                            f'AND metric.type="cloudsql.googleapis.com/database/cpu/utilization"'
+                        )
+                        cpu_request = monitoring_v3.ListTimeSeriesRequest({
+                            "name": f"projects/{self.project_id}",
+                            "filter": cpu_filter,
+                            "interval": interval,
+                            "view": monitoring_v3.ListTimeSeriesRequest.TimeSeriesView.FULL
+                        })
+
+                        cpu_values = []
+                        for series in monitoring_client.list_time_series(request=cpu_request):
+                            for point in series.points:
+                                cpu_values.append(point.value.double_value * 100)  # Convert to percentage
+
+                        # Memory metrics
+                        memory_filter = (
+                            f'resource.type="cloudsql_database" '
+                            f'AND resource.labels.database_id="{self.project_id}:{instance_name}" '
+                            f'AND metric.type="cloudsql.googleapis.com/database/memory/utilization"'
+                        )
+                        memory_request = monitoring_v3.ListTimeSeriesRequest({
+                            "name": f"projects/{self.project_id}",
+                            "filter": memory_filter,
+                            "interval": interval,
+                            "view": monitoring_v3.ListTimeSeriesRequest.TimeSeriesView.FULL
+                        })
+
+                        memory_values = []
+                        for series in monitoring_client.list_time_series(request=memory_request):
+                            for point in series.points:
+                                memory_values.append(point.value.double_value * 100)
+
+                        if not cpu_values or not memory_values:
+                            continue
+
+                        avg_cpu = sum(cpu_values) / len(cpu_values)
+                        avg_memory = sum(memory_values) / len(memory_values)
+
+                        # Detect over-provisioning
+                        if avg_cpu < cpu_threshold and avg_memory < memory_threshold:
+                            # Calculate recommended tier (downgrade)
+                            machine_pricing = {
+                                "db-n1-standard-1": 46.20,
+                                "db-n1-standard-2": 92.40,
+                                "db-n1-standard-4": 184.80,
+                                "db-n1-standard-8": 369.60,
+                            }
+
+                            current_cost = machine_pricing.get(tier, 46.20)
+
+                            # Simple downgrade logic
+                            recommended_tier = tier
+                            if "standard-8" in tier:
+                                recommended_tier = tier.replace("standard-8", "standard-4")
+                            elif "standard-4" in tier:
+                                recommended_tier = tier.replace("standard-4", "standard-2")
+                            elif "standard-2" in tier:
+                                recommended_tier = tier.replace("standard-2", "standard-1")
+
+                            recommended_cost = machine_pricing.get(recommended_tier, current_cost / 2)
+
+                            # Check HA
+                            ha_enabled = instance.settings.availability_type == sql_v1.Settings.AvailabilityType.REGIONAL if instance.settings else False
+                            if ha_enabled:
+                                current_cost *= 2
+                                recommended_cost *= 2
+
+                            monthly_waste = current_cost - recommended_cost
+
+                            if monthly_waste > 0:
+                                resources.append(OrphanResourceData(
+                                    resource_id=instance.name,
+                                    resource_type="cloud_sql_overprovisioned",
+                                    resource_name=instance.name,
+                                    region=instance.region if hasattr(instance, 'region') else "global",
+                                    estimated_monthly_cost=monthly_waste,
+                                    resource_metadata={
+                                        "instance_name": instance.name,
+                                        "database_version": instance.database_version,
+                                        "state": "RUNNABLE",
+                                        "tier": tier,
+                                        "availability_type": "HA" if ha_enabled else "ZONAL",
+                                        "cpu_metrics": {
+                                            "avg_cpu_14d": round(avg_cpu, 1),
+                                            "max_cpu_14d": round(max(cpu_values), 1) if cpu_values else 0
+                                        },
+                                        "memory_metrics": {
+                                            "avg_memory_14d": round(avg_memory, 1),
+                                            "max_memory_14d": round(max(memory_values), 1) if memory_values else 0
+                                        },
+                                        "current_cost_monthly": round(current_cost, 2),
+                                        "recommended_tier": recommended_tier,
+                                        "recommended_cost_monthly": round(recommended_cost, 2),
+                                        "annual_savings": round(monthly_waste * 12, 2),
+                                        "confidence": "HIGH",
+                                        "recommendation": f"DOWNGRADE to {recommended_tier} to save ${monthly_waste * 12:.2f}/year. CPU avg {avg_cpu:.1f}%, Memory avg {avg_memory:.1f}%.",
+                                        "waste_reason": f"Over-provisioned: CPU {avg_cpu:.1f}% < {cpu_threshold}%, Memory {avg_memory:.1f}% < {memory_threshold}%"
+                                    }
+                                ))
+
+                    except Exception as e:
+                        logger.warning(f"Could not fetch metrics for {instance_name}: {e}")
+                        continue
+
+            except Exception as e:
+                logger.error(f"Error listing Cloud SQL instances: {e}")
+
+        except Exception as e:
+            logger.error(f"Error scanning for over-provisioned Cloud SQL: {e}")
+
+        return resources
+
+    async def scan_cloud_sql_old_machine_type(
+        self, region: str | None = None, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scenario 4: Detect old machine types (db-n1 → db-custom for 45% savings).
+
+        Waste: db-n1 tiers cost 45% more than equivalent db-custom.
+        Detection: tier.startswith('db-n1-')
+        Cost: $41-82/month savings per instance
+        Priority: MEDIUM (P2) 💰💰
+        """
+        resources = []
+
+        try:
+            from google.cloud import sql_v1
+
+            sql_client = sql_v1.CloudSqlInstancesServiceClient(credentials=self.credentials)
+
+            try:
+                request = sql_v1.ListInstancesRequest(project=self.project_id)
+
+                for instance in sql_client.list(request=request):
+                    tier = instance.settings.tier if instance.settings else ""
+
+                    # Detect db-n1 tiers
+                    if not tier.startswith("db-n1-"):
+                        continue
+
+                    # Calculate costs
+                    machine_pricing = {
+                        "db-n1-standard-1": 46.20,
+                        "db-n1-standard-2": 92.40,
+                        "db-n1-standard-4": 184.80,
+                        "db-n1-standard-8": 369.60,
+                    }
+                    custom_pricing = {
+                        "db-custom-1-3840": 25.55,   # Equivalent to standard-1
+                        "db-custom-2-7680": 51.10,   # Equivalent to standard-2
+                        "db-custom-4-15360": 102.20, # Equivalent to standard-4
+                        "db-custom-8-30720": 204.40, # Equivalent to standard-8
+                    }
+
+                    current_cost = machine_pricing.get(tier, 46.20)
+
+                    # Map to equivalent db-custom
+                    if "standard-1" in tier:
+                        recommended_tier = "db-custom-1-3840"
+                        recommended_cost = custom_pricing["db-custom-1-3840"]
+                    elif "standard-2" in tier:
+                        recommended_tier = "db-custom-2-7680"
+                        recommended_cost = custom_pricing["db-custom-2-7680"]
+                    elif "standard-4" in tier:
+                        recommended_tier = "db-custom-4-15360"
+                        recommended_cost = custom_pricing["db-custom-4-15360"]
+                    elif "standard-8" in tier:
+                        recommended_tier = "db-custom-8-30720"
+                        recommended_cost = custom_pricing["db-custom-8-30720"]
+                    else:
+                        continue
+
+                    # Check HA
+                    ha_enabled = instance.settings.availability_type == sql_v1.Settings.AvailabilityType.REGIONAL if instance.settings else False
+                    if ha_enabled:
+                        current_cost *= 2
+                        recommended_cost *= 2
+
+                    monthly_waste = current_cost - recommended_cost
+                    savings_pct = (monthly_waste / current_cost * 100) if current_cost > 0 else 0
+
+                    resources.append(OrphanResourceData(
+                        resource_id=instance.name,
+                        resource_type="cloud_sql_old_machine_type",
+                        resource_name=instance.name,
+                        region=instance.region if hasattr(instance, 'region') else "global",
+                        estimated_monthly_cost=monthly_waste,
+                        resource_metadata={
+                            "instance_name": instance.name,
+                            "database_version": instance.database_version,
+                            "state": instance.state.name,
+                            "tier": tier,
+                            "availability_type": "HA" if ha_enabled else "ZONAL",
+                            "current_cost_monthly": round(current_cost, 2),
+                            "recommended_tier": recommended_tier,
+                            "recommended_cost_monthly": round(recommended_cost, 2),
+                            "savings_percentage": round(savings_pct, 1),
+                            "annual_savings": round(monthly_waste * 12, 2),
+                            "confidence": "MEDIUM",
+                            "recommendation": f"MIGRATE to {recommended_tier} for -{savings_pct:.0f}% cost and better flexibility (${monthly_waste * 12:.2f}/year savings).",
+                            "waste_reason": f"Old db-n1 tier - db-custom is {savings_pct:.0f}% cheaper with more flexibility"
+                        }
+                    ))
+
+            except Exception as e:
+                logger.error(f"Error listing Cloud SQL instances: {e}")
+
+        except Exception as e:
+            logger.error(f"Error scanning for old machine types: {e}")
+
+        return resources
+
+    async def scan_cloud_sql_devtest_247(
+        self, region: str | None = None, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scenario 5: Detect dev/test instances running 24/7.
+
+        Waste: Dev/test should run business hours only (60h/week vs 168h).
+        Detection: labels.environment in ['dev', 'test', 'staging'] AND uptime >7 days
+        Cost: 64% savings with scheduling ($59/month typical)
+        Priority: MEDIUM (P2) 💰💰
+        """
+        resources = []
+
+        try:
+            from google.cloud import sql_v1
+            from datetime import datetime, timezone
+
+            # Get detection parameters
+            min_uptime_days = 7
+            business_hours_per_week = 60
+            devtest_labels = ["dev", "test", "staging", "development"]
+            if detection_rules and "cloud_sql_devtest_247" in detection_rules:
+                rules = detection_rules["cloud_sql_devtest_247"]
+                min_uptime_days = rules.get("min_uptime_days", 7)
+                business_hours_per_week = rules.get("business_hours_per_week", 60)
+                devtest_labels = rules.get("devtest_labels", devtest_labels)
+
+            sql_client = sql_v1.CloudSqlInstancesServiceClient(credentials=self.credentials)
+
+            try:
+                request = sql_v1.ListInstancesRequest(project=self.project_id)
+
+                for instance in sql_client.list(request=request):
+                    if instance.state != sql_v1.Instance.State.RUNNABLE:
+                        continue
+
+                    # Check labels
+                    labels = dict(instance.settings.user_labels) if instance.settings and instance.settings.user_labels else {}
+                    environment = labels.get("environment", "").lower()
+
+                    if environment not in devtest_labels:
+                        continue
+
+                    # Check uptime
+                    created_at = instance.create_time
+                    if created_at:
+                        age_days = (datetime.now(timezone.utc) - created_at).days
+                    else:
+                        age_days = 0
+
+                    if age_days < min_uptime_days:
+                        continue
+
+                    # Calculate costs
+                    tier = instance.settings.tier if instance.settings else "db-n1-standard-1"
+                    machine_pricing = {
+                        "db-f1-micro": 7.67,
+                        "db-g1-small": 25.00,
+                        "db-n1-standard-1": 46.20,
+                        "db-n1-standard-2": 92.40,
+                        "db-n1-standard-4": 184.80,
+                    }
+                    instance_cost = machine_pricing.get(tier, 46.20)
+
+                    storage_size_gb = instance.settings.data_disk_size_gb if instance.settings else 100
+                    storage_cost = storage_size_gb * 0.17
+                    backup_cost = storage_size_gb * 1.5 * 0.08
+
+                    # Current cost (24/7)
+                    monthly_cost = instance_cost + storage_cost + backup_cost
+
+                    # Optimal cost (business hours only)
+                    hours_actual = 168
+                    hours_optimal = business_hours_per_week
+                    optimal_instance_cost = instance_cost * (hours_optimal / hours_actual)
+                    optimal_cost = optimal_instance_cost + storage_cost + backup_cost
+
+                    monthly_waste = monthly_cost - optimal_cost
+                    waste_pct = (monthly_waste / monthly_cost * 100) if monthly_cost > 0 else 0
+
+                    resources.append(OrphanResourceData(
+                        resource_id=instance.name,
+                        resource_type="cloud_sql_devtest_247",
+                        resource_name=instance.name,
+                        region=instance.region if hasattr(instance, 'region') else "global",
+                        estimated_monthly_cost=monthly_waste,
+                        resource_metadata={
+                            "instance_name": instance.name,
+                            "database_version": instance.database_version,
+                            "state": "RUNNABLE",
+                            "tier": tier,
+                            "labels": labels,
+                            "uptime_days": age_days,
+                            "current_uptime_hours_weekly": hours_actual,
+                            "optimal_uptime_hours_weekly": hours_optimal,
+                            "current_cost_monthly": round(monthly_cost, 2),
+                            "optimal_cost_monthly": round(optimal_cost, 2),
+                            "waste_percentage": round(waste_pct, 0),
+                            "annual_savings": round(monthly_waste * 12, 2),
+                            "confidence": "HIGH",
+                            "recommendation": f"Implement automated start/stop schedule (8am-8pm Mon-Fri) to save ${monthly_waste * 12:.2f}/year ({waste_pct:.0f}% savings).",
+                            "waste_reason": f"Dev/test instance running 24/7 - {waste_pct:.0f}% waste with proper scheduling"
+                        }
+                    ))
+
+            except Exception as e:
+                logger.error(f"Error listing Cloud SQL instances: {e}")
+
+        except Exception as e:
+            logger.error(f"Error scanning for dev/test 24/7 instances: {e}")
+
+        return resources
+
+    async def scan_cloud_sql_unused_replicas(
+        self, region: str | None = None, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scenario 6: Detect unused read replicas (zero queries).
+
+        Waste: Read replicas cost same as primary but never used.
+        Detection: is_replica AND total_queries == 0 for 14 days
+        Cost: Full instance cost ($92-150/month typical)
+        Priority: CRITICAL (P0) 💰💰💰💰
+        """
+        resources = []
+
+        try:
+            from google.cloud import sql_v1
+            from google.cloud import monitoring_v3
+            from datetime import datetime, timezone, timedelta
+
+            # Get detection parameters
+            lookback_days = 14
+            if detection_rules and "cloud_sql_unused_replicas" in detection_rules:
+                rules = detection_rules["cloud_sql_unused_replicas"]
+                lookback_days = rules.get("lookback_days", 14)
+
+            sql_client = sql_v1.CloudSqlInstancesServiceClient(credentials=self.credentials)
+            monitoring_client = monitoring_v3.MetricServiceClient(credentials=self.credentials)
+
+            try:
+                request = sql_v1.ListInstancesRequest(project=self.project_id)
+
+                for instance in sql_client.list(request=request):
+                    # Check if instance is a replica
+                    if not instance.replica_configuration:
+                        continue
+
+                    if instance.state != sql_v1.Instance.State.RUNNABLE:
+                        continue
+
+                    instance_name = instance.name
+
+                    # Query read operations
+                    end_time = datetime.now(timezone.utc)
+                    start_time = end_time - timedelta(days=lookback_days)
+
+                    try:
+                        interval = monitoring_v3.TimeInterval({
+                            "end_time": {"seconds": int(end_time.timestamp())},
+                            "start_time": {"seconds": int(start_time.timestamp())}
+                        })
+
+                        queries_filter = (
+                            f'resource.type="cloudsql_database" '
+                            f'AND resource.labels.database_id="{self.project_id}:{instance_name}" '
+                            f'AND metric.type="cloudsql.googleapis.com/database/queries"'
+                        )
+
+                        queries_request = monitoring_v3.ListTimeSeriesRequest({
+                            "name": f"projects/{self.project_id}",
+                            "filter": queries_filter,
+                            "interval": interval,
+                            "view": monitoring_v3.ListTimeSeriesRequest.TimeSeriesView.FULL
+                        })
+
+                        total_queries = 0
+                        for series in monitoring_client.list_time_series(request=queries_request):
+                            for point in series.points:
+                                total_queries += point.value.int64_value or 0
+
+                        # Detect unused replica
+                        if total_queries == 0:
+                            # Calculate full cost
+                            tier = instance.settings.tier if instance.settings else "db-n1-standard-2"
+                            machine_pricing = {
+                                "db-n1-standard-1": 46.20,
+                                "db-n1-standard-2": 92.40,
+                                "db-n1-standard-4": 184.80,
+                            }
+                            instance_cost = machine_pricing.get(tier, 92.40)
+
+                            storage_size_gb = instance.settings.data_disk_size_gb if instance.settings else 200
+                            storage_cost = storage_size_gb * 0.17
+                            backup_cost = storage_size_gb * 1.5 * 0.08
+
+                            monthly_cost = instance_cost + storage_cost + backup_cost
+
+                            # Calculate waste since creation
+                            created_at = instance.create_time
+                            if created_at:
+                                age_days = (datetime.now(timezone.utc) - created_at).days
+                                already_wasted = monthly_cost * (age_days / 30)
+                            else:
+                                age_days = 0
+                                already_wasted = 0
+
+                            resources.append(OrphanResourceData(
+                                resource_id=instance.name,
+                                resource_type="cloud_sql_unused_replicas",
+                                resource_name=instance.name,
+                                region=instance.region if hasattr(instance, 'region') else "global",
+                                estimated_monthly_cost=monthly_cost,
+                                resource_metadata={
+                                    "instance_name": instance.name,
+                                    "database_version": instance.database_version,
+                                    "state": "RUNNABLE",
+                                    "tier": tier,
+                                    "is_replica": True,
+                                    "storage_size_gb": storage_size_gb,
+                                    "query_metrics": {
+                                        "total_queries_14d": total_queries
+                                    },
+                                    "age_days": age_days,
+                                    "instance_cost_monthly": round(instance_cost, 2),
+                                    "storage_cost_monthly": round(storage_cost, 2),
+                                    "backup_cost_monthly": round(backup_cost, 2),
+                                    "already_wasted": round(already_wasted, 2),
+                                    "annual_cost": round(monthly_cost * 12, 2),
+                                    "confidence": "HIGH",
+                                    "recommendation": f"DELETE read replica to save ${monthly_cost * 12:.2f}/year. Zero queries in {lookback_days} days.",
+                                    "waste_reason": f"Read replica unused - 0 queries for {lookback_days}+ days (100% waste)"
+                                }
+                            ))
+
+                    except Exception as e:
+                        logger.warning(f"Could not fetch metrics for replica {instance_name}: {e}")
+                        continue
+
+            except Exception as e:
+                logger.error(f"Error listing Cloud SQL instances: {e}")
+
+        except Exception as e:
+            logger.error(f"Error scanning for unused replicas: {e}")
+
+        return resources
+
+    async def scan_cloud_sql_untagged(
+        self, region: str | None = None, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scenario 7: Detect untagged Cloud SQL instances (governance waste).
+
+        Waste: Missing labels = lost cost allocation & governance.
+        Detection: missing required labels (environment, owner, cost-center)
+        Cost: 5% of instance cost (governance overhead)
+        Priority: LOW (P3) 💰
+        """
+        resources = []
+
+        try:
+            from google.cloud import sql_v1
+
+            # Get detection parameters
+            required_labels = ["environment", "owner", "cost-center"]
+            governance_waste_pct = 0.05
+            if detection_rules and "cloud_sql_untagged" in detection_rules:
+                rules = detection_rules["cloud_sql_untagged"]
+                required_labels = rules.get("required_labels", required_labels)
+                governance_waste_pct = rules.get("governance_waste_pct", 0.05)
+
+            sql_client = sql_v1.CloudSqlInstancesServiceClient(credentials=self.credentials)
+
+            try:
+                request = sql_v1.ListInstancesRequest(project=self.project_id)
+
+                for instance in sql_client.list(request=request):
+                    # Check labels
+                    labels = dict(instance.settings.user_labels) if instance.settings and instance.settings.user_labels else {}
+
+                    # Identify missing labels
+                    missing_labels = [label for label in required_labels if label not in labels]
+
+                    if not missing_labels:
+                        continue
+
+                    # Calculate governance waste
+                    tier = instance.settings.tier if instance.settings else "db-n1-standard-2"
+                    machine_pricing = {
+                        "db-f1-micro": 7.67,
+                        "db-n1-standard-1": 46.20,
+                        "db-n1-standard-2": 92.40,
+                        "db-n1-standard-4": 184.80,
+                    }
+                    instance_cost = machine_pricing.get(tier, 92.40)
+
+                    storage_size_gb = instance.settings.data_disk_size_gb if instance.settings else 100
+                    storage_cost = storage_size_gb * 0.17
+                    backup_cost = storage_size_gb * 1.5 * 0.08
+
+                    # Check HA
+                    ha_enabled = instance.settings.availability_type == sql_v1.Settings.AvailabilityType.REGIONAL if instance.settings else False
+                    if ha_enabled:
+                        instance_cost *= 2
+
+                    instance_monthly_cost = instance_cost + storage_cost + backup_cost
+
+                    # Governance waste
+                    monthly_waste = instance_monthly_cost * governance_waste_pct
+
+                    resources.append(OrphanResourceData(
+                        resource_id=instance.name,
+                        resource_type="cloud_sql_untagged",
+                        resource_name=instance.name,
+                        region=instance.region if hasattr(instance, 'region') else "global",
+                        estimated_monthly_cost=monthly_waste,
+                        resource_metadata={
+                            "instance_name": instance.name,
+                            "database_version": instance.database_version,
+                            "state": instance.state.name,
+                            "tier": tier,
+                            "labels": labels,
+                            "missing_labels": missing_labels,
+                            "instance_monthly_cost": round(instance_monthly_cost, 2),
+                            "annual_cost": round(monthly_waste * 12, 2),
+                            "confidence": "MEDIUM",
+                            "recommendation": f"Add required labels for cost allocation and governance. Missing: {', '.join(missing_labels)}.",
+                            "waste_reason": f"Missing {len(missing_labels)} required labels - governance waste"
+                        }
+                    ))
+
+            except Exception as e:
+                logger.error(f"Error listing Cloud SQL instances: {e}")
+
+        except Exception as e:
+            logger.error(f"Error scanning for untagged instances: {e}")
+
+        return resources
+
+    async def scan_cloud_sql_zero_io(
+        self, region: str | None = None, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scenario 8: Detect instances with zero I/O (empty database).
+
+        Waste: No read/write operations = database unused.
+        Detection: total_read_ops == 0 AND total_write_ops == 0 for 14 days
+        Cost: Full instance cost ($121/month typical)
+        Priority: CRITICAL (P0) 💰💰💰💰
+        """
+        resources = []
+
+        try:
+            from google.cloud import sql_v1
+            from google.cloud import monitoring_v3
+            from datetime import datetime, timezone, timedelta
+
+            # Get detection parameters
+            lookback_days = 14
+            min_age_days = 7
+            if detection_rules and "cloud_sql_zero_io" in detection_rules:
+                rules = detection_rules["cloud_sql_zero_io"]
+                lookback_days = rules.get("lookback_days", 14)
+                min_age_days = rules.get("min_age_days", 7)
+
+            sql_client = sql_v1.CloudSqlInstancesServiceClient(credentials=self.credentials)
+            monitoring_client = monitoring_v3.MetricServiceClient(credentials=self.credentials)
+
+            try:
+                request = sql_v1.ListInstancesRequest(project=self.project_id)
+
+                for instance in sql_client.list(request=request):
+                    if instance.state != sql_v1.Instance.State.RUNNABLE:
+                        continue
+
+                    # Check age
+                    created_at = instance.create_time
+                    if created_at:
+                        age_days = (datetime.now(timezone.utc) - created_at).days
+                    else:
+                        age_days = 0
+
+                    if age_days < min_age_days:
+                        continue
+
+                    instance_name = instance.name
+
+                    # Query I/O metrics
+                    end_time = datetime.now(timezone.utc)
+                    start_time = end_time - timedelta(days=lookback_days)
+
+                    try:
+                        interval = monitoring_v3.TimeInterval({
+                            "end_time": {"seconds": int(end_time.timestamp())},
+                            "start_time": {"seconds": int(start_time.timestamp())}
+                        })
+
+                        # Read ops
+                        read_filter = (
+                            f'resource.type="cloudsql_database" '
+                            f'AND resource.labels.database_id="{self.project_id}:{instance_name}" '
+                            f'AND metric.type="cloudsql.googleapis.com/database/disk/read_ops_count"'
+                        )
+                        read_request = monitoring_v3.ListTimeSeriesRequest({
+                            "name": f"projects/{self.project_id}",
+                            "filter": read_filter,
+                            "interval": interval,
+                            "view": monitoring_v3.ListTimeSeriesRequest.TimeSeriesView.FULL
+                        })
+
+                        total_read_ops = 0
+                        for series in monitoring_client.list_time_series(request=read_request):
+                            for point in series.points:
+                                total_read_ops += point.value.int64_value or 0
+
+                        # Write ops
+                        write_filter = (
+                            f'resource.type="cloudsql_database" '
+                            f'AND resource.labels.database_id="{self.project_id}:{instance_name}" '
+                            f'AND metric.type="cloudsql.googleapis.com/database/disk/write_ops_count"'
+                        )
+                        write_request = monitoring_v3.ListTimeSeriesRequest({
+                            "name": f"projects/{self.project_id}",
+                            "filter": write_filter,
+                            "interval": interval,
+                            "view": monitoring_v3.ListTimeSeriesRequest.TimeSeriesView.FULL
+                        })
+
+                        total_write_ops = 0
+                        for series in monitoring_client.list_time_series(request=write_request):
+                            for point in series.points:
+                                total_write_ops += point.value.int64_value or 0
+
+                        # Detect zero I/O
+                        if total_read_ops == 0 and total_write_ops == 0:
+                            # Calculate full cost
+                            tier = instance.settings.tier if instance.settings else "db-n1-standard-2"
+                            machine_pricing = {
+                                "db-n1-standard-1": 46.20,
+                                "db-n1-standard-2": 92.40,
+                                "db-n1-standard-4": 184.80,
+                            }
+                            instance_cost = machine_pricing.get(tier, 92.40)
+
+                            storage_size_gb = instance.settings.data_disk_size_gb if instance.settings else 100
+                            storage_cost = storage_size_gb * 0.17
+                            backup_cost = storage_size_gb * 1.5 * 0.08
+
+                            monthly_cost = instance_cost + storage_cost + backup_cost
+
+                            already_wasted = monthly_cost * (age_days / 30)
+
+                            resources.append(OrphanResourceData(
+                                resource_id=instance.name,
+                                resource_type="cloud_sql_zero_io",
+                                resource_name=instance.name,
+                                region=instance.region if hasattr(instance, 'region') else "global",
+                                estimated_monthly_cost=monthly_cost,
+                                resource_metadata={
+                                    "instance_name": instance.name,
+                                    "database_version": instance.database_version,
+                                    "state": "RUNNABLE",
+                                    "tier": tier,
+                                    "storage_size_gb": storage_size_gb,
+                                    "io_metrics": {
+                                        "total_read_ops_14d": total_read_ops,
+                                        "total_write_ops_14d": total_write_ops
+                                    },
+                                    "age_days": age_days,
+                                    "already_wasted": round(already_wasted, 2),
+                                    "annual_cost": round(monthly_cost * 12, 2),
+                                    "confidence": "HIGH",
+                                    "recommendation": f"DELETE instance to save ${monthly_cost * 12:.2f}/year. Zero I/O for {lookback_days} days.",
+                                    "waste_reason": f"Database with zero I/O operations for {lookback_days}+ days (likely empty)"
+                                }
+                            ))
+
+                    except Exception as e:
+                        logger.warning(f"Could not fetch I/O metrics for {instance_name}: {e}")
+                        continue
+
+            except Exception as e:
+                logger.error(f"Error listing Cloud SQL instances: {e}")
+
+        except Exception as e:
+            logger.error(f"Error scanning for zero I/O instances: {e}")
+
+        return resources
+
+    async def scan_cloud_sql_storage_overprovisioned(
+        self, region: str | None = None, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scenario 9: Detect storage over-provisioned (>80% free space).
+
+        Waste: Paying for unused storage + proportional backups.
+        Detection: storage_used < 20% of allocated
+        Cost: Storage + backup waste ($232/month typical for 1TB → 200GB)
+        Priority: HIGH (P1) 💰💰💰
+        """
+        resources = []
+
+        try:
+            from google.cloud import sql_v1
+            from google.cloud import monitoring_v3
+            from datetime import datetime, timezone, timedelta
+
+            # Get detection parameters
+            free_space_threshold = 80.0
+            safety_buffer = 1.30
+            min_savings_threshold = 5.0
+            lookback_days = 14
+            if detection_rules and "cloud_sql_storage_overprovisioned" in detection_rules:
+                rules = detection_rules["cloud_sql_storage_overprovisioned"]
+                free_space_threshold = rules.get("free_space_threshold", 80.0)
+                safety_buffer = rules.get("safety_buffer", 1.30)
+                min_savings_threshold = rules.get("min_savings_threshold", 5.0)
+                lookback_days = rules.get("lookback_days", 14)
+
+            sql_client = sql_v1.CloudSqlInstancesServiceClient(credentials=self.credentials)
+            monitoring_client = monitoring_v3.MetricServiceClient(credentials=self.credentials)
+
+            try:
+                request = sql_v1.ListInstancesRequest(project=self.project_id)
+
+                for instance in sql_client.list(request=request):
+                    instance_name = instance.name
+                    allocated_storage_gb = instance.settings.data_disk_size_gb if instance.settings else 100
+
+                    # Query storage usage
+                    end_time = datetime.now(timezone.utc)
+                    start_time = end_time - timedelta(days=lookback_days)
+
+                    try:
+                        interval = monitoring_v3.TimeInterval({
+                            "end_time": {"seconds": int(end_time.timestamp())},
+                            "start_time": {"seconds": int(start_time.timestamp())}
+                        })
+
+                        bytes_used_filter = (
+                            f'resource.type="cloudsql_database" '
+                            f'AND resource.labels.database_id="{self.project_id}:{instance_name}" '
+                            f'AND metric.type="cloudsql.googleapis.com/database/disk/bytes_used"'
+                        )
+                        bytes_used_request = monitoring_v3.ListTimeSeriesRequest({
+                            "name": f"projects/{self.project_id}",
+                            "filter": bytes_used_filter,
+                            "interval": interval,
+                            "view": monitoring_v3.ListTimeSeriesRequest.TimeSeriesView.FULL
+                        })
+
+                        used_bytes_values = []
+                        for series in monitoring_client.list_time_series(request=bytes_used_request):
+                            for point in series.points:
+                                used_bytes_values.append(point.value.double_value or 0)
+
+                        if not used_bytes_values:
+                            continue
+
+                        avg_used_bytes = sum(used_bytes_values) / len(used_bytes_values)
+                        avg_used_gb = avg_used_bytes / (1024**3)
+
+                        # Calculate percentage
+                        used_percent = (avg_used_gb / allocated_storage_gb * 100) if allocated_storage_gb > 0 else 0
+                        free_percent = 100 - used_percent
+
+                        # Detect over-provisioning
+                        if free_percent >= free_space_threshold:
+                            # Calculate recommended storage
+                            recommended_storage_gb = int(avg_used_gb * safety_buffer)
+                            recommended_storage_gb = max(recommended_storage_gb, 10)  # Minimum 10GB
+
+                            # Storage pricing
+                            storage_type = instance.settings.data_disk_type if instance.settings else "PD_SSD"
+                            storage_pricing = {"PD_SSD": 0.17, "PD_HDD": 0.09}
+                            price_per_gb = storage_pricing.get(storage_type, 0.17)
+
+                            current_storage_cost = allocated_storage_gb * price_per_gb
+                            recommended_storage_cost = recommended_storage_gb * price_per_gb
+                            storage_waste = current_storage_cost - recommended_storage_cost
+
+                            # Backup waste
+                            current_backup_cost = allocated_storage_gb * 1.5 * 0.08
+                            recommended_backup_cost = recommended_storage_gb * 1.5 * 0.08
+                            backup_waste = current_backup_cost - recommended_backup_cost
+
+                            monthly_waste = storage_waste + backup_waste
+
+                            if monthly_waste >= min_savings_threshold:
+                                savings_pct = (monthly_waste / (current_storage_cost + current_backup_cost) * 100) if (current_storage_cost + current_backup_cost) > 0 else 0
+
+                                resources.append(OrphanResourceData(
+                                    resource_id=instance.name,
+                                    resource_type="cloud_sql_storage_overprovisioned",
+                                    resource_name=instance.name,
+                                    region=instance.region if hasattr(instance, 'region') else "global",
+                                    estimated_monthly_cost=monthly_waste,
+                                    resource_metadata={
+                                        "instance_name": instance.name,
+                                        "database_version": instance.database_version,
+                                        "state": instance.state.name,
+                                        "storage_size_gb": allocated_storage_gb,
+                                        "storage_type": storage_type,
+                                        "storage_usage": {
+                                            "avg_used_gb": round(avg_used_gb, 1),
+                                            "avg_used_percent": round(used_percent, 1),
+                                            "avg_free_percent": round(free_percent, 1)
+                                        },
+                                        "recommended_storage_gb": recommended_storage_gb,
+                                        "current_storage_cost_monthly": round(current_storage_cost, 2),
+                                        "recommended_storage_cost_monthly": round(recommended_storage_cost, 2),
+                                        "current_backup_cost_monthly": round(current_backup_cost, 2),
+                                        "recommended_backup_cost_monthly": round(recommended_backup_cost, 2),
+                                        "savings_percentage": round(savings_pct, 0),
+                                        "annual_savings": round(monthly_waste * 12, 2),
+                                        "confidence": "HIGH",
+                                        "recommendation": f"REDUCE storage from {allocated_storage_gb}GB to {recommended_storage_gb}GB to save ${monthly_waste * 12:.2f}/year. Using only {used_percent:.0f}%.",
+                                        "waste_reason": f"Storage over-provisioned: {free_percent:.0f}% free space ({allocated_storage_gb}GB allocated, {avg_used_gb:.0f}GB used)"
+                                    }
+                                ))
+
+                    except Exception as e:
+                        logger.warning(f"Could not fetch storage metrics for {instance_name}: {e}")
+                        continue
+
+            except Exception as e:
+                logger.error(f"Error listing Cloud SQL instances: {e}")
+
+        except Exception as e:
+            logger.error(f"Error scanning for storage over-provisioning: {e}")
+
+        return resources
+
+    async def scan_cloud_sql_unnecessary_ha(
+        self, region: str | None = None, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scenario 10: Detect unnecessary High Availability on dev/test.
+
+        Waste: HA doubles instance cost but dev/test doesn't need 99.95% SLA.
+        Detection: availability_type == 'REGIONAL' AND labels.environment in ['dev', 'test']
+        Cost: +100% instance cost waste ($184/month typical)
+        Priority: CRITICAL (P0) 💰💰💰💰
+        """
+        resources = []
+
+        try:
+            from google.cloud import sql_v1
+
+            # Get detection parameters
+            devtest_labels = ["dev", "test", "staging", "development"]
+            if detection_rules and "cloud_sql_unnecessary_ha" in detection_rules:
+                rules = detection_rules["cloud_sql_unnecessary_ha"]
+                devtest_labels = rules.get("devtest_labels", devtest_labels)
+
+            sql_client = sql_v1.CloudSqlInstancesServiceClient(credentials=self.credentials)
+
+            try:
+                request = sql_v1.ListInstancesRequest(project=self.project_id)
+
+                for instance in sql_client.list(request=request):
+                    # Check if HA enabled
+                    ha_enabled = instance.settings.availability_type == sql_v1.Settings.AvailabilityType.REGIONAL if instance.settings else False
+
+                    if not ha_enabled:
+                        continue
+
+                    if instance.state != sql_v1.Instance.State.RUNNABLE:
+                        continue
+
+                    # Check labels
+                    labels = dict(instance.settings.user_labels) if instance.settings and instance.settings.user_labels else {}
+                    environment = labels.get("environment", "").lower()
+
+                    if environment not in devtest_labels:
+                        continue
+
+                    # Calculate HA waste
+                    tier = instance.settings.tier if instance.settings else "db-n1-standard-4"
+                    machine_pricing = {
+                        "db-n1-standard-1": 46.20,
+                        "db-n1-standard-2": 92.40,
+                        "db-n1-standard-4": 184.80,
+                        "db-n1-standard-8": 369.60,
+                    }
+                    instance_cost_single = machine_pricing.get(tier, 184.80)
+
+                    # HA waste = standby replica cost
+                    monthly_waste = instance_cost_single
+
+                    resources.append(OrphanResourceData(
+                        resource_id=instance.name,
+                        resource_type="cloud_sql_unnecessary_ha",
+                        resource_name=instance.name,
+                        region=instance.region if hasattr(instance, 'region') else "global",
+                        estimated_monthly_cost=monthly_waste,
+                        resource_metadata={
+                            "instance_name": instance.name,
+                            "database_version": instance.database_version,
+                            "state": "RUNNABLE",
+                            "tier": tier,
+                            "availability_type": "REGIONAL",
+                            "labels": labels,
+                            "instance_cost_single_monthly": round(instance_cost_single, 2),
+                            "instance_cost_ha_monthly": round(instance_cost_single * 2, 2),
+                            "annual_savings": round(monthly_waste * 12, 2),
+                            "confidence": "HIGH",
+                            "recommendation": f"DISABLE High Availability for dev/test environment to save ${monthly_waste * 12:.2f}/year. 99.95% SLA not needed for non-prod.",
+                            "waste_reason": "High Availability enabled on dev/test - unnecessary +100% cost"
+                        }
+                    ))
+
+            except Exception as e:
+                logger.error(f"Error listing Cloud SQL instances: {e}")
+
+        except Exception as e:
+            logger.error(f"Error scanning for unnecessary HA: {e}")
+
+        return resources
+
+    async def scan_cloud_nat_gateway_idle(
+        self, region: str | None = None, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scenario 1: Detect Cloud NAT gateways with zero traffic (idle).
+
+        Waste: Cloud NAT gateway costs $32.40/month minimum even when idle.
+        This is the #1 cause of Cloud NAT waste (40% of typical waste).
+
+        Detection: Cloud Router with NAT config AND allocated_ports=0 AND sent_bytes=0 for 7+ days
+        Cost: $32.40/month gateway minimum + $2.88/month per unused NAT IP
+        Priority: CRITICAL (P0) 💰💰💰
+        """
+        resources = []
+
+        try:
+            from google.cloud import compute_v1
+            from google.cloud import monitoring_v3
+            from datetime import datetime, timezone, timedelta
+
+            # Get detection parameters
+            min_idle_days = 7
+            if detection_rules and "gcp_nat_gateway_idle" in detection_rules:
+                rules = detection_rules["gcp_nat_gateway_idle"]
+                min_idle_days = rules.get("min_idle_days", 7)
+
+            routers_client = compute_v1.RoutersClient(credentials=self.credentials)
+            regions_client = compute_v1.RegionsClient(credentials=self.credentials)
+            monitoring_client = monitoring_v3.MetricServiceClient(credentials=self.credentials)
+
+            # Get all active regions
+            regions_to_scan = []
+            for gcp_region in regions_client.list(project=self.project_id):
+                if gcp_region.status == "UP":
+                    regions_to_scan.append(gcp_region.name)
+
+            # Scan each region for Cloud Routers with NAT
+            for gcp_region in regions_to_scan:
+                try:
+                    request = compute_v1.ListRoutersRequest(
+                        project=self.project_id,
+                        region=gcp_region
+                    )
+
+                    for router in routers_client.list(request=request):
+                        # Check if router has NAT configurations
+                        if not router.nats:
+                            continue
+
+                        for nat in router.nats:
+                            # Query Cloud Monitoring for NAT traffic metrics
+                            end_time = datetime.now(timezone.utc)
+                            start_time = end_time - timedelta(days=min_idle_days)
+
+                            # Query allocated ports metric
+                            allocated_ports = 0
+                            sent_bytes = 0
+
+                            try:
+                                # Check allocated ports
+                                interval = monitoring_v3.TimeInterval({
+                                    "end_time": {"seconds": int(end_time.timestamp())},
+                                    "start_time": {"seconds": int(start_time.timestamp())}
+                                })
+
+                                ports_filter = (
+                                    f'resource.type="nat_gateway" '
+                                    f'AND resource.labels.project_id="{self.project_id}" '
+                                    f'AND resource.labels.region="{gcp_region}" '
+                                    f'AND resource.labels.router_id="{router.name}" '
+                                    f'AND resource.labels.nat_gateway_name="{nat.name}" '
+                                    f'AND metric.type="router.googleapis.com/nat_allocated_ports"'
+                                )
+
+                                ports_request = monitoring_v3.ListTimeSeriesRequest({
+                                    "name": f"projects/{self.project_id}",
+                                    "filter": ports_filter,
+                                    "interval": interval,
+                                    "view": monitoring_v3.ListTimeSeriesRequest.TimeSeriesView.FULL
+                                })
+
+                                for series in monitoring_client.list_time_series(request=ports_request):
+                                    for point in series.points:
+                                        allocated_ports = max(allocated_ports, point.value.int64_value or 0)
+
+                                # Check sent bytes
+                                bytes_filter = (
+                                    f'resource.type="nat_gateway" '
+                                    f'AND resource.labels.project_id="{self.project_id}" '
+                                    f'AND resource.labels.region="{gcp_region}" '
+                                    f'AND resource.labels.router_id="{router.name}" '
+                                    f'AND resource.labels.nat_gateway_name="{nat.name}" '
+                                    f'AND metric.type="router.googleapis.com/sent_bytes_count"'
+                                )
+
+                                bytes_request = monitoring_v3.ListTimeSeriesRequest({
+                                    "name": f"projects/{self.project_id}",
+                                    "filter": bytes_filter,
+                                    "interval": interval,
+                                    "view": monitoring_v3.ListTimeSeriesRequest.TimeSeriesView.FULL
+                                })
+
+                                for series in monitoring_client.list_time_series(request=bytes_request):
+                                    for point in series.points:
+                                        sent_bytes += point.value.int64_value or 0
+
+                            except Exception as e:
+                                # If monitoring data unavailable, assume idle
+                                logger.warning(f"Could not fetch monitoring data for NAT {nat.name}: {e}")
+
+                            # Detect idle NAT (0 ports AND 0 bytes)
+                            if allocated_ports == 0 and sent_bytes == 0:
+                                # Calculate costs
+                                gateway_cost = 32.40  # $0.045/hour * 24 * 30
+
+                                # Count NAT IPs
+                                nat_ip_count = 0
+                                if nat.nat_ip_allocate_option == "MANUAL_ONLY":
+                                    nat_ip_count = len(nat.nat_ips or [])
+                                else:
+                                    # Auto-allocated, estimate minimum
+                                    nat_ip_count = 1
+
+                                nat_ip_cost = nat_ip_count * 2.88
+                                monthly_cost = gateway_cost + nat_ip_cost
+                                annual_cost = monthly_cost * 12
+
+                                # Calculate age
+                                created_at = datetime.fromisoformat(
+                                    router.creation_timestamp.replace('Z', '+00:00')
+                                )
+                                age_days = (datetime.now(timezone.utc) - created_at).days
+                                months_wasted = age_days / 30
+                                already_wasted = monthly_cost * months_wasted
+
+                                # Determine confidence
+                                if min_idle_days >= 30:
+                                    confidence = "CRITICAL"
+                                elif min_idle_days >= 14:
+                                    confidence = "HIGH"
+                                elif min_idle_days >= 7:
+                                    confidence = "MEDIUM"
+                                else:
+                                    confidence = "LOW"
+
+                                resources.append(OrphanResourceData(
+                                    resource_id=f"{router.name}/{nat.name}",
+                                    resource_type="gcp_nat_gateway_idle",
+                                    resource_name=nat.name,
+                                    region=gcp_region,
+                                    estimated_monthly_cost=monthly_cost,
+                                    resource_metadata={
+                                        "router_name": router.name,
+                                        "nat_name": nat.name,
+                                        "allocated_ports": allocated_ports,
+                                        "sent_bytes": sent_bytes,
+                                        "nat_ip_count": nat_ip_count,
+                                        "nat_ip_allocate_option": nat.nat_ip_allocate_option,
+                                        "gateway_cost": gateway_cost,
+                                        "nat_ip_cost": nat_ip_cost,
+                                        "age_days": age_days,
+                                        "idle_days": min_idle_days,
+                                        "already_wasted": round(already_wasted, 2),
+                                        "annual_cost": round(annual_cost, 2),
+                                        "confidence": confidence,
+                                        "recommendation": f"DELETE Cloud NAT to save ${annual_cost:.2f}/year. Gateway has been idle for {min_idle_days}+ days with 0 traffic.",
+                                        "waste_reason": f"Cloud NAT gateway idle for {min_idle_days}+ days - 0 allocated ports, 0 traffic"
+                                    }
+                                ))
+
+                except Exception as e:
+                    logger.error(f"Error scanning region {gcp_region} for idle Cloud NAT: {e}")
+                    continue
+
+        except Exception as e:
+            logger.error(f"Error scanning for idle Cloud NAT gateways: {e}")
+
+        return resources
+
+    async def scan_cloud_nat_over_allocated_ips(
+        self, region: str | None = None, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scenario 2: Detect Cloud NAT with over-allocated NAT IP addresses.
+
+        Waste: Manually allocated NAT IPs cost $2.88/month each when unused.
+        Detection: MANUAL_ONLY allocation + (nat_ips.count > min_vms / 64)
+        Cost: $2.88/month per unused IP
+        Priority: CRITICAL (P0) 💰💰
+        """
+        resources = []
+
+        try:
+            from google.cloud import compute_v1
+
+            # Get detection parameters
+            vms_per_ip_threshold = 64  # GCP default: 64 VMs per NAT IP
+            if detection_rules and "gcp_nat_over_allocated_ips" in detection_rules:
+                rules = detection_rules["gcp_nat_over_allocated_ips"]
+                vms_per_ip_threshold = rules.get("vms_per_ip_threshold", 64)
+
+            routers_client = compute_v1.RoutersClient(credentials=self.credentials)
+            regions_client = compute_v1.RegionsClient(credentials=self.credentials)
+            instances_client = compute_v1.InstancesClient(credentials=self.credentials)
+
+            # Get all active regions
+            regions_to_scan = []
+            for gcp_region in regions_client.list(project=self.project_id):
+                if gcp_region.status == "UP":
+                    regions_to_scan.append(gcp_region.name)
+
+            # Scan each region
+            for gcp_region in regions_to_scan:
+                try:
+                    # Count VMs in region (estimate NAT usage)
+                    vm_count = 0
+                    for zone_name in [f"{gcp_region}-a", f"{gcp_region}-b", f"{gcp_region}-c"]:
+                        try:
+                            request = compute_v1.ListInstancesRequest(
+                                project=self.project_id,
+                                zone=zone_name
+                            )
+                            for instance in instances_client.list(request=request):
+                                if instance.status == "RUNNING":
+                                    vm_count += 1
+                        except:
+                            pass
+
+                    # Check routers with NAT
+                    request = compute_v1.ListRoutersRequest(
+                        project=self.project_id,
+                        region=gcp_region
+                    )
+
+                    for router in routers_client.list(request=request):
+                        if not router.nats:
+                            continue
+
+                        for nat in router.nats:
+                            # Only check MANUAL_ONLY allocation
+                            if nat.nat_ip_allocate_option != "MANUAL_ONLY":
+                                continue
+
+                            nat_ip_count = len(nat.nat_ips or [])
+                            optimal_ip_count = max(1, (vm_count + vms_per_ip_threshold - 1) // vms_per_ip_threshold)
+                            over_allocated = nat_ip_count - optimal_ip_count
+
+                            if over_allocated > 0:
+                                # Calculate waste
+                                monthly_cost = over_allocated * 2.88
+                                annual_cost = monthly_cost * 12
+
+                                created_at = datetime.fromisoformat(
+                                    router.creation_timestamp.replace('Z', '+00:00')
+                                )
+                                age_days = (datetime.now(timezone.utc) - created_at).days
+                                months_wasted = age_days / 30
+                                already_wasted = monthly_cost * months_wasted
+
+                                confidence = "HIGH" if over_allocated >= 2 else "MEDIUM"
+
+                                resources.append(OrphanResourceData(
+                                    resource_id=f"{router.name}/{nat.name}",
+                                    resource_type="gcp_nat_over_allocated_ips",
+                                    resource_name=nat.name,
+                                    region=gcp_region,
+                                    estimated_monthly_cost=monthly_cost,
+                                    resource_metadata={
+                                        "router_name": router.name,
+                                        "nat_name": nat.name,
+                                        "nat_ip_count": nat_ip_count,
+                                        "optimal_ip_count": optimal_ip_count,
+                                        "over_allocated": over_allocated,
+                                        "vm_count": vm_count,
+                                        "already_wasted": round(already_wasted, 2),
+                                        "annual_cost": round(annual_cost, 2),
+                                        "confidence": confidence,
+                                        "recommendation": f"REDUCE NAT IPs from {nat_ip_count} to {optimal_ip_count} to save ${annual_cost:.2f}/year. You have {over_allocated} unused NAT IPs.",
+                                        "waste_reason": f"Over-allocated {over_allocated} NAT IPs for {vm_count} VMs (optimal: {optimal_ip_count} IPs)"
+                                    }
+                                ))
+
+                except Exception as e:
+                    logger.error(f"Error scanning region {gcp_region} for over-allocated NAT IPs: {e}")
+                    continue
+
+        except Exception as e:
+            logger.error(f"Error scanning for over-allocated NAT IPs: {e}")
+
+        return resources
+
+    async def scan_cloud_nat_vms_with_external_ips(
+        self, region: str | None = None, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scenario 3: Detect VMs with External IPs that also use Cloud NAT (double cost).
+
+        Waste: VMs with External IPs don't need Cloud NAT (double-paying for egress).
+        Detection: VMs with external IPs in subnets using Cloud NAT
+        Cost: $32.40/month gateway waste (not actually needed)
+        Priority: CRITICAL (P0) 💰💰💰
+        """
+        resources = []
+
+        try:
+            from google.cloud import compute_v1
+
+            routers_client = compute_v1.RoutersClient(credentials=self.credentials)
+            regions_client = compute_v1.RegionsClient(credentials=self.credentials)
+            instances_client = compute_v1.InstancesClient(credentials=self.credentials)
+            subnetworks_client = compute_v1.SubnetworksClient(credentials=self.credentials)
+
+            # Get all active regions
+            regions_to_scan = []
+            for gcp_region in regions_client.list(project=self.project_id):
+                if gcp_region.status == "UP":
+                    regions_to_scan.append(gcp_region.name)
+
+            # Scan each region
+            for gcp_region in regions_to_scan:
+                try:
+                    # Get NAT-enabled subnets
+                    nat_subnets = set()
+                    request = compute_v1.ListRoutersRequest(
+                        project=self.project_id,
+                        region=gcp_region
+                    )
+
+                    for router in routers_client.list(request=request):
+                        if not router.nats:
+                            continue
+
+                        for nat in router.nats:
+                            # Check source subnet IP ranges
+                            if nat.source_subnetwork_ip_ranges_to_nat == "ALL_SUBNETWORKS_ALL_IP_RANGES":
+                                # NAT applies to all subnets - get all subnets
+                                subnet_request = compute_v1.ListSubnetworksRequest(
+                                    project=self.project_id,
+                                    region=gcp_region
+                                )
+                                for subnet in subnetworks_client.list(request=subnet_request):
+                                    nat_subnets.add(subnet.name)
+                            elif nat.subnetworks:
+                                for subnet in nat.subnetworks:
+                                    nat_subnets.add(subnet.name)
+
+                    if not nat_subnets:
+                        continue
+
+                    # Check VMs with external IPs in NAT-enabled subnets
+                    vms_with_double_cost = []
+                    for zone_name in [f"{gcp_region}-a", f"{gcp_region}-b", f"{gcp_region}-c"]:
+                        try:
+                            request = compute_v1.ListInstancesRequest(
+                                project=self.project_id,
+                                zone=zone_name
+                            )
+                            for instance in instances_client.list(request=request):
+                                if instance.status != "RUNNING":
+                                    continue
+
+                                # Check if VM has external IP
+                                has_external_ip = False
+                                for iface in instance.network_interfaces:
+                                    if iface.access_configs:
+                                        has_external_ip = True
+                                        # Check if subnet uses NAT
+                                        subnet_name = iface.subnetwork.split('/')[-1]
+                                        if subnet_name in nat_subnets:
+                                            vms_with_double_cost.append({
+                                                "name": instance.name,
+                                                "subnet": subnet_name,
+                                                "external_ip": iface.access_configs[0].nat_i_p if iface.access_configs else None
+                                            })
+                        except:
+                            pass
+
+                    if vms_with_double_cost:
+                        # Calculate waste (proportional gateway cost)
+                        monthly_cost = 32.40  # Gateway cost wasted
+                        annual_cost = monthly_cost * 12
+
+                        resources.append(OrphanResourceData(
+                            resource_id=f"nat-double-cost-{gcp_region}",
+                            resource_type="gcp_nat_vms_with_external_ips",
+                            resource_name=f"Cloud NAT Double-Cost in {gcp_region}",
+                            region=gcp_region,
+                            estimated_monthly_cost=monthly_cost,
+                            resource_metadata={
+                                "vm_count": len(vms_with_double_cost),
+                                "vms": vms_with_double_cost,
+                                "annual_cost": round(annual_cost, 2),
+                                "confidence": "HIGH",
+                                "recommendation": f"REMOVE External IPs from {len(vms_with_double_cost)} VMs OR disable Cloud NAT to save ${annual_cost:.2f}/year. VMs with External IPs don't need Cloud NAT.",
+                                "waste_reason": f"{len(vms_with_double_cost)} VMs have External IPs + Cloud NAT (double-paying for egress)"
+                            }
+                        ))
+
+                except Exception as e:
+                    logger.error(f"Error scanning region {gcp_region} for double-cost NAT: {e}")
+                    continue
+
+        except Exception as e:
+            logger.error(f"Error scanning for VMs with External IPs using NAT: {e}")
+
+        return resources
+
+    async def scan_cloud_nat_large_deployments(
+        self, region: str | None = None, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scenario 4: Detect Cloud NAT for large deployments (self-managed NAT cheaper).
+
+        Waste: Cloud NAT costs $32.40/month minimum. For >5 VMs, self-managed NAT is cheaper.
+        Detection: Cloud NAT gateway with >5 VMs using it
+        Cost: $21.40/month savings (Cloud NAT $32.40 vs self-managed NAT VM $11)
+        Priority: HIGH (P1) 💰
+        """
+        resources = []
+
+        try:
+            from google.cloud import compute_v1
+
+            # Get detection parameters
+            min_vm_count = 5
+            if detection_rules and "gcp_nat_large_deployments" in detection_rules:
+                rules = detection_rules["gcp_nat_large_deployments"]
+                min_vm_count = rules.get("min_vm_count", 5)
+
+            routers_client = compute_v1.RoutersClient(credentials=self.credentials)
+            regions_client = compute_v1.RegionsClient(credentials=self.credentials)
+            instances_client = compute_v1.InstancesClient(credentials=self.credentials)
+
+            # Get all active regions
+            regions_to_scan = []
+            for gcp_region in regions_client.list(project=self.project_id):
+                if gcp_region.status == "UP":
+                    regions_to_scan.append(gcp_region.name)
+
+            # Scan each region
+            for gcp_region in regions_to_scan:
+                try:
+                    # Count VMs
+                    vm_count = 0
+                    for zone_name in [f"{gcp_region}-a", f"{gcp_region}-b", f"{gcp_region}-c"]:
+                        try:
+                            request = compute_v1.ListInstancesRequest(
+                                project=self.project_id,
+                                zone=zone_name
+                            )
+                            for instance in instances_client.list(request=request):
+                                if instance.status == "RUNNING":
+                                    vm_count += 1
+                        except:
+                            pass
+
+                    if vm_count <= min_vm_count:
+                        continue
+
+                    # Check for Cloud NAT
+                    request = compute_v1.ListRoutersRequest(
+                        project=self.project_id,
+                        region=gcp_region
+                    )
+
+                    for router in routers_client.list(request=request):
+                        if not router.nats:
+                            continue
+
+                        for nat in router.nats:
+                            # Calculate cost comparison
+                            cloud_nat_cost = 32.40  # Minimum gateway cost
+                            self_managed_cost = 11.00  # e2-small NAT VM
+                            monthly_savings = cloud_nat_cost - self_managed_cost
+                            annual_savings = monthly_savings * 12
+
+                            resources.append(OrphanResourceData(
+                                resource_id=f"{router.name}/{nat.name}",
+                                resource_type="gcp_nat_large_deployments",
+                                resource_name=nat.name,
+                                region=gcp_region,
+                                estimated_monthly_cost=monthly_savings,
+                                resource_metadata={
+                                    "router_name": router.name,
+                                    "nat_name": nat.name,
+                                    "vm_count": vm_count,
+                                    "cloud_nat_cost": cloud_nat_cost,
+                                    "self_managed_cost": self_managed_cost,
+                                    "annual_savings": round(annual_savings, 2),
+                                    "confidence": "MEDIUM",
+                                    "recommendation": f"MIGRATE to self-managed NAT VM to save ${annual_savings:.2f}/year. With {vm_count} VMs, self-managed NAT is 3x cheaper.",
+                                    "waste_reason": f"Large deployment ({vm_count} VMs) - self-managed NAT would be ${monthly_savings:.2f}/month cheaper"
+                                }
+                            ))
+
+                except Exception as e:
+                    logger.error(f"Error scanning region {gcp_region} for large deployments: {e}")
+                    continue
+
+        except Exception as e:
+            logger.error(f"Error scanning for large deployment NAT waste: {e}")
+
+        return resources
+
+    async def scan_cloud_nat_devtest_unused(
+        self, region: str | None = None, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scenario 5: Detect Dev/Test Cloud NAT unused for extended periods.
+
+        Waste: Cloud NAT in dev/test environments left running 24/7.
+        Detection: Cloud NAT with 'dev', 'test', 'staging' labels + idle 14+ days
+        Cost: $32.40/month
+        Priority: MEDIUM (P2) 💰
+        """
+        resources = []
+
+        try:
+            from google.cloud import compute_v1
+            from google.cloud import monitoring_v3
+            from datetime import datetime, timezone, timedelta
+
+            # Get detection parameters
+            min_idle_days = 14
+            if detection_rules and "gcp_nat_devtest_unused" in detection_rules:
+                rules = detection_rules["gcp_nat_devtest_unused"]
+                min_idle_days = rules.get("min_idle_days", 14)
+
+            routers_client = compute_v1.RoutersClient(credentials=self.credentials)
+            regions_client = compute_v1.RegionsClient(credentials=self.credentials)
+            monitoring_client = monitoring_v3.MetricServiceClient(credentials=self.credentials)
+
+            # Get all active regions
+            regions_to_scan = []
+            for gcp_region in regions_client.list(project=self.project_id):
+                if gcp_region.status == "UP":
+                    regions_to_scan.append(gcp_region.name)
+
+            # Dev/Test labels to check
+            devtest_labels = ["dev", "test", "staging", "development", "nonprod", "qa"]
+
+            # Scan each region
+            for gcp_region in regions_to_scan:
+                try:
+                    request = compute_v1.ListRoutersRequest(
+                        project=self.project_id,
+                        region=gcp_region
+                    )
+
+                    for router in routers_client.list(request=request):
+                        if not router.nats:
+                            continue
+
+                        # Check for dev/test labels
+                        router_labels = router.labels or {}
+                        is_devtest = False
+                        for label_key, label_value in router_labels.items():
+                            if any(env in label_key.lower() or env in label_value.lower() for env in devtest_labels):
+                                is_devtest = True
+                                break
+
+                        if not is_devtest:
+                            continue
+
+                        for nat in router.nats:
+                            # Check if idle
+                            end_time = datetime.now(timezone.utc)
+                            start_time = end_time - timedelta(days=min_idle_days)
+
+                            allocated_ports = 0
+                            try:
+                                interval = monitoring_v3.TimeInterval({
+                                    "end_time": {"seconds": int(end_time.timestamp())},
+                                    "start_time": {"seconds": int(start_time.timestamp())}
+                                })
+
+                                ports_filter = (
+                                    f'resource.type="nat_gateway" '
+                                    f'AND resource.labels.project_id="{self.project_id}" '
+                                    f'AND resource.labels.region="{gcp_region}" '
+                                    f'AND resource.labels.router_id="{router.name}" '
+                                    f'AND metric.type="router.googleapis.com/nat_allocated_ports"'
+                                )
+
+                                ports_request = monitoring_v3.ListTimeSeriesRequest({
+                                    "name": f"projects/{self.project_id}",
+                                    "filter": ports_filter,
+                                    "interval": interval,
+                                    "view": monitoring_v3.ListTimeSeriesRequest.TimeSeriesView.FULL
+                                })
+
+                                for series in monitoring_client.list_time_series(request=ports_request):
+                                    for point in series.points:
+                                        allocated_ports = max(allocated_ports, point.value.int64_value or 0)
+                            except:
+                                pass
+
+                            if allocated_ports == 0:
+                                monthly_cost = 32.40
+                                annual_cost = monthly_cost * 12
+
+                                created_at = datetime.fromisoformat(
+                                    router.creation_timestamp.replace('Z', '+00:00')
+                                )
+                                age_days = (datetime.now(timezone.utc) - created_at).days
+                                months_wasted = age_days / 30
+                                already_wasted = monthly_cost * months_wasted
+
+                                resources.append(OrphanResourceData(
+                                    resource_id=f"{router.name}/{nat.name}",
+                                    resource_type="gcp_nat_devtest_unused",
+                                    resource_name=nat.name,
+                                    region=gcp_region,
+                                    estimated_monthly_cost=monthly_cost,
+                                    resource_metadata={
+                                        "router_name": router.name,
+                                        "nat_name": nat.name,
+                                        "labels": dict(router_labels),
+                                        "idle_days": min_idle_days,
+                                        "already_wasted": round(already_wasted, 2),
+                                        "annual_cost": round(annual_cost, 2),
+                                        "confidence": "MEDIUM",
+                                        "recommendation": f"DELETE dev/test Cloud NAT to save ${annual_cost:.2f}/year. Idle for {min_idle_days}+ days.",
+                                        "waste_reason": f"Dev/Test Cloud NAT unused for {min_idle_days}+ days"
+                                    }
+                                ))
+
+                except Exception as e:
+                    logger.error(f"Error scanning region {gcp_region} for dev/test NAT: {e}")
+                    continue
+
+        except Exception as e:
+            logger.error(f"Error scanning for dev/test NAT waste: {e}")
+
+        return resources
+
+    async def scan_cloud_nat_duplicate_gateways(
+        self, region: str | None = None, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scenario 6: Detect duplicate NAT gateways for same subnet.
+
+        Waste: Multiple Cloud NAT gateways serving the same subnets (redundant).
+        Detection: Multiple Cloud Routers with NAT for same subnets
+        Cost: $32.40/month per duplicate
+        Priority: MEDIUM (P2) 💰
+        """
+        resources = []
+
+        try:
+            from google.cloud import compute_v1
+
+            routers_client = compute_v1.RoutersClient(credentials=self.credentials)
+            regions_client = compute_v1.RegionsClient(credentials=self.credentials)
+            subnetworks_client = compute_v1.SubnetworksClient(credentials=self.credentials)
+
+            # Get all active regions
+            regions_to_scan = []
+            for gcp_region in regions_client.list(project=self.project_id):
+                if gcp_region.status == "UP":
+                    regions_to_scan.append(gcp_region.name)
+
+            # Scan each region
+            for gcp_region in regions_to_scan:
+                try:
+                    # Track NAT coverage by subnet
+                    subnet_nat_map = defaultdict(list)
+
+                    request = compute_v1.ListRoutersRequest(
+                        project=self.project_id,
+                        region=gcp_region
+                    )
+
+                    for router in routers_client.list(request=request):
+                        if not router.nats:
+                            continue
+
+                        for nat in router.nats:
+                            # Get subnets covered by this NAT
+                            covered_subnets = set()
+                            if nat.source_subnetwork_ip_ranges_to_nat == "ALL_SUBNETWORKS_ALL_IP_RANGES":
+                                # Get all subnets
+                                subnet_request = compute_v1.ListSubnetworksRequest(
+                                    project=self.project_id,
+                                    region=gcp_region
+                                )
+                                for subnet in subnetworks_client.list(request=subnet_request):
+                                    covered_subnets.add(subnet.name)
+                            elif nat.subnetworks:
+                                for subnet in nat.subnetworks:
+                                    covered_subnets.add(subnet.name)
+
+                            # Track this NAT
+                            for subnet in covered_subnets:
+                                subnet_nat_map[subnet].append({
+                                    "router": router.name,
+                                    "nat": nat.name
+                                })
+
+                    # Find duplicates
+                    for subnet, nats in subnet_nat_map.items():
+                        if len(nats) > 1:
+                            # Duplicate NAT gateways
+                            monthly_cost = 32.40 * (len(nats) - 1)  # All but 1 are waste
+                            annual_cost = monthly_cost * 12
+
+                            resources.append(OrphanResourceData(
+                                resource_id=f"duplicate-nat-{gcp_region}-{subnet}",
+                                resource_type="gcp_nat_duplicate_gateways",
+                                resource_name=f"Duplicate NAT for {subnet}",
+                                region=gcp_region,
+                                estimated_monthly_cost=monthly_cost,
+                                resource_metadata={
+                                    "subnet": subnet,
+                                    "nat_count": len(nats),
+                                    "nats": nats,
+                                    "annual_cost": round(annual_cost, 2),
+                                    "confidence": "HIGH",
+                                    "recommendation": f"CONSOLIDATE {len(nats)} NAT gateways to 1 to save ${annual_cost:.2f}/year. Remove {len(nats)-1} duplicate NAT(s).",
+                                    "waste_reason": f"{len(nats)} Cloud NAT gateways serving same subnet {subnet} (only 1 needed)"
+                                }
+                            ))
+
+                except Exception as e:
+                    logger.error(f"Error scanning region {gcp_region} for duplicate NAT: {e}")
+                    continue
+
+        except Exception as e:
+            logger.error(f"Error scanning for duplicate NAT gateways: {e}")
+
+        return resources
+
+    async def scan_cloud_nat_broken_router(
+        self, region: str | None = None, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scenario 7: Detect Cloud NAT with missing/misconfigured Cloud Router.
+
+        Waste: Cloud NAT requires a Cloud Router. Broken/missing router = wasted NAT.
+        Detection: NAT config exists but router has no BGP peers and no routes
+        Cost: $32.40/month
+        Priority: MEDIUM (P2) 💰
+        """
+        resources = []
+
+        try:
+            from google.cloud import compute_v1
+
+            routers_client = compute_v1.RoutersClient(credentials=self.credentials)
+            regions_client = compute_v1.RegionsClient(credentials=self.credentials)
+
+            # Get all active regions
+            regions_to_scan = []
+            for gcp_region in regions_client.list(project=self.project_id):
+                if gcp_region.status == "UP":
+                    regions_to_scan.append(gcp_region.name)
+
+            # Scan each region
+            for gcp_region in regions_to_scan:
+                try:
+                    request = compute_v1.ListRoutersRequest(
+                        project=self.project_id,
+                        region=gcp_region
+                    )
+
+                    for router in routers_client.list(request=request):
+                        if not router.nats:
+                            continue
+
+                        # Check if router is properly configured
+                        has_bgp_peers = len(router.bgp_peers or []) > 0
+                        has_network = router.network is not None and router.network != ""
+
+                        if not has_network:
+                            # Router not attached to network - broken
+                            for nat in router.nats:
+                                monthly_cost = 32.40
+                                annual_cost = monthly_cost * 12
+
+                                resources.append(OrphanResourceData(
+                                    resource_id=f"{router.name}/{nat.name}",
+                                    resource_type="gcp_nat_broken_router",
+                                    resource_name=nat.name,
+                                    region=gcp_region,
+                                    estimated_monthly_cost=monthly_cost,
+                                    resource_metadata={
+                                        "router_name": router.name,
+                                        "nat_name": nat.name,
+                                        "has_network": has_network,
+                                        "has_bgp_peers": has_bgp_peers,
+                                        "annual_cost": round(annual_cost, 2),
+                                        "confidence": "HIGH",
+                                        "recommendation": f"DELETE broken Cloud NAT to save ${annual_cost:.2f}/year. Router not attached to network.",
+                                        "waste_reason": "Cloud NAT with broken/misconfigured Cloud Router (no network)"
+                                    }
+                                ))
+
+                except Exception as e:
+                    logger.error(f"Error scanning region {gcp_region} for broken NAT: {e}")
+                    continue
+
+        except Exception as e:
+            logger.error(f"Error scanning for broken Cloud NAT routers: {e}")
+
+        return resources
+
+    async def scan_cloud_nat_high_data_processing(
+        self, region: str | None = None, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scenario 8: Detect Cloud NAT with high data processing costs (>1TB/month).
+
+        Waste: Cloud NAT charges $0.045/GB for data processing. >1TB/month = expensive.
+        Detection: sent_bytes_count > 1TB/month
+        Cost: $45+/month for data processing
+        Priority: CRITICAL (P0) 💰💰💰
+        """
+        resources = []
+
+        try:
+            from google.cloud import compute_v1
+            from google.cloud import monitoring_v3
+            from datetime import datetime, timezone, timedelta
+
+            # Get detection parameters
+            min_bytes_per_month = 1_000_000_000_000  # 1TB
+            if detection_rules and "gcp_nat_high_data_processing" in detection_rules:
+                rules = detection_rules["gcp_nat_high_data_processing"]
+                min_bytes_per_month = rules.get("min_bytes_per_month", 1_000_000_000_000)
+
+            routers_client = compute_v1.RoutersClient(credentials=self.credentials)
+            regions_client = compute_v1.RegionsClient(credentials=self.credentials)
+            monitoring_client = monitoring_v3.MetricServiceClient(credentials=self.credentials)
+
+            # Get all active regions
+            regions_to_scan = []
+            for gcp_region in regions_client.list(project=self.project_id):
+                if gcp_region.status == "UP":
+                    regions_to_scan.append(gcp_region.name)
+
+            # Scan each region
+            for gcp_region in regions_to_scan:
+                try:
+                    request = compute_v1.ListRoutersRequest(
+                        project=self.project_id,
+                        region=gcp_region
+                    )
+
+                    for router in routers_client.list(request=request):
+                        if not router.nats:
+                            continue
+
+                        for nat in router.nats:
+                            # Query sent bytes last 30 days
+                            end_time = datetime.now(timezone.utc)
+                            start_time = end_time - timedelta(days=30)
+
+                            sent_bytes = 0
+                            try:
+                                interval = monitoring_v3.TimeInterval({
+                                    "end_time": {"seconds": int(end_time.timestamp())},
+                                    "start_time": {"seconds": int(start_time.timestamp())}
+                                })
+
+                                bytes_filter = (
+                                    f'resource.type="nat_gateway" '
+                                    f'AND resource.labels.project_id="{self.project_id}" '
+                                    f'AND resource.labels.region="{gcp_region}" '
+                                    f'AND resource.labels.router_id="{router.name}" '
+                                    f'AND resource.labels.nat_gateway_name="{nat.name}" '
+                                    f'AND metric.type="router.googleapis.com/sent_bytes_count"'
+                                )
+
+                                bytes_request = monitoring_v3.ListTimeSeriesRequest({
+                                    "name": f"projects/{self.project_id}",
+                                    "filter": bytes_filter,
+                                    "interval": interval,
+                                    "view": monitoring_v3.ListTimeSeriesRequest.TimeSeriesView.FULL
+                                })
+
+                                for series in monitoring_client.list_time_series(request=bytes_request):
+                                    for point in series.points:
+                                        sent_bytes += point.value.int64_value or 0
+                            except:
+                                pass
+
+                            if sent_bytes > min_bytes_per_month:
+                                # Calculate data processing cost
+                                gb_sent = sent_bytes / (1024**3)
+                                data_processing_cost = gb_sent * 0.045
+                                gateway_cost = 32.40
+                                monthly_cost = data_processing_cost
+                                annual_cost = monthly_cost * 12
+
+                                resources.append(OrphanResourceData(
+                                    resource_id=f"{router.name}/{nat.name}",
+                                    resource_type="gcp_nat_high_data_processing",
+                                    resource_name=nat.name,
+                                    region=gcp_region,
+                                    estimated_monthly_cost=monthly_cost,
+                                    resource_metadata={
+                                        "router_name": router.name,
+                                        "nat_name": nat.name,
+                                        "sent_bytes": sent_bytes,
+                                        "sent_gb": round(gb_sent, 2),
+                                        "data_processing_cost": round(data_processing_cost, 2),
+                                        "gateway_cost": gateway_cost,
+                                        "annual_cost": round(annual_cost, 2),
+                                        "confidence": "CRITICAL",
+                                        "recommendation": f"MIGRATE to External IPs or self-managed NAT to save ${annual_cost:.2f}/year. {round(gb_sent, 0)}GB/month traffic = ${data_processing_cost:.2f}/month data processing.",
+                                        "waste_reason": f"High data processing costs: {round(gb_sent, 0)}GB/month through Cloud NAT"
+                                    }
+                                ))
+
+                except Exception as e:
+                    logger.error(f"Error scanning region {gcp_region} for high data processing: {e}")
+                    continue
+
+        except Exception as e:
+            logger.error(f"Error scanning for high data processing NAT: {e}")
+
+        return resources
+
+    async def scan_cloud_nat_regional_waste(
+        self, region: str | None = None, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scenario 9: Detect Cloud NAT in unused regions (no VMs in region).
+
+        Waste: Cloud NAT deployed in regions without VMs.
+        Detection: Cloud NAT exists but 0 VMs in region
+        Cost: $32.40/month
+        Priority: HIGH (P1) 💰💰
+        """
+        resources = []
+
+        try:
+            from google.cloud import compute_v1
+
+            routers_client = compute_v1.RoutersClient(credentials=self.credentials)
+            regions_client = compute_v1.RegionsClient(credentials=self.credentials)
+            instances_client = compute_v1.InstancesClient(credentials=self.credentials)
+
+            # Get all active regions
+            regions_to_scan = []
+            for gcp_region in regions_client.list(project=self.project_id):
+                if gcp_region.status == "UP":
+                    regions_to_scan.append(gcp_region.name)
+
+            # Scan each region
+            for gcp_region in regions_to_scan:
+                try:
+                    # Count VMs in region
+                    vm_count = 0
+                    for zone_name in [f"{gcp_region}-a", f"{gcp_region}-b", f"{gcp_region}-c"]:
+                        try:
+                            request = compute_v1.ListInstancesRequest(
+                                project=self.project_id,
+                                zone=zone_name
+                            )
+                            for instance in instances_client.list(request=request):
+                                if instance.status == "RUNNING":
+                                    vm_count += 1
+                        except:
+                            pass
+
+                    if vm_count > 0:
+                        continue
+
+                    # Check for Cloud NAT
+                    request = compute_v1.ListRoutersRequest(
+                        project=self.project_id,
+                        region=gcp_region
+                    )
+
+                    for router in routers_client.list(request=request):
+                        if not router.nats:
+                            continue
+
+                        for nat in router.nats:
+                            monthly_cost = 32.40
+                            annual_cost = monthly_cost * 12
+
+                            created_at = datetime.fromisoformat(
+                                router.creation_timestamp.replace('Z', '+00:00')
+                            )
+                            age_days = (datetime.now(timezone.utc) - created_at).days
+                            months_wasted = age_days / 30
+                            already_wasted = monthly_cost * months_wasted
+
+                            resources.append(OrphanResourceData(
+                                resource_id=f"{router.name}/{nat.name}",
+                                resource_type="gcp_nat_regional_waste",
+                                resource_name=nat.name,
+                                region=gcp_region,
+                                estimated_monthly_cost=monthly_cost,
+                                resource_metadata={
+                                    "router_name": router.name,
+                                    "nat_name": nat.name,
+                                    "vm_count": 0,
+                                    "already_wasted": round(already_wasted, 2),
+                                    "annual_cost": round(annual_cost, 2),
+                                    "confidence": "HIGH",
+                                    "recommendation": f"DELETE Cloud NAT in unused region to save ${annual_cost:.2f}/year. No VMs in {gcp_region}.",
+                                    "waste_reason": f"Cloud NAT in region {gcp_region} with 0 VMs"
+                                }
+                            ))
+
+                except Exception as e:
+                    logger.error(f"Error scanning region {gcp_region} for regional waste: {e}")
+                    continue
+
+        except Exception as e:
+            logger.error(f"Error scanning for regional NAT waste: {e}")
+
+        return resources
+
+    async def scan_cloud_nat_manual_vs_auto_allocate(
+        self, region: str | None = None, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scenario 10: Detect Cloud NAT using Manual IP allocation vs Auto-allocate.
+
+        Waste: Manual allocation requires pre-allocated IPs that may go unused.
+        Detection: nat_ip_allocate_option == "MANUAL_ONLY"
+        Cost: $2.88/month per unused allocated IP
+        Priority: MEDIUM (P2) 💰
+        """
+        resources = []
+
+        try:
+            from google.cloud import compute_v1
+
+            routers_client = compute_v1.RoutersClient(credentials=self.credentials)
+            regions_client = compute_v1.RegionsClient(credentials=self.credentials)
+
+            # Get all active regions
+            regions_to_scan = []
+            for gcp_region in regions_client.list(project=self.project_id):
+                if gcp_region.status == "UP":
+                    regions_to_scan.append(gcp_region.name)
+
+            # Scan each region
+            for gcp_region in regions_to_scan:
+                try:
+                    request = compute_v1.ListRoutersRequest(
+                        project=self.project_id,
+                        region=gcp_region
+                    )
+
+                    for router in routers_client.list(request=request):
+                        if not router.nats:
+                            continue
+
+                        for nat in router.nats:
+                            # Check allocation option
+                            if nat.nat_ip_allocate_option == "MANUAL_ONLY":
+                                nat_ip_count = len(nat.nat_ips or [])
+                                # Assume potential waste of 1 IP per manual allocation
+                                monthly_cost = 2.88
+                                annual_cost = monthly_cost * 12
+
+                                resources.append(OrphanResourceData(
+                                    resource_id=f"{router.name}/{nat.name}",
+                                    resource_type="gcp_nat_manual_vs_auto_allocate",
+                                    resource_name=nat.name,
+                                    region=gcp_region,
+                                    estimated_monthly_cost=monthly_cost,
+                                    resource_metadata={
+                                        "router_name": router.name,
+                                        "nat_name": nat.name,
+                                        "nat_ip_allocate_option": nat.nat_ip_allocate_option,
+                                        "nat_ip_count": nat_ip_count,
+                                        "annual_cost": round(annual_cost, 2),
+                                        "confidence": "LOW",
+                                        "recommendation": f"SWITCH to AUTO_ALLOCATE to save ~${annual_cost:.2f}/year. Auto-allocate is more cost-efficient and dynamic.",
+                                        "waste_reason": "Manual IP allocation risks over-provisioning - AUTO_ALLOCATE is more efficient"
+                                    }
+                                ))
+
+                except Exception as e:
+                    logger.error(f"Error scanning region {gcp_region} for manual allocation: {e}")
+                    continue
+
+        except Exception as e:
+            logger.error(f"Error scanning for manual vs auto-allocate NAT: {e}")
+
+        return resources
 
     async def scan_unused_fsx_file_systems(
         self, region: str, detection_rules: dict | None = None

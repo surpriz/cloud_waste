@@ -646,10 +646,19 @@ const RESOURCE_CATEGORIES = {
       "gcp_lb_zero_traffic", "gcp_lb_devtest_unused", "gcp_lb_untagged",
       "gcp_lb_wrong_type", "gcp_lb_multiple_single_backend", "gcp_lb_overprovisioned_backends",
       "gcp_lb_premium_tier_nonprod",
-      // Cloud NAT (TODO)
-      "nat_gateway_unused"
+      // Cloud NAT (10 scenarios)
+      "gcp_nat_gateway_idle", "gcp_nat_over_allocated_ips", "gcp_nat_vms_with_external_ips",
+      "gcp_nat_large_deployments", "gcp_nat_devtest_unused", "gcp_nat_duplicate_gateways",
+      "gcp_nat_broken_router", "gcp_nat_high_data_processing", "gcp_nat_regional_waste",
+      "gcp_nat_manual_vs_auto_allocate"
     ],
-    database: ["cloud_sql_stopped", "cloud_sql_idle"],
+    database: [
+      // Cloud SQL (10 scenarios)
+      "cloud_sql_stopped", "cloud_sql_idle", "cloud_sql_overprovisioned",
+      "cloud_sql_old_machine_type", "cloud_sql_devtest_247", "cloud_sql_unused_replicas",
+      "cloud_sql_untagged", "cloud_sql_zero_io", "cloud_sql_storage_overprovisioned",
+      "cloud_sql_unnecessary_ha"
+    ],
   },
   azure: {
     compute: [
@@ -982,11 +991,28 @@ const GCP_RESOURCE_LABELS: { [key: string]: string } = {
   gcp_lb_multiple_single_backend: "Cloud Load Balancer (Multiple for Single Backend) 💰💰 P1",
   gcp_lb_overprovisioned_backends: "Cloud Load Balancer (Over-Provisioned Backends <20% CPU) 💰💰 P1",
   gcp_lb_premium_tier_nonprod: "Cloud Load Balancer (Premium Tier on Non-Prod) 💰💰 P2",
-  // Networking - Cloud NAT
-  nat_gateway_unused: "Cloud NAT (Unused)",
-  // Database
-  cloud_sql_stopped: "Cloud SQL (Stopped)",
-  cloud_sql_idle: "Cloud SQL (Idle)",
+  // Networking - Cloud NAT (10 scenarios)
+  gcp_nat_gateway_idle: "Cloud NAT (Gateway Idle - 0 Traffic 7+ days) 💰💰💰💰 P0",
+  gcp_nat_over_allocated_ips: "Cloud NAT (Over-Allocated NAT IPs) 💰💰💰 P0",
+  gcp_nat_vms_with_external_ips: "Cloud NAT (VMs with External IPs - Double Cost) 💰💰💰💰 P0",
+  gcp_nat_large_deployments: "Cloud NAT (Large Deployments >5 VMs - Self-Managed Cheaper) 💰💰 P1",
+  gcp_nat_devtest_unused: "Cloud NAT (Dev/Test Unused 14+ days) 💰💰 P2",
+  gcp_nat_duplicate_gateways: "Cloud NAT (Duplicate Gateways Same Subnet) 💰💰 P2",
+  gcp_nat_broken_router: "Cloud NAT (Broken/Missing Router) 💰💰 P2",
+  gcp_nat_high_data_processing: "Cloud NAT (High Data Processing >1TB/month) 💰💰💰💰 P0",
+  gcp_nat_regional_waste: "Cloud NAT (Unused Region - 0 VMs) 💰💰💰 P1",
+  gcp_nat_manual_vs_auto_allocate: "Cloud NAT (Manual IP Allocation - Switch to Auto) 💰 P2",
+  // Database - Cloud SQL (10 scenarios)
+  cloud_sql_stopped: "Cloud SQL (Stopped >30 days - Storage+Backups Only) 💰💰💰💰 P0",
+  cloud_sql_idle: "Cloud SQL (Idle - 0 Connections 14+ days) 💰💰💰💰 P0",
+  cloud_sql_overprovisioned: "Cloud SQL (Over-Provisioned CPU<30% Memory<40%) 💰💰💰 P1",
+  cloud_sql_old_machine_type: "Cloud SQL (Old db-n1 Tier - Migrate to db-custom -45%) 💰💰 P2",
+  cloud_sql_devtest_247: "Cloud SQL (Dev/Test 24/7 - Schedule for 64% Savings) 💰💰 P2",
+  cloud_sql_unused_replicas: "Cloud SQL (Read Replica Unused - 0 Queries) 💰💰💰💰 P0",
+  cloud_sql_untagged: "Cloud SQL (Missing Required Labels) 💰 P3",
+  cloud_sql_zero_io: "Cloud SQL (Zero I/O - Empty Database) 💰💰💰💰 P0",
+  cloud_sql_storage_overprovisioned: "Cloud SQL (Storage >80% Free - Reduce Size) 💰💰💰 P1",
+  cloud_sql_unnecessary_ha: "Cloud SQL (Unnecessary HA on Dev/Test) 💰💰💰💰 P0",
 };
 
 // Microsoft 365 Resource Icons & Labels

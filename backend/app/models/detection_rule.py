@@ -2833,6 +2833,58 @@ DEFAULT_DETECTION_RULES = {
         "description": "GCP Load Balancer Premium tier on non-prod (use Standard tier) - 29% egress savings 💰💰 P2",
     },
     # =================================================================
+    # GCP CLOUD NAT DETECTION RULES (10 scenarios)
+    # =================================================================
+    "gcp_nat_gateway_idle": {
+        "enabled": True,
+        "min_idle_days": 7,
+        "confidence_medium_days": 7,
+        "confidence_high_days": 14,
+        "confidence_critical_days": 30,
+        "description": "GCP Cloud NAT Gateway Idle (0 traffic) - $32.40/month minimum gateway cost 💰💰💰💰 P0",
+    },
+    "gcp_nat_over_allocated_ips": {
+        "enabled": True,
+        "vms_per_ip_threshold": 64,
+        "description": "GCP Cloud NAT Over-Allocated IPs - $2.88/month per unused IP 💰💰💰 P0",
+    },
+    "gcp_nat_vms_with_external_ips": {
+        "enabled": True,
+        "description": "GCP VMs with External IPs using Cloud NAT - Double cost, NAT not needed 💰💰💰💰 P0",
+    },
+    "gcp_nat_large_deployments": {
+        "enabled": True,
+        "min_vm_count": 5,
+        "description": "GCP Cloud NAT for Large Deployments - Self-managed NAT 3x cheaper for >5 VMs 💰💰 P1",
+    },
+    "gcp_nat_devtest_unused": {
+        "enabled": True,
+        "min_idle_days": 14,
+        "devtest_labels": ["dev", "test", "staging", "development", "nonprod", "qa"],
+        "description": "GCP Dev/Test Cloud NAT Unused - Idle 14+ days, delete to save $32.40/month 💰💰 P2",
+    },
+    "gcp_nat_duplicate_gateways": {
+        "enabled": True,
+        "description": "GCP Duplicate NAT Gateways for Same Subnet - $32.40/month per duplicate 💰💰 P2",
+    },
+    "gcp_nat_broken_router": {
+        "enabled": True,
+        "description": "GCP Cloud NAT with Missing/Broken Router - $32.40/month wasted, router not attached 💰💰 P2",
+    },
+    "gcp_nat_high_data_processing": {
+        "enabled": True,
+        "min_bytes_per_month": 1_000_000_000_000,  # 1TB
+        "description": "GCP Cloud NAT High Data Processing (>1TB/month) - $45+/month data processing, migrate to External IPs 💰💰💰💰 P0",
+    },
+    "gcp_nat_regional_waste": {
+        "enabled": True,
+        "description": "GCP Cloud NAT in Unused Region (0 VMs) - $32.40/month wasted 💰💰💰 P1",
+    },
+    "gcp_nat_manual_vs_auto_allocate": {
+        "enabled": True,
+        "description": "GCP Cloud NAT Manual IP Allocation - Switch to AUTO_ALLOCATE for better cost efficiency 💰 P2",
+    },
+    # =================================================================
     # GCP GKE CLUSTERS DETECTION RULES (10 scenarios)
     # =================================================================
     "gke_cluster_empty": {
@@ -3121,6 +3173,77 @@ DEFAULT_DETECTION_RULES = {
     "gcp_filestore_wrong_nfs_protocol": {
         "enabled": True,
         "description": "GCP Filestore using NFSv3 instead of NFSv4.1 - upgrade for better performance (no cost change) ⚡ P3",
+    },
+    # =================================================================
+    # GCP CLOUD SQL DETECTION RULES (10 scenarios)
+    # =================================================================
+    "cloud_sql_stopped": {
+        "enabled": True,
+        "min_age_days": 30,
+        "confidence_medium_days": 30,
+        "confidence_high_days": 60,
+        "confidence_critical_days": 90,
+        "description": "GCP Cloud SQL instance stopped >30 days - paying storage+backups only ($29-145/month) 💰💰💰💰 P0",
+    },
+    "cloud_sql_idle": {
+        "enabled": True,
+        "lookback_days": 14,
+        "min_connections_threshold": 0.0,
+        "description": "GCP Cloud SQL instance idle - 0 connections 14+ days, 100% waste ($92-369/month) 💰💰💰💰 P0",
+    },
+    "cloud_sql_overprovisioned": {
+        "enabled": True,
+        "cpu_threshold": 30.0,
+        "memory_threshold": 40.0,
+        "lookback_days": 14,
+        "min_savings_threshold": 20.0,
+        "description": "GCP Cloud SQL over-provisioned - CPU<30% & Memory<40%, downgrade to save ($92-184/month) 💰💰💰 P1",
+    },
+    "cloud_sql_old_machine_type": {
+        "enabled": True,
+        "old_tiers": ["db-n1"],
+        "preferred_tier_type": "db-custom",
+        "min_savings_threshold": 10.0,
+        "description": "GCP Cloud SQL old tier db-n1 - migrate to db-custom for -45% cost ($41-82/month savings) 💰💰 P2",
+    },
+    "cloud_sql_devtest_247": {
+        "enabled": True,
+        "min_uptime_days": 7,
+        "business_hours_per_week": 60,
+        "devtest_labels": ["dev", "test", "staging", "development"],
+        "description": "GCP Cloud SQL dev/test 24/7 - schedule for 64% savings ($59/month typical) 💰💰 P2",
+    },
+    "cloud_sql_unused_replicas": {
+        "enabled": True,
+        "lookback_days": 14,
+        "min_queries_threshold": 0,
+        "description": "GCP Cloud SQL read replica unused - 0 queries 14+ days, 100% waste ($92-150/month) 💰💰💰💰 P0",
+    },
+    "cloud_sql_untagged": {
+        "enabled": True,
+        "required_labels": ["environment", "owner", "cost-center"],
+        "governance_waste_pct": 0.05,
+        "description": "GCP Cloud SQL missing required labels - 5% governance waste 💰 P3",
+    },
+    "cloud_sql_zero_io": {
+        "enabled": True,
+        "lookback_days": 14,
+        "min_age_days": 7,
+        "zero_io_threshold": 0,
+        "description": "GCP Cloud SQL zero I/O - empty database unused 14+ days ($121/month typical) 💰💰💰💰 P0",
+    },
+    "cloud_sql_storage_overprovisioned": {
+        "enabled": True,
+        "free_space_threshold": 80.0,
+        "safety_buffer": 1.30,
+        "min_savings_threshold": 5.0,
+        "lookback_days": 14,
+        "description": "GCP Cloud SQL storage over-provisioned - >80% free space, reduce for savings ($232/month typical) 💰💰💰 P1",
+    },
+    "cloud_sql_unnecessary_ha": {
+        "enabled": True,
+        "devtest_labels": ["dev", "test", "staging", "development"],
+        "description": "GCP Cloud SQL unnecessary HA on dev/test - disable for +100% savings ($184/month typical) 💰💰💰💰 P0",
     },
 }
 
