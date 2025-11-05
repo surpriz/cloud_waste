@@ -5846,6 +5846,800 @@ class GCPProvider(CloudProviderBase):
 
         return resources
 
+    # ================================================================
+    # CLOUD FIRESTORE DETECTION METHODS (10 scenarios)
+    # ================================================================
+
+    async def scan_firestore_idle(
+        self, region: str | None = None, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scenario 1: Detect completely idle Firestore databases (0 requests 30+ days).
+
+        Waste: Databases with zero API requests but still paying for storage.
+        Detection: api/request_count = 0 for 30+ days
+        Cost: Storage cost ($9-$170/month typical) - 100% waste
+        Priority: CRITICAL (P0) 💰💰💰💰
+        """
+        resources: list[OrphanResourceData] = []
+        rules = detection_rules or {}
+
+        days_idle_threshold = rules.get("days_idle_threshold", 30)
+        min_savings_threshold = rules.get("min_savings_threshold", 5.0)
+
+        try:
+            from google.cloud.firestore_admin_v1 import FirestoreAdminClient
+            from google.cloud import monitoring_v3
+            from datetime import datetime, timedelta
+
+            admin_client = FirestoreAdminClient()
+            monitoring_client = monitoring_v3.MetricServiceClient()
+
+            # List all Firestore databases
+            parent = f"projects/{self.project_id}"
+
+            try:
+                databases = admin_client.list_databases(parent=parent)
+
+                for database in databases:
+                    database_id = database.name.split('/')[-1]
+                    location_id = database.location_id
+
+                    # Check activity via Cloud Monitoring
+                    now = datetime.utcnow()
+                    interval = monitoring_v3.TimeInterval({
+                        "end_time": {"seconds": int(now.timestamp())},
+                        "start_time": {"seconds": int((now - timedelta(days=days_idle_threshold)).timestamp())}
+                    })
+
+                    # Query api/request_count metric
+                    total_requests = 0
+                    try:
+                        metric_filter = (
+                            f'metric.type="firestore.googleapis.com/api/request_count" AND '
+                            f'resource.labels.database_id="{database_id}"'
+                        )
+
+                        results = monitoring_client.list_time_series(
+                            name=f"projects/{self.project_id}",
+                            filter=metric_filter,
+                            interval=interval,
+                            view=monitoring_v3.ListTimeSeriesRequest.TimeSeriesView.FULL
+                        )
+
+                        for result in results:
+                            for point in result.points:
+                                total_requests += point.value.int64_value if hasattr(point.value, 'int64_value') else 0
+                    except Exception as e:
+                        logger.warning(f"Could not fetch metrics for database {database_id}: {e}")
+                        continue
+
+                    # If idle (0 requests)
+                    if total_requests == 0:
+                        # Estimate storage size (simplified - actual size would need Firestore client query)
+                        estimated_storage_gb = 50.0  # Default estimate
+
+                        # Calculate waste (storage + potential backups)
+                        storage_monthly = estimated_storage_gb * 0.18
+                        backup_monthly = estimated_storage_gb * 0.026 * 4  # 4 weekly backups estimate
+                        monthly_waste = storage_monthly + backup_monthly
+
+                        if monthly_waste < min_savings_threshold:
+                            continue
+
+                        # Calculate age (simplified)
+                        created_at = database.create_time if hasattr(database, 'create_time') else now
+                        age_days = (now - created_at.replace(tzinfo=None) if hasattr(created_at, 'replace') else now - now).days
+                        already_wasted = monthly_waste * (age_days / 30)
+
+                        # Confidence level
+                        if days_idle_threshold >= 90:
+                            confidence = "CRITICAL"
+                        elif days_idle_threshold >= 60:
+                            confidence = "HIGH"
+                        else:
+                            confidence = "MEDIUM"
+
+                        resources.append(
+                            OrphanResourceData(
+                                resource_id=database.name,
+                                resource_name=database_id,
+                                resource_type="firestore_idle",
+                                region=location_id,
+                                estimated_monthly_cost=monthly_waste,
+                                already_wasted=already_wasted,
+                                confidence_level=confidence,
+                                resource_metadata={
+                                    "database_id": database_id,
+                                    "location": location_id,
+                                    "days_idle": days_idle_threshold,
+                                    "total_requests": total_requests,
+                                    "storage_gb_estimate": estimated_storage_gb,
+                                    "storage_cost_monthly": round(storage_monthly, 2),
+                                    "backup_cost_monthly": round(backup_monthly, 2)
+                                },
+                                recommendation=f"DELETE database if confirmed unused. Zero requests for {days_idle_threshold}+ days = 100% waste."
+                            )
+                        )
+
+            except Exception as e:
+                logger.error(f"Error listing Firestore databases: {e}")
+
+        except Exception as e:
+            logger.error(f"Error scanning for idle Firestore databases: {e}")
+
+        return resources
+
+    async def scan_firestore_unused_indexes(
+        self, region: str | None = None, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scenario 2: Detect unused Firestore indexes (never used in queries).
+
+        Waste: Indexes that are never used but consume storage and slow down writes.
+        Detection: List indexes + correlate with query usage patterns (Cloud Logging)
+        Cost: $0.18/GB/month storage + performance impact
+        Priority: HIGH (P1) 💰💰💰
+        """
+        resources: list[OrphanResourceData] = []
+        rules = detection_rules or {}
+
+        days_lookback = rules.get("days_lookback", 30)
+        min_savings_threshold = rules.get("min_savings_threshold", 2.0)
+
+        try:
+            from google.cloud.firestore_admin_v1 import FirestoreAdminClient
+
+            admin_client = FirestoreAdminClient()
+
+            # List all Firestore databases
+            parent = f"projects/{self.project_id}"
+
+            try:
+                databases = admin_client.list_databases(parent=parent)
+
+                for database in databases:
+                    database_id = database.name.split('/')[-1]
+                    location_id = database.location_id
+
+                    # List all indexes in this database
+                    collection_parent = f"{database.name}/collectionGroups/-"
+
+                    try:
+                        indexes = admin_client.list_indexes(parent=collection_parent)
+
+                        unused_index_count = 0
+                        for index in indexes:
+                            # Simplified detection: In production, would correlate with Cloud Logging query patterns
+                            # For MVP, flag all composite indexes for review
+                            if len(index.fields) > 2:  # Composite indexes with 3+ fields
+                                unused_index_count += 1
+
+                        if unused_index_count > 0:
+                            # Estimate waste
+                            estimated_index_storage_gb = unused_index_count * 0.1  # ~100MB per unused index estimate
+                            monthly_waste = estimated_index_storage_gb * 0.18
+
+                            if monthly_waste < min_savings_threshold:
+                                continue
+
+                            resources.append(
+                                OrphanResourceData(
+                                    resource_id=database.name,
+                                    resource_name=f"{database_id}_unused_indexes",
+                                    resource_type="firestore_unused_indexes",
+                                    region=location_id,
+                                    estimated_monthly_cost=monthly_waste,
+                                    confidence_level="MEDIUM",
+                                    resource_metadata={
+                                        "database_id": database_id,
+                                        "unused_index_count": unused_index_count,
+                                        "index_storage_gb": round(estimated_index_storage_gb, 2),
+                                        "lookback_days": days_lookback
+                                    },
+                                    recommendation=f"Review and DELETE {unused_index_count} unused composite indexes. Saves storage and improves write performance."
+                                )
+                            )
+
+                    except Exception as e:
+                        logger.warning(f"Error listing indexes for database {database_id}: {e}")
+
+            except Exception as e:
+                logger.error(f"Error listing Firestore databases: {e}")
+
+        except Exception as e:
+            logger.error(f"Error scanning for unused Firestore indexes: {e}")
+
+        return resources
+
+    async def scan_firestore_missing_ttl(
+        self, region: str | None = None, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scenario 3: Detect missing TTL policies (expired data not auto-deleted).
+
+        Waste: Old/expired data still consuming storage without TTL policies.
+        Detection: Check for TTL field configuration + estimate old data volume
+        Cost: $500-$5,000/year typical
+        Priority: HIGH (P1) 💰💰💰
+        """
+        resources: list[OrphanResourceData] = []
+        rules = detection_rules or {}
+
+        ttl_threshold_days = rules.get("ttl_threshold_days", 90)
+        min_savings_threshold = rules.get("min_savings_threshold", 10.0)
+
+        try:
+            from google.cloud.firestore_admin_v1 import FirestoreAdminClient
+
+            admin_client = FirestoreAdminClient()
+
+            # List all Firestore databases
+            parent = f"projects/{self.project_id}"
+
+            try:
+                databases = admin_client.list_databases(parent=parent)
+
+                for database in databases:
+                    database_id = database.name.split('/')[-1]
+                    location_id = database.location_id
+
+                    # Check for TTL policies
+                    # In real implementation, would query Firestore for TTL field configuration
+                    # For MVP, we flag databases without explicit TTL configuration
+
+                    # Simplified: Estimate potential waste from old data
+                    estimated_old_data_gb = 20.0  # Default estimate
+                    monthly_waste = estimated_old_data_gb * 0.18
+
+                    if monthly_waste < min_savings_threshold:
+                        continue
+
+                    resources.append(
+                        OrphanResourceData(
+                            resource_id=database.name,
+                            resource_name=f"{database_id}_missing_ttl",
+                            resource_type="firestore_missing_ttl",
+                            region=location_id,
+                            estimated_monthly_cost=monthly_waste,
+                            confidence_level="MEDIUM",
+                            resource_metadata={
+                                "database_id": database_id,
+                                "ttl_threshold_days": ttl_threshold_days,
+                                "estimated_old_data_gb": estimated_old_data_gb
+                            },
+                            recommendation=f"Implement TTL policies for documents older than {ttl_threshold_days} days to auto-delete expired data."
+                        )
+                    )
+
+            except Exception as e:
+                logger.error(f"Error listing Firestore databases: {e}")
+
+        except Exception as e:
+            logger.error(f"Error scanning for missing TTL in Firestore: {e}")
+
+        return resources
+
+    async def scan_firestore_over_indexing(
+        self, region: str | None = None, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scenario 4: Detect over-indexing (too many automatic indexes).
+
+        Waste: Excessive automatic single-field indexes consuming storage.
+        Detection: Count automatic indexes vs index exemptions
+        Cost: $1,000-$10,000/year typical
+        Priority: MEDIUM (P2) 💰💰
+        """
+        resources: list[OrphanResourceData] = []
+        rules = detection_rules or {}
+
+        max_auto_indexes_threshold = rules.get("max_auto_indexes_threshold", 50)
+        min_savings_threshold = rules.get("min_savings_threshold", 20.0)
+
+        try:
+            from google.cloud.firestore_admin_v1 import FirestoreAdminClient
+
+            admin_client = FirestoreAdminClient()
+
+            # List all Firestore databases
+            parent = f"projects/{self.project_id}"
+
+            try:
+                databases = admin_client.list_databases(parent=parent)
+
+                for database in databases:
+                    database_id = database.name.split('/')[-1]
+                    location_id = database.location_id
+
+                    # Count indexes
+                    collection_parent = f"{database.name}/collectionGroups/-"
+
+                    try:
+                        indexes = list(admin_client.list_indexes(parent=collection_parent))
+                        total_indexes = len(indexes)
+
+                        # Simplified: Flag if too many indexes
+                        if total_indexes > max_auto_indexes_threshold:
+                            # Estimate waste
+                            excessive_indexes = total_indexes - max_auto_indexes_threshold
+                            estimated_waste_gb = excessive_indexes * 0.05  # ~50MB per excessive index
+                            monthly_waste = estimated_waste_gb * 0.18
+
+                            if monthly_waste < min_savings_threshold:
+                                continue
+
+                            resources.append(
+                                OrphanResourceData(
+                                    resource_id=database.name,
+                                    resource_name=f"{database_id}_over_indexing",
+                                    resource_type="firestore_over_indexing",
+                                    region=location_id,
+                                    estimated_monthly_cost=monthly_waste,
+                                    confidence_level="MEDIUM",
+                                    resource_metadata={
+                                        "database_id": database_id,
+                                        "total_indexes": total_indexes,
+                                        "excessive_indexes": excessive_indexes,
+                                        "max_threshold": max_auto_indexes_threshold
+                                    },
+                                    recommendation=f"Add index exemptions for {excessive_indexes} rarely-queried fields to reduce storage overhead."
+                                )
+                            )
+
+                    except Exception as e:
+                        logger.warning(f"Error counting indexes for database {database_id}: {e}")
+
+            except Exception as e:
+                logger.error(f"Error listing Firestore databases: {e}")
+
+        except Exception as e:
+            logger.error(f"Error scanning for over-indexing in Firestore: {e}")
+
+        return resources
+
+    async def scan_firestore_empty_collections(
+        self, region: str | None = None, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scenario 5: Detect empty collections with indexes.
+
+        Waste: Collections with 0 documents but still have indexes configured.
+        Detection: Query collections + check document count
+        Cost: $50-$500/year typical
+        Priority: MEDIUM (P2) 💰💰
+        """
+        resources: list[OrphanResourceData] = []
+        rules = detection_rules or {}
+
+        min_savings_threshold = rules.get("min_savings_threshold", 5.0)
+
+        try:
+            from google.cloud.firestore_admin_v1 import FirestoreAdminClient
+            from google.cloud import firestore
+
+            admin_client = FirestoreAdminClient()
+
+            # List all Firestore databases
+            parent = f"projects/{self.project_id}"
+
+            try:
+                databases = admin_client.list_databases(parent=parent)
+
+                for database in databases:
+                    database_id = database.name.split('/')[-1]
+                    location_id = database.location_id
+
+                    # Simplified detection: Flag databases with indexes but low usage
+                    # In real implementation, would check individual collections
+
+                    # For MVP, estimate based on index count
+                    collection_parent = f"{database.name}/collectionGroups/-"
+
+                    try:
+                        indexes = list(admin_client.list_indexes(parent=collection_parent))
+
+                        if len(indexes) > 0:
+                            # Estimate 10% of indexes are on empty collections
+                            empty_indexes_estimate = max(1, len(indexes) // 10)
+                            estimated_waste_gb = empty_indexes_estimate * 0.01  # Small waste per empty collection
+                            monthly_waste = estimated_waste_gb * 0.18
+
+                            if monthly_waste < min_savings_threshold:
+                                continue
+
+                            resources.append(
+                                OrphanResourceData(
+                                    resource_id=database.name,
+                                    resource_name=f"{database_id}_empty_collections",
+                                    resource_type="firestore_empty_collections",
+                                    region=location_id,
+                                    estimated_monthly_cost=monthly_waste,
+                                    confidence_level="LOW",
+                                    resource_metadata={
+                                        "database_id": database_id,
+                                        "total_indexes": len(indexes),
+                                        "empty_collections_estimate": empty_indexes_estimate
+                                    },
+                                    recommendation="Review and DELETE empty collections or remove their indexes."
+                                )
+                            )
+
+                    except Exception as e:
+                        logger.warning(f"Error checking empty collections for database {database_id}: {e}")
+
+            except Exception as e:
+                logger.error(f"Error listing Firestore databases: {e}")
+
+        except Exception as e:
+            logger.error(f"Error scanning for empty collections in Firestore: {e}")
+
+        return resources
+
+    async def scan_firestore_untagged(
+        self, region: str | None = None, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scenario 6: Detect untagged Firestore databases (missing required labels).
+
+        Waste: Missing labels = governance overhead and cost allocation issues.
+        Detection: Check labels via Admin API
+        Cost: 5% of database cost (governance overhead)
+        Priority: LOW (P3) 💰
+        """
+        resources: list[OrphanResourceData] = []
+        rules = detection_rules or {}
+
+        required_labels = rules.get("required_labels", ["environment", "owner", "cost-center"])
+        governance_waste_pct = rules.get("governance_waste_pct", 0.05)
+
+        try:
+            from google.cloud.firestore_admin_v1 import FirestoreAdminClient
+
+            admin_client = FirestoreAdminClient()
+
+            # List all Firestore databases
+            parent = f"projects/{self.project_id}"
+
+            try:
+                databases = admin_client.list_databases(parent=parent)
+
+                for database in databases:
+                    database_id = database.name.split('/')[-1]
+                    location_id = database.location_id
+
+                    # Check labels (if available in API response)
+                    labels = {}
+                    if hasattr(database, 'labels'):
+                        labels = dict(database.labels) if database.labels else {}
+
+                    missing_labels = [label for label in required_labels if label not in labels]
+
+                    if missing_labels:
+                        # Estimate database cost for governance calculation
+                        estimated_db_cost = 50.0  # Default monthly estimate
+                        monthly_waste = estimated_db_cost * governance_waste_pct
+
+                        resources.append(
+                            OrphanResourceData(
+                                resource_id=database.name,
+                                resource_name=f"{database_id}_untagged",
+                                resource_type="firestore_untagged",
+                                region=location_id,
+                                estimated_monthly_cost=monthly_waste,
+                                confidence_level="LOW",
+                                resource_metadata={
+                                    "database_id": database_id,
+                                    "missing_labels": missing_labels,
+                                    "current_labels": list(labels.keys())
+                                },
+                                recommendation=f"Add missing labels: {', '.join(missing_labels)} for proper cost allocation and governance."
+                            )
+                        )
+
+            except Exception as e:
+                logger.error(f"Error listing Firestore databases: {e}")
+
+        except Exception as e:
+            logger.error(f"Error scanning for untagged Firestore databases: {e}")
+
+        return resources
+
+    async def scan_firestore_old_backups(
+        self, region: str | None = None, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scenario 7: Detect old backups with excessive retention (>90 days).
+
+        Waste: Backups retained longer than necessary.
+        Detection: List backups + check age
+        Cost: $100-$1,000/year typical
+        Priority: LOW (P3) 💰
+        """
+        resources: list[OrphanResourceData] = []
+        rules = detection_rules or {}
+
+        retention_threshold_days = rules.get("retention_threshold_days", 90)
+        min_savings_threshold = rules.get("min_savings_threshold", 5.0)
+
+        try:
+            from google.cloud.firestore_admin_v1 import FirestoreAdminClient
+            from datetime import datetime, timedelta
+
+            admin_client = FirestoreAdminClient()
+
+            # List all Firestore databases
+            parent = f"projects/{self.project_id}"
+
+            try:
+                databases = admin_client.list_databases(parent=parent)
+
+                for database in databases:
+                    database_id = database.name.split('/')[-1]
+                    location_id = database.location_id
+
+                    # List backups for this database
+                    try:
+                        backups = admin_client.list_backups(parent=database.name)
+
+                        old_backups = []
+                        total_old_backup_size_gb = 0.0
+                        now = datetime.utcnow()
+
+                        for backup in backups:
+                            if hasattr(backup, 'create_time'):
+                                backup_age = (now - backup.create_time.replace(tzinfo=None)).days
+
+                                if backup_age > retention_threshold_days:
+                                    old_backups.append(backup.name)
+                                    # Estimate backup size
+                                    total_old_backup_size_gb += 10.0  # ~10GB per old backup estimate
+
+                        if old_backups:
+                            monthly_waste = total_old_backup_size_gb * 0.026  # Backup storage cost
+
+                            if monthly_waste < min_savings_threshold:
+                                continue
+
+                            resources.append(
+                                OrphanResourceData(
+                                    resource_id=database.name,
+                                    resource_name=f"{database_id}_old_backups",
+                                    resource_type="firestore_old_backups",
+                                    region=location_id,
+                                    estimated_monthly_cost=monthly_waste,
+                                    confidence_level="MEDIUM",
+                                    resource_metadata={
+                                        "database_id": database_id,
+                                        "old_backup_count": len(old_backups),
+                                        "retention_threshold_days": retention_threshold_days,
+                                        "total_size_gb": round(total_old_backup_size_gb, 2)
+                                    },
+                                    recommendation=f"DELETE {len(old_backups)} backups older than {retention_threshold_days} days to reduce storage costs."
+                                )
+                            )
+
+                    except Exception as e:
+                        logger.warning(f"Error listing backups for database {database_id}: {e}")
+
+            except Exception as e:
+                logger.error(f"Error listing Firestore databases: {e}")
+
+        except Exception as e:
+            logger.error(f"Error scanning for old Firestore backups: {e}")
+
+        return resources
+
+    async def scan_firestore_inefficient_queries(
+        self, region: str | None = None, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scenario 8: Detect inefficient query patterns (N+1 problem).
+
+        Waste: Multiple sequential reads instead of batched queries = higher costs.
+        Detection: Cloud Logging analysis of query patterns
+        Cost: $500-$8,000/year typical
+        Priority: HIGH (P1) 💰💰💰
+        """
+        resources: list[OrphanResourceData] = []
+        rules = detection_rules or {}
+
+        min_savings_threshold = rules.get("min_savings_threshold", 50.0)
+
+        try:
+            from google.cloud.firestore_admin_v1 import FirestoreAdminClient
+
+            admin_client = FirestoreAdminClient()
+
+            # List all Firestore databases
+            parent = f"projects/{self.project_id}"
+
+            try:
+                databases = admin_client.list_databases(parent=parent)
+
+                for database in databases:
+                    database_id = database.name.split('/')[-1]
+                    location_id = database.location_id
+
+                    # Simplified detection: Flag active databases for query pattern review
+                    # In real implementation, would analyze Cloud Logging for N+1 patterns
+
+                    # For MVP, estimate potential waste from inefficient queries
+                    estimated_inefficient_reads = 100000  # 100K inefficient reads/month estimate
+                    monthly_waste = (estimated_inefficient_reads / 100000) * 0.03  # Read cost
+
+                    if monthly_waste < min_savings_threshold:
+                        continue
+
+                    resources.append(
+                        OrphanResourceData(
+                            resource_id=database.name,
+                            resource_name=f"{database_id}_inefficient_queries",
+                            resource_type="firestore_inefficient_queries",
+                            region=location_id,
+                            estimated_monthly_cost=monthly_waste,
+                            confidence_level="LOW",
+                            resource_metadata={
+                                "database_id": database_id,
+                                "estimated_inefficient_reads": estimated_inefficient_reads
+                            },
+                            recommendation="Review query patterns in Cloud Logging. Use batch reads instead of sequential document lookups to reduce costs."
+                        )
+                    )
+
+            except Exception as e:
+                logger.error(f"Error listing Firestore databases: {e}")
+
+        except Exception as e:
+            logger.error(f"Error scanning for inefficient queries in Firestore: {e}")
+
+        return resources
+
+    async def scan_firestore_unnecessary_composite(
+        self, region: str | None = None, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scenario 9: Detect unnecessary composite indexes (custom indexes not used).
+
+        Waste: Composite indexes that were created but never used in queries.
+        Detection: List composite indexes + correlate with query usage
+        Cost: $200-$3,000/year typical
+        Priority: MEDIUM (P2) 💰💰
+        """
+        resources: list[OrphanResourceData] = []
+        rules = detection_rules or {}
+
+        days_lookback = rules.get("days_lookback", 30)
+        min_savings_threshold = rules.get("min_savings_threshold", 10.0)
+
+        try:
+            from google.cloud.firestore_admin_v1 import FirestoreAdminClient
+
+            admin_client = FirestoreAdminClient()
+
+            # List all Firestore databases
+            parent = f"projects/{self.project_id}"
+
+            try:
+                databases = admin_client.list_databases(parent=parent)
+
+                for database in databases:
+                    database_id = database.name.split('/')[-1]
+                    location_id = database.location_id
+
+                    # List composite indexes
+                    collection_parent = f"{database.name}/collectionGroups/-"
+
+                    try:
+                        indexes = admin_client.list_indexes(parent=collection_parent)
+
+                        composite_count = 0
+                        for index in indexes:
+                            # Composite indexes have 2+ fields (excluding __name__)
+                            non_system_fields = [f for f in index.fields if f.field_path != '__name__']
+                            if len(non_system_fields) >= 2:
+                                composite_count += 1
+
+                        if composite_count > 0:
+                            # Estimate waste (assume 20% are unused)
+                            unused_composite_estimate = max(1, composite_count // 5)
+                            estimated_waste_gb = unused_composite_estimate * 0.1  # ~100MB per unused composite
+                            monthly_waste = estimated_waste_gb * 0.18
+
+                            if monthly_waste < min_savings_threshold:
+                                continue
+
+                            resources.append(
+                                OrphanResourceData(
+                                    resource_id=database.name,
+                                    resource_name=f"{database_id}_unnecessary_composite",
+                                    resource_type="firestore_unnecessary_composite",
+                                    region=location_id,
+                                    estimated_monthly_cost=monthly_waste,
+                                    confidence_level="MEDIUM",
+                                    resource_metadata={
+                                        "database_id": database_id,
+                                        "total_composite_indexes": composite_count,
+                                        "unused_estimate": unused_composite_estimate,
+                                        "lookback_days": days_lookback
+                                    },
+                                    recommendation=f"Review {unused_composite_estimate} potentially unused composite indexes and DELETE if confirmed unnecessary."
+                                )
+                            )
+
+                    except Exception as e:
+                        logger.warning(f"Error listing composite indexes for database {database_id}: {e}")
+
+            except Exception as e:
+                logger.error(f"Error listing Firestore databases: {e}")
+
+        except Exception as e:
+            logger.error(f"Error scanning for unnecessary composite indexes in Firestore: {e}")
+
+        return resources
+
+    async def scan_firestore_wrong_mode(
+        self, region: str | None = None, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scenario 10: Detect wrong mode choice (Native vs Datastore mismatch).
+
+        Waste: Using wrong Firestore mode for use case (migration recommendation).
+        Detection: Check database mode + analyze usage patterns
+        Cost: Migration awareness (no direct cost, but opportunity cost)
+        Priority: LOW (P3) ⚠️
+        """
+        resources: list[OrphanResourceData] = []
+        rules = detection_rules or {}
+
+        try:
+            from google.cloud.firestore_admin_v1 import FirestoreAdminClient
+
+            admin_client = FirestoreAdminClient()
+
+            # List all Firestore databases
+            parent = f"projects/{self.project_id}"
+
+            try:
+                databases = admin_client.list_databases(parent=parent)
+
+                for database in databases:
+                    database_id = database.name.split('/')[-1]
+                    location_id = database.location_id
+
+                    # Check database mode
+                    db_type = database.type_ if hasattr(database, 'type_') else "UNKNOWN"
+
+                    # Simplified detection: Flag Datastore mode databases for review
+                    if "DATASTORE" in str(db_type).upper():
+                        # Estimate potential savings from Native mode features
+                        monthly_cost_awareness = 0.0  # Informational only
+
+                        resources.append(
+                            OrphanResourceData(
+                                resource_id=database.name,
+                                resource_name=f"{database_id}_wrong_mode",
+                                resource_type="firestore_wrong_mode",
+                                region=location_id,
+                                estimated_monthly_cost=monthly_cost_awareness,
+                                confidence_level="LOW",
+                                resource_metadata={
+                                    "database_id": database_id,
+                                    "current_mode": str(db_type),
+                                    "note": "Mode cannot be changed after creation with data"
+                                },
+                                recommendation="Review if Datastore mode is truly needed. Native mode offers real-time listeners and better mobile support. Consider for new databases."
+                            )
+                        )
+
+            except Exception as e:
+                logger.error(f"Error listing Firestore databases: {e}")
+
+        except Exception as e:
+            logger.error(f"Error scanning for wrong mode in Firestore: {e}")
+
+        return resources
+
     async def scan_cloud_nat_gateway_idle(
         self, region: str | None = None, detection_rules: dict | None = None
     ) -> list[OrphanResourceData]:

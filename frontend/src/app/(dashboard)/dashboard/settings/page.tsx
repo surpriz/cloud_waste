@@ -662,7 +662,12 @@ const RESOURCE_CATEGORIES = {
       "cloud_spanner_underutilized", "cloud_spanner_unnecessary_multiregional", "cloud_spanner_devtest_overprovisioned",
       "cloud_spanner_idle", "cloud_spanner_pu_suboptimal", "cloud_spanner_empty_databases",
       "cloud_spanner_untagged", "cloud_spanner_low_cpu", "cloud_spanner_storage_overprovisioned",
-      "cloud_spanner_excessive_backups"
+      "cloud_spanner_excessive_backups",
+      // Firestore (10 scenarios)
+      "firestore_idle", "firestore_unused_indexes", "firestore_missing_ttl",
+      "firestore_over_indexing", "firestore_empty_collections", "firestore_untagged",
+      "firestore_old_backups", "firestore_inefficient_queries", "firestore_unnecessary_composite",
+      "firestore_wrong_mode"
     ],
   },
   azure: {
@@ -893,6 +898,16 @@ const GCP_RESOURCE_ICONS: { [key: string]: any } = {
   cloud_spanner_low_cpu: Database,
   cloud_spanner_storage_overprovisioned: Database,
   cloud_spanner_excessive_backups: Database,
+  firestore_idle: Database,
+  firestore_unused_indexes: Database,
+  firestore_missing_ttl: Database,
+  firestore_over_indexing: Database,
+  firestore_empty_collections: Database,
+  firestore_untagged: Database,
+  firestore_old_backups: Database,
+  firestore_inefficient_queries: Database,
+  firestore_unnecessary_composite: Database,
+  firestore_wrong_mode: Database,
 };
 
 const GCP_RESOURCE_LABELS: { [key: string]: string } = {
@@ -1039,6 +1054,17 @@ const GCP_RESOURCE_LABELS: { [key: string]: string } = {
   cloud_spanner_low_cpu: "Cloud Spanner (Very Low CPU<20% - Aggressive Reduction) 💰💰💰💰 P0",
   cloud_spanner_storage_overprovisioned: "Cloud Spanner (Small Storage <100GB - Migrate to Cloud SQL) 💰💰 P2",
   cloud_spanner_excessive_backups: "Cloud Spanner (Excessive Backup Retention >90d/365d) 💰 P3",
+  // Database - Cloud Firestore (10 scenarios)
+  firestore_idle: "Cloud Firestore (Idle - 0 API Requests 30+ days) 💰💰💰💰 P0",
+  firestore_unused_indexes: "Cloud Firestore (Unused Indexes - Never Used) 💰💰💰 P1",
+  firestore_missing_ttl: "Cloud Firestore (Missing TTL Policies - Expired Data) 💰💰💰 P1",
+  firestore_over_indexing: "Cloud Firestore (Over-Indexing - Too Many Automatic Indexes) 💰💰 P2",
+  firestore_empty_collections: "Cloud Firestore (Empty Collections with Indexes) 💰💰 P2",
+  firestore_untagged: "Cloud Firestore (Missing Required Labels) 💰 P3",
+  firestore_old_backups: "Cloud Firestore (Old Backups - Retention >90 days) 💰 P3",
+  firestore_inefficient_queries: "Cloud Firestore (Inefficient Queries - N+1 Problem) 💰💰💰 P1",
+  firestore_unnecessary_composite: "Cloud Firestore (Unnecessary Composite Indexes) 💰💰 P2",
+  firestore_wrong_mode: "Cloud Firestore (Wrong Mode - Native vs Datastore Mismatch) ⚠️ P3",
 };
 
 // Microsoft 365 Resource Icons & Labels

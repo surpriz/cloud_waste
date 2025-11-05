@@ -3316,6 +3316,65 @@ DEFAULT_DETECTION_RULES = {
         "devtest_labels": ["dev", "test", "staging", "development"],
         "description": "GCP Cloud Spanner excessive backup retention - >90d dev/test or >365d prod ($100/month typical) 💰 P3",
     },
+    # =================================================================
+    # GCP CLOUD FIRESTORE DETECTION RULES (10 scenarios)
+    # =================================================================
+    "firestore_idle": {
+        "enabled": True,
+        "days_idle_threshold": 30,
+        "min_savings_threshold": 5.0,
+        "description": "GCP Cloud Firestore idle - 0 API requests 30+ days, 100% waste ($9-170/month typical) 💰💰💰💰 P0",
+    },
+    "firestore_unused_indexes": {
+        "enabled": True,
+        "days_lookback": 30,
+        "min_savings_threshold": 2.0,
+        "description": "GCP Cloud Firestore unused indexes - never used, storage waste + slower writes 💰💰💰 P1",
+    },
+    "firestore_missing_ttl": {
+        "enabled": True,
+        "ttl_threshold_days": 90,
+        "min_savings_threshold": 10.0,
+        "description": "GCP Cloud Firestore missing TTL policies - expired data not auto-deleted ($500-5k/year) 💰💰💰 P1",
+    },
+    "firestore_over_indexing": {
+        "enabled": True,
+        "max_auto_indexes_threshold": 50,
+        "min_savings_threshold": 20.0,
+        "description": "GCP Cloud Firestore over-indexing - too many automatic indexes ($1-10k/year) 💰💰 P2",
+    },
+    "firestore_empty_collections": {
+        "enabled": True,
+        "min_savings_threshold": 5.0,
+        "description": "GCP Cloud Firestore empty collections - 0 documents with indexes ($50-500/year) 💰💰 P2",
+    },
+    "firestore_untagged": {
+        "enabled": True,
+        "required_labels": ["environment", "owner", "cost-center"],
+        "governance_waste_pct": 0.05,
+        "description": "GCP Cloud Firestore missing required labels - 5% governance waste 💰 P3",
+    },
+    "firestore_old_backups": {
+        "enabled": True,
+        "retention_threshold_days": 90,
+        "min_savings_threshold": 5.0,
+        "description": "GCP Cloud Firestore old backups - excessive retention >90 days ($100-1k/year) 💰 P3",
+    },
+    "firestore_inefficient_queries": {
+        "enabled": True,
+        "min_savings_threshold": 50.0,
+        "description": "GCP Cloud Firestore inefficient queries - N+1 problem, sequential reads ($500-8k/year) 💰💰💰 P1",
+    },
+    "firestore_unnecessary_composite": {
+        "enabled": True,
+        "days_lookback": 30,
+        "min_savings_threshold": 10.0,
+        "description": "GCP Cloud Firestore unnecessary composite indexes - unused custom indexes ($200-3k/year) 💰💰 P2",
+    },
+    "firestore_wrong_mode": {
+        "enabled": True,
+        "description": "GCP Cloud Firestore wrong mode - Native vs Datastore mismatch (migration awareness) ⚠️ P3",
+    },
 }
 
 
