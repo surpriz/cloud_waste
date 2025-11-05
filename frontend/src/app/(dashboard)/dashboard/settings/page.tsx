@@ -679,6 +679,13 @@ const RESOURCE_CATEGORIES = {
       "memorystore_redis_untagged", "memorystore_redis_high_connection_churn", "memorystore_redis_wrong_size",
       "memorystore_redis_cross_zone_traffic"
     ],
+    analytics: [
+      // BigQuery (10 scenarios)
+      "bigquery_never_queried_tables", "bigquery_active_storage_waste", "bigquery_empty_datasets",
+      "bigquery_no_expiration", "bigquery_unpartitioned_large_tables", "bigquery_unclustered_large_tables",
+      "bigquery_untagged_datasets", "bigquery_expensive_queries", "bigquery_ondemand_vs_flatrate",
+      "bigquery_unused_materialized_views"
+    ],
   },
   azure: {
     compute: [
@@ -807,6 +814,7 @@ const CATEGORY_LABELS = {
     storage: "💾 Storage",
     networking: "🌐 Networking",
     database: "🗄️ Database",
+    analytics: "📊 Analytics",
   },
   azure: {
     compute: "💻 Compute",
@@ -938,6 +946,17 @@ const GCP_RESOURCE_ICONS: { [key: string]: any } = {
   memorystore_redis_high_connection_churn: Database,
   memorystore_redis_wrong_size: Database,
   memorystore_redis_cross_zone_traffic: Database,
+  // BigQuery Analytics (10 scenarios)
+  bigquery_never_queried_tables: Database,
+  bigquery_active_storage_waste: Database,
+  bigquery_empty_datasets: Database,
+  bigquery_no_expiration: Database,
+  bigquery_unpartitioned_large_tables: Database,
+  bigquery_unclustered_large_tables: Database,
+  bigquery_untagged_datasets: Database,
+  bigquery_expensive_queries: Database,
+  bigquery_ondemand_vs_flatrate: Database,
+  bigquery_unused_materialized_views: Database,
 };
 
 const GCP_RESOURCE_LABELS: { [key: string]: string } = {
@@ -1117,6 +1136,17 @@ const GCP_RESOURCE_LABELS: { [key: string]: string } = {
   memorystore_redis_high_connection_churn: "Memorystore Redis (High Connection Churn - No Pooling) 💰💰💰💰 P2",
   memorystore_redis_wrong_size: "Memorystore Redis (Wrong Instance Size - Basic >100GB or Standard <5GB) 💰💰💰 P2",
   memorystore_redis_cross_zone_traffic: "Memorystore Redis (Cross-Zone Traffic Costs) 💰💰💰 P3",
+  // BigQuery Analytics (10 scenarios)
+  bigquery_never_queried_tables: "BigQuery Tables (Never Queried 90+ days - 100% Storage Waste) 💰💰💰💰💰 P0",
+  bigquery_active_storage_waste: "BigQuery Tables (Active Storage Waste >90 days unmodified) 💰💰💰💰 P1",
+  bigquery_empty_datasets: "BigQuery Datasets (Empty >30 days) 💰💰 P2",
+  bigquery_no_expiration: "BigQuery Tables (No Expiration - Temp/Staging Tables) 💰💰💰💰 P1",
+  bigquery_unpartitioned_large_tables: "BigQuery Tables (Unpartitioned >1TB - 90% Query Waste) 💰💰💰💰💰 P0",
+  bigquery_unclustered_large_tables: "BigQuery Tables (Unclustered >100GB - 40% Query Waste) 💰💰💰 P1",
+  bigquery_untagged_datasets: "BigQuery Datasets (Missing Labels - Governance) 💰💰 P3",
+  bigquery_expensive_queries: "BigQuery Queries (>10TB Scanned - 70% Optimization) 💰💰💰💰💰 P0",
+  bigquery_ondemand_vs_flatrate: "BigQuery Pricing (On-Demand vs Flat-Rate >$2k/month) 💰💰💰💰 P1",
+  bigquery_unused_materialized_views: "BigQuery Materialized Views (Never Queried 30+ days) 💰💰💰 P2",
 };
 
 // Microsoft 365 Resource Icons & Labels

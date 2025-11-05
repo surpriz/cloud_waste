@@ -3497,6 +3497,74 @@ DEFAULT_DETECTION_RULES = {
         "enabled": True,
         "description": "GCP Memorystore Redis cross-zone traffic - clients in different zone, $0.01/GB fees ($72/month per 10TB) 💰💰💰 P3 [3% impact]",
     },
+    # GCP BIGQUERY ANALYTICS DETECTION RULES (10 scenarios)
+    # Impact: $20,000-$100,000/year per organization
+    # Documentation: docs/gcp/GCP_BIGQUERY_SCENARIOS_100.md
+    "bigquery_never_queried_tables": {
+        "enabled": True,
+        "never_queried_days": 90,
+        "min_size_gb": 1.0,
+        "exclude_datasets": ['logs', 'temp'],
+        "description": "BigQuery never queried tables - 90+ days unused, 100% storage waste ($20-2,000/month) 💰💰💰💰💰 P0 [40% impact]",
+    },
+    "bigquery_active_storage_waste": {
+        "enabled": True,
+        "days_since_modified_threshold": 90,
+        "min_size_gb": 1.0,
+        "description": "BigQuery active storage waste - >90 days unmodified, should be long-term (50% overpay) ($10-1,000/month) 💰💰💰💰 P1 [25% impact]",
+    },
+    "bigquery_empty_datasets": {
+        "enabled": True,
+        "min_age_days": 30,
+        "description": "BigQuery empty datasets - 0 tables 30+ days, abandoned projects 💰💰 P2 [5% impact]",
+    },
+    "bigquery_no_expiration": {
+        "enabled": True,
+        "temp_name_patterns": ['temp', 'tmp', 'staging', 'stg', 'test', 'scratch', 'backup'],
+        "intended_lifetime_days": 30,
+        "min_age_days": 7,
+        "description": "BigQuery no expiration - temp/staging tables without expiration, accumulation waste ($100-500/month) 💰💰💰💰 P1 [20% impact]",
+    },
+    "bigquery_unpartitioned_large_tables": {
+        "enabled": True,
+        "min_size_tb": 1.0,
+        "full_scan_threshold": 0.5,
+        "estimated_partition_reduction": 0.90,
+        "description": "BigQuery unpartitioned large tables - >1TB without partitioning, 90% query waste ($100-5,000/month) 💰💰💰💰💰 P0 [35% impact]",
+    },
+    "bigquery_unclustered_large_tables": {
+        "enabled": True,
+        "min_size_gb": 100.0,
+        "clustering_reduction": 0.40,
+        "min_queries_per_month": 10,
+        "description": "BigQuery unclustered large tables - >100GB without clustering, 40% query waste ($50-1,000/month) 💰💰💰 P1 [15% impact]",
+    },
+    "bigquery_untagged_datasets": {
+        "enabled": True,
+        "required_labels": ['environment', 'owner', 'cost-center'],
+        "governance_waste_pct": 0.05,
+        "description": "BigQuery untagged datasets - missing labels (environment/owner/cost-center), 5% governance waste 💰💰 P3 [5% impact]",
+    },
+    "bigquery_expensive_queries": {
+        "enabled": True,
+        "expensive_query_tb_threshold": 10.0,
+        "lookback_days": 30,
+        "optimization_reduction": 0.70,
+        "description": "BigQuery expensive queries - >10TB scanned, 70% optimization potential ($100-2,000/month) 💰💰💰💰💰 P0 [30% impact]",
+    },
+    "bigquery_ondemand_vs_flatrate": {
+        "enabled": True,
+        "flatrate_baseline_cost": 2000.0,
+        "min_savings_threshold": 300.0,
+        "max_variance_threshold": 0.30,
+        "description": "BigQuery on-demand vs flat-rate - >$2k/month on-demand with stable workload ($300-1,500/month savings) 💰💰💰💰 P1 [10% impact]",
+    },
+    "bigquery_unused_materialized_views": {
+        "enabled": True,
+        "lookback_days": 30,
+        "refresh_scan_percentage": 0.10,
+        "description": "BigQuery unused materialized views - never queried 30+ days, storage + refresh waste ($10-500/month) 💰💰💰 P2 [5% impact]",
+    },
 }
 
 

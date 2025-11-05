@@ -18201,6 +18201,953 @@ class GCPProvider(CloudProviderBase):
 
         return resources
 
+    # ============================================================================
+    # BIGQUERY ANALYTICS WASTE DETECTION (10 SCENARIOS)
+    # ============================================================================
+
+    async def scan_bigquery_never_queried_tables(
+        self, region: str | None = None, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scenario 1: Detect tables never queried.
+
+        Waste: Tables jamais interrogées depuis 90+ jours = 100% storage waste.
+        Detection: creation_time <90 days AND query_count = 0
+        Cost: Full storage cost ($20-$2,000/month typical for 1-100 TB)
+        Priority: CRITICAL (P0) 💰💰💰💰💰
+        Impact: 40% of BigQuery waste
+        """
+        resources: list[OrphanResourceData] = []
+        rules = detection_rules or {}
+
+        never_queried_days = rules.get("never_queried_days", 90)
+        min_size_gb = rules.get("min_size_gb", 1.0)
+        exclude_datasets = rules.get("exclude_datasets", ['logs', 'temp'])
+
+        try:
+            from google.cloud import bigquery
+            from datetime import datetime, timedelta
+
+            client = bigquery.Client(project=self.project_id)
+
+            # Query tables older than threshold
+            query_tables = f"""
+            SELECT
+              table_catalog,
+              table_schema,
+              table_name,
+              creation_time,
+              TIMESTAMP_DIFF(CURRENT_TIMESTAMP(), creation_time, DAY) as age_days,
+              size_bytes / POW(1024, 3) as size_gb,
+              row_count,
+              type
+            FROM `{self.project_id}.INFORMATION_SCHEMA.TABLES`
+            WHERE table_type = 'BASE TABLE'
+              AND creation_time < TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {never_queried_days} DAY)
+              AND size_bytes >= {int(min_size_gb * 1024**3)}
+            ORDER BY size_bytes DESC
+            """
+
+            tables = list(client.query(query_tables).result())
+
+            for table in tables:
+                # Skip excluded datasets
+                if table.table_schema in exclude_datasets:
+                    continue
+
+                # Check if table was ever queried
+                try:
+                    query_jobs = f"""
+                    SELECT COUNT(*) as query_count
+                    FROM `{self.project_id}.region-{region or 'us'}.INFORMATION_SCHEMA.JOBS_BY_PROJECT`
+                    WHERE creation_time >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {never_queried_days} DAY)
+                      AND state = 'DONE'
+                      AND error_result IS NULL
+                      AND ARRAY_LENGTH(referenced_tables) > 0
+                      AND EXISTS (
+                        SELECT 1 FROM UNNEST(referenced_tables) as ref
+                        WHERE ref.table_id = '{table.table_name}'
+                          AND ref.dataset_id = '{table.table_schema}'
+                      )
+                    """
+
+                    result = list(client.query(query_jobs).result())
+                    query_count = result[0].query_count if result else 0
+
+                    if query_count == 0:
+                        # Table never queried = 100% waste
+                        age_days = table.age_days
+                        size_gb = table.size_gb
+
+                        # Storage pricing: active ($0.020) or long-term ($0.010)
+                        storage_price = 0.010 if age_days >= 90 else 0.020
+                        monthly_cost = size_gb * storage_price
+
+                        # Already wasted cost
+                        age_months = age_days / 30.0
+                        already_wasted = monthly_cost * age_months
+
+                        resources.append(
+                            OrphanResourceData(
+                                resource_id=f"{self.project_id}:{table.table_schema}.{table.table_name}",
+                                resource_name=table.table_name,
+                                resource_type="bigquery_never_queried_tables",
+                                region=region or "us-central1",
+                                estimated_monthly_cost=monthly_cost,
+                                confidence_level="HIGH",
+                                resource_metadata={
+                                    "project_id": self.project_id,
+                                    "dataset_id": table.table_schema,
+                                    "table_id": table.table_name,
+                                    "size_gb": round(size_gb, 2),
+                                    "row_count": table.row_count,
+                                    "age_days": age_days,
+                                    "storage_tier": "long_term" if age_days >= 90 else "active",
+                                    "query_count_90d": 0,
+                                    "already_wasted": round(already_wasted, 2),
+                                    "waste_percentage": 100
+                                },
+                                recommendation=f"Delete table or export to Cloud Storage Coldline ($0.004/GB = 60% savings). Never queried in {age_days} days."
+                            )
+                        )
+
+                except Exception as e:
+                    logger.warning(f"Could not check query history for table {table.table_name}: {e}")
+
+        except Exception as e:
+            logger.error(f"Error in scan_bigquery_never_queried_tables: {e}")
+
+        return resources
+
+    async def scan_bigquery_active_storage_waste(
+        self, region: str | None = None, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scenario 2: Detect active storage that should be long-term.
+
+        Waste: Tables not modified in 90+ days still in active storage = 50% overpay.
+        Detection: last_modified_time >90 days AND storage_tier = active
+        Cost: 50% of storage cost ($10-$1,000/month typical)
+        Priority: HIGH (P1) 💰💰💰💰
+        Impact: 25% of BigQuery waste
+        """
+        resources: list[OrphanResourceData] = []
+        rules = detection_rules or {}
+
+        days_since_modified_threshold = rules.get("days_since_modified_threshold", 90)
+        min_size_gb = rules.get("min_size_gb", 1.0)
+
+        try:
+            from google.cloud import bigquery
+
+            client = bigquery.Client(project=self.project_id)
+
+            # Query tables not modified in threshold period
+            query = f"""
+            SELECT
+              table_catalog,
+              table_schema,
+              table_name,
+              creation_time,
+              size_bytes / POW(1024, 3) as size_gb,
+              TIMESTAMP_DIFF(
+                CURRENT_TIMESTAMP(),
+                creation_time,
+                DAY
+              ) as days_since_modified
+            FROM `{self.project_id}.INFORMATION_SCHEMA.TABLES`
+            WHERE table_type = 'BASE TABLE'
+              AND TIMESTAMP_DIFF(
+                    CURRENT_TIMESTAMP(),
+                    creation_time,
+                    DAY
+                  ) >= {days_since_modified_threshold}
+              AND size_bytes >= {int(min_size_gb * 1024**3)}
+            ORDER BY size_bytes DESC
+            """
+
+            tables = list(client.query(query).result())
+
+            for table in tables:
+                size_gb = table.size_gb
+                days_since_modified = table.days_since_modified
+
+                # Active storage cost
+                current_cost = size_gb * 0.020
+
+                # Long-term storage cost
+                recommended_cost = size_gb * 0.010
+
+                # Waste = difference
+                monthly_waste = current_cost - recommended_cost
+                annual_savings = monthly_waste * 12
+
+                resources.append(
+                    OrphanResourceData(
+                        resource_id=f"{self.project_id}:{table.table_schema}.{table.table_name}",
+                        resource_name=table.table_name,
+                        resource_type="bigquery_active_storage_waste",
+                        region=region or "us-central1",
+                        estimated_monthly_cost=monthly_waste,
+                        confidence_level="HIGH",
+                        resource_metadata={
+                            "project_id": self.project_id,
+                            "dataset_id": table.table_schema,
+                            "table_id": table.table_name,
+                            "size_gb": round(size_gb, 2),
+                            "days_since_modified": days_since_modified,
+                            "storage_tier": "active",
+                            "current_cost_monthly": round(current_cost, 2),
+                            "recommended_cost_monthly": round(recommended_cost, 2),
+                            "annual_savings": round(annual_savings, 2),
+                            "waste_percentage": 50
+                        },
+                        recommendation=f"Table not modified in {days_since_modified} days. Should transition to long-term storage (automatic after 90d). Save ${monthly_waste:.2f}/month."
+                    )
+                )
+
+        except Exception as e:
+            logger.error(f"Error in scan_bigquery_active_storage_waste: {e}")
+
+        return resources
+
+    async def scan_bigquery_empty_datasets(
+        self, region: str | None = None, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scenario 3: Detect empty datasets.
+
+        Waste: Empty datasets >30 days = abandoned projects, governance issue.
+        Detection: table_count = 0 AND age_days >= 30
+        Cost: No direct cost but signals other wastes
+        Priority: MEDIUM (P2) 💰💰
+        Impact: 5% of BigQuery waste
+        """
+        resources: list[OrphanResourceData] = []
+        rules = detection_rules or {}
+
+        min_age_days = rules.get("min_age_days", 30)
+
+        try:
+            from google.cloud import bigquery
+            from datetime import datetime
+
+            client = bigquery.Client(project=self.project_id)
+
+            # List all datasets
+            datasets = list(client.list_datasets(project=self.project_id))
+
+            for dataset_ref in datasets:
+                dataset = client.get_dataset(dataset_ref.reference)
+
+                # Count tables in dataset
+                query_count = f"""
+                SELECT COUNT(*) as table_count
+                FROM `{self.project_id}.{dataset.dataset_id}.INFORMATION_SCHEMA.TABLES`
+                """
+
+                result = list(client.query(query_count).result())
+                table_count = result[0].table_count if result else 0
+
+                if table_count == 0:
+                    # Calculate age
+                    age_days = (datetime.utcnow().replace(tzinfo=None) - dataset.created.replace(tzinfo=None)).days
+
+                    if age_days >= min_age_days:
+                        resources.append(
+                            OrphanResourceData(
+                                resource_id=f"{self.project_id}:{dataset.dataset_id}",
+                                resource_name=dataset.dataset_id,
+                                resource_type="bigquery_empty_datasets",
+                                region=region or dataset.location,
+                                estimated_monthly_cost=0.0,
+                                confidence_level="MEDIUM",
+                                resource_metadata={
+                                    "project_id": self.project_id,
+                                    "dataset_id": dataset.dataset_id,
+                                    "location": dataset.location,
+                                    "age_days": age_days,
+                                    "table_count": 0
+                                },
+                                recommendation=f"Delete empty dataset - likely abandoned project (age: {age_days} days)."
+                            )
+                        )
+
+        except Exception as e:
+            logger.error(f"Error in scan_bigquery_empty_datasets: {e}")
+
+        return resources
+
+    async def scan_bigquery_no_expiration(
+        self, region: str | None = None, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scenario 4: Detect temporary tables without expiration.
+
+        Waste: Temp/staging tables without expiration = accumulation waste.
+        Detection: table_name matches temp patterns AND expires = null AND age_days >= 7
+        Cost: Full storage cost after intended lifetime ($100-$500/month typical)
+        Priority: HIGH (P1) 💰💰💰💰
+        Impact: 20% of BigQuery waste
+        """
+        resources: list[OrphanResourceData] = []
+        rules = detection_rules or {}
+
+        temp_name_patterns = rules.get("temp_name_patterns", ['temp', 'tmp', 'staging', 'stg', 'test', 'scratch', 'backup'])
+        intended_lifetime_days = rules.get("intended_lifetime_days", 30)
+        min_age_days = rules.get("min_age_days", 7)
+
+        try:
+            from google.cloud import bigquery
+
+            client = bigquery.Client(project=self.project_id)
+
+            # Build pattern matching for temp tables
+            pattern_conditions = " OR ".join([f"LOWER(table_name) LIKE '%{pattern}%'" for pattern in temp_name_patterns])
+
+            query = f"""
+            SELECT
+              table_catalog,
+              table_schema,
+              table_name,
+              creation_time,
+              TIMESTAMP_DIFF(CURRENT_TIMESTAMP(), creation_time, DAY) as age_days,
+              size_bytes / POW(1024, 3) as size_gb
+            FROM `{self.project_id}.INFORMATION_SCHEMA.TABLES`
+            WHERE table_type = 'BASE TABLE'
+              AND ({pattern_conditions})
+              AND TIMESTAMP_DIFF(CURRENT_TIMESTAMP(), creation_time, DAY) >= {min_age_days}
+            ORDER BY size_bytes DESC
+            """
+
+            tables = list(client.query(query).result())
+
+            for table in tables:
+                # Check if expiration is set
+                table_ref = client.get_table(f"{table.table_catalog}.{table.table_schema}.{table.table_name}")
+
+                if table_ref.expires is None:
+                    # Table has no expiration
+                    age_days = table.age_days
+                    size_gb = table.size_gb
+
+                    # Calculate waste
+                    if age_days > intended_lifetime_days:
+                        waste_days = age_days - intended_lifetime_days
+                        waste_months = waste_days / 30.0
+                        monthly_cost = size_gb * 0.020
+                        already_wasted = monthly_cost * waste_months
+                    else:
+                        monthly_cost = size_gb * 0.020
+                        already_wasted = 0
+
+                    resources.append(
+                        OrphanResourceData(
+                            resource_id=f"{self.project_id}:{table.table_schema}.{table.table_name}",
+                            resource_name=table.table_name,
+                            resource_type="bigquery_no_expiration",
+                            region=region or "us-central1",
+                            estimated_monthly_cost=monthly_cost,
+                            confidence_level="HIGH",
+                            resource_metadata={
+                                "project_id": self.project_id,
+                                "dataset_id": table.table_schema,
+                                "table_id": table.table_name,
+                                "size_gb": round(size_gb, 2),
+                                "age_days": age_days,
+                                "expires": None,
+                                "intended_lifetime_days": intended_lifetime_days,
+                                "excess_days": max(0, age_days - intended_lifetime_days),
+                                "already_wasted": round(already_wasted, 2)
+                            },
+                            recommendation=f"Set table expiration to {intended_lifetime_days} days for temporary/staging tables. Already wasted ${already_wasted:.2f}."
+                        )
+                    )
+
+        except Exception as e:
+            logger.error(f"Error in scan_bigquery_no_expiration: {e}")
+
+        return resources
+
+    async def scan_bigquery_unpartitioned_large_tables(
+        self, region: str | None = None, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scenario 5: Detect large unpartitioned tables.
+
+        Waste: Tables >1 TB without partitioning = 90% query cost waste (full scans).
+        Detection: size_bytes >1 TB AND no PARTITION BY in DDL AND queries doing full scans
+        Cost: Query costs 10x higher ($100-$5,000/month typical)
+        Priority: CRITICAL (P0) 💰💰💰💰💰
+        Impact: 35% of BigQuery waste
+        """
+        resources: list[OrphanResourceData] = []
+        rules = detection_rules or {}
+
+        min_size_tb = rules.get("min_size_tb", 1.0)
+        full_scan_threshold = rules.get("full_scan_threshold", 0.5)
+        estimated_partition_reduction = rules.get("estimated_partition_reduction", 0.90)
+
+        try:
+            from google.cloud import bigquery
+
+            client = bigquery.Client(project=self.project_id)
+
+            # Query tables >1 TB without partitioning
+            query_tables = f"""
+            SELECT
+              table_catalog,
+              table_schema,
+              table_name,
+              size_bytes / POW(1024, 4) as size_tb,
+              row_count,
+              creation_time,
+              ddl
+            FROM `{self.project_id}.INFORMATION_SCHEMA.TABLES`
+            WHERE table_type = 'BASE TABLE'
+              AND size_bytes > {int(min_size_tb * 1024**4)}
+              AND (ddl NOT LIKE '%PARTITION BY%' OR ddl IS NULL)
+            ORDER BY size_bytes DESC
+            """
+
+            tables = list(client.query(query_tables).result())
+
+            for table in tables:
+                # Analyze recent queries (30 days)
+                try:
+                    query_jobs = f"""
+                    SELECT
+                      COUNT(*) as query_count,
+                      AVG(total_bytes_processed / POW(1024, 4)) as avg_tb_scanned,
+                      SUM(total_bytes_processed / POW(1024, 4)) as total_tb_scanned
+                    FROM `{self.project_id}.region-{region or 'us'}.INFORMATION_SCHEMA.JOBS_BY_PROJECT`
+                    WHERE creation_time >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 30 DAY)
+                      AND state = 'DONE'
+                      AND error_result IS NULL
+                      AND EXISTS (
+                        SELECT 1 FROM UNNEST(referenced_tables) as ref
+                        WHERE ref.table_id = '{table.table_name}'
+                      )
+                    """
+
+                    result = list(client.query(query_jobs).result())
+
+                    if result and result[0].query_count > 0:
+                        total_tb_scanned = result[0].total_tb_scanned or 0
+                        avg_tb_scanned = result[0].avg_tb_scanned or 0
+                        query_count = result[0].query_count
+
+                        # Check if doing full scans
+                        if avg_tb_scanned > (table.size_tb * full_scan_threshold):
+                            # Calculate query costs
+                            current_query_cost_30d = total_tb_scanned * 5  # $5/TB
+                            monthly_cost = current_query_cost_30d
+
+                            # Estimated cost with partitioning
+                            recommended_cost = monthly_cost * (1 - estimated_partition_reduction)
+                            monthly_waste = monthly_cost - recommended_cost
+
+                            resources.append(
+                                OrphanResourceData(
+                                    resource_id=f"{self.project_id}:{table.table_schema}.{table.table_name}",
+                                    resource_name=table.table_name,
+                                    resource_type="bigquery_unpartitioned_large_tables",
+                                    region=region or "us-central1",
+                                    estimated_monthly_cost=monthly_waste,
+                                    confidence_level="HIGH",
+                                    resource_metadata={
+                                        "project_id": self.project_id,
+                                        "dataset_id": table.table_schema,
+                                        "table_id": table.table_name,
+                                        "size_tb": round(table.size_tb, 2),
+                                        "is_partitioned": False,
+                                        "query_count_30d": query_count,
+                                        "avg_tb_scanned": round(avg_tb_scanned, 2),
+                                        "total_tb_scanned": round(total_tb_scanned, 2),
+                                        "current_query_cost_monthly": round(monthly_cost, 2),
+                                        "recommended_query_cost_monthly": round(recommended_cost, 2),
+                                        "estimated_scan_reduction": int(estimated_partition_reduction * 100)
+                                    },
+                                    recommendation=f"Add date partitioning (PARTITION BY DATE(timestamp)). Expected 90% query cost reduction = ${monthly_waste:.2f}/month savings."
+                                )
+                            )
+
+                except Exception as e:
+                    logger.warning(f"Could not analyze queries for table {table.table_name}: {e}")
+
+        except Exception as e:
+            logger.error(f"Error in scan_bigquery_unpartitioned_large_tables: {e}")
+
+        return resources
+
+    async def scan_bigquery_unclustered_large_tables(
+        self, region: str | None = None, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scenario 6: Detect large unclustered tables.
+
+        Waste: Tables >100 GB without clustering = 30-50% query cost waste.
+        Detection: size_bytes >100 GB AND no CLUSTER BY in DDL AND queries with WHERE filters
+        Cost: Query costs 40% higher ($50-$1,000/month typical)
+        Priority: HIGH (P1) 💰💰💰
+        Impact: 15% of BigQuery waste
+        """
+        resources: list[OrphanResourceData] = []
+        rules = detection_rules or {}
+
+        min_size_gb = rules.get("min_size_gb", 100.0)
+        clustering_reduction = rules.get("clustering_reduction", 0.40)
+        min_queries_per_month = rules.get("min_queries_per_month", 10)
+
+        try:
+            from google.cloud import bigquery
+
+            client = bigquery.Client(project=self.project_id)
+
+            # Query tables >100 GB without clustering
+            query_tables = f"""
+            SELECT
+              table_catalog,
+              table_schema,
+              table_name,
+              size_bytes / POW(1024, 3) as size_gb,
+              row_count,
+              ddl
+            FROM `{self.project_id}.INFORMATION_SCHEMA.TABLES`
+            WHERE table_type = 'BASE TABLE'
+              AND size_bytes > {int(min_size_gb * 1024**3)}
+              AND (ddl NOT LIKE '%CLUSTER BY%' OR ddl IS NULL)
+            ORDER BY size_bytes DESC
+            """
+
+            tables = list(client.query(query_tables).result())
+
+            for table in tables:
+                # Analyze query patterns
+                try:
+                    query_jobs = f"""
+                    SELECT
+                      COUNT(*) as query_count,
+                      AVG(total_bytes_processed / POW(1024, 3)) as avg_gb_scanned
+                    FROM `{self.project_id}.region-{region or 'us'}.INFORMATION_SCHEMA.JOBS_BY_PROJECT`
+                    WHERE creation_time >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 30 DAY)
+                      AND state = 'DONE'
+                      AND error_result IS NULL
+                      AND EXISTS (
+                        SELECT 1 FROM UNNEST(referenced_tables) as ref
+                        WHERE ref.table_id = '{table.table_name}'
+                      )
+                    """
+
+                    result = list(client.query(query_jobs).result())
+
+                    if result and result[0].query_count >= min_queries_per_month:
+                        query_count = result[0].query_count
+                        avg_gb_scanned = result[0].avg_gb_scanned or 0
+
+                        # Calculate query costs
+                        current_cost_per_query = (avg_gb_scanned / 1000) * 5
+                        current_monthly_cost = current_cost_per_query * query_count
+
+                        # Estimated cost with clustering
+                        recommended_cost = current_monthly_cost * (1 - clustering_reduction)
+                        monthly_waste = current_monthly_cost - recommended_cost
+
+                        resources.append(
+                            OrphanResourceData(
+                                resource_id=f"{self.project_id}:{table.table_schema}.{table.table_name}",
+                                resource_name=table.table_name,
+                                resource_type="bigquery_unclustered_large_tables",
+                                region=region or "us-central1",
+                                estimated_monthly_cost=monthly_waste,
+                                confidence_level="HIGH",
+                                resource_metadata={
+                                    "project_id": self.project_id,
+                                    "dataset_id": table.table_schema,
+                                    "table_id": table.table_name,
+                                    "size_gb": round(table.size_gb, 2),
+                                    "is_clustered": False,
+                                    "query_count_30d": query_count,
+                                    "avg_gb_scanned": round(avg_gb_scanned, 2),
+                                    "current_query_cost_monthly": round(current_monthly_cost, 2),
+                                    "recommended_query_cost_monthly": round(recommended_cost, 2),
+                                    "estimated_scan_reduction": int(clustering_reduction * 100)
+                                },
+                                recommendation=f"Add clustering (CLUSTER BY column1, column2). Expected 40% query cost reduction = ${monthly_waste:.2f}/month savings."
+                            )
+                        )
+
+                except Exception as e:
+                    logger.warning(f"Could not analyze queries for table {table.table_name}: {e}")
+
+        except Exception as e:
+            logger.error(f"Error in scan_bigquery_unclustered_large_tables: {e}")
+
+        return resources
+
+    async def scan_bigquery_untagged_datasets(
+        self, region: str | None = None, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scenario 7: Detect untagged datasets.
+
+        Waste: Datasets without required labels = 5% governance waste.
+        Detection: Missing required labels (environment, owner, cost-center)
+        Cost: 5% of total dataset cost (governance overhead)
+        Priority: LOW (P3) 💰💰
+        Impact: 5% of BigQuery waste
+        """
+        resources: list[OrphanResourceData] = []
+        rules = detection_rules or {}
+
+        required_labels = rules.get("required_labels", ['environment', 'owner', 'cost-center'])
+        governance_waste_pct = rules.get("governance_waste_pct", 0.05)
+
+        try:
+            from google.cloud import bigquery
+
+            client = bigquery.Client(project=self.project_id)
+
+            # List all datasets
+            datasets = list(client.list_datasets(project=self.project_id))
+
+            for dataset_ref in datasets:
+                dataset = client.get_dataset(dataset_ref.reference)
+
+                labels = dataset.labels if dataset.labels else {}
+
+                # Identify missing labels
+                missing_labels = [label for label in required_labels if label not in labels]
+
+                if missing_labels:
+                    # Calculate dataset storage cost
+                    query_storage = f"""
+                    SELECT SUM(size_bytes) / POW(1024, 3) as total_size_gb
+                    FROM `{self.project_id}.{dataset.dataset_id}.INFORMATION_SCHEMA.TABLES`
+                    """
+
+                    result = list(client.query(query_storage).result())
+                    total_size_gb = result[0].total_size_gb if result and result[0].total_size_gb else 0
+
+                    storage_cost = total_size_gb * 0.020  # Assume active storage
+
+                    # Governance waste = 5% of storage cost
+                    monthly_waste = storage_cost * governance_waste_pct
+
+                    resources.append(
+                        OrphanResourceData(
+                            resource_id=f"{self.project_id}:{dataset.dataset_id}",
+                            resource_name=dataset.dataset_id,
+                            resource_type="bigquery_untagged_datasets",
+                            region=region or dataset.location,
+                            estimated_monthly_cost=monthly_waste,
+                            confidence_level="MEDIUM",
+                            resource_metadata={
+                                "project_id": self.project_id,
+                                "dataset_id": dataset.dataset_id,
+                                "location": dataset.location,
+                                "labels": labels,
+                                "missing_labels": missing_labels,
+                                "storage_size_gb": round(total_size_gb, 2),
+                                "storage_cost_monthly": round(storage_cost, 2)
+                            },
+                            recommendation=f"Add required labels: {', '.join(missing_labels)}. Required for cost allocation and governance."
+                        )
+                    )
+
+        except Exception as e:
+            logger.error(f"Error in scan_bigquery_untagged_datasets: {e}")
+
+        return resources
+
+    async def scan_bigquery_expensive_queries(
+        self, region: str | None = None, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scenario 8: Detect expensive queries (>10 TB scanned).
+
+        Waste: Queries scanning >10 TB = $50+ per run, often schedulable/optimizable.
+        Detection: total_bytes_processed >10 TB AND scheduled = true
+        Cost: Query costs with 70% optimization potential ($100-$2,000/month typical)
+        Priority: CRITICAL (P0) 💰💰💰💰💰
+        Impact: 30% of BigQuery waste
+        """
+        resources: list[OrphanResourceData] = []
+        rules = detection_rules or {}
+
+        expensive_query_tb_threshold = rules.get("expensive_query_tb_threshold", 10.0)
+        lookback_days = rules.get("lookback_days", 30)
+        optimization_reduction = rules.get("optimization_reduction", 0.70)
+
+        try:
+            from google.cloud import bigquery
+
+            client = bigquery.Client(project=self.project_id)
+
+            # Query expensive jobs
+            query_jobs = f"""
+            SELECT
+              job_id,
+              user_email,
+              query,
+              creation_time,
+              total_bytes_processed / POW(1024, 4) as tb_scanned,
+              (total_bytes_processed / POW(1024, 4)) * 5 as cost_usd,
+              referenced_tables,
+              statement_type
+            FROM `{self.project_id}.region-{region or 'us'}.INFORMATION_SCHEMA.JOBS_BY_PROJECT`
+            WHERE creation_time >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {lookback_days} DAY)
+              AND state = 'DONE'
+              AND error_result IS NULL
+              AND total_bytes_processed > {int(expensive_query_tb_threshold * 1024**4)}
+            ORDER BY total_bytes_processed DESC
+            LIMIT 100
+            """
+
+            expensive_queries = list(client.query(query_jobs).result())
+
+            for job in expensive_queries:
+                tb_scanned = job.tb_scanned
+                cost_per_run = job.cost_usd
+
+                # Check if scheduled query
+                is_scheduled = 'scheduled_query' in job.job_id.lower()
+                runs_per_month = 30 if is_scheduled else 1
+
+                current_monthly_cost = cost_per_run * runs_per_month
+
+                # Optimization potential
+                optimized_cost = current_monthly_cost * (1 - optimization_reduction)
+                monthly_waste = current_monthly_cost - optimized_cost
+
+                # Detect issues
+                issues = []
+                if 'SELECT *' in (job.query or '').upper():
+                    issues.append('select_star')
+                if 'WHERE' not in (job.query or '').upper():
+                    issues.append('no_where_clause')
+
+                resources.append(
+                    OrphanResourceData(
+                        resource_id=f"{self.project_id}:job_{job.job_id}",
+                        resource_name=f"expensive_query_{job.job_id[:20]}",
+                        resource_type="bigquery_expensive_queries",
+                        region=region or "us-central1",
+                        estimated_monthly_cost=monthly_waste,
+                        confidence_level="HIGH",
+                        resource_metadata={
+                            "project_id": self.project_id,
+                            "job_id": job.job_id,
+                            "user_email": job.user_email,
+                            "tb_scanned": round(tb_scanned, 2),
+                            "cost_per_run": round(cost_per_run, 2),
+                            "is_scheduled": is_scheduled,
+                            "runs_per_month": runs_per_month,
+                            "current_monthly_cost": round(current_monthly_cost, 2),
+                            "issues_detected": issues,
+                            "estimated_optimized_monthly_cost": round(optimized_cost, 2)
+                        },
+                        recommendation=f"Optimize query - 70% cost reduction possible with partitioning/column selection. Issues: {', '.join(issues) if issues else 'full table scan'}."
+                    )
+                )
+
+        except Exception as e:
+            logger.error(f"Error in scan_bigquery_expensive_queries: {e}")
+
+        return resources
+
+    async def scan_bigquery_ondemand_vs_flatrate(
+        self, region: str | None = None, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scenario 9: Detect on-demand vs flat-rate optimization opportunities.
+
+        Waste: On-demand costs >$2,000/month with stable workload = should use flat-rate.
+        Detection: monthly_query_costs >$2,000 AND workload_variance <30%
+        Cost: Difference between on-demand and flat-rate ($300-$1,500/month typical)
+        Priority: HIGH (P1) 💰💰💰💰
+        Impact: 10% of BigQuery waste
+        """
+        resources: list[OrphanResourceData] = []
+        rules = detection_rules or {}
+
+        flatrate_baseline_cost = rules.get("flatrate_baseline_cost", 2000.0)
+        min_savings_threshold = rules.get("min_savings_threshold", 300.0)
+        max_variance_threshold = rules.get("max_variance_threshold", 0.30)
+
+        try:
+            from google.cloud import bigquery
+
+            client = bigquery.Client(project=self.project_id)
+
+            # Calculate total query costs (30 days)
+            query_analysis = f"""
+            SELECT
+              SUM(total_bytes_processed) / POW(1024, 4) as total_tb_scanned,
+              COUNT(*) as total_queries,
+              AVG(total_bytes_processed) / POW(1024, 3) as avg_gb_per_query
+            FROM `{self.project_id}.region-{region or 'us'}.INFORMATION_SCHEMA.JOBS_BY_PROJECT`
+            WHERE creation_time >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 30 DAY)
+              AND state = 'DONE'
+              AND error_result IS NULL
+              AND job_type = 'QUERY'
+            """
+
+            result = list(client.query(query_analysis).result())[0]
+
+            total_tb_scanned = result.total_tb_scanned or 0
+            total_queries = result.total_queries or 0
+
+            # On-demand cost (1 TB free per month)
+            free_tb = 1.0
+            billable_tb = max(0, total_tb_scanned - free_tb)
+            ondemand_monthly_cost = billable_tb * 5  # $5/TB
+
+            if ondemand_monthly_cost > flatrate_baseline_cost:
+                # Flat-rate might be beneficial
+                monthly_savings = ondemand_monthly_cost - flatrate_baseline_cost
+
+                if monthly_savings >= min_savings_threshold:
+                    # Calculate workload variance (simplified)
+                    # In real implementation, would analyze daily variance
+                    daily_variance = 0.15  # Placeholder - assume stable workload
+
+                    if daily_variance < max_variance_threshold:
+                        confidence = "HIGH"
+                        workload_stability = "high"
+                    else:
+                        confidence = "MEDIUM"
+                        workload_stability = "variable"
+
+                    resources.append(
+                        OrphanResourceData(
+                            resource_id=f"{self.project_id}:pricing_analysis",
+                            resource_name="project_pricing_optimization",
+                            resource_type="bigquery_ondemand_vs_flatrate",
+                            region=region or "us-central1",
+                            estimated_monthly_cost=monthly_savings,
+                            confidence_level=confidence,
+                            resource_metadata={
+                                "project_id": self.project_id,
+                                "total_queries": total_queries,
+                                "total_tb_scanned": round(total_tb_scanned, 2),
+                                "current_pricing_model": "on_demand",
+                                "current_monthly_cost": round(ondemand_monthly_cost, 2),
+                                "recommended_pricing_model": "flat_rate",
+                                "flatrate_monthly_cost": flatrate_baseline_cost,
+                                "estimated_annual_savings": round(monthly_savings * 12, 2),
+                                "savings_percentage": round((monthly_savings / ondemand_monthly_cost) * 100, 1),
+                                "workload_stability": workload_stability
+                            },
+                            recommendation=f"Switch to flat-rate pricing (100 slots = $2,000/month). Save ${monthly_savings:.2f}/month with {workload_stability} workload."
+                        )
+                    )
+
+        except Exception as e:
+            logger.error(f"Error in scan_bigquery_ondemand_vs_flatrate: {e}")
+
+        return resources
+
+    async def scan_bigquery_unused_materialized_views(
+        self, region: str | None = None, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scenario 10: Detect unused materialized views.
+
+        Waste: Materialized views never queried = storage + refresh waste.
+        Detection: table_type = 'MATERIALIZED_VIEW' AND query_count_30d = 0
+        Cost: Storage + refresh costs ($10-$500/month typical)
+        Priority: MEDIUM (P2) 💰💰💰
+        Impact: 5% of BigQuery waste
+        """
+        resources: list[OrphanResourceData] = []
+        rules = detection_rules or {}
+
+        lookback_days = rules.get("lookback_days", 30)
+        refresh_scan_percentage = rules.get("refresh_scan_percentage", 0.10)
+
+        try:
+            from google.cloud import bigquery
+
+            client = bigquery.Client(project=self.project_id)
+
+            # List all materialized views
+            query_mvs = f"""
+            SELECT
+              table_catalog,
+              table_schema,
+              table_name,
+              creation_time,
+              size_bytes / POW(1024, 3) as size_gb
+            FROM `{self.project_id}.INFORMATION_SCHEMA.TABLES`
+            WHERE table_type = 'MATERIALIZED_VIEW'
+            ORDER BY size_bytes DESC
+            """
+
+            materialized_views = list(client.query(query_mvs).result())
+
+            for mv in materialized_views:
+                # Check if MV was queried
+                try:
+                    query_usage = f"""
+                    SELECT COUNT(*) as query_count
+                    FROM `{self.project_id}.region-{region or 'us'}.INFORMATION_SCHEMA.JOBS_BY_PROJECT`
+                    WHERE creation_time >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {lookback_days} DAY)
+                      AND state = 'DONE'
+                      AND error_result IS NULL
+                      AND EXISTS (
+                        SELECT 1 FROM UNNEST(referenced_tables) as ref
+                        WHERE ref.table_id = '{mv.table_name}'
+                          AND ref.dataset_id = '{mv.table_schema}'
+                      )
+                    """
+
+                    result = list(client.query(query_usage).result())
+                    query_count = result[0].query_count if result else 0
+
+                    if query_count == 0:
+                        # MV never used
+                        size_gb = mv.size_gb
+
+                        # Storage cost
+                        storage_cost = size_gb * 0.020
+
+                        # Estimate refresh cost (assume base table 10x size, refresh daily, scans 10%)
+                        base_table_size_tb = (size_gb / 1000) * 10
+                        refresh_tb = base_table_size_tb * refresh_scan_percentage
+                        refresh_cost_monthly = refresh_tb * 5 * 30  # $5/TB × 30 days
+
+                        monthly_waste = storage_cost + refresh_cost_monthly
+
+                        resources.append(
+                            OrphanResourceData(
+                                resource_id=f"{self.project_id}:{mv.table_schema}.{mv.table_name}",
+                                resource_name=mv.table_name,
+                                resource_type="bigquery_unused_materialized_views",
+                                region=region or "us-central1",
+                                estimated_monthly_cost=monthly_waste,
+                                confidence_level="HIGH",
+                                resource_metadata={
+                                    "project_id": self.project_id,
+                                    "dataset_id": mv.table_schema,
+                                    "table_id": mv.table_name,
+                                    "size_gb": round(size_gb, 2),
+                                    "query_count_30d": 0,
+                                    "storage_cost_monthly": round(storage_cost, 2),
+                                    "refresh_cost_monthly": round(refresh_cost_monthly, 2)
+                                },
+                                recommendation=f"Delete unused materialized view. Never queried in {lookback_days} days. Wasting ${monthly_waste:.2f}/month."
+                            )
+                        )
+
+                except Exception as e:
+                    logger.warning(f"Could not check usage for MV {mv.table_name}: {e}")
+
+        except Exception as e:
+            logger.error(f"Error in scan_bigquery_unused_materialized_views: {e}")
+
+        return resources
+
     # AWS-specific EC2 instance methods (not applicable to GCP)
     async def scan_oversized_instances(
         self, region: str, detection_rules: dict | None = None

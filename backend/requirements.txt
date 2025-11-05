@@ -64,6 +64,7 @@ google-cloud-filestore==1.14.0  # Cloud Filestore (network-attached storage NFS)
 google-cloud-firestore==2.14.0  # Cloud Firestore (NoSQL document database) for waste detection
 google-cloud-bigtable==2.19.0  # Cloud Bigtable Admin API for waste detection
 google-cloud-redis==1.14.0  # Cloud Memorystore for Redis management
+google-cloud-bigquery==3.25.0  # BigQuery data warehouse for analytics waste detection
 google-auth==2.26.2  # GCP authentication
 
 # Validation
