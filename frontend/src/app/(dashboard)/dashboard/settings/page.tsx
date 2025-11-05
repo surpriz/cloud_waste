@@ -600,7 +600,18 @@ const RESOURCE_CATEGORIES = {
       "gcp_cloud_run_excessive_max_instances",
       "gcp_cloud_run_low_concurrency",
       "gcp_cloud_run_excessive_min_instances",
-      "gcp_cloud_run_multi_region_redundant"
+      "gcp_cloud_run_multi_region_redundant",
+      // Cloud Functions (10 scenarios)
+      "gcp_cloud_function_never_invoked",
+      "gcp_cloud_function_idle_min_instances",
+      "gcp_cloud_function_memory_overprovisioning",
+      "gcp_cloud_function_excessive_timeout",
+      "gcp_cloud_function_1st_gen_expensive",
+      "gcp_cloud_function_untagged",
+      "gcp_cloud_function_excessive_max_instances",
+      "gcp_cloud_function_cold_start_over_optimization",
+      "gcp_cloud_function_duplicate",
+      "gcp_cloud_function_excessive_concurrency"
     ],
     storage: [
       // Persistent Disks (10 scenarios)
@@ -796,6 +807,17 @@ const GCP_RESOURCE_ICONS: { [key: string]: any } = {
   gcp_cloud_run_low_concurrency: Zap,
   gcp_cloud_run_excessive_min_instances: Activity,
   gcp_cloud_run_multi_region_redundant: Globe,
+  // Cloud Functions (10 scenarios)
+  gcp_cloud_function_never_invoked: Server,
+  gcp_cloud_function_idle_min_instances: Activity,
+  gcp_cloud_function_memory_overprovisioning: TrendingDown,
+  gcp_cloud_function_excessive_timeout: Clock,
+  gcp_cloud_function_1st_gen_expensive: DollarSign,
+  gcp_cloud_function_untagged: Tag,
+  gcp_cloud_function_excessive_max_instances: AlertCircle,
+  gcp_cloud_function_cold_start_over_optimization: Zap,
+  gcp_cloud_function_duplicate: Copy,
+  gcp_cloud_function_excessive_concurrency: Activity,
   // Persistent Disks (10 scenarios)
   persistent_disk_unattached: HardDrive,
   persistent_disk_attached_stopped: Server,
@@ -862,6 +884,17 @@ const GCP_RESOURCE_LABELS: { [key: string]: string } = {
   gcp_cloud_run_low_concurrency: "Cloud Run Service (Low Concurrency <= 10) 💰💰💰 P1",
   gcp_cloud_run_excessive_min_instances: "Cloud Run Service (Excessive min_instances >= 5) 💰💰💰 P1",
   gcp_cloud_run_multi_region_redundant: "Cloud Run Service (Multi-Region Redundant) 💰💰💰 P1",
+  // Cloud Functions (10 scenarios)
+  gcp_cloud_function_never_invoked: "Cloud Functions (Never Invoked - 0 invocations 30+ days) 💰💰 P1",
+  gcp_cloud_function_idle_min_instances: "Cloud Functions 2nd Gen (Idle min_instances > 0 + <10 inv/day) 💰💰💰 P1",
+  gcp_cloud_function_memory_overprovisioning: "Cloud Functions (Memory Overprovisioned <50% util) 💰💰 P1",
+  gcp_cloud_function_excessive_timeout: "Cloud Functions (Excessive Timeout > 3x avg exec) 💰 P2",
+  gcp_cloud_function_1st_gen_expensive: "Cloud Functions (1st Gen 20%+ more expensive than 2nd Gen) 💰💰 P1",
+  gcp_cloud_function_untagged: "Cloud Functions (Missing Required Labels) 🏷️ P2",
+  gcp_cloud_function_excessive_max_instances: "Cloud Functions 2nd Gen (Excessive max_instances > 100) 💰💰💰 P1",
+  gcp_cloud_function_cold_start_over_optimization: "Cloud Functions 2nd Gen (Cold Start Over-Optimization) 💰💰 P1",
+  gcp_cloud_function_duplicate: "Cloud Functions (Duplicate Code Source) 💰💰 P2",
+  gcp_cloud_function_excessive_concurrency: "Cloud Functions 2nd Gen (Concurrency=1 Suboptimal) 💰💰 P1",
   // Persistent Disks (10 scenarios)
   persistent_disk_unattached: "Persistent Disk (Unattached >7 days) 💰💰💰💰 P0",
   persistent_disk_attached_stopped: "Persistent Disk (Attached to Stopped Instance >30 days) 💰💰💰💰 P0",

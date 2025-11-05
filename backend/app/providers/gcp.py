@@ -1,6 +1,7 @@
 """GCP provider implementation for CloudWaste."""
 
 import asyncio
+import hashlib
 import json
 import re
 import time
@@ -8,7 +9,7 @@ from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from google.cloud import compute_v1, container_v1, logging, monitoring_v3, run_v2
+from google.cloud import compute_v1, container_v1, functions_v1, functions_v2, logging, monitoring_v3, run_v2
 from google.oauth2 import service_account
 from google.protobuf.timestamp_pb2 import Timestamp
 from kubernetes import client as k8s_client
@@ -6451,6 +6452,1280 @@ class GCPProvider(CloudProviderBase):
 
                 except Exception:
                     continue
+
+        except Exception:
+            pass
+
+        return resources
+
+    # ============================================================================
+    # GCP CLOUD FUNCTIONS DETECTION METHODS
+    # ============================================================================
+
+    async def scan_cloud_function_never_invoked(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scan for Cloud Functions (1st & 2nd gen) with 0 invocations.
+        Detects functions never used but still incurring costs.
+        """
+        resources = []
+
+        no_invocations_threshold_days = 30
+        if detection_rules:
+            no_invocations_threshold_days = detection_rules.get("no_invocations_threshold_days", 30)
+
+        try:
+            functions_v1_client = functions_v1.CloudFunctionsServiceClient(credentials=self.credentials)
+            functions_v2_client = functions_v2.FunctionServiceClient(credentials=self.credentials)
+            monitoring_client = monitoring_v3.MetricServiceClient(credentials=self.credentials)
+
+            # Scan 1st gen functions
+            parent_v1 = f"projects/{self.project_id}/locations/{region}"
+
+            try:
+                functions_1st_gen = functions_v1_client.list_functions(parent=parent_v1)
+
+                for function in functions_1st_gen:
+                    function_name = function.name.split('/')[-1]
+
+                    # Query invocations
+                    interval = monitoring_v3.TimeInterval({
+                        "end_time": {"seconds": int(datetime.utcnow().timestamp())},
+                        "start_time": {"seconds": int((datetime.utcnow() - timedelta(days=no_invocations_threshold_days)).timestamp())},
+                    })
+
+                    filter_str = (
+                        f'resource.type = "cloud_function" '
+                        f'AND resource.labels.function_name = "{function_name}" '
+                        f'AND resource.labels.region = "{region}" '
+                        f'AND metric.type = "cloudfunctions.googleapis.com/function/execution_count"'
+                    )
+
+                    request = monitoring_v3.ListTimeSeriesRequest(
+                        name=f"projects/{self.project_id}",
+                        filter=filter_str,
+                        interval=interval,
+                    )
+
+                    time_series = monitoring_client.list_time_series(request=request)
+
+                    total_invocations = 0
+                    for series in time_series:
+                        for point in series.points:
+                            total_invocations += point.value.int64_value or 0
+
+                    if total_invocations == 0:
+                        memory_mb = function.available_memory_mb
+                        memory_gb = memory_mb / 1024
+                        cpu_ghz = 2.4 if memory_mb >= 2048 else (memory_mb / 1024) * 1.4
+
+                        update_time = function.update_time
+                        days_since_creation = (datetime.utcnow() - update_time.replace(tzinfo=None)).days
+
+                        if days_since_creation >= 90:
+                            confidence = "critical"
+                        elif days_since_creation >= 30:
+                            confidence = "high"
+                        else:
+                            confidence = "medium"
+
+                        monthly_cost = 10.0
+
+                        resources.append(
+                            OrphanResourceData(
+                                resource_id=function.name,
+                                resource_name=function_name,
+                                resource_type="gcp_cloud_function_never_invoked",
+                                region=region,
+                                estimated_monthly_cost=monthly_cost,
+                                resource_metadata={
+                                    "function_name": function_name,
+                                    "generation": "1st",
+                                    "runtime": function.runtime,
+                                    "memory_mb": memory_mb,
+                                    "timeout_seconds": function.timeout.seconds if function.timeout else 60,
+                                    "total_invocations": 0,
+                                    "days_since_creation": days_since_creation,
+                                    "confidence": confidence,
+                                    "recommendation": "Delete unused function or investigate if still needed",
+                                    "labels": dict(function.labels) if function.labels else {},
+                                },
+                            )
+                        )
+            except Exception:
+                pass
+
+            # Scan 2nd gen functions
+            parent_v2 = f"projects/{self.project_id}/locations/{region}"
+
+            try:
+                functions_2nd_gen = functions_v2_client.list_functions(parent=parent_v2)
+
+                for function in functions_2nd_gen:
+                    function_name = function.name.split('/')[-1]
+
+                    service_config = function.service_config
+                    min_instances = service_config.min_instance_count if service_config else 0
+
+                    # Query invocations
+                    interval = monitoring_v3.TimeInterval({
+                        "end_time": {"seconds": int(datetime.utcnow().timestamp())},
+                        "start_time": {"seconds": int((datetime.utcnow() - timedelta(days=no_invocations_threshold_days)).timestamp())},
+                    })
+
+                    filter_str = (
+                        f'resource.type = "cloud_run_revision" '
+                        f'AND resource.labels.service_name = "{function_name}" '
+                        f'AND metric.type = "run.googleapis.com/request_count"'
+                    )
+
+                    request = monitoring_v3.ListTimeSeriesRequest(
+                        name=f"projects/{self.project_id}",
+                        filter=filter_str,
+                        interval=interval,
+                    )
+
+                    time_series = monitoring_client.list_time_series(request=request)
+
+                    total_invocations = 0
+                    for series in time_series:
+                        for point in series.points:
+                            total_invocations += point.value.int64_value or 0
+
+                    if total_invocations == 0:
+                        memory_mb = int(service_config.available_memory.replace('M', '').replace('Mi', '')) if service_config and service_config.available_memory else 256
+                        memory_gib = memory_mb / 1024
+                        vcpu = max(0.08, memory_gib / 2)
+
+                        update_time = function.update_time
+                        days_since_creation = (datetime.utcnow() - update_time.replace(tzinfo=None)).days
+
+                        if min_instances > 0:
+                            monthly_cost = (vcpu * 0.00002400 + memory_gib * 0.00000250) * 2_592_000 * min_instances
+                        else:
+                            monthly_cost = 10.0
+
+                        if days_since_creation >= 90:
+                            confidence = "critical"
+                        elif days_since_creation >= 30:
+                            confidence = "high"
+                        else:
+                            confidence = "medium"
+
+                        resources.append(
+                            OrphanResourceData(
+                                resource_id=function.name,
+                                resource_name=function_name,
+                                resource_type="gcp_cloud_function_never_invoked",
+                                region=region,
+                                estimated_monthly_cost=monthly_cost,
+                                resource_metadata={
+                                    "function_name": function_name,
+                                    "generation": "2nd",
+                                    "runtime": service_config.runtime if service_config else "unknown",
+                                    "memory_mb": memory_mb,
+                                    "vcpu": round(vcpu, 2),
+                                    "min_instances": min_instances,
+                                    "timeout_seconds": service_config.timeout_seconds if service_config else 60,
+                                    "total_invocations": 0,
+                                    "days_since_creation": days_since_creation,
+                                    "confidence": confidence,
+                                    "recommendation": "Delete unused function or investigate if still needed",
+                                    "labels": dict(function.labels) if function.labels else {},
+                                },
+                            )
+                        )
+            except Exception:
+                pass
+
+        except Exception:
+            pass
+
+        return resources
+
+    async def scan_cloud_function_idle_min_instances(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scan for 2nd gen Cloud Functions with min_instances > 0 but low traffic.
+        Min instances are billed 24/7 even if not used.
+        """
+        resources = []
+
+        low_invocations_per_day = 10
+        lookback_days = 14
+        if detection_rules:
+            low_invocations_per_day = detection_rules.get("low_invocations_per_day", 10)
+            lookback_days = detection_rules.get("lookback_days", 14)
+
+        try:
+            functions_v2_client = functions_v2.FunctionServiceClient(credentials=self.credentials)
+            monitoring_client = monitoring_v3.MetricServiceClient(credentials=self.credentials)
+
+            parent = f"projects/{self.project_id}/locations/{region}"
+
+            functions_2nd_gen = functions_v2_client.list_functions(parent=parent)
+
+            for function in functions_2nd_gen:
+                function_name = function.name.split('/')[-1]
+
+                service_config = function.service_config
+                min_instances = service_config.min_instance_count if service_config else 0
+
+                if min_instances == 0:
+                    continue
+
+                # Query invocations
+                interval = monitoring_v3.TimeInterval({
+                    "end_time": {"seconds": int(datetime.utcnow().timestamp())},
+                    "start_time": {"seconds": int((datetime.utcnow() - timedelta(days=lookback_days)).timestamp())},
+                })
+
+                filter_str = (
+                    f'resource.type = "cloud_run_revision" '
+                    f'AND resource.labels.service_name = "{function_name}" '
+                    f'AND metric.type = "run.googleapis.com/request_count"'
+                )
+
+                request = monitoring_v3.ListTimeSeriesRequest(
+                    name=f"projects/{self.project_id}",
+                    filter=filter_str,
+                    interval=interval,
+                )
+
+                time_series = monitoring_client.list_time_series(request=request)
+
+                total_invocations = 0
+                for series in time_series:
+                    for point in series.points:
+                        total_invocations += point.value.int64_value or 0
+
+                avg_invocations_per_day = total_invocations / lookback_days if lookback_days > 0 else 0
+
+                if avg_invocations_per_day < low_invocations_per_day:
+                    memory_mb = int(service_config.available_memory.replace('M', '').replace('Mi', '')) if service_config and service_config.available_memory else 256
+                    memory_gib = memory_mb / 1024
+                    vcpu = max(0.08, memory_gib / 2)
+
+                    monthly_cost = (vcpu * 0.00002400 + memory_gib * 0.00000250) * 2_592_000 * min_instances
+
+                    if avg_invocations_per_day < 5:
+                        confidence = "high"
+                    else:
+                        confidence = "medium"
+
+                    resources.append(
+                        OrphanResourceData(
+                            resource_id=function.name,
+                            resource_name=function_name,
+                            resource_type="gcp_cloud_function_idle_min_instances",
+                            region=region,
+                            estimated_monthly_cost=monthly_cost,
+                            resource_metadata={
+                                "function_name": function_name,
+                                "generation": "2nd",
+                                "memory_mb": memory_mb,
+                                "vcpu": round(vcpu, 2),
+                                "min_instances": min_instances,
+                                "avg_invocations_per_day": round(avg_invocations_per_day, 2),
+                                "monthly_waste": round(monthly_cost, 2),
+                                "confidence": confidence,
+                                "recommendation": f"Reduce min_instances from {min_instances} to 0",
+                                "labels": dict(function.labels) if function.labels else {},
+                            },
+                        )
+                    )
+
+        except Exception:
+            pass
+
+        return resources
+
+    async def scan_cloud_function_memory_overprovisioning(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scan for Cloud Functions with memory allocated >> memory used.
+        """
+        resources = []
+
+        memory_utilization_threshold = 0.50
+        lookback_days = 14
+        if detection_rules:
+            memory_utilization_threshold = detection_rules.get("memory_utilization_threshold", 0.50)
+            lookback_days = detection_rules.get("lookback_days", 14)
+
+        try:
+            functions_v1_client = functions_v1.CloudFunctionsServiceClient(credentials=self.credentials)
+            functions_v2_client = functions_v2.FunctionServiceClient(credentials=self.credentials)
+            monitoring_client = monitoring_v3.MetricServiceClient(credentials=self.credentials)
+
+            # Scan 1st gen
+            parent_v1 = f"projects/{self.project_id}/locations/{region}"
+
+            try:
+                functions_1st_gen = functions_v1_client.list_functions(parent=parent_v1)
+
+                for function in functions_1st_gen:
+                    function_name = function.name.split('/')[-1]
+                    memory_allocated_mb = function.available_memory_mb
+
+                    interval = monitoring_v3.TimeInterval({
+                        "end_time": {"seconds": int(datetime.utcnow().timestamp())},
+                        "start_time": {"seconds": int((datetime.utcnow() - timedelta(days=lookback_days)).timestamp())},
+                    })
+
+                    filter_str = (
+                        f'resource.type = "cloud_function" '
+                        f'AND resource.labels.function_name = "{function_name}" '
+                        f'AND metric.type = "cloudfunctions.googleapis.com/function/user_memory_bytes"'
+                    )
+
+                    request = monitoring_v3.ListTimeSeriesRequest(
+                        name=f"projects/{self.project_id}",
+                        filter=filter_str,
+                        interval=interval,
+                    )
+
+                    time_series = monitoring_client.list_time_series(request=request)
+
+                    memory_values = []
+                    for series in time_series:
+                        for point in series.points:
+                            memory_bytes = point.value.double_value or point.value.int64_value or 0
+                            memory_values.append(memory_bytes / (1024 * 1024))
+
+                    if not memory_values:
+                        continue
+
+                    avg_memory_used_mb = sum(memory_values) / len(memory_values)
+                    memory_utilization = (avg_memory_used_mb / memory_allocated_mb) if memory_allocated_mb > 0 else 0
+
+                    if memory_utilization < memory_utilization_threshold:
+                        recommended_memory_mb = max(128, int(avg_memory_used_mb * 1.3))
+                        monthly_savings = 15.0
+
+                        if memory_utilization < 0.30:
+                            confidence = "critical"
+                        elif memory_utilization < 0.50:
+                            confidence = "high"
+                        else:
+                            confidence = "medium"
+
+                        resources.append(
+                            OrphanResourceData(
+                                resource_id=function.name,
+                                resource_name=function_name,
+                                resource_type="gcp_cloud_function_memory_overprovisioning",
+                                region=region,
+                                estimated_monthly_cost=monthly_savings,
+                                resource_metadata={
+                                    "function_name": function_name,
+                                    "generation": "1st",
+                                    "memory_allocated_mb": memory_allocated_mb,
+                                    "avg_memory_used_mb": round(avg_memory_used_mb, 2),
+                                    "memory_utilization": round(memory_utilization * 100, 2),
+                                    "recommended_memory_mb": recommended_memory_mb,
+                                    "monthly_savings": round(monthly_savings, 2),
+                                    "confidence": confidence,
+                                    "recommendation": f"Reduce memory from {memory_allocated_mb}MB to {recommended_memory_mb}MB",
+                                    "labels": dict(function.labels) if function.labels else {},
+                                },
+                            )
+                        )
+            except Exception:
+                pass
+
+            # Scan 2nd gen
+            parent_v2 = f"projects/{self.project_id}/locations/{region}"
+
+            try:
+                functions_2nd_gen = functions_v2_client.list_functions(parent=parent_v2)
+
+                for function in functions_2nd_gen:
+                    function_name = function.name.split('/')[-1]
+                    service_config = function.service_config
+                    memory_allocated_mb = int(service_config.available_memory.replace('M', '').replace('Mi', '')) if service_config and service_config.available_memory else 256
+
+                    interval = monitoring_v3.TimeInterval({
+                        "end_time": {"seconds": int(datetime.utcnow().timestamp())},
+                        "start_time": {"seconds": int((datetime.utcnow() - timedelta(days=lookback_days)).timestamp())},
+                    })
+
+                    filter_str = (
+                        f'resource.type = "cloud_run_revision" '
+                        f'AND resource.labels.service_name = "{function_name}" '
+                        f'AND metric.type = "run.googleapis.com/container/memory/utilizations"'
+                    )
+
+                    request = monitoring_v3.ListTimeSeriesRequest(
+                        name=f"projects/{self.project_id}",
+                        filter=filter_str,
+                        interval=interval,
+                    )
+
+                    time_series = monitoring_client.list_time_series(request=request)
+
+                    utilization_values = []
+                    for series in time_series:
+                        for point in series.points:
+                            util = point.value.double_value or 0
+                            utilization_values.append(util)
+
+                    if not utilization_values:
+                        continue
+
+                    avg_utilization = sum(utilization_values) / len(utilization_values)
+
+                    if avg_utilization < memory_utilization_threshold:
+                        recommended_memory_mb = max(128, int(memory_allocated_mb * avg_utilization * 1.3))
+                        monthly_savings = 20.0
+
+                        if avg_utilization < 0.30:
+                            confidence = "critical"
+                        elif avg_utilization < 0.50:
+                            confidence = "high"
+                        else:
+                            confidence = "medium"
+
+                        resources.append(
+                            OrphanResourceData(
+                                resource_id=function.name,
+                                resource_name=function_name,
+                                resource_type="gcp_cloud_function_memory_overprovisioning",
+                                region=region,
+                                estimated_monthly_cost=monthly_savings,
+                                resource_metadata={
+                                    "function_name": function_name,
+                                    "generation": "2nd",
+                                    "memory_allocated_mb": memory_allocated_mb,
+                                    "avg_memory_utilization": round(avg_utilization * 100, 2),
+                                    "recommended_memory_mb": recommended_memory_mb,
+                                    "monthly_savings": round(monthly_savings, 2),
+                                    "confidence": confidence,
+                                    "recommendation": f"Reduce memory from {memory_allocated_mb}MB to {recommended_memory_mb}MB",
+                                    "labels": dict(function.labels) if function.labels else {},
+                                },
+                            )
+                        )
+            except Exception:
+                pass
+
+        except Exception:
+            pass
+
+        return resources
+
+    async def scan_cloud_function_excessive_timeout(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scan for Cloud Functions with timeout >> avg execution time.
+        """
+        resources = []
+
+        timeout_ratio_threshold = 3.0
+        lookback_days = 14
+        if detection_rules:
+            timeout_ratio_threshold = detection_rules.get("timeout_ratio_threshold", 3.0)
+            lookback_days = detection_rules.get("lookback_days", 14)
+
+        try:
+            functions_v1_client = functions_v1.CloudFunctionsServiceClient(credentials=self.credentials)
+            functions_v2_client = functions_v2.FunctionServiceClient(credentials=self.credentials)
+            monitoring_client = monitoring_v3.MetricServiceClient(credentials=self.credentials)
+
+            # Scan 1st gen
+            parent_v1 = f"projects/{self.project_id}/locations/{region}"
+
+            try:
+                functions_1st_gen = functions_v1_client.list_functions(parent=parent_v1)
+
+                for function in functions_1st_gen:
+                    function_name = function.name.split('/')[-1]
+                    timeout_seconds = function.timeout.seconds if function.timeout else 60
+
+                    interval = monitoring_v3.TimeInterval({
+                        "end_time": {"seconds": int(datetime.utcnow().timestamp())},
+                        "start_time": {"seconds": int((datetime.utcnow() - timedelta(days=lookback_days)).timestamp())},
+                    })
+
+                    filter_str = (
+                        f'resource.type = "cloud_function" '
+                        f'AND resource.labels.function_name = "{function_name}" '
+                        f'AND metric.type = "cloudfunctions.googleapis.com/function/execution_times"'
+                    )
+
+                    request = monitoring_v3.ListTimeSeriesRequest(
+                        name=f"projects/{self.project_id}",
+                        filter=filter_str,
+                        interval=interval,
+                    )
+
+                    time_series = monitoring_client.list_time_series(request=request)
+
+                    exec_time_values = []
+                    for series in time_series:
+                        for point in series.points:
+                            exec_time_ms = point.value.distribution_value.mean if point.value.distribution_value else 0
+                            exec_time_values.append(exec_time_ms / 1000)
+
+                    if not exec_time_values:
+                        continue
+
+                    avg_exec_time_seconds = sum(exec_time_values) / len(exec_time_values)
+                    timeout_ratio = timeout_seconds / avg_exec_time_seconds if avg_exec_time_seconds > 0 else 0
+
+                    if timeout_ratio > timeout_ratio_threshold:
+                        recommended_timeout = int(avg_exec_time_seconds * 1.5)
+
+                        if timeout_ratio > 10:
+                            confidence = "critical"
+                        elif timeout_ratio > 5:
+                            confidence = "high"
+                        else:
+                            confidence = "medium"
+
+                        resources.append(
+                            OrphanResourceData(
+                                resource_id=function.name,
+                                resource_name=function_name,
+                                resource_type="gcp_cloud_function_excessive_timeout",
+                                region=region,
+                                estimated_monthly_cost=5.0,
+                                resource_metadata={
+                                    "function_name": function_name,
+                                    "generation": "1st",
+                                    "timeout_configured_seconds": timeout_seconds,
+                                    "avg_exec_time_seconds": round(avg_exec_time_seconds, 2),
+                                    "timeout_ratio": round(timeout_ratio, 2),
+                                    "recommended_timeout_seconds": recommended_timeout,
+                                    "confidence": confidence,
+                                    "recommendation": f"Reduce timeout from {timeout_seconds}s to {recommended_timeout}s",
+                                    "labels": dict(function.labels) if function.labels else {},
+                                },
+                            )
+                        )
+            except Exception:
+                pass
+
+            # Scan 2nd gen
+            parent_v2 = f"projects/{self.project_id}/locations/{region}"
+
+            try:
+                functions_2nd_gen = functions_v2_client.list_functions(parent=parent_v2)
+
+                for function in functions_2nd_gen:
+                    function_name = function.name.split('/')[-1]
+                    service_config = function.service_config
+                    timeout_seconds = service_config.timeout_seconds if service_config else 60
+
+                    interval = monitoring_v3.TimeInterval({
+                        "end_time": {"seconds": int(datetime.utcnow().timestamp())},
+                        "start_time": {"seconds": int((datetime.utcnow() - timedelta(days=lookback_days)).timestamp())},
+                    })
+
+                    filter_str = (
+                        f'resource.type = "cloud_run_revision" '
+                        f'AND resource.labels.service_name = "{function_name}" '
+                        f'AND metric.type = "run.googleapis.com/request_latencies"'
+                    )
+
+                    request = monitoring_v3.ListTimeSeriesRequest(
+                        name=f"projects/{self.project_id}",
+                        filter=filter_str,
+                        interval=interval,
+                    )
+
+                    time_series = monitoring_client.list_time_series(request=request)
+
+                    latency_values = []
+                    for series in time_series:
+                        for point in series.points:
+                            latency_ms = point.value.distribution_value.mean if point.value.distribution_value else 0
+                            latency_values.append(latency_ms / 1000)
+
+                    if not latency_values:
+                        continue
+
+                    avg_exec_time_seconds = sum(latency_values) / len(latency_values)
+                    timeout_ratio = timeout_seconds / avg_exec_time_seconds if avg_exec_time_seconds > 0 else 0
+
+                    if timeout_ratio > timeout_ratio_threshold:
+                        recommended_timeout = int(avg_exec_time_seconds * 1.5)
+
+                        if timeout_ratio > 10:
+                            confidence = "critical"
+                        elif timeout_ratio > 5:
+                            confidence = "high"
+                        else:
+                            confidence = "medium"
+
+                        resources.append(
+                            OrphanResourceData(
+                                resource_id=function.name,
+                                resource_name=function_name,
+                                resource_type="gcp_cloud_function_excessive_timeout",
+                                region=region,
+                                estimated_monthly_cost=5.0,
+                                resource_metadata={
+                                    "function_name": function_name,
+                                    "generation": "2nd",
+                                    "timeout_configured_seconds": timeout_seconds,
+                                    "avg_exec_time_seconds": round(avg_exec_time_seconds, 2),
+                                    "timeout_ratio": round(timeout_ratio, 2),
+                                    "recommended_timeout_seconds": recommended_timeout,
+                                    "confidence": confidence,
+                                    "recommendation": f"Reduce timeout from {timeout_seconds}s to {recommended_timeout}s",
+                                    "labels": dict(function.labels) if function.labels else {},
+                                },
+                            )
+                        )
+            except Exception:
+                pass
+
+        except Exception:
+            pass
+
+        return resources
+
+    async def scan_cloud_function_1st_gen_expensive(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scan for 1st gen functions that would be cheaper in 2nd gen.
+        """
+        resources = []
+
+        cost_savings_threshold_pct = 20.0
+        lookback_days = 14
+        if detection_rules:
+            cost_savings_threshold_pct = detection_rules.get("cost_savings_threshold_pct", 20.0)
+            lookback_days = detection_rules.get("lookback_days", 14)
+
+        try:
+            functions_v1_client = functions_v1.CloudFunctionsServiceClient(credentials=self.credentials)
+            monitoring_client = monitoring_v3.MetricServiceClient(credentials=self.credentials)
+
+            parent = f"projects/{self.project_id}/locations/{region}"
+            functions_1st_gen = functions_v1_client.list_functions(parent=parent)
+
+            for function in functions_1st_gen:
+                function_name = function.name.split('/')[-1]
+                memory_mb = function.available_memory_mb
+                memory_gb = memory_mb / 1024
+                cpu_ghz = 2.4 if memory_mb >= 2048 else (memory_mb / 1024) * 1.4
+
+                interval = monitoring_v3.TimeInterval({
+                    "end_time": {"seconds": int(datetime.utcnow().timestamp())},
+                    "start_time": {"seconds": int((datetime.utcnow() - timedelta(days=lookback_days)).timestamp())},
+                })
+
+                # Get invocations
+                filter_invocations = (
+                    f'resource.type = "cloud_function" '
+                    f'AND resource.labels.function_name = "{function_name}" '
+                    f'AND metric.type = "cloudfunctions.googleapis.com/function/execution_count"'
+                )
+
+                request_inv = monitoring_v3.ListTimeSeriesRequest(
+                    name=f"projects/{self.project_id}",
+                    filter=filter_invocations,
+                    interval=interval,
+                )
+
+                time_series_inv = monitoring_client.list_time_series(request=request_inv)
+
+                total_invocations = 0
+                for series in time_series_inv:
+                    for point in series.points:
+                        total_invocations += point.value.int64_value or 0
+
+                if total_invocations == 0:
+                    continue
+
+                monthly_invocations = (total_invocations / lookback_days) * 30
+
+                # Get avg exec time
+                filter_exec = (
+                    f'resource.type = "cloud_function" '
+                    f'AND resource.labels.function_name = "{function_name}" '
+                    f'AND metric.type = "cloudfunctions.googleapis.com/function/execution_times"'
+                )
+
+                request_exec = monitoring_v3.ListTimeSeriesRequest(
+                    name=f"projects/{self.project_id}",
+                    filter=filter_exec,
+                    interval=interval,
+                )
+
+                time_series_exec = monitoring_client.list_time_series(request=request_exec)
+
+                exec_time_values = []
+                for series in time_series_exec:
+                    for point in series.points:
+                        exec_time_ms = point.value.distribution_value.mean if point.value.distribution_value else 0
+                        exec_time_values.append(exec_time_ms / 1000)
+
+                if not exec_time_values:
+                    continue
+
+                avg_exec_time_seconds = sum(exec_time_values) / len(exec_time_values)
+
+                # Calculate 1st gen cost
+                compute_seconds = monthly_invocations * avg_exec_time_seconds
+                invocations_cost = (monthly_invocations / 1_000_000) * 0.40
+                memory_cost = compute_seconds * memory_gb * 0.0000025
+                cpu_cost = compute_seconds * cpu_ghz * 0.0000100
+                monthly_cost_1st_gen = invocations_cost + memory_cost + cpu_cost
+
+                # Calculate 2nd gen cost
+                memory_gib = memory_mb / 1024
+                vcpu = max(0.08, memory_gib / 2)
+                vcpu_cost = compute_seconds * vcpu * 0.00002400
+                memory_cost_2nd = compute_seconds * memory_gib * 0.00000250
+                monthly_cost_2nd_gen = invocations_cost + vcpu_cost + memory_cost_2nd
+
+                if monthly_cost_1st_gen > monthly_cost_2nd_gen:
+                    savings_pct = ((monthly_cost_1st_gen - monthly_cost_2nd_gen) / monthly_cost_1st_gen * 100)
+
+                    if savings_pct >= cost_savings_threshold_pct:
+                        monthly_savings = monthly_cost_1st_gen - monthly_cost_2nd_gen
+
+                        if savings_pct >= 40:
+                            confidence = "high"
+                        else:
+                            confidence = "medium"
+
+                        resources.append(
+                            OrphanResourceData(
+                                resource_id=function.name,
+                                resource_name=function_name,
+                                resource_type="gcp_cloud_function_1st_gen_expensive",
+                                region=region,
+                                estimated_monthly_cost=monthly_savings,
+                                resource_metadata={
+                                    "function_name": function_name,
+                                    "generation": "1st",
+                                    "monthly_invocations": int(monthly_invocations),
+                                    "avg_exec_time_seconds": round(avg_exec_time_seconds, 3),
+                                    "monthly_cost_1st_gen": round(monthly_cost_1st_gen, 2),
+                                    "monthly_cost_2nd_gen": round(monthly_cost_2nd_gen, 2),
+                                    "savings_pct": round(savings_pct, 2),
+                                    "monthly_savings": round(monthly_savings, 2),
+                                    "annual_savings": round(monthly_savings * 12, 2),
+                                    "confidence": confidence,
+                                    "recommendation": f"Migrate to 2nd gen for {savings_pct:.1f}% savings (${monthly_savings:.2f}/month)",
+                                    "labels": dict(function.labels) if function.labels else {},
+                                },
+                            )
+                        )
+
+        except Exception:
+            pass
+
+        return resources
+
+    async def scan_cloud_function_untagged(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scan for Cloud Functions missing required labels.
+        """
+        resources = []
+
+        required_labels = ["environment", "owner"]
+        if detection_rules:
+            required_labels = detection_rules.get("required_labels", ["environment", "owner"])
+
+        try:
+            functions_v1_client = functions_v1.CloudFunctionsServiceClient(credentials=self.credentials)
+            functions_v2_client = functions_v2.FunctionServiceClient(credentials=self.credentials)
+
+            # Scan 1st gen
+            parent_v1 = f"projects/{self.project_id}/locations/{region}"
+
+            try:
+                functions_1st_gen = functions_v1_client.list_functions(parent=parent_v1)
+
+                for function in functions_1st_gen:
+                    function_name = function.name.split('/')[-1]
+                    current_labels = dict(function.labels) if function.labels else {}
+                    missing_labels = [label for label in required_labels if label not in current_labels]
+
+                    if missing_labels:
+                        resources.append(
+                            OrphanResourceData(
+                                resource_id=function.name,
+                                resource_name=function_name,
+                                resource_type="gcp_cloud_function_untagged",
+                                region=region,
+                                estimated_monthly_cost=0.0,
+                                resource_metadata={
+                                    "function_name": function_name,
+                                    "generation": "1st",
+                                    "runtime": function.runtime,
+                                    "missing_labels": missing_labels,
+                                    "current_labels": current_labels,
+                                    "confidence": "high",
+                                    "recommendation": f"Add missing labels: {', '.join(missing_labels)}",
+                                },
+                            )
+                        )
+            except Exception:
+                pass
+
+            # Scan 2nd gen
+            parent_v2 = f"projects/{self.project_id}/locations/{region}"
+
+            try:
+                functions_2nd_gen = functions_v2_client.list_functions(parent=parent_v2)
+
+                for function in functions_2nd_gen:
+                    function_name = function.name.split('/')[-1]
+                    current_labels = dict(function.labels) if function.labels else {}
+                    missing_labels = [label for label in required_labels if label not in current_labels]
+
+                    if missing_labels:
+                        service_config = function.service_config
+
+                        resources.append(
+                            OrphanResourceData(
+                                resource_id=function.name,
+                                resource_name=function_name,
+                                resource_type="gcp_cloud_function_untagged",
+                                region=region,
+                                estimated_monthly_cost=0.0,
+                                resource_metadata={
+                                    "function_name": function_name,
+                                    "generation": "2nd",
+                                    "runtime": service_config.runtime if service_config else "unknown",
+                                    "missing_labels": missing_labels,
+                                    "current_labels": current_labels,
+                                    "confidence": "high",
+                                    "recommendation": f"Add missing labels: {', '.join(missing_labels)}",
+                                },
+                            )
+                        )
+            except Exception:
+                pass
+
+        except Exception:
+            pass
+
+        return resources
+
+    async def scan_cloud_function_excessive_max_instances(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scan for Cloud Functions with excessive max_instances (runaway cost risk).
+        """
+        resources = []
+
+        max_instances_threshold = 100
+        if detection_rules:
+            max_instances_threshold = detection_rules.get("max_instances_threshold", 100)
+
+        try:
+            functions_v2_client = functions_v2.FunctionServiceClient(credentials=self.credentials)
+
+            parent = f"projects/{self.project_id}/locations/{region}"
+            functions_2nd_gen = functions_v2_client.list_functions(parent=parent)
+
+            for function in functions_2nd_gen:
+                function_name = function.name.split('/')[-1]
+                service_config = function.service_config
+                max_instances = service_config.max_instance_count if service_config else 0
+
+                if max_instances > max_instances_threshold:
+                    memory_mb = int(service_config.available_memory.replace('M', '').replace('Mi', '')) if service_config and service_config.available_memory else 256
+                    memory_gib = memory_mb / 1024
+                    vcpu = max(0.08, memory_gib / 2)
+
+                    # Calculate max daily cost risk
+                    seconds_per_day = 86400
+                    max_daily_cost = max_instances * (vcpu * 0.00002400 + memory_gib * 0.00000250) * seconds_per_day
+
+                    if max_instances >= 500:
+                        confidence = "critical"
+                    elif max_instances >= 200:
+                        confidence = "high"
+                    else:
+                        confidence = "medium"
+
+                    resources.append(
+                        OrphanResourceData(
+                            resource_id=function.name,
+                            resource_name=function_name,
+                            resource_type="gcp_cloud_function_excessive_max_instances",
+                            region=region,
+                            estimated_monthly_cost=max_daily_cost,
+                            resource_metadata={
+                                "function_name": function_name,
+                                "generation": "2nd",
+                                "max_instances_configured": max_instances,
+                                "memory_mb": memory_mb,
+                                "vcpu": round(vcpu, 2),
+                                "max_daily_cost": round(max_daily_cost, 2),
+                                "confidence": confidence,
+                                "recommendation": f"Reduce max_instances from {max_instances} to {max_instances_threshold} + add rate limiting",
+                                "risk": "Runaway cost if public endpoint receives traffic spike",
+                                "labels": dict(function.labels) if function.labels else {},
+                            },
+                        )
+                    )
+
+        except Exception:
+            pass
+
+        return resources
+
+    async def scan_cloud_function_cold_start_over_optimization(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scan for 2nd gen functions with min_instances for cold start optimization only.
+        Alternative: warm-up requests via Cloud Scheduler (<$20/month).
+        """
+        resources = []
+
+        cold_start_cost_threshold = 50.0
+        lookback_days = 14
+        if detection_rules:
+            cold_start_cost_threshold = detection_rules.get("cold_start_cost_threshold", 50.0)
+            lookback_days = detection_rules.get("lookback_days", 14)
+
+        try:
+            functions_v2_client = functions_v2.FunctionServiceClient(credentials=self.credentials)
+            monitoring_client = monitoring_v3.MetricServiceClient(credentials=self.credentials)
+
+            parent = f"projects/{self.project_id}/locations/{region}"
+            functions_2nd_gen = functions_v2_client.list_functions(parent=parent)
+
+            for function in functions_2nd_gen:
+                function_name = function.name.split('/')[-1]
+                service_config = function.service_config
+                min_instances = service_config.min_instance_count if service_config else 0
+
+                if min_instances == 0:
+                    continue
+
+                memory_mb = int(service_config.available_memory.replace('M', '').replace('Mi', '')) if service_config and service_config.available_memory else 256
+                memory_gib = memory_mb / 1024
+                vcpu = max(0.08, memory_gib / 2)
+
+                monthly_cost_min_instances = (vcpu * 0.00002400 + memory_gib * 0.00000250) * 2_592_000 * min_instances
+
+                if monthly_cost_min_instances < cold_start_cost_threshold:
+                    continue
+
+                # Query invocations
+                interval = monitoring_v3.TimeInterval({
+                    "end_time": {"seconds": int(datetime.utcnow().timestamp())},
+                    "start_time": {"seconds": int((datetime.utcnow() - timedelta(days=lookback_days)).timestamp())},
+                })
+
+                filter_str = (
+                    f'resource.type = "cloud_run_revision" '
+                    f'AND resource.labels.service_name = "{function_name}" '
+                    f'AND metric.type = "run.googleapis.com/request_count"'
+                )
+
+                request = monitoring_v3.ListTimeSeriesRequest(
+                    name=f"projects/{self.project_id}",
+                    filter=filter_str,
+                    interval=interval,
+                )
+
+                time_series = monitoring_client.list_time_series(request=request)
+
+                total_invocations = 0
+                for series in time_series:
+                    for point in series.points:
+                        total_invocations += point.value.int64_value or 0
+
+                monthly_invocations = (total_invocations / lookback_days) * 30 if lookback_days > 0 else 0
+                invocations_per_hour = monthly_invocations / (30 * 24) if monthly_invocations > 0 else 0
+
+                if invocations_per_hour < 10:
+                    warmup_requests_per_month = 30 * 24 * 60
+                    warmup_cost = (warmup_requests_per_month / 1_000_000) * 0.40 + 0.10
+
+                    monthly_savings = monthly_cost_min_instances - warmup_cost
+
+                    if monthly_savings > 0:
+                        if monthly_savings > 200:
+                            confidence = "high"
+                        else:
+                            confidence = "medium"
+
+                        resources.append(
+                            OrphanResourceData(
+                                resource_id=function.name,
+                                resource_name=function_name,
+                                resource_type="gcp_cloud_function_cold_start_over_optimization",
+                                region=region,
+                                estimated_monthly_cost=monthly_savings,
+                                resource_metadata={
+                                    "function_name": function_name,
+                                    "generation": "2nd",
+                                    "min_instances": min_instances,
+                                    "invocations_per_hour": round(invocations_per_hour, 2),
+                                    "monthly_cost_min_instances": round(monthly_cost_min_instances, 2),
+                                    "alternative_warmup_cost": round(warmup_cost, 2),
+                                    "monthly_savings": round(monthly_savings, 2),
+                                    "annual_savings": round(monthly_savings * 12, 2),
+                                    "confidence": confidence,
+                                    "recommendation": "Remove min_instances and use Cloud Scheduler warm-up requests (1/min)",
+                                    "alternative": "Cloud Scheduler: $0.10/job + $17/month invocations",
+                                    "labels": dict(function.labels) if function.labels else {},
+                                },
+                            )
+                        )
+
+        except Exception:
+            pass
+
+        return resources
+
+    async def scan_cloud_function_duplicate(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scan for Cloud Functions with duplicate code (same source hash).
+        """
+        resources = []
+
+        try:
+            functions_v1_client = functions_v1.CloudFunctionsServiceClient(credentials=self.credentials)
+            functions_v2_client = functions_v2.FunctionServiceClient(credentials=self.credentials)
+
+            function_hashes: dict[str, list] = {}
+
+            # Scan 1st gen
+            parent_v1 = f"projects/{self.project_id}/locations/{region}"
+
+            try:
+                functions_1st_gen = functions_v1_client.list_functions(parent=parent_v1)
+
+                for function in functions_1st_gen:
+                    function_name = function.name.split('/')[-1]
+
+                    signature_data = f"{function.runtime}:{function.entry_point}:{function.source_archive_url}"
+                    function_hash = hashlib.sha256(signature_data.encode()).hexdigest()[:16]
+
+                    if function_hash not in function_hashes:
+                        function_hashes[function_hash] = []
+
+                    function_hashes[function_hash].append({
+                        "function_name": function_name,
+                        "generation": "1st",
+                        "region": region,
+                        "runtime": function.runtime,
+                        "entry_point": function.entry_point,
+                        "memory_mb": function.available_memory_mb,
+                    })
+            except Exception:
+                pass
+
+            # Scan 2nd gen
+            parent_v2 = f"projects/{self.project_id}/locations/{region}"
+
+            try:
+                functions_2nd_gen = functions_v2_client.list_functions(parent=parent_v2)
+
+                for function in functions_2nd_gen:
+                    function_name = function.name.split('/')[-1]
+
+                    build_config = function.build_config
+                    service_config = function.service_config
+
+                    signature_data = f"{service_config.runtime if service_config else 'unknown'}:{build_config.entry_point if build_config else 'unknown'}"
+                    function_hash = hashlib.sha256(signature_data.encode()).hexdigest()[:16]
+
+                    if function_hash not in function_hashes:
+                        function_hashes[function_hash] = []
+
+                    memory_mb = int(service_config.available_memory.replace('M', '').replace('Mi', '')) if service_config and service_config.available_memory else 256
+
+                    function_hashes[function_hash].append({
+                        "function_name": function_name,
+                        "generation": "2nd",
+                        "region": region,
+                        "runtime": service_config.runtime if service_config else "unknown",
+                        "entry_point": build_config.entry_point if build_config else "unknown",
+                        "memory_mb": memory_mb,
+                    })
+            except Exception:
+                pass
+
+            # Identify duplicates
+            for function_hash, functions in function_hashes.items():
+                if len(functions) > 1:
+                    monthly_waste = len(functions) * 50.0
+
+                    resources.append(
+                        OrphanResourceData(
+                            resource_id=f"duplicate_{function_hash}",
+                            resource_name=f"Duplicate group: {functions[0]['function_name']}",
+                            resource_type="gcp_cloud_function_duplicate",
+                            region=region,
+                            estimated_monthly_cost=monthly_waste,
+                            resource_metadata={
+                                "duplicate_hash": function_hash,
+                                "duplicate_count": len(functions),
+                                "functions": functions,
+                                "confidence": "high",
+                                "recommendation": f"Consolidate {len(functions)} duplicate functions",
+                                "impact": "Operational overhead, duplicate bugs, confusion",
+                            },
+                        )
+                    )
+
+        except Exception:
+            pass
+
+        return resources
+
+    async def scan_cloud_function_excessive_concurrency(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scan for 2nd gen functions with concurrency = 1 (suboptimal).
+        """
+        resources = []
+
+        lookback_days = 14
+        if detection_rules:
+            lookback_days = detection_rules.get("lookback_days", 14)
+
+        try:
+            functions_v2_client = functions_v2.FunctionServiceClient(credentials=self.credentials)
+            monitoring_client = monitoring_v3.MetricServiceClient(credentials=self.credentials)
+
+            parent = f"projects/{self.project_id}/locations/{region}"
+            functions_2nd_gen = functions_v2_client.list_functions(parent=parent)
+
+            for function in functions_2nd_gen:
+                function_name = function.name.split('/')[-1]
+                service_config = function.service_config
+                concurrency = service_config.max_instance_request_concurrency if service_config else 1
+
+                if concurrency > 1:
+                    continue
+
+                # Query invocations
+                interval = monitoring_v3.TimeInterval({
+                    "end_time": {"seconds": int(datetime.utcnow().timestamp())},
+                    "start_time": {"seconds": int((datetime.utcnow() - timedelta(days=lookback_days)).timestamp())},
+                })
+
+                filter_str = (
+                    f'resource.type = "cloud_run_revision" '
+                    f'AND resource.labels.service_name = "{function_name}" '
+                    f'AND metric.type = "run.googleapis.com/request_count"'
+                )
+
+                request = monitoring_v3.ListTimeSeriesRequest(
+                    name=f"projects/{self.project_id}",
+                    filter=filter_str,
+                    interval=interval,
+                )
+
+                time_series = monitoring_client.list_time_series(request=request)
+
+                total_invocations = 0
+                for series in time_series:
+                    for point in series.points:
+                        total_invocations += point.value.int64_value or 0
+
+                if total_invocations == 0:
+                    continue
+
+                monthly_invocations = (total_invocations / lookback_days) * 30 if lookback_days > 0 else 0
+
+                # Get avg exec time
+                filter_latency = (
+                    f'resource.type = "cloud_run_revision" '
+                    f'AND resource.labels.service_name = "{function_name}" '
+                    f'AND metric.type = "run.googleapis.com/request_latencies"'
+                )
+
+                request_latency = monitoring_v3.ListTimeSeriesRequest(
+                    name=f"projects/{self.project_id}",
+                    filter=filter_latency,
+                    interval=interval,
+                )
+
+                time_series_latency = monitoring_client.list_time_series(request=request_latency)
+
+                latency_values = []
+                for series in time_series_latency:
+                    for point in series.points:
+                        latency_ms = point.value.distribution_value.mean if point.value.distribution_value else 0
+                        latency_values.append(latency_ms)
+
+                if not latency_values:
+                    continue
+
+                avg_exec_time_ms = sum(latency_values) / len(latency_values)
+                avg_exec_time_seconds = avg_exec_time_ms / 1000
+
+                if avg_exec_time_seconds < 1.0:
+                    if avg_exec_time_seconds < 0.1:
+                        recommended_concurrency = 100
+                    elif avg_exec_time_seconds < 0.5:
+                        recommended_concurrency = 50
+                    else:
+                        recommended_concurrency = 10
+
+                    memory_mb = int(service_config.available_memory.replace('M', '').replace('Mi', '')) if service_config and service_config.available_memory else 256
+                    memory_gib = memory_mb / 1024
+                    vcpu = max(0.08, memory_gib / 2)
+
+                    compute_seconds = monthly_invocations * avg_exec_time_seconds
+
+                    invocations_cost = (monthly_invocations / 1_000_000) * 0.40
+                    vcpu_cost = compute_seconds * vcpu * 0.00002400
+                    memory_cost = compute_seconds * memory_gib * 0.00000250
+                    monthly_cost_current = invocations_cost + vcpu_cost + memory_cost
+
+                    monthly_cost_optimal = monthly_cost_current * 0.70
+                    monthly_savings = monthly_cost_current - monthly_cost_optimal
+
+                    if monthly_savings > 10:
+                        if avg_exec_time_seconds < 0.1:
+                            confidence = "high"
+                        else:
+                            confidence = "medium"
+
+                        resources.append(
+                            OrphanResourceData(
+                                resource_id=function.name,
+                                resource_name=function_name,
+                                resource_type="gcp_cloud_function_excessive_concurrency",
+                                region=region,
+                                estimated_monthly_cost=monthly_savings,
+                                resource_metadata={
+                                    "function_name": function_name,
+                                    "generation": "2nd",
+                                    "concurrency_current": concurrency,
+                                    "recommended_concurrency": recommended_concurrency,
+                                    "avg_exec_time_seconds": round(avg_exec_time_seconds, 3),
+                                    "monthly_invocations": int(monthly_invocations),
+                                    "monthly_cost_current": round(monthly_cost_current, 2),
+                                    "monthly_cost_optimal": round(monthly_cost_optimal, 2),
+                                    "monthly_savings": round(monthly_savings, 2),
+                                    "annual_savings": round(monthly_savings * 12, 2),
+                                    "confidence": confidence,
+                                    "recommendation": f"Increase concurrency from {concurrency} to {recommended_concurrency}",
+                                    "benefit": "Fewer instances needed, better resource utilization",
+                                    "labels": dict(function.labels) if function.labels else {},
+                                },
+                            )
+                        )
 
         except Exception:
             pass

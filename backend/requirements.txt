@@ -59,6 +59,7 @@ google-cloud-monitoring==2.18.0  # Cloud Monitoring metrics
 google-cloud-logging==3.11.0  # Cloud Logging for snapshot restore verification
 google-cloud-container==2.48.0  # GKE (Google Kubernetes Engine) clusters management
 google-cloud-run==0.10.6  # Cloud Run services management
+google-cloud-functions==1.13.3  # Cloud Functions (1st and 2nd gen) management
 google-auth==2.26.2  # GCP authentication
 
 # Validation

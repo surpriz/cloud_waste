@@ -2829,6 +2829,61 @@ DEFAULT_DETECTION_RULES = {
         "lookback_days": 14,
         "description": "GCP Cloud Run service deployed in 3+ regions but 80%+ traffic in 1 region - remove redundant regions 💰💰💰 P1",
     },
+    # GCP Cloud Functions Detection Rules
+    "gcp_cloud_function_never_invoked": {
+        "enabled": True,
+        "no_invocations_threshold_days": 30,
+        "description": "GCP Cloud Functions (1st & 2nd gen) with 0 invocations for 30+ days - delete unused functions 💰💰 P1",
+    },
+    "gcp_cloud_function_idle_min_instances": {
+        "enabled": True,
+        "low_invocations_per_day": 10,
+        "lookback_days": 14,
+        "description": "GCP Cloud Functions 2nd gen with min_instances > 0 but <10 invocations/day - reduce to 0 💰💰💰 P1",
+    },
+    "gcp_cloud_function_memory_overprovisioning": {
+        "enabled": True,
+        "memory_utilization_threshold": 0.50,
+        "lookback_days": 14,
+        "description": "GCP Cloud Functions with <50% memory utilization - right-size memory allocation 💰💰 P1",
+    },
+    "gcp_cloud_function_excessive_timeout": {
+        "enabled": True,
+        "timeout_ratio_threshold": 3.0,
+        "lookback_days": 14,
+        "description": "GCP Cloud Functions with timeout > 3x avg execution time - reduce timeout 💰 P2",
+    },
+    "gcp_cloud_function_1st_gen_expensive": {
+        "enabled": True,
+        "cost_savings_threshold_pct": 20.0,
+        "lookback_days": 14,
+        "description": "GCP Cloud Functions 1st gen that would be 20%+ cheaper in 2nd gen - migrate 💰💰 P1",
+    },
+    "gcp_cloud_function_untagged": {
+        "enabled": True,
+        "required_labels": ["environment", "owner"],
+        "description": "GCP Cloud Functions missing required labels (environment, owner) - add labels for governance 🏷️ P2",
+    },
+    "gcp_cloud_function_excessive_max_instances": {
+        "enabled": True,
+        "max_instances_threshold": 100,
+        "description": "GCP Cloud Functions 2nd gen with max_instances > 100 - runaway cost risk, add rate limiting 💰💰💰 P1",
+    },
+    "gcp_cloud_function_cold_start_over_optimization": {
+        "enabled": True,
+        "cold_start_cost_threshold": 50.0,
+        "lookback_days": 14,
+        "description": "GCP Cloud Functions 2nd gen with min_instances for cold starts only - use Cloud Scheduler warm-up instead 💰💰 P1",
+    },
+    "gcp_cloud_function_duplicate": {
+        "enabled": True,
+        "description": "GCP Cloud Functions with duplicate code source (same hash) - consolidate functions 💰💰 P2",
+    },
+    "gcp_cloud_function_excessive_concurrency": {
+        "enabled": True,
+        "lookback_days": 14,
+        "description": "GCP Cloud Functions 2nd gen with concurrency=1 (suboptimal) - increase concurrency for fast functions 💰💰 P1",
+    },
 }
 
 
