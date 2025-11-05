@@ -3770,6 +3770,71 @@ DEFAULT_DETECTION_RULES = {
         "min_storage_gb": 1.0,
         "description": "Vertex AI feature store unused (0 requests 30+ days) - storage waste ($70-500/month) 💰💰 P2 [3-5% impact]",
     },
+    # GCP AI PLATFORM NOTEBOOKS / VERTEX AI WORKBENCH DETECTION RULES (10 scenarios)
+    # Impact: $18,500+/year per organization (avg $85-2,679/instance/month)
+    # Documentation: docs/gcp/GCP_AI_PLATFORM_NOTEBOOKS_SCENARIOS_100.md
+    "notebook_instance_stopped": {
+        "enabled": True,
+        "min_stopped_days": 30,
+        "min_age_days": 7,
+        "description": "Notebook instance stopped 30+ days - disk waste ($40-170/month) 💰💰 P1 [10-15% impact]",
+    },
+    "notebook_instance_idle_no_shutdown": {
+        "enabled": True,
+        "min_age_days": 7,
+        "recommended_idle_timeout_minutes": 60,
+        "description": "Notebook instance without idle shutdown - 30% off-hours waste risk ($222/month) 💰💰💰 P1 [15-20% impact]",
+    },
+    "notebook_instance_running_no_activity": {
+        "enabled": True,
+        "min_idle_days": 7,
+        "max_cpu_threshold": 5.0,
+        "description": "Notebook instance running with no activity 7+ days ($962/14 days) 💰💰💰💰 P0 [20-25% impact]",
+    },
+    "notebook_instance_gpu_attached_unused": {
+        "enabled": True,
+        "min_observation_days": 14,
+        "max_gpu_utilization_threshold": 5.0,
+        "description": "Notebook GPU attached but unused <5% utilization ($255-1,810/month) 💰💰💰💰💰 P0 [25-30% impact]",
+    },
+    "notebook_instance_oversized_machine_type": {
+        "enabled": True,
+        "max_cpu_utilization": 30.0,
+        "max_memory_utilization": 30.0,
+        "min_observation_days": 14,
+        "description": "Notebook oversized machine type - CPU/RAM <30% ($219/month) 💰💰💰 P1 [10-15% impact]",
+    },
+    "notebook_instance_unnecessary_gpu_in_dev": {
+        "enabled": True,
+        "dev_environments": ["dev", "test", "staging", "qa", "development", "sandbox"],
+        "min_age_days": 7,
+        "description": "Notebook GPU in dev/test environment ($255-2,679/month waste) 💰💰💰💰💰 P0 [15-20% impact]",
+    },
+    "notebook_instance_low_cpu_utilization": {
+        "enabled": True,
+        "min_observation_days": 30,
+        "max_cpu_threshold": 20.0,
+        "description": "Notebook low CPU <20% avg 30 days - downsize machine ($485/month) 💰💰💰💰💰 P0 [10-15% impact]",
+    },
+    "notebook_instance_low_memory_utilization": {
+        "enabled": True,
+        "min_observation_days": 30,
+        "max_memory_threshold": 30.0,
+        "description": "Notebook low memory <30% avg 30 days - highmem→standard ($131/month) 💰💰 P1 [5-10% impact]",
+    },
+    "notebook_instance_low_gpu_utilization": {
+        "enabled": True,
+        "min_observation_days": 30,
+        "max_gpu_utilization_threshold": 10.0,
+        "description": "Notebook GPU low <10% duty cycle 30 days - detach GPU ($255-1,810/month) 💰💰💰 P1 [5-10% impact]",
+    },
+    "notebook_instance_oversized_disk": {
+        "enabled": True,
+        "min_observation_days": 30,
+        "max_disk_utilization_threshold": 20.0,
+        "disk_size_buffer_factor": 1.5,
+        "description": "Notebook oversized disk <20% usage - reduce size ($127.50/month) 💰💰 P2 [3-5% impact]",
+    },
 }
 
 

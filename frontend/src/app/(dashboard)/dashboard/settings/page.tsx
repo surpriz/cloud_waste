@@ -701,7 +701,13 @@ const RESOURCE_CATEGORIES = {
       "vertex_ai_zero_predictions", "vertex_ai_idle_endpoints", "vertex_ai_gpu_waste",
       "vertex_ai_overprovisioned_machines", "vertex_ai_devtest_247", "vertex_ai_old_model_versions",
       "vertex_ai_untagged_endpoints", "vertex_ai_unused_traffic_split", "vertex_ai_failed_training_jobs",
-      "vertex_ai_unused_feature_store"
+      "vertex_ai_unused_feature_store",
+      // AI Platform Notebooks / Vertex AI Workbench (10 scenarios)
+      "notebook_instance_stopped", "notebook_instance_idle_no_shutdown", "notebook_instance_running_no_activity",
+      "notebook_instance_gpu_attached_unused", "notebook_instance_oversized_machine_type",
+      "notebook_instance_unnecessary_gpu_in_dev", "notebook_instance_low_cpu_utilization",
+      "notebook_instance_low_memory_utilization", "notebook_instance_low_gpu_utilization",
+      "notebook_instance_oversized_disk"
     ],
   },
   azure: {
@@ -1007,6 +1013,17 @@ const GCP_RESOURCE_ICONS: { [key: string]: any } = {
   vertex_ai_unused_traffic_split: Layers,
   vertex_ai_failed_training_jobs: XCircle,
   vertex_ai_unused_feature_store: Database,
+  // AI Platform Notebooks (10 scenarios)
+  notebook_instance_stopped: Server,
+  notebook_instance_idle_no_shutdown: Clock,
+  notebook_instance_running_no_activity: Activity,
+  notebook_instance_gpu_attached_unused: Cpu,
+  notebook_instance_oversized_machine_type: TrendingDown,
+  notebook_instance_unnecessary_gpu_in_dev: AlertTriangle,
+  notebook_instance_low_cpu_utilization: Activity,
+  notebook_instance_low_memory_utilization: Server,
+  notebook_instance_low_gpu_utilization: Cpu,
+  notebook_instance_oversized_disk: HardDrive,
 };
 
 const GCP_RESOURCE_LABELS: { [key: string]: string } = {
@@ -1230,6 +1247,17 @@ const GCP_RESOURCE_LABELS: { [key: string]: string } = {
   vertex_ai_unused_traffic_split: "Vertex AI Endpoint (Traffic Split 0% - A/B Test Complete) 💰💰💰 P2",
   vertex_ai_failed_training_jobs: "Vertex AI Training (3+ Same Errors - Recurring Issues) 💰💰💰💰 P1",
   vertex_ai_unused_feature_store: "Vertex AI Feature Store (0 Requests 30+ Days - Storage Waste) 💰💰 P2",
+  // AI Platform Notebooks / Vertex AI Workbench (10 scenarios)
+  notebook_instance_stopped: "AI Platform Notebook (Stopped 30+ Days - Disk Waste) 💰💰 P1",
+  notebook_instance_idle_no_shutdown: "AI Platform Notebook (No Idle Shutdown - 30% Off-Hours Risk) 💰💰💰 P1",
+  notebook_instance_running_no_activity: "AI Platform Notebook (Running No Activity 7+ Days) 💰💰💰💰 P0",
+  notebook_instance_gpu_attached_unused: "AI Platform Notebook (GPU Attached <5% Utilization) 💰💰💰💰💰 P0",
+  notebook_instance_oversized_machine_type: "AI Platform Notebook (Oversized - CPU/RAM <30%) 💰💰💰 P1",
+  notebook_instance_unnecessary_gpu_in_dev: "AI Platform Notebook (GPU in Dev/Test Environment) 💰💰💰💰💰 P0",
+  notebook_instance_low_cpu_utilization: "AI Platform Notebook (Low CPU <20% - Downsize) 💰💰💰💰💰 P0",
+  notebook_instance_low_memory_utilization: "AI Platform Notebook (Low Memory <30% - Standard) 💰💰 P1",
+  notebook_instance_low_gpu_utilization: "AI Platform Notebook (GPU <10% Duty Cycle - Detach) 💰💰💰 P1",
+  notebook_instance_oversized_disk: "AI Platform Notebook (Oversized Disk <20% Usage) 💰💰 P2",
 };
 
 // Microsoft 365 Resource Icons & Labels

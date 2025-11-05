@@ -68,6 +68,7 @@ google-cloud-bigquery==3.25.0  # BigQuery data warehouse for analytics waste det
 google-cloud-dataproc==5.4.0  # Cloud Dataproc (Hadoop/Spark) managed clusters for waste detection
 google-cloud-dataflow==0.7.5  # Cloud Dataflow (Apache Beam) streaming/batch jobs for waste detection
 google-cloud-aiplatform==1.38.1  # Vertex AI (ML endpoints, training jobs, feature store) for waste detection
+google-cloud-notebooks==1.8.0  # AI Platform Notebooks / Vertex AI Workbench for waste detection
 google-auth==2.26.2  # GCP authentication
 
 # Validation
