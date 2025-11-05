@@ -17214,6 +17214,993 @@ class GCPProvider(CloudProviderBase):
 
         return resources
 
+    # ============================================================================
+    # MEMORYSTORE REDIS/MEMCACHED WASTE DETECTION (10 SCENARIOS)
+    # ============================================================================
+
+    async def scan_memorystore_idle(
+        self, region: str | None = None, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scenario 1: Detect completely idle Memorystore instances.
+
+        Waste: Instances with 0 connections and 0 operations for extended period.
+        Detection: connections = 0 OR (hit_ratio = 0 AND commands_rate = 0) for 30+ days
+        Cost: Full capacity cost ($292-$1,752/month typical)
+        Priority: CRITICAL (P0) 💰💰💰💰💰
+        Impact: 40% of Memorystore waste
+        """
+        resources: list[OrphanResourceData] = []
+        rules = detection_rules or {}
+
+        days_idle_threshold = rules.get("days_idle_threshold", 30)
+        min_savings_threshold = rules.get("min_savings_threshold", 50.0)
+
+        try:
+            from google.cloud import redis_v1
+            from google.cloud import monitoring_v3
+            from datetime import datetime, timedelta
+
+            redis_client = redis_v1.CloudRedisClient()
+            monitoring_client = monitoring_v3.MetricServiceClient()
+
+            # List all Redis instances in region (or all regions if None)
+            if region:
+                parent = f"projects/{self.project_id}/locations/{region}"
+                locations_to_check = [parent]
+            else:
+                # Check all available regions
+                locations_to_check = [
+                    f"projects/{self.project_id}/locations/{loc}"
+                    for loc in ["us-central1", "us-east1", "europe-west1", "asia-east1"]
+                ]
+
+            for parent in locations_to_check:
+                try:
+                    instances = redis_client.list_instances(parent=parent)
+
+                    for instance in instances:
+                        instance_id = instance.name.split('/')[-1]
+                        instance_region = instance.name.split('/')[3]
+
+                        # Check activity via Cloud Monitoring
+                        now = datetime.utcnow()
+                        interval = monitoring_v3.TimeInterval({
+                            "end_time": {"seconds": int(now.timestamp())},
+                            "start_time": {"seconds": int((now - timedelta(days=days_idle_threshold)).timestamp())}
+                        })
+
+                        # Check connections metric
+                        try:
+                            metric_filter = (
+                                f'resource.type="redis.googleapis.com/Instance" '
+                                f'AND resource.labels.instance_id="{instance_id}" '
+                                f'AND metric.type="redis.googleapis.com/stats/connections"'
+                            )
+
+                            results = monitoring_client.list_time_series(
+                                name=f"projects/{self.project_id}",
+                                filter=metric_filter,
+                                interval=interval,
+                                view=monitoring_v3.ListTimeSeriesRequest.TimeSeriesView.FULL
+                            )
+
+                            avg_connections = 0
+                            connection_count = 0
+                            for result in results:
+                                for point in result.points:
+                                    avg_connections += point.value.double_value or 0
+                                    connection_count += 1
+
+                            avg_connections = avg_connections / connection_count if connection_count > 0 else 0
+
+                            # Check hit ratio metric
+                            metric_filter_hit = (
+                                f'resource.type="redis.googleapis.com/Instance" '
+                                f'AND resource.labels.instance_id="{instance_id}" '
+                                f'AND metric.type="redis.googleapis.com/stats/hit_ratio"'
+                            )
+
+                            results_hit = monitoring_client.list_time_series(
+                                name=f"projects/{self.project_id}",
+                                filter=metric_filter_hit,
+                                interval=interval,
+                                view=monitoring_v3.ListTimeSeriesRequest.TimeSeriesView.FULL
+                            )
+
+                            avg_hit_ratio = 0
+                            hit_count = 0
+                            for result in results_hit:
+                                for point in result.points:
+                                    avg_hit_ratio += point.value.double_value or 0
+                                    hit_count += 1
+
+                            avg_hit_ratio = avg_hit_ratio / hit_count if hit_count > 0 else 0
+
+                            # Instance is idle if connections = 0 OR hit_ratio = 0
+                            is_idle = avg_connections == 0 or avg_hit_ratio == 0
+
+                            if is_idle:
+                                # Calculate waste
+                                capacity_gb = instance.memory_size_gb
+                                tier = instance.tier.name
+
+                                # Approximate pricing (us-central1)
+                                price_per_gb_hour = 0.024 if tier == "STANDARD_HA" else 0.008
+                                hours_per_month = 730
+                                monthly_waste = capacity_gb * price_per_gb_hour * hours_per_month
+
+                                if monthly_waste < min_savings_threshold:
+                                    continue
+
+                                # Confidence based on days idle
+                                if days_idle_threshold >= 90:
+                                    confidence = "CRITICAL"
+                                elif days_idle_threshold >= 60:
+                                    confidence = "HIGH"
+                                elif days_idle_threshold >= 30:
+                                    confidence = "MEDIUM"
+                                else:
+                                    confidence = "LOW"
+
+                                resources.append(
+                                    OrphanResourceData(
+                                        resource_id=instance.name,
+                                        resource_name=instance_id,
+                                        resource_type="memorystore_redis_idle",
+                                        region=instance_region,
+                                        estimated_monthly_cost=monthly_waste,
+                                        confidence_level=confidence,
+                                        resource_metadata={
+                                            "instance_id": instance_id,
+                                            "tier": tier,
+                                            "capacity_gb": capacity_gb,
+                                            "days_idle": days_idle_threshold,
+                                            "avg_connections": round(avg_connections, 2),
+                                            "avg_hit_ratio": round(avg_hit_ratio, 4),
+                                            "waste_percentage": 100,
+                                            "remediation": "DELETE instance immediately"
+                                        },
+                                        recommendation=f"DELETE instance. Zero activity for {days_idle_threshold}+ days = 100% waste (${monthly_waste:.2f}/month)."
+                                    )
+                                )
+
+                        except Exception as e:
+                            logger.warning(f"Could not fetch metrics for Memorystore instance {instance_id}: {e}")
+
+                except Exception as e:
+                    logger.warning(f"Could not list Memorystore instances in {parent}: {e}")
+
+        except Exception as e:
+            logger.error(f"Error in scan_memorystore_idle: {e}")
+
+        return resources
+
+    async def scan_memorystore_overprovisioned(
+        self, region: str | None = None, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scenario 2: Detect over-provisioned Memorystore capacity.
+
+        Waste: Memory usage < 30% consistently = paying for unused capacity.
+        Detection: memory_usage_ratio < 0.30 for 30+ days
+        Cost: 70% of capacity cost wasted ($204-$1,226/month typical)
+        Priority: HIGH (P1) 💰💰💰💰
+        Impact: 25% of Memorystore waste
+        """
+        resources: list[OrphanResourceData] = []
+        rules = detection_rules or {}
+
+        usage_threshold = rules.get("usage_threshold", 0.30)
+        days = rules.get("days", 30)
+        min_savings_threshold = rules.get("min_savings_threshold", 50.0)
+
+        try:
+            from google.cloud import redis_v1
+            from google.cloud import monitoring_v3
+            from datetime import datetime, timedelta
+
+            redis_client = redis_v1.CloudRedisClient()
+            monitoring_client = monitoring_v3.MetricServiceClient()
+
+            # List all Redis instances
+            if region:
+                locations_to_check = [f"projects/{self.project_id}/locations/{region}"]
+            else:
+                locations_to_check = [
+                    f"projects/{self.project_id}/locations/{loc}"
+                    for loc in ["us-central1", "us-east1", "europe-west1", "asia-east1"]
+                ]
+
+            for parent in locations_to_check:
+                try:
+                    instances = redis_client.list_instances(parent=parent)
+
+                    for instance in instances:
+                        instance_id = instance.name.split('/')[-1]
+                        instance_region = instance.name.split('/')[3]
+
+                        # Check memory usage via Cloud Monitoring
+                        now = datetime.utcnow()
+                        interval = monitoring_v3.TimeInterval({
+                            "end_time": {"seconds": int(now.timestamp())},
+                            "start_time": {"seconds": int((now - timedelta(days=days)).timestamp())}
+                        })
+
+                        try:
+                            metric_filter = (
+                                f'resource.type="redis.googleapis.com/Instance" '
+                                f'AND resource.labels.instance_id="{instance_id}" '
+                                f'AND metric.type="redis.googleapis.com/stats/memory/usage_ratio"'
+                            )
+
+                            results = monitoring_client.list_time_series(
+                                name=f"projects/{self.project_id}",
+                                filter=metric_filter,
+                                interval=interval,
+                                view=monitoring_v3.ListTimeSeriesRequest.TimeSeriesView.FULL
+                            )
+
+                            memory_usage_values = []
+                            for result in results:
+                                for point in result.points:
+                                    memory_usage_values.append(point.value.double_value or 0)
+
+                            avg_memory_usage = sum(memory_usage_values) / len(memory_usage_values) if memory_usage_values else 0
+
+                            if 0 < avg_memory_usage < usage_threshold:
+                                # Calculate waste
+                                capacity_gb = instance.memory_size_gb
+                                tier = instance.tier.name
+
+                                # Optimal capacity with 20% buffer
+                                optimal_capacity = int(capacity_gb * avg_memory_usage * 1.2)
+                                wasted_capacity = capacity_gb - optimal_capacity
+
+                                # Pricing
+                                price_per_gb_hour = 0.024 if tier == "STANDARD_HA" else 0.008
+                                hours_per_month = 730
+                                monthly_waste = wasted_capacity * price_per_gb_hour * hours_per_month
+
+                                if monthly_waste < min_savings_threshold:
+                                    continue
+
+                                resources.append(
+                                    OrphanResourceData(
+                                        resource_id=instance.name,
+                                        resource_name=instance_id,
+                                        resource_type="memorystore_redis_overprovisioned",
+                                        region=instance_region,
+                                        estimated_monthly_cost=monthly_waste,
+                                        confidence_level="HIGH",
+                                        resource_metadata={
+                                            "instance_id": instance_id,
+                                            "tier": tier,
+                                            "current_capacity_gb": capacity_gb,
+                                            "optimal_capacity_gb": optimal_capacity,
+                                            "wasted_capacity_gb": wasted_capacity,
+                                            "memory_usage_ratio": round(avg_memory_usage, 4),
+                                            "waste_percentage": round((wasted_capacity / capacity_gb) * 100, 2)
+                                        },
+                                        recommendation=f"Downsize from {capacity_gb}GB to {optimal_capacity}GB. Save ${monthly_waste:.2f}/month."
+                                    )
+                                )
+
+                        except Exception as e:
+                            logger.warning(f"Could not fetch memory metrics for {instance_id}: {e}")
+
+                except Exception as e:
+                    logger.warning(f"Could not list Memorystore instances in {parent}: {e}")
+
+        except Exception as e:
+            logger.error(f"Error in scan_memorystore_overprovisioned: {e}")
+
+        return resources
+
+    async def scan_memorystore_low_hit_rate(
+        self, region: str | None = None, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scenario 3: Detect low cache hit rate instances.
+
+        Waste: Hit rate < 50% = ineffective cache + backend overload.
+        Detection: cache_hit_ratio < 0.50 for 7+ days (benchmark: >0.80)
+        Cost: Cache cost + backend overload ($3,000-$15,000/year typical)
+        Priority: CRITICAL (P0) 💰💰💰💰💰
+        Impact: 30% of Memorystore waste
+        """
+        resources: list[OrphanResourceData] = []
+        rules = detection_rules or {}
+
+        hit_rate_threshold = rules.get("hit_rate_threshold", 0.50)
+        days = rules.get("days", 7)
+        min_savings_threshold = rules.get("min_savings_threshold", 50.0)
+
+        try:
+            from google.cloud import redis_v1
+            from google.cloud import monitoring_v3
+            from datetime import datetime, timedelta
+
+            redis_client = redis_v1.CloudRedisClient()
+            monitoring_client = monitoring_v3.MetricServiceClient()
+
+            # List all Redis instances
+            if region:
+                locations_to_check = [f"projects/{self.project_id}/locations/{region}"]
+            else:
+                locations_to_check = [
+                    f"projects/{self.project_id}/locations/{loc}"
+                    for loc in ["us-central1", "us-east1", "europe-west1", "asia-east1"]
+                ]
+
+            for parent in locations_to_check:
+                try:
+                    instances = redis_client.list_instances(parent=parent)
+
+                    for instance in instances:
+                        instance_id = instance.name.split('/')[-1]
+                        instance_region = instance.name.split('/')[3]
+
+                        # Check hit ratio via Cloud Monitoring
+                        now = datetime.utcnow()
+                        interval = monitoring_v3.TimeInterval({
+                            "end_time": {"seconds": int(now.timestamp())},
+                            "start_time": {"seconds": int((now - timedelta(days=days)).timestamp())}
+                        })
+
+                        try:
+                            metric_filter = (
+                                f'resource.type="redis.googleapis.com/Instance" '
+                                f'AND resource.labels.instance_id="{instance_id}" '
+                                f'AND metric.type="redis.googleapis.com/stats/hit_ratio"'
+                            )
+
+                            results = monitoring_client.list_time_series(
+                                name=f"projects/{self.project_id}",
+                                filter=metric_filter,
+                                interval=interval,
+                                view=monitoring_v3.ListTimeSeriesRequest.TimeSeriesView.FULL
+                            )
+
+                            hit_ratio_values = []
+                            for result in results:
+                                for point in result.points:
+                                    hit_ratio_values.append(point.value.double_value or 0)
+
+                            avg_hit_ratio = sum(hit_ratio_values) / len(hit_ratio_values) if hit_ratio_values else 0
+
+                            if 0 < avg_hit_ratio < hit_rate_threshold:
+                                # Estimate backend cost increase
+                                daily_requests = 10_000_000  # Conservative estimate
+                                optimal_hit_rate = 0.85
+
+                                backend_queries_current = daily_requests * (1 - avg_hit_ratio)
+                                backend_queries_optimal = daily_requests * (1 - optimal_hit_rate)
+                                excess_queries = backend_queries_current - backend_queries_optimal
+
+                                backend_waste_daily = (excess_queries / 1000) * 0.10
+                                backend_waste_annual = backend_waste_daily * 365
+
+                                # Also consider cache cost itself
+                                capacity_gb = instance.memory_size_gb
+                                tier = instance.tier.name
+                                price_per_gb_hour = 0.024 if tier == "STANDARD_HA" else 0.008
+                                cache_annual_cost = capacity_gb * price_per_gb_hour * 730 * 12
+
+                                total_annual_waste = backend_waste_annual + (cache_annual_cost * 0.5)  # 50% of cache cost considered waste
+                                monthly_waste = total_annual_waste / 12
+
+                                if monthly_waste < min_savings_threshold:
+                                    continue
+
+                                resources.append(
+                                    OrphanResourceData(
+                                        resource_id=instance.name,
+                                        resource_name=instance_id,
+                                        resource_type="memorystore_redis_low_hit_rate",
+                                        region=instance_region,
+                                        estimated_monthly_cost=monthly_waste,
+                                        confidence_level="CRITICAL",
+                                        resource_metadata={
+                                            "instance_id": instance_id,
+                                            "tier": tier,
+                                            "capacity_gb": capacity_gb,
+                                            "hit_ratio": round(avg_hit_ratio, 4),
+                                            "benchmark_hit_ratio": 0.85,
+                                            "gap": round(0.85 - avg_hit_ratio, 4),
+                                            "backend_waste_annual": round(backend_waste_annual, 2)
+                                        },
+                                        recommendation=f"Low hit rate ({avg_hit_ratio:.2%}). Change eviction policy to allkeys-lru, increase TTL, optimize cache warming. Target >85%."
+                                    )
+                                )
+
+                        except Exception as e:
+                            logger.warning(f"Could not fetch hit ratio for {instance_id}: {e}")
+
+                except Exception as e:
+                    logger.warning(f"Could not list Memorystore instances in {parent}: {e}")
+
+        except Exception as e:
+            logger.error(f"Error in scan_memorystore_low_hit_rate: {e}")
+
+        return resources
+
+    async def scan_memorystore_wrong_tier(
+        self, region: str | None = None, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scenario 4: Detect Standard tier for dev/test environments.
+
+        Waste: Standard tier (HA) for dev/test where Basic tier sufficient.
+        Detection: tier = STANDARD_HA AND environment = dev/test/staging
+        Cost: 3x more expensive than Basic ($584/month typical waste)
+        Priority: MEDIUM (P2) 💰💰💰
+        Impact: 15% of Memorystore waste
+        """
+        resources: list[OrphanResourceData] = []
+        rules = detection_rules or {}
+        min_savings_threshold = rules.get("min_savings_threshold", 50.0)
+
+        try:
+            from google.cloud import redis_v1
+
+            redis_client = redis_v1.CloudRedisClient()
+
+            # List all Redis instances
+            if region:
+                locations_to_check = [f"projects/{self.project_id}/locations/{region}"]
+            else:
+                locations_to_check = [
+                    f"projects/{self.project_id}/locations/{loc}"
+                    for loc in ["us-central1", "us-east1", "europe-west1", "asia-east1"]
+                ]
+
+            for parent in locations_to_check:
+                try:
+                    instances = redis_client.list_instances(parent=parent)
+
+                    for instance in instances:
+                        instance_id = instance.name.split('/')[-1]
+                        instance_region = instance.name.split('/')[3]
+
+                        # Check if Standard tier
+                        if instance.tier.name != "STANDARD_HA":
+                            continue
+
+                        # Check labels for environment
+                        labels = instance.labels or {}
+                        environment = labels.get('environment', '').lower()
+
+                        # If dev/test/staging → waste
+                        if environment in ['dev', 'test', 'staging', 'development', 'qa']:
+                            capacity_gb = instance.memory_size_gb
+
+                            # Cost comparison
+                            standard_cost = capacity_gb * 0.024 * 730  # Standard tier
+                            basic_cost = capacity_gb * 0.008 * 730  # Basic tier
+                            monthly_waste = standard_cost - basic_cost
+
+                            if monthly_waste < min_savings_threshold:
+                                continue
+
+                            resources.append(
+                                OrphanResourceData(
+                                    resource_id=instance.name,
+                                    resource_name=instance_id,
+                                    resource_type="memorystore_redis_wrong_tier",
+                                    region=instance_region,
+                                    estimated_monthly_cost=monthly_waste,
+                                    confidence_level="HIGH",
+                                    resource_metadata={
+                                        "instance_id": instance_id,
+                                        "tier": "STANDARD_HA",
+                                        "environment": environment,
+                                        "capacity_gb": capacity_gb,
+                                        "standard_monthly_cost": round(standard_cost, 2),
+                                        "basic_monthly_cost": round(basic_cost, 2),
+                                        "waste_percentage": round((monthly_waste / standard_cost) * 100, 2)
+                                    },
+                                    recommendation=f"Migrate to Basic tier for {environment}. Save ${monthly_waste:.2f}/month (67% savings)."
+                                )
+                            )
+
+                except Exception as e:
+                    logger.warning(f"Could not list Memorystore instances in {parent}: {e}")
+
+        except Exception as e:
+            logger.error(f"Error in scan_memorystore_wrong_tier: {e}")
+
+        return resources
+
+    async def scan_memorystore_wrong_eviction(
+        self, region: str | None = None, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scenario 5: Detect wrong eviction policy configuration.
+
+        Waste: volatile-lru (default) instead of allkeys-lru for caching.
+        Detection: maxmemory-policy = volatile-lru (may cause OOM or need larger instance)
+        Cost: Potential for larger instance needed ($146-$876/month waste)
+        Priority: MEDIUM (P2) 💰💰💰
+        Impact: 10% of Memorystore waste
+        """
+        resources: list[OrphanResourceData] = []
+        rules = detection_rules or {}
+
+        try:
+            from google.cloud import redis_v1
+
+            redis_client = redis_v1.CloudRedisClient()
+
+            # List all Redis instances
+            if region:
+                locations_to_check = [f"projects/{self.project_id}/locations/{region}"]
+            else:
+                locations_to_check = [
+                    f"projects/{self.project_id}/locations/{loc}"
+                    for loc in ["us-central1", "us-east1", "europe-west1", "asia-east1"]
+                ]
+
+            for parent in locations_to_check:
+                try:
+                    instances = redis_client.list_instances(parent=parent)
+
+                    for instance in instances:
+                        instance_id = instance.name.split('/')[-1]
+                        instance_region = instance.name.split('/')[3]
+
+                        # Get Redis config
+                        redis_config = instance.redis_configs or {}
+                        eviction_policy = redis_config.get('maxmemory-policy', 'volatile-lru')
+
+                        # If volatile-lru (default) → potential waste
+                        if eviction_policy == 'volatile-lru':
+                            capacity_gb = instance.memory_size_gb
+                            tier = instance.tier.name
+                            price_per_gb_hour = 0.024 if tier == "STANDARD_HA" else 0.008
+
+                            # Estimate potential waste (20% of instance cost)
+                            monthly_cost = capacity_gb * price_per_gb_hour * 730
+                            monthly_waste = monthly_cost * 0.20
+
+                            resources.append(
+                                OrphanResourceData(
+                                    resource_id=instance.name,
+                                    resource_name=instance_id,
+                                    resource_type="memorystore_redis_wrong_eviction",
+                                    region=instance_region,
+                                    estimated_monthly_cost=monthly_waste,
+                                    confidence_level="MEDIUM",
+                                    resource_metadata={
+                                        "instance_id": instance_id,
+                                        "tier": tier,
+                                        "capacity_gb": capacity_gb,
+                                        "current_policy": eviction_policy,
+                                        "recommended_policy": "allkeys-lru"
+                                    },
+                                    recommendation=f"Change eviction policy to allkeys-lru for caching use cases. Prevents OOM errors and potential upsizing needs."
+                                )
+                            )
+
+                except Exception as e:
+                    logger.warning(f"Could not list Memorystore instances in {parent}: {e}")
+
+        except Exception as e:
+            logger.error(f"Error in scan_memorystore_wrong_eviction: {e}")
+
+        return resources
+
+    async def scan_memorystore_no_cud(
+        self, region: str | None = None, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scenario 6: Detect instances without Committed Use Discounts.
+
+        Waste: Instances ≥5 GB running without CUD (20-40% savings missed).
+        Detection: capacity ≥ 5 GB AND no CUD label
+        Cost: 20-40% of instance cost ($117-$701/month typical)
+        Priority: LOW (P3) 💰💰
+        Impact: 5% of Memorystore waste
+        """
+        resources: list[OrphanResourceData] = []
+        rules = detection_rules or {}
+        min_savings_threshold = rules.get("min_savings_threshold", 50.0)
+
+        try:
+            from google.cloud import redis_v1
+
+            redis_client = redis_v1.CloudRedisClient()
+
+            # List all Redis instances
+            if region:
+                locations_to_check = [f"projects/{self.project_id}/locations/{region}"]
+            else:
+                locations_to_check = [
+                    f"projects/{self.project_id}/locations/{loc}"
+                    for loc in ["us-central1", "us-east1", "europe-west1", "asia-east1"]
+                ]
+
+            for parent in locations_to_check:
+                try:
+                    instances = redis_client.list_instances(parent=parent)
+
+                    for instance in instances:
+                        instance_id = instance.name.split('/')[-1]
+                        instance_region = instance.name.split('/')[3]
+
+                        # Only instances ≥5 GB eligible for CUD
+                        capacity_gb = instance.memory_size_gb
+                        if capacity_gb < 5:
+                            continue
+
+                        # Check if instance has CUD (check via label)
+                        labels = instance.labels or {}
+                        has_cud = labels.get('cud', 'false') == 'true'
+
+                        if not has_cud:
+                            tier = instance.tier.name
+                            price_per_gb_hour = 0.024 if tier == "STANDARD_HA" else 0.008
+                            monthly_cost = capacity_gb * price_per_gb_hour * 730
+
+                            # 3-year CUD = 40% discount
+                            monthly_savings = monthly_cost * 0.40
+
+                            if monthly_savings < min_savings_threshold:
+                                continue
+
+                            resources.append(
+                                OrphanResourceData(
+                                    resource_id=instance.name,
+                                    resource_name=instance_id,
+                                    resource_type="memorystore_redis_no_cud",
+                                    region=instance_region,
+                                    estimated_monthly_cost=monthly_savings,
+                                    confidence_level="MEDIUM",
+                                    resource_metadata={
+                                        "instance_id": instance_id,
+                                        "tier": tier,
+                                        "capacity_gb": capacity_gb,
+                                        "monthly_cost_without_cud": round(monthly_cost, 2),
+                                        "monthly_savings_with_cud_1y": round(monthly_cost * 0.20, 2),
+                                        "monthly_savings_with_cud_3y": round(monthly_cost * 0.40, 2),
+                                        "annual_savings_3y": round(monthly_savings * 12, 2)
+                                    },
+                                    recommendation=f"Purchase 1-year CUD (20% off) or 3-year CUD (40% off). Save ${monthly_savings:.2f}/month."
+                                )
+                            )
+
+                except Exception as e:
+                    logger.warning(f"Could not list Memorystore instances in {parent}: {e}")
+
+        except Exception as e:
+            logger.error(f"Error in scan_memorystore_no_cud: {e}")
+
+        return resources
+
+    async def scan_memorystore_untagged(
+        self, region: str | None = None, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scenario 7: Detect untagged Memorystore instances.
+
+        Waste: Instances without required labels (environment, team, cost_center).
+        Detection: Missing any required labels
+        Cost: Indirect (impossible cost allocation)
+        Priority: LOW (P3) 💰💰
+        Impact: 3% of Memorystore waste
+        """
+        resources: list[OrphanResourceData] = []
+        rules = detection_rules or {}
+        required_labels = rules.get("required_labels", ["environment", "team", "cost_center"])
+
+        try:
+            from google.cloud import redis_v1
+
+            redis_client = redis_v1.CloudRedisClient()
+
+            # List all Redis instances
+            if region:
+                locations_to_check = [f"projects/{self.project_id}/locations/{region}"]
+            else:
+                locations_to_check = [
+                    f"projects/{self.project_id}/locations/{loc}"
+                    for loc in ["us-central1", "us-east1", "europe-west1", "asia-east1"]
+                ]
+
+            for parent in locations_to_check:
+                try:
+                    instances = redis_client.list_instances(parent=parent)
+
+                    for instance in instances:
+                        instance_id = instance.name.split('/')[-1]
+                        instance_region = instance.name.split('/')[3]
+
+                        labels = instance.labels or {}
+
+                        # Check for missing required labels
+                        missing_labels = [label for label in required_labels if label not in labels]
+
+                        if missing_labels:
+                            resources.append(
+                                OrphanResourceData(
+                                    resource_id=instance.name,
+                                    resource_name=instance_id,
+                                    resource_type="memorystore_redis_untagged",
+                                    region=instance_region,
+                                    estimated_monthly_cost=0.0,
+                                    confidence_level="LOW",
+                                    resource_metadata={
+                                        "instance_id": instance_id,
+                                        "missing_labels": missing_labels,
+                                        "existing_labels": list(labels.keys())
+                                    },
+                                    recommendation=f"Add missing labels: {', '.join(missing_labels)}. Required for cost allocation."
+                                )
+                            )
+
+                except Exception as e:
+                    logger.warning(f"Could not list Memorystore instances in {parent}: {e}")
+
+        except Exception as e:
+            logger.error(f"Error in scan_memorystore_untagged: {e}")
+
+        return resources
+
+    async def scan_memorystore_high_connection_churn(
+        self, region: str | None = None, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scenario 8: Detect high connection churn (Phase 2).
+
+        Waste: Repeated short-lived connections instead of connection pooling.
+        Detection: High variance in connection count (std_dev > 50% of mean)
+        Cost: CPU overhead 5-10% ($29-$175/month typical)
+        Priority: MEDIUM (P2) 💰💰💰💰
+        Impact: 8% of Memorystore waste
+        """
+        resources: list[OrphanResourceData] = []
+        rules = detection_rules or {}
+        days = rules.get("days", 7)
+        min_savings_threshold = rules.get("min_savings_threshold", 20.0)
+
+        try:
+            from google.cloud import redis_v1
+            from google.cloud import monitoring_v3
+            from datetime import datetime, timedelta
+            import statistics
+
+            redis_client = redis_v1.CloudRedisClient()
+            monitoring_client = monitoring_v3.MetricServiceClient()
+
+            # List all Redis instances
+            if region:
+                locations_to_check = [f"projects/{self.project_id}/locations/{region}"]
+            else:
+                locations_to_check = [
+                    f"projects/{self.project_id}/locations/{loc}"
+                    for loc in ["us-central1", "us-east1", "europe-west1", "asia-east1"]
+                ]
+
+            for parent in locations_to_check:
+                try:
+                    instances = redis_client.list_instances(parent=parent)
+
+                    for instance in instances:
+                        instance_id = instance.name.split('/')[-1]
+                        instance_region = instance.name.split('/')[3]
+
+                        # Get connection count time series
+                        now = datetime.utcnow()
+                        interval = monitoring_v3.TimeInterval({
+                            "end_time": {"seconds": int(now.timestamp())},
+                            "start_time": {"seconds": int((now - timedelta(days=days)).timestamp())}
+                        })
+
+                        try:
+                            metric_filter = (
+                                f'resource.type="redis.googleapis.com/Instance" '
+                                f'AND resource.labels.instance_id="{instance_id}" '
+                                f'AND metric.type="redis.googleapis.com/stats/connections"'
+                            )
+
+                            results = monitoring_client.list_time_series(
+                                name=f"projects/{self.project_id}",
+                                filter=metric_filter,
+                                interval=interval,
+                                view=monitoring_v3.ListTimeSeriesRequest.TimeSeriesView.FULL
+                            )
+
+                            connections_data = []
+                            for result in results:
+                                for point in result.points:
+                                    connections_data.append(point.value.double_value or 0)
+
+                            if len(connections_data) > 10:
+                                std_dev = statistics.stdev(connections_data)
+                                mean = statistics.mean(connections_data)
+
+                                # High churn if std_dev > 50% of mean
+                                if mean > 0 and (std_dev / mean) > 0.5:
+                                    capacity_gb = instance.memory_size_gb
+                                    tier = instance.tier.name
+                                    price_per_gb_hour = 0.024 if tier == "STANDARD_HA" else 0.008
+                                    monthly_cost = capacity_gb * price_per_gb_hour * 730
+
+                                    # Estimate 10% overhead from connection churn
+                                    monthly_waste = monthly_cost * 0.10
+
+                                    if monthly_waste < min_savings_threshold:
+                                        continue
+
+                                    resources.append(
+                                        OrphanResourceData(
+                                            resource_id=instance.name,
+                                            resource_name=instance_id,
+                                            resource_type="memorystore_redis_high_connection_churn",
+                                            region=instance_region,
+                                            estimated_monthly_cost=monthly_waste,
+                                            confidence_level="MEDIUM",
+                                            resource_metadata={
+                                                "instance_id": instance_id,
+                                                "tier": tier,
+                                                "capacity_gb": capacity_gb,
+                                                "avg_connections": round(mean, 2),
+                                                "connection_variance": round(std_dev, 2),
+                                                "churn_indicator": round(std_dev / mean, 4)
+                                            },
+                                            recommendation=f"Implement connection pooling in application code. High connection churn detected (variance: {std_dev:.1f})."
+                                        )
+                                    )
+
+                        except Exception as e:
+                            logger.warning(f"Could not fetch connection metrics for {instance_id}: {e}")
+
+                except Exception as e:
+                    logger.warning(f"Could not list Memorystore instances in {parent}: {e}")
+
+        except Exception as e:
+            logger.error(f"Error in scan_memorystore_high_connection_churn: {e}")
+
+        return resources
+
+    async def scan_memorystore_wrong_size(
+        self, region: str | None = None, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scenario 9: Detect wrong instance size for workload (Phase 2).
+
+        Waste: Basic tier >100 GB (should use Redis Cluster) or Standard tier <5 GB.
+        Detection: Suboptimal sizing based on tier and capacity
+        Cost: Performance issues or HA overhead ($29-$88/month typical)
+        Priority: MEDIUM (P2) 💰💰💰
+        Impact: 5% of Memorystore waste
+        """
+        resources: list[OrphanResourceData] = []
+        rules = detection_rules or {}
+
+        try:
+            from google.cloud import redis_v1
+
+            redis_client = redis_v1.CloudRedisClient()
+
+            # List all Redis instances
+            if region:
+                locations_to_check = [f"projects/{self.project_id}/locations/{region}"]
+            else:
+                locations_to_check = [
+                    f"projects/{self.project_id}/locations/{loc}"
+                    for loc in ["us-central1", "us-east1", "europe-west1", "asia-east1"]
+                ]
+
+            for parent in locations_to_check:
+                try:
+                    instances = redis_client.list_instances(parent=parent)
+
+                    for instance in instances:
+                        instance_id = instance.name.split('/')[-1]
+                        instance_region = instance.name.split('/')[3]
+                        capacity_gb = instance.memory_size_gb
+                        tier = instance.tier.name
+
+                        issue = None
+                        recommendation = None
+                        monthly_waste = 0
+
+                        # Basic >100 GB → should use Redis Cluster
+                        if tier == "BASIC" and capacity_gb > 100:
+                            issue = "Should use Redis Cluster for >100 GB"
+                            recommendation = "Migrate to Redis Cluster for better performance and horizontal scaling"
+                            # Performance issue, not direct cost waste
+                            monthly_waste = 0
+
+                        # Standard <5 GB + no HA needed → should use Basic
+                        elif tier == "STANDARD_HA" and capacity_gb < 5:
+                            issue = "Small instance with HA overhead"
+                            recommendation = "Consider Basic tier if HA not critical for small workloads"
+                            # Calculate waste as difference between Standard and Basic
+                            standard_cost = capacity_gb * 0.024 * 730
+                            basic_cost = capacity_gb * 0.008 * 730
+                            monthly_waste = standard_cost - basic_cost
+
+                        if issue:
+                            resources.append(
+                                OrphanResourceData(
+                                    resource_id=instance.name,
+                                    resource_name=instance_id,
+                                    resource_type="memorystore_redis_wrong_size",
+                                    region=instance_region,
+                                    estimated_monthly_cost=monthly_waste,
+                                    confidence_level="MEDIUM",
+                                    resource_metadata={
+                                        "instance_id": instance_id,
+                                        "tier": tier,
+                                        "capacity_gb": capacity_gb,
+                                        "issue": issue
+                                    },
+                                    recommendation=recommendation
+                                )
+                            )
+
+                except Exception as e:
+                    logger.warning(f"Could not list Memorystore instances in {parent}: {e}")
+
+        except Exception as e:
+            logger.error(f"Error in scan_memorystore_wrong_size: {e}")
+
+        return resources
+
+    async def scan_memorystore_cross_zone_traffic(
+        self, region: str | None = None, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """
+        Scenario 10: Detect cross-zone traffic costs (Phase 2).
+
+        Waste: Redis Cluster with clients in different zone → $0.01/GB cross-zone fees.
+        Detection: Network egress analysis (requires VPC flow logs analysis)
+        Cost: Cross-zone processing fees ($72/month per 10TB typical)
+        Priority: LOW (P3) 💰💰💰
+        Impact: 3% of Memorystore waste
+        """
+        resources: list[OrphanResourceData] = []
+        rules = detection_rules or {}
+
+        # Note: This scenario requires analyzing VPC flow logs and client locations
+        # which is complex and beyond basic Memorystore API capabilities.
+        # This is a placeholder implementation that would need additional
+        # network analysis infrastructure.
+
+        try:
+            from google.cloud import redis_v1
+
+            redis_client = redis_v1.CloudRedisClient()
+
+            # List all Redis instances
+            if region:
+                locations_to_check = [f"projects/{self.project_id}/locations/{region}"]
+            else:
+                locations_to_check = [
+                    f"projects/{self.project_id}/locations/{loc}"
+                    for loc in ["us-central1", "us-east1", "europe-west1", "asia-east1"]
+                ]
+
+            for parent in locations_to_check:
+                try:
+                    instances = redis_client.list_instances(parent=parent)
+
+                    for instance in instances:
+                        # Only Redis Cluster has significant cross-zone fees
+                        # For Basic and Standard tiers, cross-zone replication is included
+                        # This detection would require additional VPC flow log analysis
+                        pass
+
+                except Exception as e:
+                    logger.warning(f"Could not list Memorystore instances in {parent}: {e}")
+
+        except Exception as e:
+            logger.error(f"Error in scan_memorystore_cross_zone_traffic: {e}")
+
+        return resources
+
     # AWS-specific EC2 instance methods (not applicable to GCP)
     async def scan_oversized_instances(
         self, region: str, detection_rules: dict | None = None

@@ -3441,6 +3441,62 @@ DEFAULT_DETECTION_RULES = {
         "min_savings_threshold": 10.0,
         "description": "GCP Cloud Bigtable tables with zero reads - 30+ days unused tables, storage waste 💰💰 P2",
     },
+    # GCP MEMORYSTORE REDIS/MEMCACHED DETECTION RULES (10 scenarios)
+    # Impact: $10,000-$50,000/year per organization
+    # Documentation: docs/gcp/GCP_MEMORYSTORE_SCENARIOS_100.md
+    "memorystore_redis_idle": {
+        "enabled": True,
+        "days_idle_threshold": 30,
+        "min_savings_threshold": 50.0,
+        "description": "GCP Memorystore Redis idle - 0 connections/ops 30+ days, 100% waste ($292-1,752/month) 💰💰💰💰💰 P0 [40% impact]",
+    },
+    "memorystore_redis_overprovisioned": {
+        "enabled": True,
+        "usage_threshold": 0.30,
+        "days": 30,
+        "min_savings_threshold": 50.0,
+        "description": "GCP Memorystore Redis over-provisioned - memory <30% 30+ days, 70% capacity waste ($204-1,226/month) 💰💰💰💰 P1 [25% impact]",
+    },
+    "memorystore_redis_low_hit_rate": {
+        "enabled": True,
+        "hit_rate_threshold": 0.50,
+        "days": 7,
+        "min_savings_threshold": 50.0,
+        "description": "GCP Memorystore Redis low hit rate - <50% hit rate, ineffective cache + backend overload ($3k-15k/year) 💰💰💰💰💰 P0 [30% impact]",
+    },
+    "memorystore_redis_wrong_tier": {
+        "enabled": True,
+        "min_savings_threshold": 50.0,
+        "description": "GCP Memorystore Redis wrong tier - Standard HA for dev/test, 3x more expensive ($584/month waste) 💰💰💰 P2 [15% impact]",
+    },
+    "memorystore_redis_wrong_eviction": {
+        "enabled": True,
+        "description": "GCP Memorystore Redis wrong eviction - volatile-lru for caching, causes OOM + upsizing ($146-876/month) 💰💰💰 P2 [10% impact]",
+    },
+    "memorystore_redis_no_cud": {
+        "enabled": True,
+        "min_savings_threshold": 50.0,
+        "description": "GCP Memorystore Redis no CUD - instances ≥5GB without discount, missing 20-40% savings ($117-701/month) 💰💰 P3 [5% impact]",
+    },
+    "memorystore_redis_untagged": {
+        "enabled": True,
+        "required_labels": ["environment", "team", "cost_center"],
+        "description": "GCP Memorystore Redis missing labels - no environment/team/cost_center, impossible cost allocation 💰💰 P3 [3% impact]",
+    },
+    "memorystore_redis_high_connection_churn": {
+        "enabled": True,
+        "days": 7,
+        "min_savings_threshold": 20.0,
+        "description": "GCP Memorystore Redis high connection churn - repeated short connections, 5-10% CPU overhead ($29-175/month) 💰💰💰💰 P2 [8% impact]",
+    },
+    "memorystore_redis_wrong_size": {
+        "enabled": True,
+        "description": "GCP Memorystore Redis wrong size - Basic >100GB or Standard <5GB, suboptimal sizing ($29-88/month) 💰💰💰 P2 [5% impact]",
+    },
+    "memorystore_redis_cross_zone_traffic": {
+        "enabled": True,
+        "description": "GCP Memorystore Redis cross-zone traffic - clients in different zone, $0.01/GB fees ($72/month per 10TB) 💰💰💰 P3 [3% impact]",
+    },
 }
 
 

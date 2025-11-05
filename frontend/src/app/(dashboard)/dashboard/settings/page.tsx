@@ -672,7 +672,12 @@ const RESOURCE_CATEGORIES = {
       "bigtable_underutilized", "bigtable_unnecessary_multicluster", "bigtable_unnecessary_ssd",
       "bigtable_devtest_overprovisioned", "bigtable_idle", "bigtable_empty_tables",
       "bigtable_untagged", "bigtable_low_cpu", "bigtable_storage_type_suboptimal",
-      "bigtable_zero_read_tables"
+      "bigtable_zero_read_tables",
+      // Memorystore Redis/Memcached (10 scenarios)
+      "memorystore_redis_idle", "memorystore_redis_overprovisioned", "memorystore_redis_low_hit_rate",
+      "memorystore_redis_wrong_tier", "memorystore_redis_wrong_eviction", "memorystore_redis_no_cud",
+      "memorystore_redis_untagged", "memorystore_redis_high_connection_churn", "memorystore_redis_wrong_size",
+      "memorystore_redis_cross_zone_traffic"
     ],
   },
   azure: {
@@ -923,6 +928,16 @@ const GCP_RESOURCE_ICONS: { [key: string]: any } = {
   bigtable_low_cpu: Database,
   bigtable_storage_type_suboptimal: Database,
   bigtable_zero_read_tables: Database,
+  memorystore_redis_idle: Database,
+  memorystore_redis_overprovisioned: Database,
+  memorystore_redis_low_hit_rate: Database,
+  memorystore_redis_wrong_tier: Database,
+  memorystore_redis_wrong_eviction: Database,
+  memorystore_redis_no_cud: Database,
+  memorystore_redis_untagged: Database,
+  memorystore_redis_high_connection_churn: Database,
+  memorystore_redis_wrong_size: Database,
+  memorystore_redis_cross_zone_traffic: Database,
 };
 
 const GCP_RESOURCE_LABELS: { [key: string]: string } = {
@@ -1091,6 +1106,17 @@ const GCP_RESOURCE_LABELS: { [key: string]: string } = {
   bigtable_low_cpu: "Cloud Bigtable (Very Low CPU<30% - Aggressive Reduction) 💰💰💰💰 P0",
   bigtable_storage_type_suboptimal: "Cloud Bigtable (Storage Type Suboptimal - HDD with High Throughput) 💰💰 P2",
   bigtable_zero_read_tables: "Cloud Bigtable (Tables with Zero Reads 30+ days) 💰💰 P2",
+  // Database - Memorystore Redis/Memcached (10 scenarios)
+  memorystore_redis_idle: "Memorystore Redis (Idle - 0 Connections/Ops 30+ days) 💰💰💰💰💰 P0",
+  memorystore_redis_overprovisioned: "Memorystore Redis (Over-Provisioned Memory <30%) 💰💰💰💰 P1",
+  memorystore_redis_low_hit_rate: "Memorystore Redis (Low Hit Rate <50% - Ineffective Cache) 💰💰💰💰💰 P0",
+  memorystore_redis_wrong_tier: "Memorystore Redis (Wrong Tier - Standard HA for Dev/Test) 💰💰💰 P2",
+  memorystore_redis_wrong_eviction: "Memorystore Redis (Wrong Eviction Policy - volatile-lru) 💰💰💰 P2",
+  memorystore_redis_no_cud: "Memorystore Redis (No Committed Use Discount ≥5GB) 💰💰 P3",
+  memorystore_redis_untagged: "Memorystore Redis (Missing Required Labels) 💰💰 P3",
+  memorystore_redis_high_connection_churn: "Memorystore Redis (High Connection Churn - No Pooling) 💰💰💰💰 P2",
+  memorystore_redis_wrong_size: "Memorystore Redis (Wrong Instance Size - Basic >100GB or Standard <5GB) 💰💰💰 P2",
+  memorystore_redis_cross_zone_traffic: "Memorystore Redis (Cross-Zone Traffic Costs) 💰💰💰 P3",
 };
 
 // Microsoft 365 Resource Icons & Labels
