@@ -667,7 +667,12 @@ const RESOURCE_CATEGORIES = {
       "firestore_idle", "firestore_unused_indexes", "firestore_missing_ttl",
       "firestore_over_indexing", "firestore_empty_collections", "firestore_untagged",
       "firestore_old_backups", "firestore_inefficient_queries", "firestore_unnecessary_composite",
-      "firestore_wrong_mode"
+      "firestore_wrong_mode",
+      // Bigtable (10 scenarios)
+      "bigtable_underutilized", "bigtable_unnecessary_multicluster", "bigtable_unnecessary_ssd",
+      "bigtable_devtest_overprovisioned", "bigtable_idle", "bigtable_empty_tables",
+      "bigtable_untagged", "bigtable_low_cpu", "bigtable_storage_type_suboptimal",
+      "bigtable_zero_read_tables"
     ],
   },
   azure: {
@@ -908,6 +913,16 @@ const GCP_RESOURCE_ICONS: { [key: string]: any } = {
   firestore_inefficient_queries: Database,
   firestore_unnecessary_composite: Database,
   firestore_wrong_mode: Database,
+  bigtable_underutilized: Database,
+  bigtable_unnecessary_multicluster: Database,
+  bigtable_unnecessary_ssd: Database,
+  bigtable_devtest_overprovisioned: Database,
+  bigtable_idle: Database,
+  bigtable_empty_tables: Database,
+  bigtable_untagged: Database,
+  bigtable_low_cpu: Database,
+  bigtable_storage_type_suboptimal: Database,
+  bigtable_zero_read_tables: Database,
 };
 
 const GCP_RESOURCE_LABELS: { [key: string]: string } = {
@@ -1065,6 +1080,17 @@ const GCP_RESOURCE_LABELS: { [key: string]: string } = {
   firestore_inefficient_queries: "Cloud Firestore (Inefficient Queries - N+1 Problem) 💰💰💰 P1",
   firestore_unnecessary_composite: "Cloud Firestore (Unnecessary Composite Indexes) 💰💰 P2",
   firestore_wrong_mode: "Cloud Firestore (Wrong Mode - Native vs Datastore Mismatch) ⚠️ P3",
+  // Database - Cloud Bigtable (10 scenarios)
+  bigtable_underutilized: "Cloud Bigtable (Under-Utilized CPU<65% - Reduce Nodes) 💰💰💰 P1",
+  bigtable_unnecessary_multicluster: "Cloud Bigtable (Unnecessary Multi-Cluster - Dev/Test Replication) 💰💰💰💰 P0",
+  bigtable_unnecessary_ssd: "Cloud Bigtable (Unnecessary SSD - Use HDD for Cold Data) 💰💰💰💰 P0",
+  bigtable_devtest_overprovisioned: "Cloud Bigtable (Dev/Test Over-Provisioned >1 Node) 💰💰💰 P1",
+  bigtable_idle: "Cloud Bigtable (Idle - 0 Requests 14+ days) 💰💰💰💰 P0",
+  bigtable_empty_tables: "Cloud Bigtable (Empty Tables - No Data) 💰💰💰 P1",
+  bigtable_untagged: "Cloud Bigtable (Missing Required Labels) 💰 P3",
+  bigtable_low_cpu: "Cloud Bigtable (Very Low CPU<30% - Aggressive Reduction) 💰💰💰💰 P0",
+  bigtable_storage_type_suboptimal: "Cloud Bigtable (Storage Type Suboptimal - HDD with High Throughput) 💰💰 P2",
+  bigtable_zero_read_tables: "Cloud Bigtable (Tables with Zero Reads 30+ days) 💰💰 P2",
 };
 
 // Microsoft 365 Resource Icons & Labels

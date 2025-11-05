@@ -3375,6 +3375,72 @@ DEFAULT_DETECTION_RULES = {
         "enabled": True,
         "description": "GCP Cloud Firestore wrong mode - Native vs Datastore mismatch (migration awareness) ⚠️ P3",
     },
+    # =================================================================
+    # GCP CLOUD BIGTABLE DETECTION RULES (10 scenarios)
+    # =================================================================
+    "bigtable_underutilized": {
+        "enabled": True,
+        "cpu_threshold": 65.0,
+        "target_cpu": 65.0,
+        "lookback_days": 14,
+        "min_savings_threshold": 100.0,
+        "description": "GCP Cloud Bigtable under-utilized - CPU<65% 14+ days, reduce nodes ($1,422/month typical) 💰💰💰 P1",
+    },
+    "bigtable_unnecessary_multicluster": {
+        "enabled": True,
+        "devtest_labels": ["dev", "test", "staging", "development"],
+        "min_savings_threshold": 200.0,
+        "description": "GCP Cloud Bigtable unnecessary multi-cluster - dev/test with replication, double node cost ($2,844/month) 💰💰💰💰 P0",
+    },
+    "bigtable_unnecessary_ssd": {
+        "enabled": True,
+        "throughput_threshold": 500,
+        "min_savings_threshold": 100.0,
+        "description": "GCP Cloud Bigtable unnecessary SSD - cold data on SSD, 6.5x storage waste ($2,184/month) 💰💰💰💰 P0",
+    },
+    "bigtable_devtest_overprovisioned": {
+        "enabled": True,
+        "devtest_labels": ["dev", "test", "staging", "development"],
+        "recommended_nodes": 1,
+        "min_savings_threshold": 100.0,
+        "description": "GCP Cloud Bigtable dev/test over-provisioned - >1 node for dev/test ($948/month waste) 💰💰💰 P1",
+    },
+    "bigtable_idle": {
+        "enabled": True,
+        "days_idle_threshold": 14,
+        "min_savings_threshold": 50.0,
+        "description": "GCP Cloud Bigtable idle - 0 requests 14+ days, 100% waste ($506/month typical) 💰💰💰💰 P0",
+    },
+    "bigtable_empty_tables": {
+        "enabled": True,
+        "min_savings_threshold": 50.0,
+        "description": "GCP Cloud Bigtable empty tables - no data, unused infrastructure ($474/month typical) 💰💰💰 P1",
+    },
+    "bigtable_untagged": {
+        "enabled": True,
+        "required_labels": ["environment", "owner", "cost-center"],
+        "governance_waste_pct": 0.05,
+        "description": "GCP Cloud Bigtable missing required labels - 5% governance waste 💰 P3",
+    },
+    "bigtable_low_cpu": {
+        "enabled": True,
+        "low_cpu_threshold": 30.0,
+        "target_cpu": 65.0,
+        "lookback_days": 14,
+        "min_savings_threshold": 200.0,
+        "description": "GCP Cloud Bigtable very low CPU - <30% 14+ days, aggressive reduction ($2,370/month typical) 💰💰💰💰 P0",
+    },
+    "bigtable_storage_type_suboptimal": {
+        "enabled": True,
+        "high_throughput_threshold": 5000,
+        "description": "GCP Cloud Bigtable storage type suboptimal - HDD with high throughput needs (performance risk) 💰💰 P2",
+    },
+    "bigtable_zero_read_tables": {
+        "enabled": True,
+        "days_lookback": 30,
+        "min_savings_threshold": 10.0,
+        "description": "GCP Cloud Bigtable tables with zero reads - 30+ days unused tables, storage waste 💰💰 P2",
+    },
 }
 
 
