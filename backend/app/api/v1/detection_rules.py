@@ -12,6 +12,7 @@ from app.models.detection_rule import DEFAULT_DETECTION_RULES
 from app.models.resource_families import (
     RESOURCE_FAMILIES,
     AZURE_RESOURCE_FAMILIES,
+    GCP_RESOURCE_FAMILIES,
     get_resource_family,
     get_family_scenarios,
     extract_common_params,
@@ -102,7 +103,7 @@ async def get_grouped_detection_rules(
     })
 
     # Process all resource types
-    all_families = {**RESOURCE_FAMILIES, **AZURE_RESOURCE_FAMILIES}
+    all_families = {**RESOURCE_FAMILIES, **AZURE_RESOURCE_FAMILIES, **GCP_RESOURCE_FAMILIES}
 
     for family, scenario_types in all_families.items():
         family_data = families_dict[family]

@@ -130,15 +130,53 @@ export function BasicModeView({ selectedProvider, searchQuery, showSuccess, show
   };
 
   const getProviderFromFamily = (familyName: string): string => {
-    if (familyName.startsWith("managed_disk") || familyName.startsWith("public_ip") ||
-        familyName.startsWith("disk_snapshot") || familyName.startsWith("virtual_machine") ||
-        familyName.startsWith("nat_gateway") || familyName.startsWith("azure_")) {
+    // Azure families
+    if (
+      familyName.startsWith("managed_disk") ||
+      familyName.startsWith("public_ip") ||
+      familyName.startsWith("disk_snapshot") ||
+      familyName.startsWith("virtual_machine") ||
+      familyName.startsWith("nat_gateway") ||
+      familyName.startsWith("azure_") ||
+      familyName.startsWith("load_balancer") ||
+      familyName.startsWith("application_gateway") ||
+      familyName.startsWith("sql_database") ||
+      familyName.startsWith("cosmosdb") ||
+      familyName.startsWith("postgres_mysql") ||
+      familyName.startsWith("synapse") ||
+      familyName.startsWith("redis") ||
+      familyName.startsWith("storage") ||
+      familyName.startsWith("functions") ||
+      familyName.startsWith("container_app") ||
+      familyName.startsWith("avd_") ||
+      familyName.startsWith("hdinsight") ||
+      familyName.startsWith("ml_compute") ||
+      familyName.startsWith("app_service") ||
+      familyName.startsWith("expressroute") ||
+      familyName.startsWith("vpn_gateway") ||
+      familyName.startsWith("network_interface")
+    ) {
       return "azure";
     }
-    if (familyName.includes("gcp") || familyName.startsWith("compute_") ||
-        familyName.startsWith("persistent_disk")) {
+
+    // GCP families
+    if (
+      familyName.startsWith("compute_instance") ||
+      familyName.startsWith("persistent_disk") ||
+      familyName.startsWith("cloud_sql") ||
+      familyName.startsWith("gke_") ||
+      familyName.startsWith("dataflow") ||
+      familyName.startsWith("dataproc") ||
+      familyName.startsWith("bigquery") ||
+      familyName.startsWith("memorystore") ||
+      familyName.startsWith("gcp_cloud") ||
+      familyName.startsWith("vertex_ai") ||
+      familyName.startsWith("notebook_instance")
+    ) {
       return "gcp";
     }
+
+    // AWS families (default)
     return "aws";
   };
 
@@ -191,6 +229,7 @@ export function BasicModeView({ selectedProvider, searchQuery, showSuccess, show
         filteredFamilies.map((family) => {
           const Icon = FAMILY_ICONS[family.resource_family] || HardDrive;
           const isExpanded = expandedFamilies.has(family.resource_family);
+          const provider = getProviderFromFamily(family.resource_family);
 
           return (
             <div
@@ -209,10 +248,21 @@ export function BasicModeView({ selectedProvider, searchQuery, showSuccess, show
                     <Icon className="w-6 h-6 text-blue-600" />
                   </div>
                   <div className="flex-1">
-                    <div className="flex items-center gap-2">
+                    <div className="flex items-center gap-2 flex-wrap">
                       <h3 className="text-lg font-bold text-gray-900">{family.label}</h3>
+                      <span
+                        className={`text-xs px-2 py-1 rounded-full font-semibold ${
+                          provider === "gcp"
+                            ? "bg-red-100 text-red-800"
+                            : provider === "azure"
+                            ? "bg-blue-100 text-blue-800"
+                            : "bg-orange-100 text-orange-800"
+                        }`}
+                      >
+                        {provider === "gcp" ? "🔴 GCP" : provider === "azure" ? "🔵 AZURE" : "🟠 AWS"}
+                      </span>
                       {family.is_customized && (
-                        <span className="px-2 py-0.5 bg-orange-100 text-orange-700 text-xs font-semibold rounded-full">
+                        <span className="px-2 py-0.5 bg-purple-200 text-purple-800 text-xs font-semibold rounded-full">
                           CUSTOMIZED
                         </span>
                       )}

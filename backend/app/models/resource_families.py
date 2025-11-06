@@ -144,6 +144,162 @@ AZURE_RESOURCE_FAMILIES: Dict[str, List[str]] = {
     # ... Add more as needed
 }
 
+# GCP Resource Families (logically grouped - 12 major services with ~152 scenarios)
+GCP_RESOURCE_FAMILIES: Dict[str, List[str]] = {
+    # Compute Engine Instances
+    "compute_instance": [
+        "compute_instance_stopped",
+        "compute_instance_idle",
+        "compute_instance_overprovisioned",
+        "compute_instance_old_generation",
+        "compute_instance_no_spot",
+        "compute_instance_untagged",
+        "compute_instance_memory_waste",
+        "compute_instance_rightsizing",
+        "compute_instance_burstable_waste",
+    ],
+    # Persistent Disks
+    "persistent_disk": [
+        "persistent_disk_unattached",
+        "persistent_disk_attached_stopped",
+        "persistent_disk_never_used",
+        "persistent_disk_orphan_snapshots",
+        "persistent_disk_oversized",
+        "persistent_disk_underutilized",
+        "persistent_disk_overprovisioned_type",
+        "persistent_disk_old_type",
+        "persistent_disk_readonly",
+        "persistent_disk_untagged",
+    ],
+    # Cloud SQL
+    "cloud_sql": [
+        "cloud_sql_stopped",
+        "cloud_sql_idle",
+        "cloud_sql_overprovisioned",
+        "cloud_sql_storage_overprovisioned",
+        "cloud_sql_unnecessary_ha",
+        "cloud_sql_old_machine_type",
+        "cloud_sql_unused_replicas",
+        "cloud_sql_zero_io",
+        "cloud_sql_untagged",
+        "cloud_sql_alternative_cost_per_gb",
+    ],
+    # GKE Clusters
+    "gke_cluster": [
+        "gke_cluster_empty",
+        "gke_cluster_no_workloads",
+        "gke_cluster_no_autoscaling",
+        "gke_cluster_nodes_inactive",
+        "gke_cluster_nodes_underutilized",
+        "gke_cluster_nodepool_overprovisioned",
+        "gke_cluster_pods_overrequested",
+        "gke_cluster_old_machine_type",
+        "gke_cluster_untagged",
+    ],
+    # Dataflow Jobs
+    "dataflow": [
+        "dataflow_streaming_job_idle",
+        "dataflow_job_low_cpu_utilization",
+        "dataflow_job_low_throughput",
+        "dataflow_job_oversized_workers",
+        "dataflow_oversized_disk",
+        "dataflow_no_max_workers",
+        "dataflow_batch_without_flexrs",
+        "dataflow_streaming_without_engine",
+        "dataflow_streaming_high_backlog",
+        "dataflow_job_failed_with_resources",
+    ],
+    # Dataproc Clusters
+    "dataproc_cluster": [
+        "dataproc_cluster_stopped",
+        "dataproc_cluster_idle",
+        "dataproc_cluster_low_cpu_utilization",
+        "dataproc_cluster_low_memory_utilization",
+        "dataproc_cluster_no_autoscaling",
+        "dataproc_cluster_oversized_workers",
+        "dataproc_cluster_unnecessary_ssd",
+        "dataproc_cluster_underutilized_hdfs",
+        "dataproc_cluster_no_scheduled_delete",
+        "dataproc_cluster_single_node_prod",
+    ],
+    # BigQuery
+    "bigquery": [
+        "bigquery_unused_materialized_views",
+        "bigquery_never_queried_tables",
+        "bigquery_empty_datasets",
+        "bigquery_unpartitioned_large_tables",
+        "bigquery_unclustered_large_tables",
+        "bigquery_no_expiration",
+        "bigquery_active_storage_waste",
+        "bigquery_expensive_queries",
+        "bigquery_ondemand_vs_flatrate",
+        "bigquery_untagged_datasets",
+    ],
+    # Memorystore Redis
+    "memorystore_redis": [
+        "memorystore_redis_idle",
+        "memorystore_redis_overprovisioned",
+        "memorystore_redis_low_hit_rate",
+        "memorystore_redis_wrong_tier",
+        "memorystore_redis_wrong_size",
+        "memorystore_redis_wrong_eviction",
+        "memorystore_redis_cross_zone_traffic",
+        "memorystore_redis_high_connection_churn",
+        "memorystore_redis_no_cud",
+        "memorystore_redis_untagged",
+    ],
+    # Cloud Functions
+    "gcp_cloud_function": [
+        "gcp_cloud_function_never_invoked",
+        "gcp_cloud_function_memory_overprovisioning",
+        "gcp_cloud_function_excessive_timeout",
+        "gcp_cloud_function_excessive_concurrency",
+        "gcp_cloud_function_excessive_max_instances",
+        "gcp_cloud_function_idle_min_instances",
+        "gcp_cloud_function_duplicate",
+        "gcp_cloud_function_cold_start_over_optimization",
+        "gcp_cloud_function_untagged",
+    ],
+    # Cloud Run
+    "gcp_cloud_run": [
+        "gcp_cloud_run_never_used",
+        "gcp_cloud_run_overprovisioned",
+        "gcp_cloud_run_excessive_min_instances",
+        "gcp_cloud_run_excessive_max_instances",
+        "gcp_cloud_run_idle_min_instances",
+        "gcp_cloud_run_nonprod_min_instances",
+        "gcp_cloud_run_cpu_always_allocated",
+        "gcp_cloud_run_low_concurrency",
+        "gcp_cloud_run_multi_region_redundant",
+        "gcp_cloud_run_untagged",
+    ],
+    # Vertex AI
+    "vertex_ai": [
+        "vertex_ai_idle_endpoints",
+        "vertex_ai_zero_predictions",
+        "vertex_ai_overprovisioned_machines",
+        "vertex_ai_unused_traffic_split",
+        "vertex_ai_old_model_versions",
+        "vertex_ai_gpu_waste",
+        "vertex_ai_failed_training_jobs",
+        "vertex_ai_unused_feature_store",
+        "vertex_ai_untagged_endpoints",
+    ],
+    # AI Platform Notebooks
+    "notebook_instance": [
+        "notebook_instance_stopped",
+        "notebook_instance_idle_no_shutdown",
+        "notebook_instance_running_no_activity",
+        "notebook_instance_oversized_machine_type",
+        "notebook_instance_oversized_disk",
+        "notebook_instance_low_cpu_utilization",
+        "notebook_instance_low_memory_utilization",
+        "notebook_instance_low_gpu_utilization",
+        "notebook_instance_gpu_attached_unused",
+        "notebook_instance_unnecessary_gpu_in_dev",
+    ],
+}
+
 # Inverse mapping: resource_type -> family
 RESOURCE_TYPE_TO_FAMILY: Dict[str, str] = {}
 for family, types in RESOURCE_FAMILIES.items():
@@ -151,6 +307,10 @@ for family, types in RESOURCE_FAMILIES.items():
         RESOURCE_TYPE_TO_FAMILY[resource_type] = family
 
 for family, types in AZURE_RESOURCE_FAMILIES.items():
+    for resource_type in types:
+        RESOURCE_TYPE_TO_FAMILY[resource_type] = family
+
+for family, types in GCP_RESOURCE_FAMILIES.items():
     for resource_type in types:
         RESOURCE_TYPE_TO_FAMILY[resource_type] = family
 
@@ -166,6 +326,8 @@ def get_family_scenarios(family: str) -> List[str]:
         return RESOURCE_FAMILIES[family]
     elif family in AZURE_RESOURCE_FAMILIES:
         return AZURE_RESOURCE_FAMILIES[family]
+    elif family in GCP_RESOURCE_FAMILIES:
+        return GCP_RESOURCE_FAMILIES[family]
     else:
         return [family]  # Single-scenario family
 
