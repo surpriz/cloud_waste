@@ -863,7 +863,7 @@ class AWSProvider(CloudProviderBase):
 
                     orphans.append(
                         OrphanResourceData(
-                            resource_type="ebs_volume",
+                            resource_type="ebs_volume_unattached",
                             resource_id=volume_id,
                             resource_name=name,
                             region=region,
@@ -1041,7 +1041,7 @@ class AWSProvider(CloudProviderBase):
 
                             orphans.append(
                                 OrphanResourceData(
-                                    resource_type="ebs_volume",
+                                    resource_type="ebs_volume_on_stopped_instance",
                                     resource_id=volume_id,
                                     resource_name=volume_name,
                                     region=region,
@@ -1137,7 +1137,7 @@ class AWSProvider(CloudProviderBase):
 
                     orphans.append(
                         OrphanResourceData(
-                            resource_type="ebs_volume",
+                            resource_type="ebs_volume_gp2_migration",
                             resource_id=volume_id,
                             resource_name=name,
                             region=region,
@@ -1243,7 +1243,7 @@ class AWSProvider(CloudProviderBase):
 
                     orphans.append(
                         OrphanResourceData(
-                            resource_type="ebs_volume",
+                            resource_type="ebs_volume_unnecessary_io2",
                             resource_id=volume_id,
                             resource_name=name,
                             region=region,
@@ -1359,7 +1359,7 @@ class AWSProvider(CloudProviderBase):
 
                     orphans.append(
                         OrphanResourceData(
-                            resource_type="ebs_volume",
+                            resource_type="ebs_volume_overprovisioned_iops",
                             resource_id=volume_id,
                             resource_name=name,
                             region=region,
@@ -1475,7 +1475,7 @@ class AWSProvider(CloudProviderBase):
 
                     orphans.append(
                         OrphanResourceData(
-                            resource_type="ebs_volume",
+                            resource_type="ebs_volume_overprovisioned_throughput",
                             resource_id=volume_id,
                             resource_name=name,
                             region=region,
@@ -1596,7 +1596,7 @@ class AWSProvider(CloudProviderBase):
 
                     orphans.append(
                         OrphanResourceData(
-                            resource_type="ebs_volume",
+                            resource_type="ebs_volume_low_iops_usage",
                             resource_id=volume_id,
                             resource_name=name,
                             region=region,
@@ -1712,7 +1712,7 @@ class AWSProvider(CloudProviderBase):
 
                     orphans.append(
                         OrphanResourceData(
-                            resource_type="ebs_volume",
+                            resource_type="ebs_volume_low_throughput_usage",
                             resource_id=volume_id,
                             resource_name=name,
                             region=region,
@@ -1830,7 +1830,7 @@ class AWSProvider(CloudProviderBase):
 
                     orphans.append(
                         OrphanResourceData(
-                            resource_type="ebs_volume",
+                            resource_type="ebs_volume_type_downgrade",
                             resource_id=volume_id,
                             resource_name=name,
                             region=region,
@@ -2001,7 +2001,7 @@ class AWSProvider(CloudProviderBase):
 
                     orphans.append(
                         OrphanResourceData(
-                            resource_type="elastic_ip",
+                            resource_type="elastic_ip_unassociated",
                             resource_id=allocation_id,
                             resource_name=name,
                             region=region,
@@ -2133,7 +2133,7 @@ class AWSProvider(CloudProviderBase):
 
                         orphans.append(
                             OrphanResourceData(
-                                resource_type="elastic_ip",
+                                resource_type="elastic_ip_multiple_per_instance",
                                 resource_id=allocation_id,
                                 resource_name=name,
                                 region=region,
@@ -2259,7 +2259,7 @@ class AWSProvider(CloudProviderBase):
 
                     orphans.append(
                         OrphanResourceData(
-                            resource_type="elastic_ip",
+                            resource_type="elastic_ip_on_detached_eni",
                             resource_id=allocation_id,
                             resource_name=name,
                             region=region,
@@ -2371,7 +2371,7 @@ class AWSProvider(CloudProviderBase):
 
                     orphans.append(
                         OrphanResourceData(
-                            resource_type="elastic_ip",
+                            resource_type="elastic_ip_never_used",
                             resource_id=allocation_id,
                             resource_name=name,
                             region=region,
@@ -2518,7 +2518,7 @@ class AWSProvider(CloudProviderBase):
 
                     orphans.append(
                         OrphanResourceData(
-                            resource_type="elastic_ip",
+                            resource_type="elastic_ip_on_unused_nat_gateway",
                             resource_id=allocation_id,
                             resource_name=name,
                             region=region,
@@ -2646,7 +2646,7 @@ class AWSProvider(CloudProviderBase):
 
                     orphans.append(
                         OrphanResourceData(
-                            resource_type="elastic_ip",
+                            resource_type="elastic_ip_idle",
                             resource_id=allocation_id,
                             resource_name=name,
                             region=region,
@@ -2776,7 +2776,7 @@ class AWSProvider(CloudProviderBase):
 
                     orphans.append(
                         OrphanResourceData(
-                            resource_type="elastic_ip",
+                            resource_type="elastic_ip_low_traffic",
                             resource_id=allocation_id,
                             resource_name=name,
                             region=region,
@@ -2922,7 +2922,7 @@ class AWSProvider(CloudProviderBase):
 
                     orphans.append(
                         OrphanResourceData(
-                            resource_type="elastic_ip",
+                            resource_type="elastic_ip_unused_nat_gateway",
                             resource_id=allocation_id,
                             resource_name=name,
                             region=region,
@@ -3053,7 +3053,7 @@ class AWSProvider(CloudProviderBase):
 
                     orphans.append(
                         OrphanResourceData(
-                            resource_type="elastic_ip",
+                            resource_type="elastic_ip_on_failed_instance",
                             resource_id=allocation_id,
                             resource_name=name,
                             region=region,
@@ -3217,7 +3217,7 @@ class AWSProvider(CloudProviderBase):
 
                     orphans.append(
                         OrphanResourceData(
-                            resource_type="ebs_snapshot",
+                            resource_type="ebs_snapshot_orphaned",
                             resource_id=snapshot_id,
                             resource_name=name or description,
                             region=region,
@@ -3342,7 +3342,7 @@ class AWSProvider(CloudProviderBase):
 
                                 orphans.append(
                                     OrphanResourceData(
-                                        resource_type="ebs_snapshot",
+                                        resource_type="ebs_snapshot_redundant",
                                         resource_id=snapshot_id,
                                         resource_name=name or description,
                                         region=region,
@@ -3483,7 +3483,7 @@ class AWSProvider(CloudProviderBase):
 
                         orphans.append(
                             OrphanResourceData(
-                                resource_type="ebs_snapshot",
+                                resource_type="ebs_snapshot_unused_ami",
                                 resource_id=snapshot_id,
                                 resource_name=name or description,
                                 region=region,
@@ -3587,7 +3587,7 @@ class AWSProvider(CloudProviderBase):
 
                         orphans.append(
                             OrphanResourceData(
-                                resource_type="ebs_snapshot",
+                                resource_type="ebs_snapshot_old_unused",
                                 resource_id=snapshot_id,
                                 resource_name=name or description,
                                 region=region,
@@ -3709,7 +3709,7 @@ class AWSProvider(CloudProviderBase):
 
                             orphans.append(
                                 OrphanResourceData(
-                                    resource_type="ebs_snapshot",
+                                    resource_type="ebs_snapshot_from_deleted_instance",
                                     resource_id=snapshot_id,
                                     resource_name=name or description,
                                     region=region,
@@ -3813,7 +3813,7 @@ class AWSProvider(CloudProviderBase):
 
                         orphans.append(
                             OrphanResourceData(
-                                resource_type="ebs_snapshot",
+                                resource_type="ebs_snapshot_incomplete_failed",
                                 resource_id=snapshot_id,
                                 resource_name=name or description,
                                 region=region,
@@ -3898,7 +3898,7 @@ class AWSProvider(CloudProviderBase):
 
                         orphans.append(
                             OrphanResourceData(
-                                resource_type="ebs_snapshot",
+                                resource_type="ebs_snapshot_untagged",
                                 resource_id=snapshot_id,
                                 resource_name=description or snapshot_id,
                                 region=region,
@@ -4008,7 +4008,7 @@ class AWSProvider(CloudProviderBase):
 
                         orphans.append(
                             OrphanResourceData(
-                                resource_type="ebs_snapshot",
+                                resource_type="ebs_snapshot_excessive_retention",
                                 resource_id=snapshot_id,
                                 resource_name=name or description,
                                 region=region,
@@ -4124,7 +4124,7 @@ class AWSProvider(CloudProviderBase):
 
                                 orphans.append(
                                     OrphanResourceData(
-                                        resource_type="ebs_snapshot",
+                                        resource_type="ebs_snapshot_duplicate",
                                         resource_id=snapshot_id,
                                         resource_name=name or description,
                                         region=region,
@@ -4236,7 +4236,7 @@ class AWSProvider(CloudProviderBase):
 
                             orphans.append(
                                 OrphanResourceData(
-                                    resource_type="ec2_instance",
+                                    resource_type="ec2_instance_stopped",
                                     resource_id=instance_id,
                                     resource_name=name,
                                     region=region,
@@ -4450,7 +4450,7 @@ class AWSProvider(CloudProviderBase):
 
                                 orphans.append(
                                     OrphanResourceData(
-                                        resource_type="ec2_instance",
+                                        resource_type="ec2_instance_idle_running",
                                         resource_id=instance_id,
                                         resource_name=name,
                                         region=region,
@@ -4642,7 +4642,7 @@ class AWSProvider(CloudProviderBase):
 
                             orphans.append(
                                 OrphanResourceData(
-                                    resource_type="ec2_instance",
+                                    resource_type="ec2_instance_oversized",
                                     resource_id=instance_id,
                                     resource_name=name,
                                     region=region,
@@ -4731,7 +4731,7 @@ class AWSProvider(CloudProviderBase):
 
                             orphans.append(
                                 OrphanResourceData(
-                                    resource_type="ec2_instance",
+                                    resource_type="ec2_instance_old_generation",
                                     resource_id=instance_id,
                                     resource_name=name,
                                     region=region,
@@ -4835,7 +4835,7 @@ class AWSProvider(CloudProviderBase):
                                 savings = current_cost - recommended_cost
 
                                 orphans.append(OrphanResourceData(
-                                    resource_type="ec2_instance",
+                                    resource_type="ec2_instance_burstable_credit_waste",
                                     resource_id=instance_id,
                                     resource_name=name,
                                     region=region,
@@ -4915,7 +4915,7 @@ class AWSProvider(CloudProviderBase):
                             savings = monthly_cost * 0.67
 
                             orphans.append(OrphanResourceData(
-                                resource_type="ec2_instance",
+                                resource_type="ec2_instance_dev_test_24_7",
                                 resource_id=instance_id,
                                 resource_name=name,
                                 region=region,
@@ -4977,7 +4977,7 @@ class AWSProvider(CloudProviderBase):
                             monthly_cost = self._estimate_ec2_instance_cost(instance_type) if state == 'running' else 0
 
                             orphans.append(OrphanResourceData(
-                                resource_type="ec2_instance",
+                                resource_type="ec2_instance_untagged",
                                 resource_id=instance_id,
                                 resource_name=instance_id,
                                 region=region,
@@ -5090,7 +5090,7 @@ class AWSProvider(CloudProviderBase):
                                 savings = current_cost - spot_cost
 
                                 orphans.append(OrphanResourceData(
-                                    resource_type="ec2_instance",
+                                    resource_type="ec2_instance_spot_eligible",
                                     resource_id=instance_id,
                                     resource_name=name,
                                     region=region,
@@ -5192,7 +5192,7 @@ class AWSProvider(CloudProviderBase):
                                     savings = current_cost * 0.73
 
                                     orphans.append(OrphanResourceData(
-                                        resource_type="ec2_instance",
+                                        resource_type="ec2_instance_scheduled_unused",
                                         resource_id=instance_id,
                                         resource_name=name,
                                         region=region,

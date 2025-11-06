@@ -13,183 +13,264 @@ from app.core.database import Base
 
 # Default detection rules (best practices)
 DEFAULT_DETECTION_RULES = {
-    "ebs_volume": {
+    # ============================================================================
+    # AWS EBS VOLUMES - GRANULAR DETECTION (10 scenarios)
+    # ============================================================================
+    "ebs_volume_unattached": {
         "enabled": True,
-        # SCENARIO 1: Unattached volumes
-        "min_age_days": 7,  # Ignore volumes created in last 7 days
-        "confidence_threshold_days": 30,  # High confidence after 30 days
-        "detect_attached_unused": True,  # Also detect attached volumes with no I/O activity
-        "min_idle_days_attached": 30,  # Min days of no I/O for attached volumes
-
-        # SCENARIO 2: Volumes on stopped instances
-        "min_stopped_days": 30,  # Instance must be stopped for 30+ days
-
-        # SCENARIO 3: gp2 → gp3 migration recommendation
-        "min_size_gb": 100,  # Minimum volume size for migration recommendation (small volumes = marginal savings)
-
-        # SCENARIO 4: Unnecessary io2 volumes
+        "min_age_days": 7,
+        "confidence_threshold_days": 30,
+        "description": "EBS volumes that are not attached to any EC2 instance",
+    },
+    "ebs_volume_on_stopped_instance": {
+        "enabled": True,
+        "min_stopped_days": 30,
+        "description": "EBS volumes attached to EC2 instances that have been stopped for 30+ days",
+    },
+    "ebs_volume_gp2_migration": {
+        "enabled": True,
+        "min_size_gb": 100,
+        "description": "EBS gp2 volumes that should be migrated to gp3 for cost savings",
+    },
+    "ebs_volume_unnecessary_io2": {
+        "enabled": True,
         "compliance_tags": [
             "compliance", "hipaa", "pci-dss", "sox", "gdpr", "iso27001",
             "critical", "production-critical", "high-availability"
-        ],  # Tags that justify io2 durability (99.999%)
-
-        # SCENARIO 5: Overprovisioned IOPS
-        "iops_overprovisioning_factor": 2.0,  # Flag if provisioned IOPS > baseline × 2
-
-        # SCENARIO 6: Overprovisioned throughput
-        "baseline_throughput_mbps": 125,  # gp3 baseline throughput (free)
+        ],
+        "description": "EBS io2 volumes without compliance requirements (99.999% durability not needed)",
+    },
+    "ebs_volume_overprovisioned_iops": {
+        "enabled": True,
+        "iops_overprovisioning_factor": 2.0,
+        "description": "EBS volumes with provisioned IOPS exceeding baseline by 2x or more",
+    },
+    "ebs_volume_overprovisioned_throughput": {
+        "enabled": True,
+        "baseline_throughput_mbps": 125,
         "high_throughput_workload_tags": [
             "database", "analytics", "bigdata", "ml", "etl", "data-warehouse"
-        ],  # Workloads that justify high throughput
-
-        # SCENARIO 7: Idle volumes (CloudWatch - already partially implemented)
-        "min_idle_days": 60,  # Observation period for idle detection
-        "max_ops_threshold": 0.1,  # ops/sec - consider idle if < 0.1 ops/sec
-
-        # SCENARIO 8: Low IOPS usage
-        "max_iops_utilization_percent": 30,  # Flag if IOPS utilization < 30%
-        "safety_buffer_factor": 1.5,  # Recommended IOPS = avg × 1.5 (safety margin)
-        "min_observation_days": 30,  # CloudWatch observation period
-
-        # SCENARIO 9: Low throughput usage
-        "max_throughput_utilization_percent": 30,  # Flag if throughput utilization < 30%
-
-        # SCENARIO 10: Volume type downgrade opportunities
-        "min_savings_percent": 20,  # Only recommend downgrade if savings ≥ 20%
-        "safety_margin_iops": 1.5,  # Ensure downgraded type can handle avg_iops × 1.5
-
-        "description": "EBS volumes - 10 waste scenarios: unattached, stopped instances, gp2→gp3 migration, unnecessary io2, overprovisioned IOPS/throughput, idle, low IOPS/throughput usage, type downgrade opportunities",
+        ],
+        "description": "EBS volumes with provisioned throughput exceeding gp3 baseline (125 MB/s)",
     },
-    "elastic_ip": {
+    "ebs_volume_idle": {
         "enabled": True,
-
-        # SCENARIO 1: Unassociated Elastic IPs
-        "min_age_days": 3,  # Ignore IPs allocated in last 3 days
-        "confidence_threshold_days": 7,  # High confidence after 7 days
-
-        # SCENARIO 2: EIPs on stopped EC2 instances
-        "min_stopped_days": 30,  # Instance must be stopped for 30+ days
-
-        # SCENARIO 3: Multiple EIPs per instance
-        "max_eips_per_instance": 1,  # Flag instances with more than 1 EIP
+        "min_idle_days": 60,
+        "max_ops_threshold": 0.1,
+        "description": "EBS volumes with zero or near-zero I/O operations for 60+ days",
+    },
+    "ebs_volume_low_iops_usage": {
+        "enabled": True,
+        "max_iops_utilization_percent": 30,
+        "safety_buffer_factor": 1.5,
+        "min_observation_days": 30,
+        "description": "EBS volumes using less than 30% of provisioned IOPS",
+    },
+    "ebs_volume_low_throughput_usage": {
+        "enabled": True,
+        "max_throughput_utilization_percent": 30,
+        "min_observation_days": 30,
+        "description": "EBS volumes using less than 30% of provisioned throughput",
+    },
+    "ebs_volume_type_downgrade": {
+        "enabled": True,
+        "min_savings_percent": 20,
+        "safety_margin_iops": 1.5,
+        "description": "EBS volumes that can be downgraded to cheaper volume types (20%+ savings)",
+    },
+    # ============================================================================
+    # AWS ELASTIC IPS - GRANULAR DETECTION (10 scenarios)
+    # ============================================================================
+    "elastic_ip_unassociated": {
+        "enabled": True,
+        "min_age_days": 3,
+        "confidence_threshold_days": 7,
+        "description": "Elastic IPs that are not associated with any AWS resource",
+    },
+    "elastic_ip_on_stopped_instance": {
+        "enabled": True,
+        "min_stopped_days": 30,
+        "description": "Elastic IPs associated with EC2 instances that have been stopped for 30+ days",
+    },
+    "elastic_ip_multiple_per_instance": {
+        "enabled": True,
+        "max_eips_per_instance": 1,
         "allow_multiple_eips_tags": [
             "multi-nic", "ha", "high-availability", "active-active",
             "failover", "floating-ip"
-        ],  # Tags that justify multiple EIPs
-
-        # SCENARIO 4: EIPs on detached ENIs
-        "detached_eni_min_days": 7,  # ENI must be detached for 7+ days
-
-        # SCENARIO 5: Never-used EIPs
-        "min_never_used_days": 7,  # EIP never attached since allocation for 7+ days
-
-        # SCENARIO 6: EIPs on unused NAT Gateways
-        "nat_gateway_min_idle_days": 30,  # NAT Gateway must be idle for 30+ days
-        "nat_gateway_traffic_threshold_gb": 0.1,  # < 0.1 GB/month = unused
-
-        # SCENARIO 7: Idle EIPs (CloudWatch)
-        "min_idle_days": 30,  # Active resource must be idle for 30+ days
-        "idle_network_threshold_bytes": 1_000_000,  # < 1MB in lookback = idle
-        "min_observation_days": 30,  # CloudWatch observation period
-
-        # SCENARIO 8: Low-traffic EIPs
-        "low_traffic_threshold_gb": 1.0,  # < 1 GB/month for 30 days
-
-        # SCENARIO 9: EIPs on unused NAT Gateways (advanced CloudWatch)
-        "nat_gateway_zero_connections_days": 30,  # NAT with zero connections for 30+ days
-
-        # SCENARIO 10: EIPs on failed instances
-        "max_status_check_failures": 7,  # Consecutive days of status check failures
-        "min_failed_days": 7,  # Instance failing for 7+ days
-
-        "description": "Elastic IP addresses - 10 waste scenarios: unassociated, stopped instances, multiple EIPs per instance, detached ENIs, never-used, unused NAT Gateways, idle resources, low traffic, zero NAT connections, failed instances",
+        ],
+        "description": "EC2 instances with multiple Elastic IPs (unless tagged for high availability)",
     },
-    "ebs_snapshot": {
+    "elastic_ip_on_detached_eni": {
         "enabled": True,
-        "min_age_days": 90,  # Snapshots older than 90 days
-        "require_orphaned_volume": True,  # Volume must be deleted
-        "detect_idle_volume_snapshots": True,  # Also detect snapshots of idle/orphaned volumes
-        "detect_redundant_snapshots": True,  # Detect redundant snapshots (too many per volume)
-        "max_snapshots_per_volume": 7,  # Keep only N most recent snapshots per volume
-        "detect_unused_ami_snapshots": True,  # Detect snapshots of unused AMIs
-        "min_ami_unused_days": 180,  # AMI unused for 180+ days
-        # Scenario 3: Old unused snapshots
-        "detect_old_unused": True,  # Detect very old snapshots without compliance tags
-        "old_unused_age_days": 365,  # Snapshots >365 days without compliance tags
-        "compliance_tags": ["Backup", "Compliance", "Governance", "Retention", "Legal"],  # Tags indicating intentional retention
-        # Scenario 4: Snapshots from deleted instances
-        "detect_deleted_instance_snapshots": True,  # Detect snapshots with instance IDs in description where instance no longer exists
-        # Scenario 5: Incomplete/failed snapshots
-        "detect_incomplete_failed": True,  # Detect snapshots in error or pending state
-        "max_pending_days": 7,  # Maximum days a snapshot can be in pending state
-        # Scenario 6: Untagged snapshots
-        "detect_untagged": True,  # Detect snapshots with no tags (likely abandoned)
-        "min_untagged_age_days": 30,  # Snapshots must be >30 days old to be flagged as untagged
-        # Scenario 8: Excessive retention in non-prod
-        "detect_excessive_retention": True,  # Detect snapshots retained too long in non-prod environments
-        "nonprod_max_days": 90,  # Max retention for dev/test/staging environments
-        "nonprod_env_tags": ["Environment", "Env", "Stage"],  # Tags that indicate environment
-        "nonprod_env_values": ["dev", "development", "test", "testing", "stage", "staging", "qa"],  # Values indicating non-prod
-        # Scenario 9: Duplicate snapshots
-        "detect_duplicates": True,  # Detect duplicate snapshots (same volume + size within short time window)
-        "duplicate_window_hours": 1,  # Time window to detect duplicates (snapshots of same volume within N hours)
-        "confidence_threshold_days": 180,
-        "description": "EBS Snapshots - 10 waste scenarios: orphaned volumes, redundant backups, old unused, deleted instances, incomplete/failed, untagged, never restored (CloudTrail), excessive retention, duplicates, unused AMIs",
+        "detached_eni_min_days": 7,
+        "description": "Elastic IPs associated with detached ENIs for 7+ days",
     },
-    "ec2_instance": {
+    "elastic_ip_never_used": {
         "enabled": True,
-        # Scenario 1: Stopped instances
-        "min_stopped_days": 30,  # Stopped for > 30 days
+        "min_never_used_days": 7,
+        "description": "Elastic IPs that have never been attached since allocation (7+ days)",
+    },
+    "elastic_ip_on_unused_nat_gateway": {
+        "enabled": True,
+        "nat_gateway_min_idle_days": 30,
+        "nat_gateway_traffic_threshold_gb": 0.1,
+        "description": "Elastic IPs on NAT Gateways with minimal traffic (<0.1 GB/month)",
+    },
+    "elastic_ip_idle": {
+        "enabled": True,
+        "min_idle_days": 30,
+        "idle_network_threshold_bytes": 1_000_000,
+        "min_observation_days": 30,
+        "description": "Elastic IPs on active resources with zero or minimal network activity",
+    },
+    "elastic_ip_low_traffic": {
+        "enabled": True,
+        "low_traffic_threshold_gb": 1.0,
+        "min_observation_days": 30,
+        "description": "Elastic IPs with very low traffic (<1 GB/month for 30 days)",
+    },
+    "elastic_ip_unused_nat_gateway": {
+        "enabled": True,
+        "nat_gateway_zero_connections_days": 30,
+        "description": "Elastic IPs on NAT Gateways with zero connections for 30+ days",
+    },
+    "elastic_ip_on_failed_instance": {
+        "enabled": True,
+        "max_status_check_failures": 7,
+        "min_failed_days": 7,
+        "description": "Elastic IPs on EC2 instances failing status checks for 7+ days",
+    },
+    # ============================================================================
+    # AWS EBS SNAPSHOTS - GRANULAR DETECTION (10 scenarios)
+    # ============================================================================
+    "ebs_snapshot_orphaned": {
+        "enabled": True,
+        "min_age_days": 90,
+        "require_orphaned_volume": True,
+        "description": "EBS snapshots of volumes that no longer exist (orphaned for 90+ days)",
+    },
+    "ebs_snapshot_redundant": {
+        "enabled": True,
+        "max_snapshots_per_volume": 7,
+        "description": "Redundant EBS snapshots (more than 7 snapshots per volume)",
+    },
+    "ebs_snapshot_unused_ami": {
+        "enabled": True,
+        "min_ami_unused_days": 180,
+        "description": "EBS snapshots associated with AMIs that haven't been used for 180+ days",
+    },
+    "ebs_snapshot_old_unused": {
+        "enabled": True,
+        "old_unused_age_days": 365,
+        "compliance_tags": ["Backup", "Compliance", "Governance", "Retention", "Legal"],
+        "description": "Very old EBS snapshots (365+ days) without compliance tags",
+    },
+    "ebs_snapshot_from_deleted_instance": {
+        "enabled": True,
+        "description": "EBS snapshots from EC2 instances that have been deleted",
+    },
+    "ebs_snapshot_incomplete_failed": {
+        "enabled": True,
+        "max_pending_days": 7,
+        "description": "EBS snapshots in error or pending state for 7+ days",
+    },
+    "ebs_snapshot_untagged": {
+        "enabled": True,
+        "min_untagged_age_days": 30,
+        "description": "EBS snapshots with no tags (likely abandoned, 30+ days old)",
+    },
+    "ebs_snapshot_excessive_retention": {
+        "enabled": True,
+        "nonprod_max_days": 90,
+        "nonprod_env_tags": ["Environment", "Env", "Stage"],
+        "nonprod_env_values": ["dev", "development", "test", "testing", "stage", "staging", "qa"],
+        "description": "EBS snapshots retained too long in non-production environments (>90 days)",
+    },
+    "ebs_snapshot_duplicate": {
+        "enabled": True,
+        "duplicate_window_hours": 1,
+        "description": "Duplicate EBS snapshots (same volume within 1 hour)",
+    },
+    "ebs_snapshot_never_restored": {
+        "enabled": True,
+        "min_age_days": 180,
+        "description": "EBS snapshots that have never been restored (180+ days old)",
+    },
+    # ============================================================================
+    # AWS EC2 INSTANCES - GRANULAR DETECTION (10 scenarios)
+    # ============================================================================
+    "ec2_instance_stopped": {
+        "enabled": True,
+        "min_stopped_days": 30,
         "confidence_threshold_days": 60,
-        # Scenario 7: Idle running instances detection
-        "detect_idle_running": True,  # Also detect running instances with low utilization
-        "cpu_threshold_percent": 5.0,  # Average CPU < 5% = idle
-        "network_threshold_bytes": 1_000_000,  # < 1MB network traffic in lookback period = idle
-        "min_idle_days": 7,  # Running instances must be idle for at least 7 days to be detected
-        "idle_confidence_threshold_days": 30,  # High confidence after 30 days idle
-        # Scenario 2: Over-provisioned instances
-        "detect_oversized": True,  # Detect over-provisioned instances
-        "oversized_cpu_threshold": 30.0,  # Average CPU <30% = over-provisioned
-        "oversized_lookback_days": 30,  # Analyze last 30 days
-        "oversized_min_instance_size": "xlarge",  # Only check xlarge+ instances
-        # Scenario 3: Old generation instances
-        "detect_old_generation": True,  # Detect obsolete instance types
-        "old_generations": ["t2", "m4", "c4", "r4", "i3", "x1", "p2", "g3"],  # Obsolete families
+        "description": "EC2 instances that have been stopped for 30+ days",
+    },
+    "ec2_instance_idle_running": {
+        "enabled": True,
+        "cpu_threshold_percent": 5.0,
+        "network_threshold_bytes": 1_000_000,
+        "min_idle_days": 7,
+        "idle_confidence_threshold_days": 30,
+        "description": "Running EC2 instances with very low CPU (<5%) and minimal network activity",
+    },
+    "ec2_instance_oversized": {
+        "enabled": True,
+        "oversized_cpu_threshold": 30.0,
+        "oversized_lookback_days": 30,
+        "oversized_min_instance_size": "xlarge",
+        "description": "Over-provisioned EC2 instances (CPU <30% for xlarge+ instances)",
+    },
+    "ec2_instance_old_generation": {
+        "enabled": True,
+        "old_generations": ["t2", "m4", "c4", "r4", "i3", "x1", "p2", "g3"],
         "generation_mapping": {
             "t2": "t3", "m4": "m5", "c4": "c5", "r4": "r5",
             "i3": "i3en", "x1": "x2idn", "p2": "p3", "g3": "g4dn"
-        },  # Old → New mapping
-        # Scenario 4: Burstable credit waste (T2/T3/T4)
-        "detect_burstable_waste": True,  # Detect T2/T3/T4 credit waste
-        "burstable_credit_threshold": 0.9,  # Credit balance >90% of max = waste
-        "burstable_lookback_days": 30,  # Analyze last 30 days
-        "detect_unlimited_charges": True,  # Detect Unlimited mode charges
-        # Scenario 5: Dev/Test running 24/7
-        "detect_dev_test_24_7": True,  # Detect non-prod running 24/7
-        "nonprod_env_tags": ["Environment", "Env", "Stage"],  # Tags indicating environment
-        "nonprod_env_values": ["dev", "development", "test", "testing", "stage", "staging", "qa", "sandbox"],  # Non-prod values
-        "nonprod_min_age_days": 7,  # Running for >7 days
-        # Scenario 6: Untagged instances
-        "detect_untagged": True,  # Detect instances without tags
-        "untagged_min_age_days": 30,  # >30 days old
-        # Scenario 8: Right-sizing opportunities (advanced)
-        "detect_right_sizing": True,  # Advanced right-sizing analysis
-        "right_sizing_cpu_threshold": 40.0,  # CPU <40% = potential right-sizing
-        "right_sizing_max_cpu_threshold": 75.0,  # Max CPU must be <75% to recommend downsize
-        "right_sizing_lookback_days": 30,  # Analyze last 30 days
-        # Scenario 9: Spot-eligible workloads
-        "detect_spot_eligible": True,  # Detect Spot-compatible workloads
-        "spot_cpu_variance_threshold": 20.0,  # CPU variance <20% = stable workload
-        "spot_min_uptime_days": 7,  # Running for >7 days
-        "spot_excluded_types": ["database", "cache", "queue"],  # Exclude critical workloads
-        # Scenario 10: Scheduled unused (business hours only)
-        "detect_scheduled_unused": True,  # Detect usage only during business hours
-        "business_hours_start": 9,  # 9 AM
-        "business_hours_end": 18,  # 6 PM
-        "business_days": [0, 1, 2, 3, 4],  # Monday-Friday (0=Monday)
-        "scheduled_cpu_threshold": 10.0,  # CPU <10% outside business hours
-        "scheduled_lookback_days": 14,  # Analyze last 14 days
-        "description": "EC2 Instances - 10 waste scenarios: stopped >30d, oversized, old generation, burstable credit waste, dev/test 24/7, untagged, idle, right-sizing, Spot-eligible, scheduled unused",
+        },
+        "description": "EC2 instances using obsolete instance types (t2, m4, c4, r4, etc.)",
+    },
+    "ec2_instance_burstable_credit_waste": {
+        "enabled": True,
+        "burstable_credit_threshold": 0.9,
+        "burstable_lookback_days": 30,
+        "detect_unlimited_charges": True,
+        "description": "T2/T3/T4 instances with unused CPU credits (>90% balance)",
+    },
+    "ec2_instance_dev_test_24_7": {
+        "enabled": True,
+        "nonprod_env_tags": ["Environment", "Env", "Stage"],
+        "nonprod_env_values": ["dev", "development", "test", "testing", "stage", "staging", "qa", "sandbox"],
+        "nonprod_min_age_days": 7,
+        "description": "Non-production EC2 instances running 24/7 (dev/test/staging)",
+    },
+    "ec2_instance_untagged": {
+        "enabled": True,
+        "untagged_min_age_days": 30,
+        "description": "EC2 instances without any tags (likely orphaned, 30+ days old)",
+    },
+    "ec2_instance_right_sizing_opportunity": {
+        "enabled": True,
+        "right_sizing_cpu_threshold": 40.0,
+        "right_sizing_max_cpu_threshold": 75.0,
+        "right_sizing_lookback_days": 30,
+        "description": "EC2 instances with right-sizing opportunities (CPU consistently <40%)",
+    },
+    "ec2_instance_spot_eligible": {
+        "enabled": True,
+        "spot_cpu_variance_threshold": 20.0,
+        "spot_min_uptime_days": 7,
+        "spot_excluded_types": ["database", "cache", "queue"],
+        "description": "EC2 instances eligible for Spot pricing (stable workload, CPU variance <20%)",
+    },
+    "ec2_instance_scheduled_unused": {
+        "enabled": True,
+        "business_hours_start": 9,
+        "business_hours_end": 18,
+        "business_days": [0, 1, 2, 3, 4],
+        "scheduled_cpu_threshold": 10.0,
+        "scheduled_lookback_days": 14,
+        "description": "EC2 instances only used during business hours (candidate for scheduling)",
     },
     # Azure NAT Gateway - 10 Waste Detection Scenarios
     "nat_gateway_no_subnet": {
