@@ -6,6 +6,8 @@ import Link from "next/link";
 import { useNotifications } from "@/hooks/useNotifications";
 import { Toast } from "@/components/ui/Toast";
 import { NotificationHistory } from "@/components/ui/NotificationHistory";
+import { BasicModeView } from "@/components/detection/BasicModeView";
+import { ExpertModeView } from "@/components/detection/ExpertModeView";
 
 interface DetectionRule {
   resource_type: string;
@@ -35,10 +37,51 @@ interface DetectionRule {
 
 // AWS Resources
 const AWS_RESOURCE_ICONS: { [key: string]: any } = {
-  ebs_volume: HardDrive,
-  elastic_ip: Globe,
-  ebs_snapshot: Camera,
-  ec2_instance: Server,
+  // EBS Volumes (10 scenarios)
+  ebs_volume_unattached: HardDrive,
+  ebs_volume_on_stopped_instance: HardDrive,
+  ebs_volume_gp2_migration: HardDrive,
+  ebs_volume_unnecessary_io2: HardDrive,
+  ebs_volume_overprovisioned_iops: HardDrive,
+  ebs_volume_overprovisioned_throughput: HardDrive,
+  ebs_volume_idle: HardDrive,
+  ebs_volume_low_iops_usage: HardDrive,
+  ebs_volume_low_throughput_usage: HardDrive,
+  ebs_volume_type_downgrade: HardDrive,
+  // Elastic IPs (10 scenarios)
+  elastic_ip_unassociated: Globe,
+  elastic_ip_on_stopped_instance: Globe,
+  elastic_ip_multiple_per_instance: Globe,
+  elastic_ip_on_detached_eni: Globe,
+  elastic_ip_never_used: Globe,
+  elastic_ip_on_unused_nat_gateway: Globe,
+  elastic_ip_idle: Globe,
+  elastic_ip_low_traffic: Globe,
+  elastic_ip_unused_nat_gateway: Globe,
+  elastic_ip_on_failed_instance: Globe,
+  // EBS Snapshots (10 scenarios)
+  ebs_snapshot_orphaned: Camera,
+  ebs_snapshot_redundant: Camera,
+  ebs_snapshot_unused_ami: Camera,
+  ebs_snapshot_old_unused: Camera,
+  ebs_snapshot_from_deleted_instance: Camera,
+  ebs_snapshot_incomplete_failed: Camera,
+  ebs_snapshot_untagged: Camera,
+  ebs_snapshot_excessive_retention: Camera,
+  ebs_snapshot_duplicate: Camera,
+  ebs_snapshot_never_restored: Camera,
+  // EC2 Instances (10 scenarios)
+  ec2_instance_stopped: Server,
+  ec2_instance_idle_running: Server,
+  ec2_instance_oversized: Server,
+  ec2_instance_old_generation: Server,
+  ec2_instance_burstable_credit_waste: Server,
+  ec2_instance_dev_test_24_7: Server,
+  ec2_instance_untagged: Server,
+  ec2_instance_right_sizing_opportunity: Server,
+  ec2_instance_spot_eligible: Server,
+  ec2_instance_scheduled_unused: Server,
+  // Other AWS resources (single types)
   load_balancer: Zap,
   rds_instance: Database,
   nat_gateway: Network,
@@ -50,10 +93,51 @@ const AWS_RESOURCE_ICONS: { [key: string]: any } = {
 };
 
 const AWS_RESOURCE_LABELS: { [key: string]: string } = {
-  ebs_volume: "EBS Volumes",
-  elastic_ip: "Elastic IPs",
-  ebs_snapshot: "EBS Snapshots",
-  ec2_instance: "EC2 Instances (Stopped)",
+  // EBS Volumes (10 scenarios)
+  ebs_volume_unattached: "EBS Volume - Unattached",
+  ebs_volume_on_stopped_instance: "EBS Volume - On Stopped Instance",
+  ebs_volume_gp2_migration: "EBS Volume - GP2 Migration Opportunity",
+  ebs_volume_unnecessary_io2: "EBS Volume - Unnecessary IO2",
+  ebs_volume_overprovisioned_iops: "EBS Volume - Overprovisioned IOPS",
+  ebs_volume_overprovisioned_throughput: "EBS Volume - Overprovisioned Throughput",
+  ebs_volume_idle: "EBS Volume - Idle",
+  ebs_volume_low_iops_usage: "EBS Volume - Low IOPS Usage",
+  ebs_volume_low_throughput_usage: "EBS Volume - Low Throughput Usage",
+  ebs_volume_type_downgrade: "EBS Volume - Type Downgrade Opportunity",
+  // Elastic IPs (10 scenarios)
+  elastic_ip_unassociated: "Elastic IP - Unassociated",
+  elastic_ip_on_stopped_instance: "Elastic IP - On Stopped Instance",
+  elastic_ip_multiple_per_instance: "Elastic IP - Multiple Per Instance",
+  elastic_ip_on_detached_eni: "Elastic IP - On Detached ENI",
+  elastic_ip_never_used: "Elastic IP - Never Used",
+  elastic_ip_on_unused_nat_gateway: "Elastic IP - On Unused NAT Gateway",
+  elastic_ip_idle: "Elastic IP - Idle",
+  elastic_ip_low_traffic: "Elastic IP - Low Traffic",
+  elastic_ip_unused_nat_gateway: "Elastic IP - Unused NAT Gateway",
+  elastic_ip_on_failed_instance: "Elastic IP - On Failed Instance",
+  // EBS Snapshots (10 scenarios)
+  ebs_snapshot_orphaned: "EBS Snapshot - Orphaned",
+  ebs_snapshot_redundant: "EBS Snapshot - Redundant",
+  ebs_snapshot_unused_ami: "EBS Snapshot - Unused AMI",
+  ebs_snapshot_old_unused: "EBS Snapshot - Old Unused",
+  ebs_snapshot_from_deleted_instance: "EBS Snapshot - From Deleted Instance",
+  ebs_snapshot_incomplete_failed: "EBS Snapshot - Incomplete/Failed",
+  ebs_snapshot_untagged: "EBS Snapshot - Untagged",
+  ebs_snapshot_excessive_retention: "EBS Snapshot - Excessive Retention",
+  ebs_snapshot_duplicate: "EBS Snapshot - Duplicate",
+  ebs_snapshot_never_restored: "EBS Snapshot - Never Restored",
+  // EC2 Instances (10 scenarios)
+  ec2_instance_stopped: "EC2 Instance - Stopped",
+  ec2_instance_idle_running: "EC2 Instance - Idle Running",
+  ec2_instance_oversized: "EC2 Instance - Oversized",
+  ec2_instance_old_generation: "EC2 Instance - Old Generation",
+  ec2_instance_burstable_credit_waste: "EC2 Instance - Burstable Credit Waste",
+  ec2_instance_dev_test_24_7: "EC2 Instance - Dev/Test 24/7",
+  ec2_instance_untagged: "EC2 Instance - Untagged",
+  ec2_instance_right_sizing_opportunity: "EC2 Instance - Right Sizing Opportunity",
+  ec2_instance_spot_eligible: "EC2 Instance - Spot Eligible",
+  ec2_instance_scheduled_unused: "EC2 Instance - Scheduled Unused",
+  // Other AWS resources (single types)
   load_balancer: "Load Balancers",
   rds_instance: "RDS Instances",
   nat_gateway: "NAT Gateways",
@@ -1289,9 +1373,24 @@ export default function SettingsPage() {
   const [selectedProvider, setSelectedProvider] = useState<"aws" | "azure" | "gcp" | "microsoft365" | "all">("all");
   const [selectedCategory, setSelectedCategory] = useState<string>("all");
   const [searchQuery, setSearchQuery] = useState<string>("");
+  const [viewMode, setViewMode] = useState<"basic" | "expert">(() => {
+    // Load from localStorage on initial render
+    if (typeof window !== "undefined") {
+      const saved = localStorage.getItem("detection_view_mode");
+      return (saved as "basic" | "expert") || "basic";
+    }
+    return "basic";
+  });
 
   // Use advanced notification system
   const { currentNotification, history, showSuccess, showError, dismiss, clearHistory } = useNotifications();
+
+  // Save viewMode to localStorage when it changes
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      localStorage.setItem("detection_view_mode", viewMode);
+    }
+  }, [viewMode]);
 
   useEffect(() => {
     if (activeTab === "detection") {
@@ -1521,6 +1620,36 @@ export default function SettingsPage() {
                   </button>
                 </div>
 
+                {/* Basic/Expert Mode Toggle */}
+                <div className="flex items-center justify-center gap-2 p-3 bg-white/60 rounded-lg border-2 border-blue-300">
+                  <span className="text-sm font-semibold text-gray-700">View Mode:</span>
+                  <div className="flex gap-1 bg-gray-100 p-1 rounded-lg">
+                    <button
+                      onClick={() => setViewMode("basic")}
+                      className={`px-4 py-2 rounded-md text-sm font-semibold transition-all ${
+                        viewMode === "basic"
+                          ? "bg-blue-600 text-white shadow-md"
+                          : "text-gray-600 hover:text-gray-900"
+                      }`}
+                    >
+                      📊 Basic
+                    </button>
+                    <button
+                      onClick={() => setViewMode("expert")}
+                      className={`px-4 py-2 rounded-md text-sm font-semibold transition-all ${
+                        viewMode === "expert"
+                          ? "bg-blue-600 text-white shadow-md"
+                          : "text-gray-600 hover:text-gray-900"
+                      }`}
+                    >
+                      ⚙️ Expert
+                    </button>
+                  </div>
+                  <span className="text-xs text-gray-600 ml-2">
+                    {viewMode === "basic" ? "(Grouped families)" : "(Individual scenarios)"}
+                  </span>
+                </div>
+
                 {/* Provider Filter */}
                 <div className="flex flex-wrap gap-2">
                   <button
@@ -1627,414 +1756,29 @@ export default function SettingsPage() {
               </div>
             </div>
 
-            {isLoading ? (
+                        {isLoading ? (
               <div className="text-center py-12 text-gray-600">Loading detection rules...</div>
+            ) : viewMode === "basic" ? (
+              <BasicModeView
+                selectedProvider={selectedProvider}
+                searchQuery={searchQuery}
+                showSuccess={showSuccess}
+                showError={showError}
+              />
             ) : (
-              (() => {
-                // Apply multi-criteria filtering
-                const filteredRules = detectionRules.filter((rule) => {
-                  // Filter 1: Provider
-                  if (selectedProvider !== "all") {
-                    const provider = getResourceProvider(rule.resource_type);
-                    if (provider !== selectedProvider) return false;
-                  }
-
-                  // Filter 2: Category
-                  if (selectedCategory !== "all" && selectedProvider !== "all") {
-                    const category = getResourceCategory(rule.resource_type, selectedProvider as "aws" | "azure" | "gcp" | "microsoft365");
-                    if (category !== selectedCategory) return false;
-                  }
-
-                  // Filter 3: Search query
-                  if (searchQuery) {
-                    const label = getResourceLabel(rule.resource_type).toLowerCase();
-                    const resourceType = rule.resource_type.toLowerCase();
-                    const query = searchQuery.toLowerCase();
-                    if (!label.includes(query) && !resourceType.includes(query)) return false;
-                  }
-
-                  return true;
-                });
-
-                return (
-                  <>
-                    {/* Resource Counter */}
-                    {(selectedProvider !== "all" || selectedCategory !== "all" || searchQuery) && (
-                      <div className="rounded-lg bg-blue-50 border-2 border-blue-200 p-4 mb-4">
-                        <p className="text-sm font-semibold text-blue-900">
-                          📊 Showing <span className="text-blue-600">{filteredRules.length}</span> resource{filteredRules.length !== 1 ? "s" : ""}
-                          {detectionRules.length !== filteredRules.length && (
-                            <span className="text-gray-600"> (filtered from {detectionRules.length} total)</span>
-                          )}
-                        </p>
-                      </div>
-                    )}
-
-                    {filteredRules.length === 0 ? (
-                      <div className="text-center py-12 text-gray-600">
-                        <p className="text-lg font-semibold mb-2">No resources found</p>
-                        <p className="text-sm">Try adjusting your filters or search query</p>
-                      </div>
-                    ) : (
-                      filteredRules.map((rule) => {
-                const Icon = getResourceIcon(rule.resource_type);
-                const label = getResourceLabel(rule.resource_type);
-                const isCustomized = JSON.stringify(rule.current_rules) !== JSON.stringify(rule.default_rules);
-                const provider = getResourceProvider(rule.resource_type);
-
-                return (
-                  <div
-                    key={rule.resource_type}
-                    className={`rounded-2xl bg-white p-4 md:p-6 shadow-lg border-2 transition-all ${
-                      isCustomized ? "border-orange-300 bg-orange-50/30" : "border-gray-200"
-                    }`}
-                  >
-                    <div className="flex flex-col lg:flex-row items-start justify-between gap-4 mb-6">
-                      <div className="flex items-start gap-3 md:gap-4 flex-1">
-                        <div className="rounded-xl bg-gradient-to-br from-blue-500 to-purple-600 p-2 md:p-3 flex-shrink-0">
-                          <Icon className="h-5 w-5 md:h-6 md:w-6 text-white" />
-                        </div>
-                        <div className="min-w-0">
-                          <h3 className="text-lg md:text-xl font-bold text-gray-900 flex flex-wrap items-center gap-2">
-                            <span>{label}</span>
-                            <span className={`text-xs px-2 py-1 rounded-full font-semibold ${
-                              provider === "gcp"
-                                ? "bg-red-100 text-red-800"
-                                : provider === "azure"
-                                ? "bg-blue-100 text-blue-800"
-                                : "bg-orange-100 text-orange-800"
-                            }`}>
-                              {provider === "gcp" ? "🔴 GCP" : provider === "azure" ? "🔵 AZURE" : "🟠 AWS"}
-                            </span>
-                            {isCustomized && (
-                              <span className="text-xs bg-purple-200 text-purple-800 px-2 py-1 rounded-full font-semibold">
-                                CUSTOM
-                              </span>
-                            )}
-                          </h3>
-                          <p className="text-sm text-gray-600 mt-1">{rule.description}</p>
-                        </div>
-                      </div>
-
-                      <div className="flex w-full lg:w-auto gap-2">
-                        <button
-                          onClick={() => updateRule(rule.resource_type)}
-                          className="flex-1 lg:flex-none flex items-center justify-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-700 transition-colors"
-                        >
-                          <Save className="h-4 w-4" />
-                          <span>Save</span>
-                        </button>
-                        {isCustomized && (
-                          <button
-                            onClick={() => resetRule(rule.resource_type)}
-                            className="flex items-center justify-center gap-2 rounded-lg border-2 border-gray-300 px-3 md:px-4 py-2 text-sm font-semibold text-gray-700 hover:bg-gray-100 transition-colors"
-                            title="Reset to defaults"
-                          >
-                            <RotateCcw className="h-4 w-4" />
-                            <span className="sr-only">Reset</span>
-                          </button>
-                        )}
-                      </div>
-                    </div>
-
-                    {/* Enable/Disable Toggle */}
-                    <div className="mb-6 flex items-center justify-between rounded-xl bg-gray-50 p-4">
-                      <div>
-                        <h4 className="font-semibold text-gray-900">Detection Enabled</h4>
-                        <p className="text-sm text-gray-600">Enable or disable detection for this resource type</p>
-                      </div>
-                      <label className="relative inline-flex cursor-pointer items-center">
-                        <input
-                          type="checkbox"
-                          className="peer sr-only"
-                          checked={rule.current_rules.enabled}
-                          onChange={(e) =>
-                            handleRuleChange(rule.resource_type, "enabled", e.target.checked)
-                          }
-                        />
-                        <div className="peer h-6 w-11 rounded-full bg-gray-300 after:absolute after:left-[2px] after:top-[2px] after:h-5 after:w-5 after:rounded-full after:bg-white after:transition-all peer-checked:bg-green-600 peer-checked:after:translate-x-full"></div>
-                      </label>
-                    </div>
-
-                    {/* Age Threshold */}
-                    {(rule.current_rules.min_age_days !== undefined || rule.current_rules.min_stopped_days !== undefined) && (
-                      <div className="mb-4">
-                        <div className="flex items-center justify-between mb-2">
-                          <h4 className="font-semibold text-gray-900">
-                            {rule.resource_type === 'ec2_instance' ? 'Minimum Age (Stopped Instances)' : 'Minimum Age'}: {rule.current_rules.min_age_days ?? rule.current_rules.min_stopped_days} days
-                          </h4>
-                          <span className="text-sm text-gray-500">
-                            Default: {rule.default_rules.min_age_days ?? rule.default_rules.min_stopped_days} days
-                          </span>
-                        </div>
-                        <input
-                          type="range"
-                          min="0"
-                          max="90"
-                          step="1"
-                          value={rule.current_rules.min_age_days ?? rule.current_rules.min_stopped_days ?? 0}
-                          onChange={(e) =>
-                            handleRuleChange(
-                              rule.resource_type,
-                              rule.current_rules.min_age_days !== undefined ? "min_age_days" : "min_stopped_days",
-                              parseInt(e.target.value)
-                            )
-                          }
-                          className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-blue-600"
-                        />
-                        <div className="flex justify-between text-xs text-gray-500 mt-1">
-                          <span>0 days (detect immediately)</span>
-                          <span>90 days</span>
-                        </div>
-
-                        {/* Interactive Example */}
-                        <div className="mt-4 rounded-lg bg-gradient-to-r from-blue-50 to-purple-50 border-2 border-blue-200 p-4">
-                          <h5 className="font-semibold text-blue-900 mb-2 flex items-center gap-2">
-                            <span>💡</span> What will be detected?
-                          </h5>
-                          <div className="space-y-2 text-sm">
-                            <div className="flex items-start gap-2">
-                              <span className="text-green-600 font-bold">✓</span>
-                              <span className="text-gray-700">
-                                Resources created <strong>{rule.current_rules.min_age_days ?? rule.current_rules.min_stopped_days}+ days ago</strong> will be detected
-                              </span>
-                            </div>
-                            <div className="flex items-start gap-2">
-                              <span className="text-red-600 font-bold">✗</span>
-                              <span className="text-gray-700">
-                                Resources created <strong>less than {rule.current_rules.min_age_days ?? rule.current_rules.min_stopped_days} days ago</strong> will be ignored
-                              </span>
-                            </div>
-                          </div>
-                          <div className="mt-3 p-3 bg-white rounded border border-blue-300">
-                            <p className="text-xs text-blue-800">
-                              <strong>Example:</strong> If set to <strong>{rule.current_rules?.min_age_days ?? rule.current_rules?.min_stopped_days ?? 0} days</strong>:
-                              {(rule.current_rules?.min_age_days ?? rule.current_rules?.min_stopped_days ?? 0) === 0 ? (
-                                <> All {rule.resource_type.replace('_', ' ')} will be detected immediately, even brand new ones.</>
-                              ) : (
-                                <> A {rule.resource_type.replace('_', ' ')} created on {new Date(Date.now() - ((rule.current_rules?.min_age_days ?? rule.current_rules?.min_stopped_days ?? 0) * 24 * 60 * 60 * 1000)).toLocaleDateString()} or earlier will be detected. One created today will be ignored.</>
-                              )}
-                            </p>
-                          </div>
-                        </div>
-                      </div>
-                    )}
-
-                    {/* Confidence Level Thresholds (New Standardized System) */}
-                    <div className="mb-4">
-                      <h4 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
-                        🎯 Confidence Level Thresholds
-                      </h4>
-                      <div className="space-y-4 p-4 bg-gradient-to-r from-blue-50 to-purple-50 border-2 border-blue-200 rounded-lg">
-                        {/* Critical Threshold */}
-                        <div>
-                          <div className="flex items-center justify-between mb-2">
-                            <label className="text-sm font-medium text-gray-900 flex items-center gap-2">
-                              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold border bg-red-100 text-red-800 border-red-300">
-                                🔴 Critical
-                              </span>
-                              After {rule.current_rules.confidence_critical_days ?? rule.default_rules.confidence_critical_days ?? 90} days
-                            </label>
-                            <span className="text-xs text-gray-500">
-                              Default: {rule.default_rules.confidence_critical_days ?? 90} days
-                            </span>
-                          </div>
-                          <input
-                            type="range"
-                            min="30"
-                            max="365"
-                            step="1"
-                            value={rule.current_rules.confidence_critical_days ?? rule.default_rules.confidence_critical_days ?? 90}
-                            onChange={(e) =>
-                              handleRuleChange(
-                                rule.resource_type,
-                                "confidence_critical_days",
-                                parseInt(e.target.value)
-                              )
-                            }
-                            className="w-full h-2 bg-gradient-to-r from-orange-200 to-red-300 rounded-lg appearance-none cursor-pointer"
-                          />
-                          <div className="flex justify-between text-xs text-gray-500 mt-1">
-                            <span>30 days</span>
-                            <span>365 days</span>
-                          </div>
-                        </div>
-
-                        {/* High Threshold */}
-                        <div>
-                          <div className="flex items-center justify-between mb-2">
-                            <label className="text-sm font-medium text-gray-900 flex items-center gap-2">
-                              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold border bg-orange-100 text-orange-800 border-orange-300">
-                                🟠 High
-                              </span>
-                              After {rule.current_rules.confidence_high_days ?? rule.default_rules.confidence_high_days ?? 30} days
-                            </label>
-                            <span className="text-xs text-gray-500">
-                              Default: {rule.default_rules.confidence_high_days ?? 30} days
-                            </span>
-                          </div>
-                          <input
-                            type="range"
-                            min="7"
-                            max="180"
-                            step="1"
-                            value={rule.current_rules.confidence_high_days ?? rule.default_rules.confidence_high_days ?? 30}
-                            onChange={(e) =>
-                              handleRuleChange(
-                                rule.resource_type,
-                                "confidence_high_days",
-                                parseInt(e.target.value)
-                              )
-                            }
-                            className="w-full h-2 bg-gradient-to-r from-yellow-200 to-orange-300 rounded-lg appearance-none cursor-pointer"
-                          />
-                          <div className="flex justify-between text-xs text-gray-500 mt-1">
-                            <span>7 days</span>
-                            <span>180 days</span>
-                          </div>
-                        </div>
-
-                        {/* Medium Threshold */}
-                        <div>
-                          <div className="flex items-center justify-between mb-2">
-                            <label className="text-sm font-medium text-gray-900 flex items-center gap-2">
-                              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold border bg-yellow-100 text-yellow-800 border-yellow-300">
-                                🟡 Medium
-                              </span>
-                              After {rule.current_rules.confidence_medium_days ?? rule.default_rules.confidence_medium_days ?? 7} days
-                            </label>
-                            <span className="text-xs text-gray-500">
-                              Default: {rule.default_rules.confidence_medium_days ?? 7} days
-                            </span>
-                          </div>
-                          <input
-                            type="range"
-                            min="0"
-                            max="60"
-                            step="1"
-                            value={rule.current_rules.confidence_medium_days ?? rule.default_rules.confidence_medium_days ?? 7}
-                            onChange={(e) =>
-                              handleRuleChange(
-                                rule.resource_type,
-                                "confidence_medium_days",
-                                parseInt(e.target.value)
-                              )
-                            }
-                            className="w-full h-2 bg-gradient-to-r from-green-200 to-yellow-300 rounded-lg appearance-none cursor-pointer"
-                          />
-                          <div className="flex justify-between text-xs text-gray-500 mt-1">
-                            <span>0 days</span>
-                            <span>60 days</span>
-                          </div>
-                        </div>
-
-                        {/* Visual Example */}
-                        <div className="mt-4 p-3 bg-white rounded border border-blue-300">
-                          <h5 className="font-semibold text-blue-900 mb-2 text-sm">How it works:</h5>
-                          <div className="space-y-1.5 text-xs text-gray-700">
-                            <div className="flex items-center gap-2">
-                              <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-xs font-semibold border bg-red-100 text-red-800 border-red-300">🔴</span>
-                              <span>Resources <strong>{rule.current_rules.confidence_critical_days ?? rule.default_rules.confidence_critical_days ?? 90}+ days old</strong> → Critical priority</span>
-                            </div>
-                            <div className="flex items-center gap-2">
-                              <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-xs font-semibold border bg-orange-100 text-orange-800 border-orange-300">🟠</span>
-                              <span>Resources <strong>{rule.current_rules.confidence_high_days ?? rule.default_rules.confidence_high_days ?? 30}-{(rule.current_rules.confidence_critical_days ?? rule.default_rules.confidence_critical_days ?? 90) - 1} days old</strong> → High priority</span>
-                            </div>
-                            <div className="flex items-center gap-2">
-                              <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-xs font-semibold border bg-yellow-100 text-yellow-800 border-yellow-300">🟡</span>
-                              <span>Resources <strong>{rule.current_rules.confidence_medium_days ?? rule.default_rules.confidence_medium_days ?? 7}-{(rule.current_rules.confidence_high_days ?? rule.default_rules.confidence_high_days ?? 30) - 1} days old</strong> → Medium priority</span>
-                            </div>
-                            <div className="flex items-center gap-2">
-                              <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-xs font-semibold border bg-green-100 text-green-800 border-green-300">🟢</span>
-                              <span>Resources <strong>less than {rule.current_rules.confidence_medium_days ?? rule.default_rules.confidence_medium_days ?? 7} days old</strong> → Low priority</span>
-                            </div>
-                          </div>
-                          <p className="mt-2 text-xs text-blue-800 italic">
-                            💡 Tip: Use these thresholds to prioritize which orphaned resources to clean up first based on how long they've been wasting money.
-                          </p>
-                        </div>
-                      </div>
-                    </div>
-
-                    {/* Legacy Confidence Threshold (Kept for backwards compatibility) */}
-                    {rule.current_rules.confidence_threshold_days !== undefined && (
-                      <div className="mb-4 opacity-50">
-                        <div className="flex items-center justify-between mb-2">
-                          <h4 className="font-semibold text-gray-900 text-sm">
-                            Legacy: High Confidence After {rule.current_rules.confidence_threshold_days} days
-                          </h4>
-                          <span className="text-xs text-gray-500">
-                            (Use new system above)
-                          </span>
-                        </div>
-                      </div>
-                    )}
-
-                    {/* Idle Running Instances Threshold (EC2 only) */}
-                    {rule.resource_type === 'ec2_instance' && rule.current_rules.min_idle_days !== undefined && (
-                      <div className="mb-4">
-                        <div className="flex items-center justify-between mb-2">
-                          <h4 className="font-semibold text-gray-900">
-                            Minimum Age (Idle Running Instances): {rule.current_rules.min_idle_days} days
-                          </h4>
-                          <span className="text-sm text-gray-500">
-                            Default: {rule.default_rules.min_idle_days} days
-                          </span>
-                        </div>
-                        <input
-                          type="range"
-                          min="0"
-                          max="30"
-                          step="1"
-                          value={rule.current_rules.min_idle_days || 0}
-                          onChange={(e) =>
-                            handleRuleChange(
-                              rule.resource_type,
-                              "min_idle_days",
-                              parseInt(e.target.value)
-                            )
-                          }
-                          className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-blue-600"
-                        />
-                        <div className="flex justify-between text-xs text-gray-500 mt-1">
-                          <span>0 days (detect immediately)</span>
-                          <span>30 days</span>
-                        </div>
-
-                        {/* Interactive Example for Idle Running */}
-                        <div className="mt-4 rounded-lg bg-gradient-to-r from-cyan-50 to-blue-50 border-2 border-cyan-200 p-4">
-                          <h5 className="font-semibold text-cyan-900 mb-2 flex items-center gap-2">
-                            <span>🔋</span> What will be detected?
-                          </h5>
-                          <div className="space-y-2 text-sm">
-                            <div className="flex items-start gap-2">
-                              <span className="text-green-600 font-bold">✓</span>
-                              <span className="text-gray-700">
-                                <strong>Running</strong> instances with low CPU (&lt;5%) and low network (&lt;1MB) for <strong>{rule.current_rules.min_idle_days}+ days</strong> will be detected as idle
-                              </span>
-                            </div>
-                            <div className="flex items-start gap-2">
-                              <span className="text-red-600 font-bold">✗</span>
-                              <span className="text-gray-700">
-                                Running instances idle for <strong>less than {rule.current_rules.min_idle_days} days</strong> will be ignored
-                              </span>
-                            </div>
-                          </div>
-                          <div className="mt-3 p-3 bg-white rounded border border-cyan-300">
-                            <p className="text-xs text-cyan-800">
-                              <strong>Note:</strong> This setting applies ONLY to running instances with very low utilization. Stopped instances are controlled by the "Minimum Age (Stopped Instances)" setting above.
-                            </p>
-                          </div>
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                );
-              })
-                    )}
-                  </>
-                );
-              })()
+              <ExpertModeView
+                detectionRules={detectionRules}
+                selectedProvider={selectedProvider}
+                selectedCategory={selectedCategory}
+                searchQuery={searchQuery}
+                getResourceIcon={getResourceIcon}
+                getResourceLabel={getResourceLabel}
+                getResourceProvider={getResourceProvider}
+                getResourceCategory={getResourceCategory}
+                updateRule={updateRule}
+                resetRule={resetRule}
+                handleRuleChange={handleRuleChange}
+              />
             )}
           </div>
         )}
