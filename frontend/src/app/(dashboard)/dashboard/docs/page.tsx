@@ -150,7 +150,7 @@ function IntroductionSection() {
     <div className="space-y-6">
       <h1 className="text-4xl font-bold text-gray-900">Welcome to CloudWaste</h1>
       <p className="text-xl text-gray-600">
-        Automatically detect and eliminate wasted cloud spending on orphaned AWS and Azure resources
+        Automatically detect and eliminate wasted cloud spending on orphaned AWS, Azure & GCP resources
       </p>
 
       <div className="grid gap-6 md:grid-cols-3">
@@ -175,16 +175,16 @@ function IntroductionSection() {
         <h3 className="text-lg font-semibold text-blue-900 mb-2">What is CloudWaste?</h3>
         <p className="text-blue-800">
           CloudWaste is a SaaS platform that helps businesses reduce cloud costs by automatically
-          detecting <strong>orphaned and unused resources</strong> in their AWS and Azure infrastructure.
-          Unlike simple monitoring tools, CloudWaste uses intelligent detection with CloudWatch (AWS) and
-          Azure Monitor metrics to identify resources that are truly wasted, not just temporarily idle.
+          detecting <strong>orphaned and unused resources</strong> in their AWS, Azure & GCP infrastructure.
+          Unlike simple monitoring tools, CloudWaste uses intelligent detection with CloudWatch (AWS),
+          Azure Monitor, and Cloud Monitoring (GCP) metrics to identify resources that are truly wasted, not just temporarily idle.
         </p>
       </div>
 
       <div className="space-y-4">
         <h3 className="text-2xl font-bold text-gray-900">How It Works</h3>
         <ol className="list-decimal list-inside space-y-3 text-gray-700">
-          <li><strong>Connect your AWS or Azure account</strong> with read-only credentials</li>
+          <li><strong>Connect your AWS, Azure or GCP account</strong> with read-only credentials</li>
           <li><strong>Run automated scans</strong> across all your regions</li>
           <li><strong>Review detected resources</strong> with detailed explanations and confidence levels</li>
           <li><strong>Take action</strong> by deleting truly orphaned resources directly in your cloud console</li>
@@ -194,9 +194,9 @@ function IntroductionSection() {
       <div className="rounded-lg bg-green-50 border border-green-200 p-6">
         <h3 className="text-lg font-semibold text-green-900 mb-2">🔒 Security First</h3>
         <p className="text-green-800">
-          CloudWaste uses <strong>read-only AWS and Azure permissions</strong>. We NEVER delete, modify,
+          CloudWaste uses <strong>read-only AWS, Azure & GCP permissions</strong>. We NEVER delete, modify,
           or write to your cloud resources. All credentials are encrypted in our database. You
-          maintain full control and delete resources manually in your AWS or Azure console.
+          maintain full control and delete resources manually in your AWS, Azure or GCP console.
         </p>
       </div>
     </div>
@@ -211,8 +211,8 @@ function GettingStartedSection() {
       <div className="space-y-8">
         <StepCard
           number={1}
-          title="Connect Your Cloud Accounts (AWS or Azure)"
-          description="Add your AWS or Azure account with read-only credentials"
+          title="Connect Your Cloud Accounts (AWS, Azure or GCP)"
+          description="Add your AWS, Azure or GCP account with read-only credentials"
         >
           <div className="space-y-4 text-sm text-gray-700">
             <div>
@@ -240,6 +240,21 @@ function GettingStartedSection() {
               </ul>
               <p className="mt-2 text-blue-600">
                 💡 <strong>Tip:</strong> Create a Service Principal with <code className="bg-gray-100 px-1">az ad sp create-for-rbac</code>
+              </p>
+            </div>
+
+            <div className="border-t pt-4">
+              <p className="font-semibold text-gray-900 mb-2">🔴 GCP - Required Service Account Roles:</p>
+              <ul className="list-disc list-inside space-y-1 ml-4">
+                <li><strong>Compute Viewer</strong> (for Compute Engine instances, disks)</li>
+                <li><strong>Cloud SQL Viewer</strong> (for Cloud SQL databases)</li>
+                <li><strong>Kubernetes Engine Cluster Viewer</strong> (for GKE clusters)</li>
+                <li><strong>BigQuery Data Viewer</strong> (for BigQuery datasets)</li>
+                <li><strong>Cloud Functions Viewer</strong> (for Cloud Functions)</li>
+                <li><strong>Monitoring Viewer</strong> (for Cloud Monitoring metrics)</li>
+              </ul>
+              <p className="mt-2 text-blue-600">
+                💡 <strong>Tip:</strong> Create a Service Account with <code className="bg-gray-100 px-1">gcloud iam service-accounts create</code> and download JSON key
               </p>
             </div>
           </div>
@@ -296,7 +311,7 @@ function GettingStartedSection() {
             </div>
             <p className="mt-4 text-amber-700 bg-amber-50 p-3 rounded">
               ⚠️ <strong>Important:</strong> CloudWaste only detects and tracks orphaned resources.
-              You must delete resources manually in your AWS console.
+              You must delete resources manually in your AWS, Azure or GCP console.
             </p>
           </div>
         </StepCard>
@@ -632,7 +647,7 @@ function SupportedResourcesSection() {
   return (
     <div className="space-y-6">
       <h1 className="text-4xl font-bold text-gray-900">Supported Resources</h1>
-      <p className="text-xl text-gray-600">Currently supporting <strong>25 AWS + 1 Azure</strong> resource types (26 total) with intelligent CloudWatch and Azure Monitor detection</p>
+      <p className="text-xl text-gray-600">Currently supporting <strong>400+ resource types</strong> across AWS (~50), Azure (~200), and GCP (~150) with intelligent CloudWatch, Azure Monitor, and Cloud Monitoring detection</p>
 
       <div className="grid gap-4">
         {resources.map((resource, index) => (
@@ -650,11 +665,12 @@ function SupportedResourcesSection() {
         ))}
       </div>
 
-      <div className="rounded-lg bg-gray-100 border p-6">
-        <h3 className="text-lg font-semibold text-gray-900 mb-2">🚀 Coming Soon</h3>
-        <p className="text-gray-700">
-          We're actively working on: Complete Azure resource coverage (VMs, Storage Accounts, Load Balancers, etc.),
-          GCP support, CloudFormation stacks, and ECS/Fargate task detection.
+      <div className="rounded-lg bg-green-50 border border-green-200 p-6">
+        <h3 className="text-lg font-semibold text-green-900 mb-2">✅ Fully Supported Providers</h3>
+        <p className="text-green-800">
+          All three major cloud providers are now fully implemented: <strong>AWS (~50 resource types)</strong>,
+          <strong> Azure (~200 resource types)</strong>, and <strong>GCP (~150 resource types)</strong>.
+          Configure detection rules in Basic or Expert mode for granular control across all providers.
         </p>
       </div>
     </div>
@@ -694,7 +710,7 @@ function DetectionRulesSection() {
           <h3 className="text-lg font-semibold text-amber-900 mb-2">⚠️ Important Notes</h3>
           <ul className="list-disc list-inside space-y-2 text-amber-800 ml-4">
             <li>Rules apply to <strong>future scans only</strong> (not retroactive)</li>
-            <li>Each resource type can have different rules (works for AWS and Azure)</li>
+            <li>Each resource type can have different rules (works for AWS, Azure & GCP)</li>
             <li>Lower thresholds may increase false positives</li>
             <li>Higher thresholds may miss short-term waste</li>
           </ul>
@@ -733,7 +749,7 @@ function UnderstandingResultsSection() {
             <ActionExplanation
               icon={Trash2}
               title="Delete Record"
-              description="Remove this resource from CloudWaste database only. Does NOT delete the actual AWS resource."
+              description="Remove this resource from CloudWaste database only. Does NOT delete the actual cloud resource."
               color="red"
             />
           </div>
@@ -745,7 +761,7 @@ function UnderstandingResultsSection() {
             <MetricExplanation
               label="Future waste"
               value="$0.80/month"
-              description="Estimated monthly cost if this resource stays orphaned. Based on AWS pricing for the resource type and size."
+              description="Estimated monthly cost if this resource stays orphaned. Based on AWS, Azure or GCP pricing for the resource type and size."
             />
             <MetricExplanation
               label="Already wasted"
@@ -762,8 +778,8 @@ function UnderstandingResultsSection() {
 function FAQSection() {
   const faqs = [
     {
-      q: "Does CloudWaste delete my AWS or Azure resources?",
-      a: "No. CloudWaste only detects and reports orphaned resources. You maintain full control and must delete resources manually in your AWS or Azure console. We use read-only permissions (AWS IAM / Azure Service Principal)."
+      q: "Does CloudWaste delete my AWS, Azure or GCP resources?",
+      a: "No. CloudWaste only detects and reports orphaned resources. You maintain full control and must delete resources manually in your AWS, Azure or GCP console. We use read-only permissions (AWS IAM / Azure Service Principal / GCP Service Account)."
     },
     {
       q: "Why is my recently created resource flagged as orphaned?",
@@ -771,11 +787,11 @@ function FAQSection() {
     },
     {
       q: "How accurate are the cost estimates?",
-      a: "Cost estimates are based on AWS and Azure public pricing and actual resource specifications (size, type, SKU). They don't include discounts (Reserved Instances, Savings Plans, Azure Reservations) or specific pricing agreements."
+      a: "Cost estimates are based on AWS, Azure & GCP public pricing and actual resource specifications (size, type, SKU). They don't include discounts (Reserved Instances, Savings Plans, Azure Reservations, GCP Committed Use Discounts) or specific pricing agreements."
     },
     {
       q: "Can I customize detection rules per resource type?",
-      a: "Yes! Go to Settings → Detection Rules to configure minimum age and confidence thresholds for each of the 26 supported resource types (25 AWS + 1 Azure)."
+      a: "Yes! Go to Settings → Detection Rules to configure minimum age and confidence thresholds for each of the 400+ supported resource types across AWS, Azure & GCP. Use Basic mode for family-level configuration or Expert mode for granular control."
     },
     {
       q: "What if CloudWatch metrics are unavailable?",
@@ -787,7 +803,7 @@ function FAQSection() {
     },
     {
       q: "Is my cloud data secure?",
-      a: "Yes. All credentials are encrypted with Fernet encryption. We use read-only permissions (AWS IAM / Azure Service Principal). Your data never leaves our secure infrastructure except for AWS and Azure API calls."
+      a: "Yes. All credentials are encrypted with Fernet encryption. We use read-only permissions (AWS IAM / Azure Service Principal / GCP Service Account). Your data never leaves our secure infrastructure except for AWS, Azure & GCP API calls."
     },
   ];
 

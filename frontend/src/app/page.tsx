@@ -22,7 +22,7 @@ export default function Home() {
           </h1>
 
           <p className="mt-6 text-2xl md:text-3xl text-blue-100 max-w-3xl mx-auto font-light">
-            Detect <span className="font-semibold text-white">25 types</span> of orphaned AWS resources + Azure automatically and
+            Detect <span className="font-semibold text-white">400+ types</span> across AWS, Azure & GCP automatically and
             <span className="font-semibold text-white"> slash your cloud bills</span>
           </p>
 
@@ -92,7 +92,7 @@ export default function Home() {
             <FeatureCard
               icon={Search}
               title="Intelligent Detection"
-              description="Detect 25 AWS resource types + Azure with CloudWatch analysis"
+              description="Detect 400+ resource types across AWS, Azure & GCP with CloudWatch analysis"
               gradient="from-blue-500 to-blue-600"
             />
             <FeatureCard
@@ -110,7 +110,7 @@ export default function Home() {
             <FeatureCard
               icon={Cloud}
               title="Multi-Cloud & Multi-Account"
-              description="AWS (25 types) + Azure with customizable detection rules"
+              description="AWS (~50) + Azure (~200) + GCP (~150) with customizable detection rules"
               gradient="from-orange-500 to-red-600"
             />
           </div>
@@ -137,7 +137,7 @@ export default function Home() {
               <div className="mt-4">
                 <h3 className="text-xl font-bold text-gray-900 mb-3">Connect Your Cloud Accounts</h3>
                 <p className="text-gray-600">
-                  Add AWS or Azure credentials with read-only permissions. We never modify or delete anything.
+                  Add AWS, Azure or GCP credentials with read-only permissions. We never modify or delete anything.
                 </p>
               </div>
             </div>
@@ -149,7 +149,7 @@ export default function Home() {
               <div className="mt-4">
                 <h3 className="text-xl font-bold text-gray-900 mb-3">Run Intelligent Scan</h3>
                 <p className="text-gray-600">
-                  CloudWatch-powered scanner analyzes 25 AWS resource types + Azure to identify orphaned resources.
+                  CloudWatch-powered scanner analyzes 400+ resource types across AWS, Azure & GCP to identify orphaned resources.
                 </p>
               </div>
             </div>
