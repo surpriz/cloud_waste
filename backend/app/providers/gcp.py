@@ -3238,6 +3238,18 @@ class GCPProvider(CloudProviderBase):
 
     # ==================== OTHER STUB METHODS (NOT IMPLEMENTED) ====================
 
+    async def scan_stopped_databases(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """Legacy method - redirects to scan_cloud_sql_stopped."""
+        return await self.scan_cloud_sql_stopped(region, detection_rules)
+
+    async def scan_unused_nat_gateways(
+        self, region: str, detection_rules: dict | None = None
+    ) -> list[OrphanResourceData]:
+        """Legacy method - redirects to scan_cloud_nat_gateway_idle."""
+        return await self.scan_cloud_nat_gateway_idle(region, detection_rules)
+
     async def scan_unassigned_ips(self, region: str) -> list[OrphanResourceData]:
         """Scan for unassigned static IP addresses (Phase 2)."""
         return []

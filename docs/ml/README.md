@@ -43,6 +43,12 @@ Debugging et résolution de problèmes :
 - Commandes de vérification SQL
 - Logs à surveiller
 
+### 6. [Scripts](./scripts/) (📦 Archived)
+Scripts Python pour export et training (Phase 5) :
+- `export_ml_data.py` - Export datasets (not needed now, use admin panel)
+- `train_model.py` - Train ML models (need 100K+ samples first)
+- **Status:** Archived for future use (Month 4+)
+
 ---
 
 ## 🎯 Quick Start
