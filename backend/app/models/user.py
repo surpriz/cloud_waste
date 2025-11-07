@@ -90,6 +90,12 @@ class User(Base):
         back_populates="user",
         cascade="all, delete-orphan",
     )
+    preferences: Mapped["UserPreferences"] = relationship(  # type: ignore
+        "UserPreferences",
+        back_populates="user",
+        cascade="all, delete-orphan",
+        uselist=False,  # One-to-one relationship
+    )
 
     def __repr__(self) -> str:
         """String representation."""

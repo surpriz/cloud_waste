@@ -3,17 +3,20 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { adminAPI } from "@/lib/api";
-import type { User, AdminStats, PricingStats } from "@/types";
-import { Shield, Users, UserCheck, UserX, Crown, Ban, CheckCircle, DollarSign, TrendingUp } from "lucide-react";
+import type { User, AdminStats, PricingStats, MLDataStats, MLExportResponse } from "@/types";
+import { Shield, Users, UserCheck, UserX, Crown, Ban, CheckCircle, DollarSign, TrendingUp, Database, Download } from "lucide-react";
 
 export default function AdminPage() {
   const router = useRouter();
   const [users, setUsers] = useState<User[]>([]);
   const [stats, setStats] = useState<AdminStats | null>(null);
   const [pricingStats, setPricingStats] = useState<PricingStats | null>(null);
+  const [mlStats, setMlStats] = useState<MLDataStats | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
+  const [exportLoading, setExportLoading] = useState(false);
+  const [exportSuccess, setExportSuccess] = useState<string | null>(null);
 
   useEffect(() => {
     loadData();
@@ -22,19 +25,37 @@ export default function AdminPage() {
   const loadData = async () => {
     try {
       setLoading(true);
-      const [usersData, statsData, pricingData] = await Promise.all([
+      const [usersData, statsData, pricingData, mlData] = await Promise.all([
         adminAPI.listUsers(),
         adminAPI.getStats(),
         adminAPI.getPricingStats().catch(() => null), // Optional pricing stats
+        adminAPI.getMLStats().catch(() => null), // Optional ML stats
       ]);
       setUsers(usersData);
       setStats(statsData);
       setPricingStats(pricingData);
+      setMlStats(mlData);
       setError(null);
     } catch (err: any) {
       setError(err.message || "Failed to load admin data");
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleExportMLData = async (days: number, format: string) => {
+    try {
+      setExportLoading(true);
+      setExportSuccess(null);
+      setError(null);
+      const result = await adminAPI.exportMLData(days, format);
+      setExportSuccess(result.message);
+      await loadData(); // Refresh ML stats
+      setTimeout(() => setExportSuccess(null), 5000);
+    } catch (err: any) {
+      setError(err.message || "Failed to export ML data");
+    } finally {
+      setExportLoading(false);
     }
   };
 
@@ -226,6 +247,97 @@ export default function AdminPage() {
                 View Details →
               </button>
             </div>
+          </div>
+        )}
+
+        {/* ML Data Collection Widget */}
+        {mlStats && (
+          <div className="mb-8 bg-gradient-to-r from-purple-50 to-indigo-50 rounded-lg shadow-sm border border-purple-200 p-6">
+            <div className="flex items-center justify-between mb-4">
+              <div className="flex items-center gap-4">
+                <Database className="h-10 w-10 text-purple-600" />
+                <div>
+                  <h3 className="text-lg font-semibold text-gray-900 flex items-center gap-2">
+                    ML Data Collection
+                    {mlStats.total_ml_records > 0 ? (
+                      <span className="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-green-100 text-green-800">
+                        ✅ Active
+                      </span>
+                    ) : (
+                      <span className="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-gray-100 text-gray-800">
+                        📊 Waiting for data
+                      </span>
+                    )}
+                  </h3>
+                  <p className="text-sm text-gray-600 mt-1">
+                    {mlStats.total_ml_records.toLocaleString()} total records | {mlStats.records_last_7_days.toLocaleString()} last 7 days | {mlStats.records_last_30_days.toLocaleString()} last 30 days
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            {/* Export Success Message */}
+            {exportSuccess && (
+              <div className="mb-4 bg-green-50 border border-green-200 text-green-700 px-4 py-3 rounded-lg text-sm">
+                ✅ {exportSuccess}
+              </div>
+            )}
+
+            {/* ML Stats Grid */}
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
+              <div className="bg-white rounded-lg p-4 border border-purple-100">
+                <p className="text-sm text-gray-600">Total ML Records</p>
+                <p className="text-2xl font-bold text-purple-600 mt-1">
+                  {mlStats.total_ml_records.toLocaleString()}
+                </p>
+              </div>
+              <div className="bg-white rounded-lg p-4 border border-purple-100">
+                <p className="text-sm text-gray-600">User Actions Tracked</p>
+                <p className="text-2xl font-bold text-purple-600 mt-1">
+                  {mlStats.total_user_actions.toLocaleString()}
+                </p>
+              </div>
+              <div className="bg-white rounded-lg p-4 border border-purple-100">
+                <p className="text-sm text-gray-600">Cost Trends</p>
+                <p className="text-2xl font-bold text-purple-600 mt-1">
+                  {mlStats.total_cost_trends.toLocaleString()}
+                </p>
+              </div>
+            </div>
+
+            {/* Export Buttons */}
+            <div className="flex gap-3">
+              <button
+                onClick={() => handleExportMLData(30, "json")}
+                disabled={exportLoading}
+                className="flex items-center gap-2 px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                <Download className="h-4 w-4" />
+                {exportLoading ? "Exporting..." : "Export Last 30 Days (JSON)"}
+              </button>
+              <button
+                onClick={() => handleExportMLData(90, "json")}
+                disabled={exportLoading}
+                className="flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                <Download className="h-4 w-4" />
+                {exportLoading ? "Exporting..." : "Export Last 90 Days (JSON)"}
+              </button>
+              <button
+                onClick={() => handleExportMLData(90, "csv")}
+                disabled={exportLoading}
+                className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                <Download className="h-4 w-4" />
+                {exportLoading ? "Exporting..." : "Export Last 90 Days (CSV)"}
+              </button>
+            </div>
+
+            {mlStats.last_collection_date && (
+              <p className="text-xs text-gray-500 mt-3">
+                Last collection: {new Date(mlStats.last_collection_date).toLocaleString()}
+              </p>
+            )}
           </div>
         )}
 

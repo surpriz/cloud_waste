@@ -16,6 +16,7 @@ from app.schemas.orphan_resource import (
     OrphanResourceStats,
     OrphanResourceUpdate,
 )
+from app.services.user_action_tracker import track_user_action
 
 router = APIRouter()
 
@@ -231,6 +232,29 @@ async def update_orphan_resource(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Orphan resource not found",
         )
+
+    # Track user action for ML if status was updated
+    if resource_update.status:
+        try:
+            # Map status to action for ML tracking
+            action_mapping = {
+                ResourceStatus.DELETED: "deleted",
+                ResourceStatus.IGNORED: "ignored",
+                ResourceStatus.ACTIVE: "kept",
+                ResourceStatus.MARKED_FOR_DELETION: "deleted",  # Treat as deleted for ML
+            }
+            action = action_mapping.get(ResourceStatus(resource_update.status), "kept")
+
+            await track_user_action(
+                resource=updated_resource,
+                action=action,
+                user=current_user,
+                cloud_account=account,
+                db=db,
+            )
+        except Exception as e:
+            # Log but don't fail the request
+            print(f"⚠️ Failed to track user action: {e}")
 
     return updated_resource
 

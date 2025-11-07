@@ -7,6 +7,12 @@ from app.models.orphan_resource import OrphanResource
 from app.models.detection_rule import DetectionRule
 from app.models.chat import ChatConversation, ChatMessage
 from app.models.pricing_cache import PricingCache
+from app.models.user_preferences import UserPreferences
+from app.models.ml_training_data import MLTrainingData
+from app.models.resource_lifecycle_event import ResourceLifecycleEvent
+from app.models.cloudwatch_metrics_history import CloudWatchMetricsHistory
+from app.models.user_action_pattern import UserActionPattern
+from app.models.cost_trend_data import CostTrendData
 
 __all__ = [
     "User",
@@ -17,4 +23,10 @@ __all__ = [
     "ChatConversation",
     "ChatMessage",
     "PricingCache",
+    "UserPreferences",
+    "MLTrainingData",
+    "ResourceLifecycleEvent",
+    "CloudWatchMetricsHistory",
+    "UserActionPattern",
+    "CostTrendData",
 ]

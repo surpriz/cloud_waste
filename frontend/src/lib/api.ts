@@ -546,6 +546,21 @@ export const adminAPI = {
   async getRefreshTaskStatus(taskId: string): Promise<import("@/types").PricingRefreshResponse> {
     return fetchAPI<import("@/types").PricingRefreshResponse>(`/api/v1/admin/pricing/refresh/${taskId}`);
   },
+
+  // ML data management
+  async getMLStats(): Promise<import("@/types").MLDataStats> {
+    return fetchAPI<import("@/types").MLDataStats>("/api/v1/admin/ml-stats");
+  },
+
+  async exportMLData(days: number = 90, format: string = "json"): Promise<import("@/types").MLExportResponse> {
+    const params = new URLSearchParams();
+    params.append("days", days.toString());
+    params.append("output_format", format);
+    const query = params.toString() ? `?${params.toString()}` : "";
+    return fetchAPI<import("@/types").MLExportResponse>(`/api/v1/admin/ml-export${query}`, {
+      method: "POST",
+    });
+  },
 };
 
 export { APIError, clearAuthTokens, getAuthToken, setAuthTokens };

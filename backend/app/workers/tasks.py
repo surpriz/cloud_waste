@@ -21,6 +21,10 @@ from app.providers.azure import AzureProvider
 from app.providers.gcp import GCPProvider
 from app.providers.microsoft365 import Microsoft365Provider
 from app.services.email_service import send_scan_summary_email
+from app.services.ml_data_collector import (
+    aggregate_monthly_cost_trends,
+    collect_ml_training_data,
+)
 from app.services.pricing_service import PricingService
 from app.workers.celery_app import celery_app
 
@@ -194,9 +198,42 @@ async def _scan_cloud_account_async(
 
                 await db.commit()
 
-                # Send email notification if user has enabled notifications
+                # Collect ML training data if user has consented
                 result = await db.execute(select(User).where(User.id == account.user_id))
                 user = result.scalar_one_or_none()
+                if user:
+                    try:
+                        # Get orphan_resources list from database
+                        orphan_resources_list = await db.execute(
+                            select(OrphanResource).where(OrphanResource.scan_id == scan.id)
+                        )
+                        orphan_resources_from_db = list(orphan_resources_list.scalars().all())
+
+                        # Collect ML data
+                        ml_records = await collect_ml_training_data(
+                            scan=scan,
+                            orphan_resources=orphan_resources_from_db,
+                            user=user,
+                            db=db,
+                        )
+
+                        # Aggregate cost trends
+                        current_month = datetime.now().strftime("%Y-%m")
+                        await aggregate_monthly_cost_trends(
+                            cloud_account=account,
+                            month=current_month,
+                            scan=scan,
+                            orphan_resources=orphan_resources_from_db,
+                            db=db,
+                        )
+
+                        if ml_records > 0:
+                            print(f"✅ Collected {ml_records} ML training records for scan {scan.id}")
+                    except Exception as e:
+                        # Log but don't fail the scan
+                        print(f"⚠️ ML data collection failed for scan {scan.id}: {e}")
+
+                # Send email notification if user has enabled notifications
                 if user and user.email_scan_notifications:
                     send_scan_summary_email(
                         email=user.email,
@@ -297,9 +334,42 @@ async def _scan_cloud_account_async(
 
                 await db.commit()
 
-                # Send email notification if user has enabled notifications
+                # Collect ML training data if user has consented (Azure)
                 result = await db.execute(select(User).where(User.id == account.user_id))
                 user = result.scalar_one_or_none()
+                if user:
+                    try:
+                        # Get orphan_resources list from database
+                        orphan_resources_list = await db.execute(
+                            select(OrphanResource).where(OrphanResource.scan_id == scan.id)
+                        )
+                        orphan_resources_from_db = list(orphan_resources_list.scalars().all())
+
+                        # Collect ML data
+                        ml_records = await collect_ml_training_data(
+                            scan=scan,
+                            orphan_resources=orphan_resources_from_db,
+                            user=user,
+                            db=db,
+                        )
+
+                        # Aggregate cost trends
+                        current_month = datetime.now().strftime("%Y-%m")
+                        await aggregate_monthly_cost_trends(
+                            cloud_account=account,
+                            month=current_month,
+                            scan=scan,
+                            orphan_resources=orphan_resources_from_db,
+                            db=db,
+                        )
+
+                        if ml_records > 0:
+                            print(f"✅ Collected {ml_records} ML training records for scan {scan.id}")
+                    except Exception as e:
+                        # Log but don't fail the scan
+                        print(f"⚠️ ML data collection failed for scan {scan.id}: {e}")
+
+                # Send email notification if user has enabled notifications
                 if user and user.email_scan_notifications:
                     send_scan_summary_email(
                         email=user.email,

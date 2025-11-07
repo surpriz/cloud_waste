@@ -421,3 +421,20 @@ export interface PricingRefreshResponse {
   updated_count: number | null;
   failed_count: number | null;
 }
+
+// ML Data Collection types
+export interface MLDataStats {
+  total_ml_records: number;
+  total_user_actions: number;
+  total_cost_trends: number;
+  records_last_7_days: number;
+  records_last_30_days: number;
+  last_collection_date: string | null;
+}
+
+export interface MLExportResponse {
+  success: boolean;
+  message: string;
+  files: Record<string, string>;
+  total_records_exported: number;
+}

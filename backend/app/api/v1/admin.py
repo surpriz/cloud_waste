@@ -2,16 +2,22 @@
 
 import uuid
 from typing import Annotated
+from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select, func
 from pydantic import BaseModel
 
 from app.api.deps import get_current_superuser
 from app.core.database import get_db
 from app.crud import user as user_crud
 from app.models.user import User
+from app.models.ml_training_data import MLTrainingData
+from app.models.user_action_pattern import UserActionPattern
+from app.models.cost_trend_data import CostTrendData
 from app.schemas.user import User as UserSchema, UserAdminUpdate
+from app.ml.data_pipeline import export_all_ml_datasets
 
 router = APIRouter()
 
@@ -245,3 +251,141 @@ async def delete_user(
     await user_crud.delete_user(db, target_user)
 
     return None
+
+
+class MLDataStats(BaseModel):
+    """ML data collection statistics schema."""
+
+    total_ml_records: int
+    total_user_actions: int
+    total_cost_trends: int
+    records_last_7_days: int
+    records_last_30_days: int
+    last_collection_date: datetime | None
+
+
+@router.get(
+    "/ml-stats",
+    response_model=MLDataStats,
+    summary="Get ML data collection statistics",
+)
+async def get_ml_data_stats(
+    db: Annotated[AsyncSession, Depends(get_db)],
+    _: Annotated[User, Depends(get_current_superuser)],
+) -> MLDataStats:
+    """
+    Get ML data collection statistics (superuser only).
+
+    Returns:
+        ML data statistics including record counts
+    """
+    # Count total records
+    total_ml_records_result = await db.execute(select(func.count()).select_from(MLTrainingData))
+    total_ml_records = total_ml_records_result.scalar_one()
+
+    total_user_actions_result = await db.execute(
+        select(func.count()).select_from(UserActionPattern)
+    )
+    total_user_actions = total_user_actions_result.scalar_one()
+
+    total_cost_trends_result = await db.execute(select(func.count()).select_from(CostTrendData))
+    total_cost_trends = total_cost_trends_result.scalar_one()
+
+    # Count records in last 7 days
+    seven_days_ago = datetime.utcnow() - timedelta(days=7)
+    records_last_7_days_result = await db.execute(
+        select(func.count())
+        .select_from(MLTrainingData)
+        .where(MLTrainingData.created_at >= seven_days_ago)
+    )
+    records_last_7_days = records_last_7_days_result.scalar_one()
+
+    # Count records in last 30 days
+    thirty_days_ago = datetime.utcnow() - timedelta(days=30)
+    records_last_30_days_result = await db.execute(
+        select(func.count())
+        .select_from(MLTrainingData)
+        .where(MLTrainingData.created_at >= thirty_days_ago)
+    )
+    records_last_30_days = records_last_30_days_result.scalar_one()
+
+    # Get last collection date
+    last_record_result = await db.execute(
+        select(MLTrainingData.created_at).order_by(MLTrainingData.created_at.desc()).limit(1)
+    )
+    last_collection_date = last_record_result.scalar_one_or_none()
+
+    return MLDataStats(
+        total_ml_records=total_ml_records,
+        total_user_actions=total_user_actions,
+        total_cost_trends=total_cost_trends,
+        records_last_7_days=records_last_7_days,
+        records_last_30_days=records_last_30_days,
+        last_collection_date=last_collection_date,
+    )
+
+
+class MLExportResponse(BaseModel):
+    """ML data export response schema."""
+
+    success: bool
+    message: str
+    files: dict[str, str]
+    total_records_exported: int
+
+
+@router.post(
+    "/ml-export",
+    response_model=MLExportResponse,
+    summary="Export ML datasets",
+)
+async def export_ml_datasets(
+    db: Annotated[AsyncSession, Depends(get_db)],
+    _: Annotated[User, Depends(get_current_superuser)],
+    days: int = Query(90, ge=7, le=365, description="Number of days to export"),
+    output_format: str = Query("json", regex="^(json|csv)$", description="Export format (json or csv)"),
+) -> MLExportResponse:
+    """
+    Export ML datasets for training (superuser only).
+
+    Args:
+        days: Number of days to export (7-365, default: 90)
+        output_format: Export format (json or csv, default: json)
+
+    Returns:
+        Export result with file paths and record counts
+    """
+    try:
+        # Calculate date range
+        end_date = datetime.utcnow()
+        start_date = end_date - timedelta(days=days)
+
+        # Export datasets
+        files = await export_all_ml_datasets(
+            output_format=output_format, output_dir="./ml_datasets"
+        )
+
+        # Count total records exported
+        total_records = 0
+        for file_path in files.values():
+            if file_path and "ml_training_data" in file_path:
+                # Count records from ml_training_data table
+                result = await db.execute(
+                    select(func.count())
+                    .select_from(MLTrainingData)
+                    .where(MLTrainingData.created_at >= start_date)
+                )
+                total_records = result.scalar_one()
+
+        return MLExportResponse(
+            success=True,
+            message=f"Successfully exported ML datasets for last {days} days",
+            files=files,
+            total_records_exported=total_records,
+        )
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to export ML datasets: {str(e)}",
+        )

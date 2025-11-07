@@ -2,7 +2,20 @@
 
 from fastapi import APIRouter
 
-from app.api.v1 import accounts, admin, admin_pricing, auth, chat, detection_rules, impact, resources, scans, test_detection
+from app.api.v1 import (
+    accounts,
+    admin,
+    admin_pricing,
+    auth,
+    chat,
+    detection_rules,
+    gdpr,
+    impact,
+    resources,
+    scans,
+    test_detection,
+    user_preferences,
+)
 
 api_router = APIRouter()
 
@@ -14,6 +27,8 @@ api_router.include_router(resources.router, prefix="/resources", tags=["resource
 api_router.include_router(detection_rules.router, prefix="/detection-rules", tags=["detection-rules"])
 api_router.include_router(impact.router, prefix="/impact", tags=["impact-savings"])
 api_router.include_router(chat.router, prefix="/chat", tags=["ai-assistant"])
+api_router.include_router(user_preferences.router, prefix="/preferences", tags=["user-preferences"])
+api_router.include_router(gdpr.router, prefix="/gdpr", tags=["gdpr-compliance"])
 api_router.include_router(admin.router, prefix="/admin", tags=["admin"])
 api_router.include_router(admin_pricing.router, prefix="/admin", tags=["admin-pricing"])
 api_router.include_router(test_detection.router, prefix="", tags=["testing"])  # Test endpoints at root /api/v1/test/...
