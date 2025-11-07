@@ -102,11 +102,11 @@ def get_verification_email_html(full_name: str, verification_url: str) -> str:
     """
     return f"""
 <!DOCTYPE html>
-<html lang="fr">
+<html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Vérifiez votre email - CloudWaste</title>
+    <title>Verify your email - CloudWaste</title>
 </head>
 <body style="margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; background-color: #f3f4f6;">
     <table width="100%" border="0" cellspacing="0" cellpadding="0" style="background-color: #f3f4f6;">
@@ -120,7 +120,7 @@ def get_verification_email_html(full_name: str, verification_url: str) -> str:
                                 🛡️ CloudWaste
                             </h1>
                             <p style="margin: 10px 0 0; color: #6b7280; font-size: 14px;">
-                                Optimisation des coûts Cloud
+                                Cloud Cost Optimization
                             </p>
                         </td>
                     </tr>
@@ -129,10 +129,10 @@ def get_verification_email_html(full_name: str, verification_url: str) -> str:
                     <tr>
                         <td style="padding: 20px 40px;">
                             <h2 style="margin: 0 0 20px; color: #1f2937; font-size: 22px; font-weight: 600;">
-                                Bienvenue {full_name} ! 👋
+                                Welcome {full_name}! 👋
                             </h2>
                             <p style="margin: 0 0 15px; color: #374151; font-size: 16px; line-height: 1.6;">
-                                Merci de vous être inscrit sur <strong>CloudWaste</strong>. Pour commencer à optimiser vos coûts cloud, veuillez confirmer votre adresse email en cliquant sur le bouton ci-dessous :
+                                Thank you for signing up for <strong>CloudWaste</strong>. To start optimizing your cloud costs, please confirm your email address by clicking the button below:
                             </p>
 
                             <!-- CTA Button -->
@@ -140,14 +140,14 @@ def get_verification_email_html(full_name: str, verification_url: str) -> str:
                                 <tr>
                                     <td align="center">
                                         <a href="{verification_url}" style="display: inline-block; padding: 14px 32px; background-color: #2563eb; color: #ffffff; text-decoration: none; border-radius: 6px; font-size: 16px; font-weight: 600;">
-                                            ✉️ Vérifier mon email
+                                            ✉️ Verify my email
                                         </a>
                                     </td>
                                 </tr>
                             </table>
 
                             <p style="margin: 20px 0 10px; color: #6b7280; font-size: 14px; line-height: 1.6;">
-                                Ou copiez ce lien dans votre navigateur :
+                                Or copy this link in your browser:
                             </p>
                             <p style="margin: 0; color: #2563eb; font-size: 13px; word-break: break-all;">
                                 {verification_url}
@@ -156,13 +156,13 @@ def get_verification_email_html(full_name: str, verification_url: str) -> str:
                             <!-- Expiration notice -->
                             <div style="margin: 30px 0; padding: 16px; background-color: #fef3c7; border-left: 4px solid #f59e0b; border-radius: 4px;">
                                 <p style="margin: 0; color: #92400e; font-size: 14px;">
-                                    ⏱️ <strong>Ce lien expire dans 7 jours.</strong><br>
-                                    Après ce délai, votre compte sera automatiquement supprimé.
+                                    ⏱️ <strong>This link expires in 7 days.</strong><br>
+                                    After this period, your account will be automatically deleted.
                                 </p>
                             </div>
 
                             <p style="margin: 20px 0 0; color: #6b7280; font-size: 14px; line-height: 1.6;">
-                                Si vous n'avez pas créé de compte CloudWaste, vous pouvez ignorer cet email.
+                                If you didn't create a CloudWaste account, you can ignore this email.
                             </p>
                         </td>
                     </tr>
@@ -171,8 +171,8 @@ def get_verification_email_html(full_name: str, verification_url: str) -> str:
                     <tr>
                         <td style="padding: 30px 40px; background-color: #f9fafb; border-top: 1px solid #e5e7eb; border-radius: 0 0 8px 8px;">
                             <p style="margin: 0; color: #9ca3af; font-size: 12px; text-align: center; line-height: 1.5;">
-                                Cet email a été envoyé par <strong>CloudWaste</strong><br>
-                                © 2025 CloudWaste. Tous droits réservés.
+                                This email was sent by <strong>CloudWaste</strong><br>
+                                © 2025 CloudWaste. All rights reserved.
                             </p>
                         </td>
                     </tr>
@@ -197,19 +197,19 @@ def get_verification_email_text(full_name: str, verification_url: str) -> str:
         Plain text email content
     """
     return f"""
-Bienvenue {full_name} !
+Welcome {full_name}!
 
-Merci de vous être inscrit sur CloudWaste. Pour commencer à optimiser vos coûts cloud, veuillez confirmer votre adresse email en cliquant sur le lien ci-dessous :
+Thank you for signing up for CloudWaste. To start optimizing your cloud costs, please confirm your email address by clicking the link below:
 
 {verification_url}
 
-⏱️ Ce lien expire dans 7 jours. Après ce délai, votre compte sera automatiquement supprimé.
+⏱️ This link expires in 7 days. After this period, your account will be automatically deleted.
 
-Si vous n'avez pas créé de compte CloudWaste, vous pouvez ignorer cet email.
+If you didn't create a CloudWaste account, you can ignore this email.
 
 ---
-Cet email a été envoyé par CloudWaste
-© 2025 CloudWaste. Tous droits réservés.
+This email was sent by CloudWaste
+© 2025 CloudWaste. All rights reserved.
 """
 
 
@@ -236,7 +236,7 @@ def send_verification_email(
 
     return send_email(
         to_email=email,
-        subject="Vérifiez votre email - CloudWaste",
+        subject="Verify your email - CloudWaste",
         html_content=html_content,
         text_content=text_content,
     )
@@ -256,11 +256,11 @@ def get_welcome_email_html(full_name: str) -> str:
 
     return f"""
 <!DOCTYPE html>
-<html lang="fr">
+<html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Bienvenue sur CloudWaste</title>
+    <title>Welcome to CloudWaste</title>
 </head>
 <body style="margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; background-color: #f3f4f6;">
     <table width="100%" border="0" cellspacing="0" cellpadding="0" style="background-color: #f3f4f6;">
@@ -271,7 +271,7 @@ def get_welcome_email_html(full_name: str) -> str:
                     <tr>
                         <td style="padding: 40px 40px 20px; text-align: center;">
                             <h1 style="margin: 0; color: #1f2937; font-size: 32px; font-weight: 700;">
-                                🎉 Félicitations !
+                                🎉 Congratulations!
                             </h1>
                         </td>
                     </tr>
@@ -280,10 +280,10 @@ def get_welcome_email_html(full_name: str) -> str:
                     <tr>
                         <td style="padding: 20px 40px;">
                             <h2 style="margin: 0 0 20px; color: #1f2937; font-size: 22px; font-weight: 600;">
-                                Votre compte est activé, {full_name} !
+                                Your account is activated, {full_name}!
                             </h2>
                             <p style="margin: 0 0 15px; color: #374151; font-size: 16px; line-height: 1.6;">
-                                Votre adresse email a été vérifiée avec succès. Vous pouvez maintenant accéder à toutes les fonctionnalités de <strong>CloudWaste</strong> :
+                                Your email address has been verified successfully. You can now access all <strong>CloudWaste</strong> features:
                             </p>
 
                             <!-- Features list -->
@@ -291,22 +291,22 @@ def get_welcome_email_html(full_name: str) -> str:
                                 <tr>
                                     <td style="padding: 12px 0;">
                                         <span style="font-size: 24px;">📊</span>
-                                        <strong style="color: #1f2937; font-size: 15px; margin-left: 10px;">Scans automatiques</strong>
-                                        <p style="margin: 5px 0 0 44px; color: #6b7280; font-size: 14px;">Détection des ressources orphelines AWS et Azure</p>
+                                        <strong style="color: #1f2937; font-size: 15px; margin-left: 10px;">Automated scans</strong>
+                                        <p style="margin: 5px 0 0 44px; color: #6b7280; font-size: 14px;">Detection of orphaned AWS and Azure resources</p>
                                     </td>
                                 </tr>
                                 <tr>
                                     <td style="padding: 12px 0;">
                                         <span style="font-size: 24px;">💰</span>
-                                        <strong style="color: #1f2937; font-size: 15px; margin-left: 10px;">Économies identifiées</strong>
-                                        <p style="margin: 5px 0 0 44px; color: #6b7280; font-size: 14px;">Estimation précise des coûts gaspillés</p>
+                                        <strong style="color: #1f2937; font-size: 15px; margin-left: 10px;">Identified savings</strong>
+                                        <p style="margin: 5px 0 0 44px; color: #6b7280; font-size: 14px;">Accurate waste cost estimation</p>
                                     </td>
                                 </tr>
                                 <tr>
                                     <td style="padding: 12px 0;">
                                         <span style="font-size: 24px;">🤖</span>
-                                        <strong style="color: #1f2937; font-size: 15px; margin-left: 10px;">Assistant IA FinOps</strong>
-                                        <p style="margin: 5px 0 0 44px; color: #6b7280; font-size: 14px;">Conseils personnalisés par Claude AI</p>
+                                        <strong style="color: #1f2937; font-size: 15px; margin-left: 10px;">FinOps AI Assistant</strong>
+                                        <p style="margin: 5px 0 0 44px; color: #6b7280; font-size: 14px;">Personalized advice by Claude AI</p>
                                     </td>
                                 </tr>
                             </table>
@@ -316,7 +316,7 @@ def get_welcome_email_html(full_name: str) -> str:
                                 <tr>
                                     <td align="center">
                                         <a href="{app_url}/auth/login" style="display: inline-block; padding: 14px 32px; background-color: #10b981; color: #ffffff; text-decoration: none; border-radius: 6px; font-size: 16px; font-weight: 600;">
-                                            🚀 Accéder à CloudWaste
+                                            🚀 Access CloudWaste
                                         </a>
                                     </td>
                                 </tr>
@@ -325,13 +325,13 @@ def get_welcome_email_html(full_name: str) -> str:
                             <!-- Next steps -->
                             <div style="margin: 30px 0; padding: 20px; background-color: #f0f9ff; border-left: 4px solid #2563eb; border-radius: 4px;">
                                 <p style="margin: 0 0 10px; color: #1e40af; font-size: 15px; font-weight: 600;">
-                                    🎯 Prochaines étapes :
+                                    🎯 Next steps:
                                 </p>
                                 <ol style="margin: 10px 0 0; padding-left: 20px; color: #1e3a8a; font-size: 14px; line-height: 1.8;">
-                                    <li>Connectez votre compte AWS ou Azure</li>
-                                    <li>Lancez votre premier scan</li>
-                                    <li>Découvrez vos économies potentielles</li>
-                                    <li>Discutez avec l'assistant IA pour optimiser vos coûts</li>
+                                    <li>Connect your AWS or Azure account</li>
+                                    <li>Launch your first scan</li>
+                                    <li>Discover your potential savings</li>
+                                    <li>Chat with the AI assistant to optimize your costs</li>
                                 </ol>
                             </div>
                         </td>
@@ -341,10 +341,10 @@ def get_welcome_email_html(full_name: str) -> str:
                     <tr>
                         <td style="padding: 30px 40px; background-color: #f9fafb; border-top: 1px solid #e5e7eb; border-radius: 0 0 8px 8px;">
                             <p style="margin: 0 0 10px; color: #6b7280; font-size: 13px; text-align: center;">
-                                Besoin d'aide ? Consultez notre documentation ou contactez le support.
+                                Need help? Check out our documentation or contact support.
                             </p>
                             <p style="margin: 0; color: #9ca3af; font-size: 12px; text-align: center; line-height: 1.5;">
-                                © 2025 CloudWaste. Tous droits réservés.
+                                © 2025 CloudWaste. All rights reserved.
                             </p>
                         </td>
                     </tr>
@@ -370,32 +370,32 @@ def get_welcome_email_text(full_name: str) -> str:
     app_url = settings.FRONTEND_URL
 
     return f"""
-🎉 Félicitations !
+🎉 Congratulations!
 
-Votre compte est activé, {full_name} !
+Your account is activated, {full_name}!
 
-Votre adresse email a été vérifiée avec succès. Vous pouvez maintenant accéder à toutes les fonctionnalités de CloudWaste :
+Your email address has been verified successfully. You can now access all CloudWaste features:
 
-📊 Scans automatiques
-   Détection des ressources orphelines AWS et Azure
+📊 Automated scans
+   Detection of orphaned AWS and Azure resources
 
-💰 Économies identifiées
-   Estimation précise des coûts gaspillés
+💰 Identified savings
+   Accurate waste cost estimation
 
-🤖 Assistant IA FinOps
-   Conseils personnalisés par Claude AI
+🤖 FinOps AI Assistant
+   Personalized advice by Claude AI
 
-🚀 Accédez à CloudWaste : {app_url}/auth/login
+🚀 Access CloudWaste: {app_url}/auth/login
 
-🎯 Prochaines étapes :
-1. Connectez votre compte AWS ou Azure
-2. Lancez votre premier scan
-3. Découvrez vos économies potentielles
-4. Discutez avec l'assistant IA pour optimiser vos coûts
+🎯 Next steps:
+1. Connect your AWS or Azure account
+2. Launch your first scan
+3. Discover your potential savings
+4. Chat with the AI assistant to optimize your costs
 
 ---
-Besoin d'aide ? Consultez notre documentation ou contactez le support.
-© 2025 CloudWaste. Tous droits réservés.
+Need help? Check out our documentation or contact support.
+© 2025 CloudWaste. All rights reserved.
 """
 
 
@@ -415,7 +415,7 @@ def send_welcome_email(email: str, full_name: str) -> bool:
 
     return send_email(
         to_email=email,
-        subject="🎉 Bienvenue sur CloudWaste - Votre compte est activé !",
+        subject="🎉 Welcome to CloudWaste - Your account is activated!",
         html_content=html_content,
         text_content=text_content,
     )
@@ -454,7 +454,7 @@ def get_scan_summary_email_html(
         HTML email content
     """
     app_url = settings.FRONTEND_URL
-    scan_type_fr = "Manuel" if scan_type == "manual" else "Planifié"
+    scan_type_en = "Manual" if scan_type == "manual" else "Scheduled"
 
     # Success template
     if status == "completed":
@@ -462,11 +462,11 @@ def get_scan_summary_email_html(
 
         return f"""
 <!DOCTYPE html>
-<html lang="fr">
+<html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Résultat du scan - CloudWaste</title>
+    <title>Scan result - CloudWaste</title>
 </head>
 <body style="margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; background-color: #f3f4f6;">
     <table width="100%" border="0" cellspacing="0" cellpadding="0" style="background-color: #f3f4f6;">
@@ -480,7 +480,7 @@ def get_scan_summary_email_html(
                                 🛡️ CloudWaste
                             </h1>
                             <p style="margin: 10px 0 0; color: #6b7280; font-size: 14px;">
-                                Optimisation des coûts Cloud
+                                Cloud Cost Optimization
                             </p>
                         </td>
                     </tr>
@@ -489,13 +489,13 @@ def get_scan_summary_email_html(
                     <tr>
                         <td style="padding: 20px 40px;">
                             <h2 style="margin: 0 0 20px; color: #1f2937; font-size: 22px; font-weight: 600;">
-                                ✅ Scan terminé avec succès
+                                ✅ Scan completed successfully
                             </h2>
                             <p style="margin: 0 0 15px; color: #374151; font-size: 16px; line-height: 1.6;">
-                                Bonjour {full_name},
+                                Hello {full_name},
                             </p>
                             <p style="margin: 0 0 15px; color: #374151; font-size: 16px; line-height: 1.6;">
-                                Le scan de votre compte cloud <strong>{account_name}</strong> (scan {scan_type_fr.lower()}) est terminé.
+                                The scan of your cloud account <strong>{account_name}</strong> ({scan_type_en.lower()} scan) is completed.
                             </p>
 
                             <!-- Scan Info Box -->
@@ -503,25 +503,25 @@ def get_scan_summary_email_html(
                                 <table width="100%" border="0" cellspacing="0" cellpadding="0">
                                     <tr>
                                         <td style="padding: 8px 0;">
-                                            <strong style="color: #1e40af; font-size: 15px;">Compte :</strong>
+                                            <strong style="color: #1e40af; font-size: 15px;">Account:</strong>
                                             <span style="color: #1e3a8a; font-size: 15px; margin-left: 10px;">{account_name}</span>
                                         </td>
                                     </tr>
                                     <tr>
                                         <td style="padding: 8px 0;">
-                                            <strong style="color: #1e40af; font-size: 15px;">Type de scan :</strong>
-                                            <span style="color: #1e3a8a; font-size: 15px; margin-left: 10px;">{scan_type_fr}</span>
+                                            <strong style="color: #1e40af; font-size: 15px;">Scan type:</strong>
+                                            <span style="color: #1e3a8a; font-size: 15px; margin-left: 10px;">{scan_type_en}</span>
                                         </td>
                                     </tr>
                                     <tr>
                                         <td style="padding: 8px 0;">
-                                            <strong style="color: #1e40af; font-size: 15px;">Durée :</strong>
+                                            <strong style="color: #1e40af; font-size: 15px;">Duration:</strong>
                                             <span style="color: #1e3a8a; font-size: 15px; margin-left: 10px;">{started_at} → {completed_at}</span>
                                         </td>
                                     </tr>
                                     <tr>
                                         <td style="padding: 8px 0;">
-                                            <strong style="color: #1e40af; font-size: 15px;">Régions scannées :</strong>
+                                            <strong style="color: #1e40af; font-size: 15px;">Scanned regions:</strong>
                                             <span style="color: #1e3a8a; font-size: 15px; margin-left: 10px;">{regions_list}</span>
                                         </td>
                                     </tr>
@@ -531,24 +531,24 @@ def get_scan_summary_email_html(
                             <!-- Results Box -->
                             <div style="margin: 25px 0; padding: 20px; background-color: #fef3c7; border-left: 4px solid #f59e0b; border-radius: 4px;">
                                 <p style="margin: 0 0 15px; color: #92400e; font-size: 16px; font-weight: 600;">
-                                    📊 Résultats du scan :
+                                    📊 Scan results:
                                 </p>
                                 <table width="100%" border="0" cellspacing="0" cellpadding="0">
                                     <tr>
                                         <td style="padding: 8px 0;">
-                                            <strong style="color: #78350f; font-size: 15px;">Ressources scannées :</strong>
+                                            <strong style="color: #78350f; font-size: 15px;">Scanned resources:</strong>
                                             <span style="color: #92400e; font-size: 15px; margin-left: 10px;">{total_resources_scanned}</span>
                                         </td>
                                     </tr>
                                     <tr>
                                         <td style="padding: 8px 0;">
-                                            <strong style="color: #78350f; font-size: 15px;">Ressources orphelines trouvées :</strong>
+                                            <strong style="color: #78350f; font-size: 15px;">Orphaned resources found:</strong>
                                             <span style="color: #92400e; font-size: 15px; margin-left: 10px; font-weight: 700;">{orphan_resources_found}</span>
                                         </td>
                                     </tr>
                                     <tr>
                                         <td style="padding: 8px 0;">
-                                            <strong style="color: #78350f; font-size: 15px;">Coût mensuel estimé du gaspillage :</strong>
+                                            <strong style="color: #78350f; font-size: 15px;">Estimated monthly waste cost:</strong>
                                             <span style="color: #92400e; font-size: 18px; margin-left: 10px; font-weight: 700;">${estimated_monthly_waste:.2f}</span>
                                         </td>
                                     </tr>
@@ -560,14 +560,14 @@ def get_scan_summary_email_html(
                                 <tr>
                                     <td align="center">
                                         <a href="{app_url}/dashboard/resources" style="display: inline-block; padding: 14px 32px; background-color: #2563eb; color: #ffffff; text-decoration: none; border-radius: 6px; font-size: 16px; font-weight: 600;">
-                                            📋 Voir les résultats détaillés
+                                            📋 View detailed results
                                         </a>
                                     </td>
                                 </tr>
                             </table>
 
                             <p style="margin: 20px 0 0; color: #6b7280; font-size: 14px; line-height: 1.6;">
-                                Consultez le dashboard pour voir les détails de chaque ressource orpheline et optimiser vos coûts cloud.
+                                Check the dashboard to see details for each orphaned resource and optimize your cloud costs.
                             </p>
                         </td>
                     </tr>
@@ -576,8 +576,8 @@ def get_scan_summary_email_html(
                     <tr>
                         <td style="padding: 30px 40px; background-color: #f9fafb; border-top: 1px solid #e5e7eb; border-radius: 0 0 8px 8px;">
                             <p style="margin: 0; color: #9ca3af; font-size: 12px; text-align: center; line-height: 1.5;">
-                                Cet email a été envoyé par <strong>CloudWaste</strong><br>
-                                © 2025 CloudWaste. Tous droits réservés.
+                                This email was sent by <strong>CloudWaste</strong><br>
+                                © 2025 CloudWaste. All rights reserved.
                             </p>
                         </td>
                     </tr>
@@ -593,11 +593,11 @@ def get_scan_summary_email_html(
     else:
         return f"""
 <!DOCTYPE html>
-<html lang="fr">
+<html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Échec du scan - CloudWaste</title>
+    <title>Scan failed - CloudWaste</title>
 </head>
 <body style="margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; background-color: #f3f4f6;">
     <table width="100%" border="0" cellspacing="0" cellpadding="0" style="background-color: #f3f4f6;">
@@ -611,7 +611,7 @@ def get_scan_summary_email_html(
                                 🛡️ CloudWaste
                             </h1>
                             <p style="margin: 10px 0 0; color: #6b7280; font-size: 14px;">
-                                Optimisation des coûts Cloud
+                                Cloud Cost Optimization
                             </p>
                         </td>
                     </tr>
@@ -620,35 +620,35 @@ def get_scan_summary_email_html(
                     <tr>
                         <td style="padding: 20px 40px;">
                             <h2 style="margin: 0 0 20px; color: #1f2937; font-size: 22px; font-weight: 600;">
-                                ❌ Échec du scan
+                                ❌ Scan failed
                             </h2>
                             <p style="margin: 0 0 15px; color: #374151; font-size: 16px; line-height: 1.6;">
-                                Bonjour {full_name},
+                                Hello {full_name},
                             </p>
                             <p style="margin: 0 0 15px; color: #374151; font-size: 16px; line-height: 1.6;">
-                                Le scan de votre compte cloud <strong>{account_name}</strong> (scan {scan_type_fr.lower()}) a échoué.
+                                The scan of your cloud account <strong>{account_name}</strong> ({scan_type_en.lower()} scan) has failed.
                             </p>
 
                             <!-- Error Box -->
                             <div style="margin: 25px 0; padding: 20px; background-color: #fee2e2; border-left: 4px solid #dc2626; border-radius: 4px;">
                                 <p style="margin: 0 0 10px; color: #991b1b; font-size: 15px; font-weight: 600;">
-                                    🚨 Erreur rencontrée :
+                                    🚨 Error encountered:
                                 </p>
                                 <p style="margin: 0; color: #7f1d1d; font-size: 14px; line-height: 1.6; font-family: monospace;">
-                                    {error_message or "Erreur inconnue"}
+                                    {error_message or "Unknown error"}
                                 </p>
                             </div>
 
                             <!-- Recommendations -->
                             <div style="margin: 25px 0; padding: 20px; background-color: #f0f9ff; border-left: 4px solid #2563eb; border-radius: 4px;">
                                 <p style="margin: 0 0 10px; color: #1e40af; font-size: 15px; font-weight: 600;">
-                                    💡 Recommandations :
+                                    💡 Recommendations:
                                 </p>
                                 <ul style="margin: 10px 0 0; padding-left: 20px; color: #1e3a8a; font-size: 14px; line-height: 1.8;">
-                                    <li>Vérifiez que vos identifiants cloud sont toujours valides</li>
-                                    <li>Assurez-vous que les permissions IAM sont correctement configurées</li>
-                                    <li>Vérifiez la connectivité réseau de votre compte</li>
-                                    <li>Consultez la documentation pour résoudre les erreurs courantes</li>
+                                    <li>Verify that your cloud credentials are still valid</li>
+                                    <li>Ensure that IAM permissions are correctly configured</li>
+                                    <li>Check your account's network connectivity</li>
+                                    <li>Consult the documentation to resolve common errors</li>
                                 </ul>
                             </div>
 
@@ -657,14 +657,14 @@ def get_scan_summary_email_html(
                                 <tr>
                                     <td align="center">
                                         <a href="{app_url}/dashboard/accounts" style="display: inline-block; padding: 14px 32px; background-color: #2563eb; color: #ffffff; text-decoration: none; border-radius: 6px; font-size: 16px; font-weight: 600;">
-                                            ⚙️ Vérifier mes comptes cloud
+                                            ⚙️ Check my cloud accounts
                                         </a>
                                     </td>
                                 </tr>
                             </table>
 
                             <p style="margin: 20px 0 0; color: #6b7280; font-size: 14px; line-height: 1.6;">
-                                Si le problème persiste, contactez notre support technique pour obtenir de l'aide.
+                                If the problem persists, contact our technical support for assistance.
                             </p>
                         </td>
                     </tr>
@@ -673,8 +673,8 @@ def get_scan_summary_email_html(
                     <tr>
                         <td style="padding: 30px 40px; background-color: #f9fafb; border-top: 1px solid #e5e7eb; border-radius: 0 0 8px 8px;">
                             <p style="margin: 0; color: #9ca3af; font-size: 12px; text-align: center; line-height: 1.5;">
-                                Cet email a été envoyé par <strong>CloudWaste</strong><br>
-                                © 2025 CloudWaste. Tous droits réservés.
+                                This email was sent by <strong>CloudWaste</strong><br>
+                                © 2025 CloudWaste. All rights reserved.
                             </p>
                         </td>
                     </tr>
@@ -720,64 +720,64 @@ def get_scan_summary_email_text(
         Plain text email content
     """
     app_url = settings.FRONTEND_URL
-    scan_type_fr = "Manuel" if scan_type == "manual" else "Planifié"
+    scan_type_en = "Manual" if scan_type == "manual" else "Scheduled"
 
     # Success template
     if status == "completed":
         regions_list = ", ".join(regions_scanned) if regions_scanned else "N/A"
 
         return f"""
-✅ Scan terminé avec succès
+✅ Scan completed successfully
 
-Bonjour {full_name},
+Hello {full_name},
 
-Le scan de votre compte cloud {account_name} (scan {scan_type_fr.lower()}) est terminé.
+The scan of your cloud account {account_name} ({scan_type_en.lower()} scan) is completed.
 
-📋 Informations du scan :
-- Compte : {account_name}
-- Type de scan : {scan_type_fr}
-- Durée : {started_at} → {completed_at}
-- Régions scannées : {regions_list}
+📋 Scan information:
+- Account: {account_name}
+- Scan type: {scan_type_en}
+- Duration: {started_at} → {completed_at}
+- Scanned regions: {regions_list}
 
-📊 Résultats du scan :
-- Ressources scannées : {total_resources_scanned}
-- Ressources orphelines trouvées : {orphan_resources_found}
-- Coût mensuel estimé du gaspillage : ${estimated_monthly_waste:.2f}
+📊 Scan results:
+- Scanned resources: {total_resources_scanned}
+- Orphaned resources found: {orphan_resources_found}
+- Estimated monthly waste cost: ${estimated_monthly_waste:.2f}
 
-Consultez le dashboard pour voir les détails de chaque ressource orpheline et optimiser vos coûts cloud.
+Check the dashboard to see details for each orphaned resource and optimize your cloud costs.
 
-👉 Voir les résultats détaillés : {app_url}/dashboard/resources
+👉 View detailed results: {app_url}/dashboard/resources
 
 ---
-Cet email a été envoyé par CloudWaste
-© 2025 CloudWaste. Tous droits réservés.
+This email was sent by CloudWaste
+© 2025 CloudWaste. All rights reserved.
 """
 
     # Failure template
     else:
         return f"""
-❌ Échec du scan
+❌ Scan failed
 
-Bonjour {full_name},
+Hello {full_name},
 
-Le scan de votre compte cloud {account_name} (scan {scan_type_fr.lower()}) a échoué.
+The scan of your cloud account {account_name} ({scan_type_en.lower()} scan) has failed.
 
-🚨 Erreur rencontrée :
-{error_message or "Erreur inconnue"}
+🚨 Error encountered:
+{error_message or "Unknown error"}
 
-💡 Recommandations :
-- Vérifiez que vos identifiants cloud sont toujours valides
-- Assurez-vous que les permissions IAM sont correctement configurées
-- Vérifiez la connectivité réseau de votre compte
-- Consultez la documentation pour résoudre les erreurs courantes
+💡 Recommendations:
+- Verify that your cloud credentials are still valid
+- Ensure that IAM permissions are correctly configured
+- Check your account's network connectivity
+- Consult the documentation to resolve common errors
 
-Si le problème persiste, contactez notre support technique pour obtenir de l'aide.
+If the problem persists, contact our technical support for assistance.
 
-👉 Vérifier mes comptes cloud : {app_url}/dashboard/accounts
+👉 Check my cloud accounts: {app_url}/dashboard/accounts
 
 ---
-Cet email a été envoyé par CloudWaste
-© 2025 CloudWaste. Tous droits réservés.
+This email was sent by CloudWaste
+© 2025 CloudWaste. All rights reserved.
 """
 
 
@@ -844,9 +844,9 @@ def send_scan_summary_email(
 
     # Determine subject based on status
     if status == "completed":
-        subject = f"✅ Scan terminé - {account_name} - CloudWaste"
+        subject = f"✅ Scan completed - {account_name} - CloudWaste"
     else:
-        subject = f"❌ Échec du scan - {account_name} - CloudWaste"
+        subject = f"❌ Scan failed - {account_name} - CloudWaste"
 
     return send_email(
         to_email=email,
