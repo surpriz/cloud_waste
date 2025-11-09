@@ -3,8 +3,8 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { adminAPI } from "@/lib/api";
-import type { User, AdminStats, PricingStats, MLDataStats, MLExportResponse } from "@/types";
-import { Shield, Users, UserCheck, UserX, Crown, Ban, CheckCircle, DollarSign, TrendingUp, Database, Download } from "lucide-react";
+import type { User, AdminStats, PricingStats, MLDataStats, MLExportResponse, SESMetrics } from "@/types";
+import { Shield, Users, UserCheck, UserX, Crown, Ban, CheckCircle, DollarSign, TrendingUp, Database, Download, Mail, AlertTriangle, CheckCircle2 } from "lucide-react";
 
 export default function AdminPage() {
   const router = useRouter();
@@ -12,6 +12,7 @@ export default function AdminPage() {
   const [stats, setStats] = useState<AdminStats | null>(null);
   const [pricingStats, setPricingStats] = useState<PricingStats | null>(null);
   const [mlStats, setMlStats] = useState<MLDataStats | null>(null);
+  const [sesMetrics, setSesMetrics] = useState<SESMetrics | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
@@ -25,16 +26,18 @@ export default function AdminPage() {
   const loadData = async () => {
     try {
       setLoading(true);
-      const [usersData, statsData, pricingData, mlData] = await Promise.all([
+      const [usersData, statsData, pricingData, mlData, sesData] = await Promise.all([
         adminAPI.listUsers(),
         adminAPI.getStats(),
         adminAPI.getPricingStats().catch(() => null), // Optional pricing stats
         adminAPI.getMLStats().catch(() => null), // Optional ML stats
+        adminAPI.getSESMetrics().catch(() => null), // Optional SES metrics
       ]);
       setUsers(usersData);
       setStats(statsData);
       setPricingStats(pricingData);
       setMlStats(mlData);
+      setSesMetrics(sesData);
       setError(null);
     } catch (err: any) {
       setError(err.message || "Failed to load admin data");
@@ -338,6 +341,199 @@ export default function AdminPage() {
                 Last collection: {new Date(mlStats.last_collection_date).toLocaleString()}
               </p>
             )}
+          </div>
+        )}
+
+        {/* AWS SES Email Monitoring Widget */}
+        {sesMetrics && (
+          <div className="mb-8 bg-gradient-to-r from-blue-50 to-cyan-50 rounded-lg shadow-sm border border-blue-200 p-6">
+            <div className="flex items-center justify-between mb-4">
+              <div className="flex items-center gap-4">
+                <Mail className="h-10 w-10 text-blue-600" />
+                <div>
+                  <h3 className="text-lg font-semibold text-gray-900 flex items-center gap-2">
+                    AWS SES Email Monitoring
+                    {sesMetrics.reputation_status === "healthy" && sesMetrics.sending_enabled ? (
+                      <span className="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-green-100 text-green-800">
+                        <CheckCircle2 className="h-3 w-3 mr-1" />
+                        Healthy
+                      </span>
+                    ) : sesMetrics.reputation_status === "under_review" ? (
+                      <span className="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-orange-100 text-orange-800">
+                        <AlertTriangle className="h-3 w-3 mr-1" />
+                        Under Review
+                      </span>
+                    ) : (
+                      <span className="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-red-100 text-red-800">
+                        <AlertTriangle className="h-3 w-3 mr-1" />
+                        Probation
+                      </span>
+                    )}
+                  </h3>
+                  <p className="text-sm text-gray-600 mt-1">
+                    Monitoring email deliverability and sender reputation in {sesMetrics.region}
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={() => loadData()}
+                className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-sm"
+              >
+                Refresh
+              </button>
+            </div>
+
+            {/* Critical Alerts */}
+            {sesMetrics.has_critical_alerts && sesMetrics.alerts.length > 0 && (
+              <div className="mb-4 bg-red-50 border border-red-200 rounded-lg p-4">
+                <div className="flex items-start gap-3">
+                  <AlertTriangle className="h-5 w-5 text-red-600 mt-0.5 flex-shrink-0" />
+                  <div className="flex-1">
+                    <h4 className="text-sm font-semibold text-red-900 mb-2">Critical Alerts</h4>
+                    <ul className="text-sm text-red-700 space-y-1">
+                      {sesMetrics.alerts.map((alert, index) => (
+                        <li key={index}>• {alert}</li>
+                      ))}
+                    </ul>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Send Volume Stats */}
+            <div className="mb-4">
+              <h4 className="text-sm font-semibold text-gray-700 mb-3">Send Volume</h4>
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                <div className="bg-white rounded-lg p-4 border border-blue-100">
+                  <p className="text-sm text-gray-600">Last 24 Hours</p>
+                  <p className="text-2xl font-bold text-blue-600 mt-1">
+                    {sesMetrics.emails_sent_24h.toLocaleString()}
+                  </p>
+                  <p className="text-xs text-gray-500 mt-1">emails sent</p>
+                </div>
+                <div className="bg-white rounded-lg p-4 border border-blue-100">
+                  <p className="text-sm text-gray-600">Last 7 Days</p>
+                  <p className="text-2xl font-bold text-blue-600 mt-1">
+                    {sesMetrics.emails_sent_7d.toLocaleString()}
+                  </p>
+                  <p className="text-xs text-gray-500 mt-1">emails sent</p>
+                </div>
+                <div className="bg-white rounded-lg p-4 border border-blue-100">
+                  <p className="text-sm text-gray-600">Last 30 Days</p>
+                  <p className="text-2xl font-bold text-blue-600 mt-1">
+                    {sesMetrics.emails_sent_30d.toLocaleString()}
+                  </p>
+                  <p className="text-xs text-gray-500 mt-1">emails sent</p>
+                </div>
+              </div>
+            </div>
+
+            {/* Deliverability Metrics */}
+            <div className="mb-4">
+              <h4 className="text-sm font-semibold text-gray-700 mb-3">Deliverability Metrics</h4>
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                <div className={`bg-white rounded-lg p-4 border-2 ${
+                  sesMetrics.delivery_rate >= 95 ? 'border-green-200' :
+                  sesMetrics.delivery_rate >= 90 ? 'border-orange-200' : 'border-red-200'
+                }`}>
+                  <p className="text-sm text-gray-600">Delivery Rate</p>
+                  <p className={`text-3xl font-bold mt-1 ${
+                    sesMetrics.delivery_rate >= 95 ? 'text-green-600' :
+                    sesMetrics.delivery_rate >= 90 ? 'text-orange-600' : 'text-red-600'
+                  }`}>
+                    {sesMetrics.delivery_rate.toFixed(1)}%
+                  </p>
+                  <p className="text-xs text-gray-500 mt-1">
+                    {sesMetrics.delivery_rate >= 95 ? '✅ Excellent' :
+                     sesMetrics.delivery_rate >= 90 ? '⚠️ Fair' : '❌ Poor'}
+                  </p>
+                </div>
+                <div className={`bg-white rounded-lg p-4 border-2 ${
+                  sesMetrics.bounce_rate <= 5 ? 'border-green-200' :
+                  sesMetrics.bounce_rate <= 10 ? 'border-orange-200' : 'border-red-200'
+                }`}>
+                  <p className="text-sm text-gray-600">Bounce Rate</p>
+                  <p className={`text-3xl font-bold mt-1 ${
+                    sesMetrics.bounce_rate <= 5 ? 'text-green-600' :
+                    sesMetrics.bounce_rate <= 10 ? 'text-orange-600' : 'text-red-600'
+                  }`}>
+                    {sesMetrics.bounce_rate.toFixed(2)}%
+                  </p>
+                  <p className="text-xs text-gray-500 mt-1">
+                    Hard: {sesMetrics.hard_bounce_rate.toFixed(2)}% | Soft: {sesMetrics.soft_bounce_rate.toFixed(2)}%
+                  </p>
+                </div>
+                <div className={`bg-white rounded-lg p-4 border-2 ${
+                  sesMetrics.complaint_rate <= 0.3 ? 'border-green-200' :
+                  sesMetrics.complaint_rate <= 0.5 ? 'border-orange-200' : 'border-red-200'
+                }`}>
+                  <p className="text-sm text-gray-600">Complaint Rate</p>
+                  <p className={`text-3xl font-bold mt-1 ${
+                    sesMetrics.complaint_rate <= 0.3 ? 'text-green-600' :
+                    sesMetrics.complaint_rate <= 0.5 ? 'text-orange-600' : 'text-red-600'
+                  }`}>
+                    {sesMetrics.complaint_rate.toFixed(3)}%
+                  </p>
+                  <p className="text-xs text-gray-500 mt-1">
+                    {sesMetrics.complaint_rate <= 0.3 ? '✅ Safe' :
+                     sesMetrics.complaint_rate <= 0.5 ? '⚠️ Warning' : '❌ Critical'}
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            {/* Quotas and Limits */}
+            <div>
+              <h4 className="text-sm font-semibold text-gray-700 mb-3">Send Quotas & Limits</h4>
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                <div className="bg-white rounded-lg p-4 border border-blue-100">
+                  <p className="text-sm text-gray-600">Max Send Rate</p>
+                  <p className="text-2xl font-bold text-blue-600 mt-1">
+                    {sesMetrics.max_send_rate.toLocaleString()}
+                  </p>
+                  <p className="text-xs text-gray-500 mt-1">emails/second</p>
+                </div>
+                <div className="bg-white rounded-lg p-4 border border-blue-100">
+                  <p className="text-sm text-gray-600">Daily Quota</p>
+                  <p className="text-2xl font-bold text-blue-600 mt-1">
+                    {sesMetrics.daily_quota.toLocaleString()}
+                  </p>
+                  <p className="text-xs text-gray-500 mt-1">emails/day</p>
+                </div>
+                <div className={`bg-white rounded-lg p-4 border-2 ${
+                  sesMetrics.quota_usage_percentage < 80 ? 'border-green-200' :
+                  sesMetrics.quota_usage_percentage < 95 ? 'border-orange-200' : 'border-red-200'
+                }`}>
+                  <p className="text-sm text-gray-600">Quota Usage</p>
+                  <p className={`text-2xl font-bold mt-1 ${
+                    sesMetrics.quota_usage_percentage < 80 ? 'text-green-600' :
+                    sesMetrics.quota_usage_percentage < 95 ? 'text-orange-600' : 'text-red-600'
+                  }`}>
+                    {sesMetrics.quota_usage_percentage.toFixed(1)}%
+                  </p>
+                  <p className="text-xs text-gray-500 mt-1">
+                    {sesMetrics.daily_sent.toLocaleString()} / {sesMetrics.daily_quota.toLocaleString()} sent today
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            {/* Footer Info */}
+            <div className="flex items-center justify-between mt-4 pt-4 border-t border-blue-200">
+              <div className="flex items-center gap-4 text-xs text-gray-600">
+                <span>
+                  Sending: {sesMetrics.sending_enabled ?
+                    <span className="text-green-600 font-medium">✓ Enabled</span> :
+                    <span className="text-red-600 font-medium">✗ Disabled</span>
+                  }
+                </span>
+                <span>•</span>
+                <span>Suppression List: {sesMetrics.suppression_list_size.toLocaleString()} addresses</span>
+              </div>
+              <p className="text-xs text-gray-500">
+                Last updated: {new Date(sesMetrics.last_updated).toLocaleString()}
+              </p>
+            </div>
           </div>
         )}
 

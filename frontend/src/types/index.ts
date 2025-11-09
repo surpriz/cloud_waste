@@ -438,3 +438,39 @@ export interface MLExportResponse {
   files: Record<string, string>;
   total_records_exported: number;
 }
+
+// AWS SES Email Monitoring types
+export interface SESMetrics {
+  // Send Statistics
+  emails_sent_24h: number;
+  emails_sent_7d: number;
+  emails_sent_30d: number;
+
+  // Deliverability Rates (percentages)
+  delivery_rate: number;
+  bounce_rate: number;
+  complaint_rate: number;
+
+  // Hard vs Soft Bounces
+  hard_bounce_rate: number;
+  soft_bounce_rate: number;
+
+  // Send Quotas
+  max_send_rate: number;
+  daily_quota: number;
+  daily_sent: number;
+  quota_usage_percentage: number;
+
+  // Account Reputation & Status
+  reputation_status: "healthy" | "under_review" | "probation";
+  sending_enabled: boolean;
+  suppression_list_size: number;
+
+  // Alerts
+  has_critical_alerts: boolean;
+  alerts: string[];
+
+  // Metadata
+  last_updated: string;
+  region: string;
+}

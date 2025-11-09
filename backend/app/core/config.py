@@ -65,6 +65,11 @@ class Settings(BaseSettings):
     AWS_SECRET_ACCESS_KEY: str = ""
     AWS_DEFAULT_REGION: str = "eu-west-1"
 
+    # AWS SES (Optional - for cold email monitoring)
+    AWS_SES_REGION: str = "eu-north-1"
+    AWS_SES_ACCESS_KEY_ID: str = ""  # Optional, uses AWS_ACCESS_KEY_ID if empty
+    AWS_SES_SECRET_ACCESS_KEY: str = ""  # Optional, uses AWS_SECRET_ACCESS_KEY if empty
+
     # AI Assistant (Anthropic)
     ANTHROPIC_API_KEY: str = ""
     CHAT_MAX_MESSAGES_PER_USER_PER_DAY: int = 50

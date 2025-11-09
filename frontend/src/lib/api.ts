@@ -561,6 +561,11 @@ export const adminAPI = {
       method: "POST",
     });
   },
+
+  // AWS SES email monitoring
+  async getSESMetrics(): Promise<import("@/types").SESMetrics> {
+    return fetchAPI<import("@/types").SESMetrics>("/api/v1/admin/ses-metrics");
+  },
 };
 
 export { APIError, clearAuthTokens, getAuthToken, setAuthTokens };

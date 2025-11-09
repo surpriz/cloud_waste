@@ -17,6 +17,8 @@ from app.models.ml_training_data import MLTrainingData
 from app.models.user_action_pattern import UserActionPattern
 from app.models.cost_trend_data import CostTrendData
 from app.schemas.user import User as UserSchema, UserAdminUpdate
+from app.schemas.ses_metrics import SESMetrics
+from app.services.ses_metrics_service import SESMetricsService
 from app.ml.data_pipeline import export_all_ml_datasets
 
 router = APIRouter()
@@ -388,4 +390,40 @@ async def export_ml_datasets(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to export ML datasets: {str(e)}",
+        )
+
+
+@router.get(
+    "/ses-metrics",
+    response_model=SESMetrics,
+    summary="Get AWS SES metrics",
+)
+async def get_ses_metrics(
+    _: Annotated[User, Depends(get_current_superuser)],
+) -> SESMetrics:
+    """
+    Get AWS SES email metrics (superuser only).
+
+    Returns comprehensive SES metrics including:
+    - Send statistics (24h, 7d, 30d)
+    - Deliverability rates
+    - Bounce and complaint rates
+    - Send quotas and usage
+    - Account reputation status
+    - Alerts for critical thresholds
+
+    Returns:
+        SES metrics object
+
+    Raises:
+        HTTPException: If unable to fetch SES metrics
+    """
+    try:
+        service = SESMetricsService()
+        metrics = await service.get_ses_metrics()
+        return metrics
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to fetch SES metrics: {str(e)}",
         )
