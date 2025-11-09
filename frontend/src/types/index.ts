@@ -474,3 +474,16 @@ export interface SESMetrics {
   last_updated: string;
   region: string;
 }
+
+export interface SESIdentityMetrics {
+  identity: string;
+  identity_type: "EmailAddress" | "Domain";
+  verification_status: string;
+  dkim_enabled: boolean;
+  emails_sent_24h: number;
+  emails_sent_7d: number;
+  emails_sent_30d: number;
+  bounce_rate: number;
+  complaint_rate: number;
+  last_checked: string;
+}

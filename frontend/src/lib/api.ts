@@ -566,6 +566,10 @@ export const adminAPI = {
   async getSESMetrics(): Promise<import("@/types").SESMetrics> {
     return fetchAPI<import("@/types").SESMetrics>("/api/v1/admin/ses-metrics");
   },
+
+  async getSESIdentities(): Promise<import("@/types").SESIdentityMetrics[]> {
+    return fetchAPI<import("@/types").SESIdentityMetrics[]>("/api/v1/admin/ses-identities");
+  },
 };
 
 export { APIError, clearAuthTokens, getAuthToken, setAuthTokens };

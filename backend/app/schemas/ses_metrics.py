@@ -6,6 +6,45 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 
+class SESIdentityMetrics(BaseModel):
+    """AWS SES individual identity metrics schema."""
+
+    identity: str = Field(..., description="Email address or domain identity")
+    identity_type: Literal["EmailAddress", "Domain"] = Field(..., description="Type of identity")
+    verification_status: str = Field(..., description="Verification status (Success, Pending, Failed)")
+    dkim_enabled: bool = Field(..., description="Whether DKIM is enabled for this identity")
+
+    # Send Statistics per identity
+    emails_sent_24h: int = Field(..., description="Emails sent from this identity in last 24 hours")
+    emails_sent_7d: int = Field(..., description="Emails sent from this identity in last 7 days")
+    emails_sent_30d: int = Field(..., description="Emails sent from this identity in last 30 days")
+
+    # Deliverability Rates per identity
+    bounce_rate: float = Field(..., ge=0, le=100, description="Bounce rate percentage for this identity")
+    complaint_rate: float = Field(..., ge=0, le=100, description="Complaint rate percentage for this identity")
+
+    # Metadata
+    last_checked: datetime = Field(..., description="When these metrics were last checked")
+
+    class Config:
+        """Pydantic config."""
+
+        json_schema_extra = {
+            "example": {
+                "identity": "cutcost.tech",
+                "identity_type": "Domain",
+                "verification_status": "Success",
+                "dkim_enabled": True,
+                "emails_sent_24h": 150,
+                "emails_sent_7d": 980,
+                "emails_sent_30d": 4200,
+                "bounce_rate": 1.2,
+                "complaint_rate": 0.05,
+                "last_checked": "2025-11-09T16:45:00Z",
+            }
+        }
+
+
 class SESMetrics(BaseModel):
     """AWS SES metrics schema."""
 

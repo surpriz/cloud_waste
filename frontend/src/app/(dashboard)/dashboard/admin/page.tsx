@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { adminAPI } from "@/lib/api";
-import type { User, AdminStats, PricingStats, MLDataStats, MLExportResponse, SESMetrics } from "@/types";
+import type { User, AdminStats, PricingStats, MLDataStats, MLExportResponse, SESMetrics, SESIdentityMetrics } from "@/types";
 import { Shield, Users, UserCheck, UserX, Crown, Ban, CheckCircle, DollarSign, TrendingUp, Database, Download, Mail, AlertTriangle, CheckCircle2 } from "lucide-react";
 
 export default function AdminPage() {
@@ -13,6 +13,7 @@ export default function AdminPage() {
   const [pricingStats, setPricingStats] = useState<PricingStats | null>(null);
   const [mlStats, setMlStats] = useState<MLDataStats | null>(null);
   const [sesMetrics, setSesMetrics] = useState<SESMetrics | null>(null);
+  const [sesIdentities, setSesIdentities] = useState<SESIdentityMetrics[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
@@ -26,18 +27,20 @@ export default function AdminPage() {
   const loadData = async () => {
     try {
       setLoading(true);
-      const [usersData, statsData, pricingData, mlData, sesData] = await Promise.all([
+      const [usersData, statsData, pricingData, mlData, sesData, sesIdentitiesData] = await Promise.all([
         adminAPI.listUsers(),
         adminAPI.getStats(),
         adminAPI.getPricingStats().catch(() => null), // Optional pricing stats
         adminAPI.getMLStats().catch(() => null), // Optional ML stats
         adminAPI.getSESMetrics().catch(() => null), // Optional SES metrics
+        adminAPI.getSESIdentities().catch(() => []), // Optional SES identities
       ]);
       setUsers(usersData);
       setStats(statsData);
       setPricingStats(pricingData);
       setMlStats(mlData);
       setSesMetrics(sesData);
+      setSesIdentities(sesIdentitiesData);
       setError(null);
     } catch (err: any) {
       setError(err.message || "Failed to load admin data");
@@ -517,6 +520,96 @@ export default function AdminPage() {
                 </div>
               </div>
             </div>
+
+            {/* Identity Breakdown Table */}
+            {sesIdentities.length > 0 && (
+              <div className="mt-6">
+                <h4 className="text-sm font-semibold text-gray-700 mb-3">Identity Breakdown</h4>
+                <div className="bg-white rounded-lg border border-blue-100 overflow-hidden">
+                  <table className="w-full">
+                    <thead className="bg-blue-50 border-b border-blue-100">
+                      <tr>
+                        <th className="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase">Domain</th>
+                        <th className="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase">Type</th>
+                        <th className="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase">Status</th>
+                        <th className="px-4 py-3 text-left text-xs font-medium text-gray-600 uppercase">DKIM</th>
+                        <th className="px-4 py-3 text-center text-xs font-medium text-gray-600 uppercase">24h</th>
+                        <th className="px-4 py-3 text-center text-xs font-medium text-gray-600 uppercase">7d</th>
+                        <th className="px-4 py-3 text-center text-xs font-medium text-gray-600 uppercase">30d</th>
+                        <th className="px-4 py-3 text-center text-xs font-medium text-gray-600 uppercase">Bounce</th>
+                        <th className="px-4 py-3 text-center text-xs font-medium text-gray-600 uppercase">Complaint</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-gray-100">
+                      {sesIdentities.map((identity, index) => (
+                        <tr key={index} className="hover:bg-blue-50/30">
+                          <td className="px-4 py-3">
+                            <span className="text-sm font-medium text-gray-900">{identity.identity}</span>
+                          </td>
+                          <td className="px-4 py-3">
+                            <span className="text-sm text-gray-600">{identity.identity_type}</span>
+                          </td>
+                          <td className="px-4 py-3">
+                            <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${
+                              identity.verification_status === "Success" || identity.verification_status === "SUCCESS"
+                                ? "bg-green-100 text-green-800"
+                                : identity.verification_status === "Pending"
+                                ? "bg-orange-100 text-orange-800"
+                                : "bg-red-100 text-red-800"
+                            }`}>
+                              {identity.verification_status === "Success" || identity.verification_status === "SUCCESS" ? "✓ Verified" : identity.verification_status}
+                            </span>
+                          </td>
+                          <td className="px-4 py-3">
+                            <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${
+                              identity.dkim_enabled ? "bg-green-100 text-green-800" : "bg-gray-100 text-gray-600"
+                            }`}>
+                              {identity.dkim_enabled ? "✓ Enabled" : "Disabled"}
+                            </span>
+                          </td>
+                          <td className="px-4 py-3 text-center">
+                            <span className="text-sm font-medium text-blue-600">
+                              {identity.emails_sent_24h.toLocaleString()}
+                            </span>
+                          </td>
+                          <td className="px-4 py-3 text-center">
+                            <span className="text-sm font-medium text-blue-600">
+                              {identity.emails_sent_7d.toLocaleString()}
+                            </span>
+                          </td>
+                          <td className="px-4 py-3 text-center">
+                            <span className="text-sm font-medium text-blue-600">
+                              {identity.emails_sent_30d.toLocaleString()}
+                            </span>
+                          </td>
+                          <td className="px-4 py-3 text-center">
+                            <span className={`text-sm font-semibold ${
+                              identity.bounce_rate === 0 ? "text-gray-400" :
+                              identity.bounce_rate <= 2 ? "text-green-600" :
+                              identity.bounce_rate <= 5 ? "text-orange-600" : "text-red-600"
+                            }`}>
+                              {identity.bounce_rate.toFixed(2)}%
+                            </span>
+                          </td>
+                          <td className="px-4 py-3 text-center">
+                            <span className={`text-sm font-semibold ${
+                              identity.complaint_rate === 0 ? "text-gray-400" :
+                              identity.complaint_rate <= 0.1 ? "text-green-600" :
+                              identity.complaint_rate <= 0.3 ? "text-orange-600" : "text-red-600"
+                            }`}>
+                              {identity.complaint_rate.toFixed(3)}%
+                            </span>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+                <p className="text-xs text-gray-500 mt-2">
+                  Note: Per-identity metrics require CloudWatch Logs or Configuration Sets. Values may show 0 without proper setup.
+                </p>
+              </div>
+            )}
 
             {/* Footer Info */}
             <div className="flex items-center justify-between mt-4 pt-4 border-t border-blue-200">

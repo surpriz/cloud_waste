@@ -17,7 +17,7 @@ from app.models.ml_training_data import MLTrainingData
 from app.models.user_action_pattern import UserActionPattern
 from app.models.cost_trend_data import CostTrendData
 from app.schemas.user import User as UserSchema, UserAdminUpdate
-from app.schemas.ses_metrics import SESMetrics
+from app.schemas.ses_metrics import SESMetrics, SESIdentityMetrics
 from app.services.ses_metrics_service import SESMetricsService
 from app.ml.data_pipeline import export_all_ml_datasets
 
@@ -426,4 +426,41 @@ async def get_ses_metrics(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to fetch SES metrics: {str(e)}",
+        )
+
+
+@router.get(
+    "/ses-identities",
+    response_model=list[SESIdentityMetrics],
+    summary="Get AWS SES identities metrics",
+)
+async def get_ses_identities(
+    _: Annotated[User, Depends(get_current_superuser)],
+) -> list[SESIdentityMetrics]:
+    """
+    Get metrics for all AWS SES email identities (superuser only).
+
+    Returns metrics for each verified identity (domain or email) including:
+    - Identity name and type
+    - Verification and DKIM status
+    - Send statistics per identity (24h, 7d, 30d)
+    - Bounce and complaint rates per identity
+
+    Note: Per-identity metrics require CloudWatch Logs or Configuration Sets.
+    Without these, send volumes and rates may show 0.
+
+    Returns:
+        List of SES identity metrics objects
+
+    Raises:
+        HTTPException: If unable to fetch identity metrics
+    """
+    try:
+        service = SESMetricsService()
+        identities = await service.get_identities_metrics()
+        return identities
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to fetch SES identity metrics: {str(e)}",
         )
