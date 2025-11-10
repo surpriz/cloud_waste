@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { Cloud, DollarSign, Search, Shield, TrendingDown, Zap, Lock, BarChart3 } from "lucide-react";
+import { Footer } from "@/components/layout/Footer";
 
 export default function Home() {
   return (
@@ -209,24 +210,7 @@ export default function Home() {
       </div>
 
       {/* Footer */}
-      <footer className="bg-gray-900 px-4 py-12 text-gray-400">
-        <div className="mx-auto max-w-6xl text-center">
-          <p>&copy; 2025 CloudWaste. Built with FastAPI & Next.js.</p>
-          <div className="mt-4 flex justify-center gap-6">
-            <a
-              href="http://localhost:8000/api/docs"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="hover:text-white transition-colors"
-            >
-              API Docs
-            </a>
-            <a href="/dashboard" className="hover:text-white transition-colors">
-              Dashboard
-            </a>
-          </div>
-        </div>
-      </footer>
+      <Footer />
     </main>
   );
 }
