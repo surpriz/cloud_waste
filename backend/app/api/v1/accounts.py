@@ -3,10 +3,11 @@
 import uuid
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_active_user, get_db
+from app.core.rate_limit import api_default_limit
 from app.crud import cloud_account as cloud_account_crud
 from app.models.user import User
 from app.schemas.cloud_account import (
@@ -29,7 +30,9 @@ router = APIRouter()
 
 
 @router.post("/", response_model=CloudAccount, status_code=status.HTTP_201_CREATED)
+@api_default_limit
 async def create_cloud_account(
+    request: Request,
     account_in: CloudAccountCreate,
     db: Annotated[AsyncSession, Depends(get_db)],
     current_user: Annotated[User, Depends(get_current_active_user)],

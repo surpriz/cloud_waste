@@ -76,6 +76,15 @@ class Settings(BaseSettings):
     CHAT_CONTEXT_MAX_RESOURCES: int = 20
     CHAT_MODEL: str = "claude-haiku-4-5-20250818"
 
+    # Rate Limiting
+    RATE_LIMIT_ENABLED: bool = True
+    RATE_LIMIT_AUTH_LOGIN: str = "5/minute"  # Login attempts (brute-force protection)
+    RATE_LIMIT_AUTH_REGISTER: str = "3/minute"  # Registration (spam prevention)
+    RATE_LIMIT_AUTH_REFRESH: str = "10/minute"  # Token refresh
+    RATE_LIMIT_SCANS: str = "10/minute"  # Cloud scans (resource-intensive)
+    RATE_LIMIT_ADMIN: str = "50/minute"  # Admin endpoints
+    RATE_LIMIT_API_DEFAULT: str = "100/minute"  # Default for all API endpoints
+
     @field_validator("ALLOWED_ORIGINS", mode="before")
     @classmethod
     def parse_allowed_origins(cls, v: str | List[str]) -> List[str]:

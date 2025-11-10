@@ -80,6 +80,14 @@ logs/
 *.sqlite
 *.sqlite3
 
+# ML Datasets & Exports (generated data)
+backend/ml_datasets/
+**/cost_trends_*.json
+**/cost_trends_*.csv
+**/ml_training_data_*.json
+**/ml_training_data_*.csv
+**/user_action_patterns_*.json
+
 # Backups (contains sensitive data)
 backups/
 *.sql.gz
@@ -106,7 +114,8 @@ coverage/
 *.scss.map
 
 #Directories and files to ignore
-#docs/
+docs/
 claude_code_rules.md
 CLAUDE.md
-todo.md
+last_points.md
+.claudeignore

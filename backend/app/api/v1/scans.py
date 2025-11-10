@@ -3,10 +3,11 @@
 import uuid
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_active_user, get_db
+from app.core.rate_limit import scan_limit
 from app.crud import cloud_account as cloud_account_crud
 from app.crud import scan as scan_crud
 from app.models.user import User
@@ -17,7 +18,9 @@ router = APIRouter()
 
 
 @router.post("/", response_model=Scan, status_code=status.HTTP_201_CREATED)
+@scan_limit
 async def create_scan(
+    request: Request,
     scan_in: ScanCreate,
     db: Annotated[AsyncSession, Depends(get_db)],
     current_user: Annotated[User, Depends(get_current_active_user)],

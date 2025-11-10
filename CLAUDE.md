@@ -325,10 +325,75 @@ az ad sp create-for-rbac --name "CloudWaste-Scanner" \
 ### Authentication
 - Password hashing: bcrypt (cost factor 12)
 - JWT tokens with access/refresh pattern
-- Rate limiting: 100 req/min per user (FastAPI-limiter + Redis)
 - CORS: Whitelist authorized domains only
 - HTTPS only (TLS 1.3)
 - Input validation: Strict Pydantic validation, ORM only (NO raw SQL)
+
+### Rate Limiting
+CloudWaste implements API rate limiting using **SlowAPI** with Redis backend to prevent:
+- **DDoS attacks** - Distributed denial of service
+- **Brute-force attacks** - Password guessing on login
+- **Resource enumeration** - Scanning for valid accounts
+- **API abuse** - Excessive scan requests
+
+**Implementation:**
+- Rate limiting by user ID (authenticated) or IP address (unauthenticated)
+- Redis-backed storage for distributed rate limiting
+- Automatic retry headers (X-RateLimit-*)
+- Configurable limits per endpoint type
+
+**Default Rate Limits:**
+```
+Authentication Endpoints:
+- POST /api/v1/auth/login            → 5/minute   (brute-force protection)
+- POST /api/v1/auth/register         → 3/minute   (spam prevention)
+- POST /api/v1/auth/refresh          → 10/minute  (token refresh)
+- POST /api/v1/auth/resend-verification → 3/minute (email spam prevention)
+
+Resource-Intensive Endpoints:
+- POST /api/v1/scans/                → 10/minute  (cloud scans)
+
+Standard API Endpoints:
+- POST /api/v1/accounts/             → 100/minute (account creation)
+- GET  /api/v1/resources/*           → 100/minute (default)
+- GET  /api/v1/scans/*               → 100/minute (default)
+
+Admin Endpoints:
+- /api/v1/admin/*                    → 50/minute
+```
+
+**Configuration:**
+Rate limits can be adjusted via environment variables:
+```bash
+RATE_LIMIT_ENABLED=true                    # Enable/disable rate limiting
+RATE_LIMIT_AUTH_LOGIN=5/minute            # Login attempts
+RATE_LIMIT_AUTH_REGISTER=3/minute         # Registration
+RATE_LIMIT_AUTH_REFRESH=10/minute         # Token refresh
+RATE_LIMIT_SCANS=10/minute                # Cloud scans
+RATE_LIMIT_ADMIN=50/minute                # Admin operations
+RATE_LIMIT_API_DEFAULT=100/minute         # Default for all endpoints
+```
+
+**Response Headers:**
+All API responses include rate limit information:
+```
+X-RateLimit-Limit: 5                      # Max requests allowed
+X-RateLimit-Remaining: 3                  # Requests remaining
+X-RateLimit-Reset: 1699876543             # Unix timestamp when limit resets
+```
+
+**Error Response (429 Too Many Requests):**
+```json
+{
+  "error": "Rate limit exceeded: 5 per 1 minute"
+}
+```
+
+**Testing:**
+```bash
+cd backend
+pytest tests/api/test_rate_limiting.py -v
+```
 
 ## Database Schema
 

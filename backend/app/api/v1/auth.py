@@ -4,12 +4,13 @@ from datetime import timedelta
 from typing import Annotated
 
 import structlog
-from fastapi import APIRouter, Depends, Form, HTTPException, status
+from fastapi import APIRouter, Depends, Form, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_active_user, get_db
 from app.core.config import settings
+from app.core.rate_limit import auth_login_limit, auth_refresh_limit, auth_register_limit, limiter
 from app.core.security import create_access_token, create_refresh_token, decode_token
 from app.crud import user as user_crud
 from app.models.user import User
@@ -23,7 +24,9 @@ logger = structlog.get_logger()
 
 
 @router.post("/register", response_model=UserSchema, status_code=status.HTTP_201_CREATED)
+@auth_register_limit
 async def register(
+    request: Request,
     user_in: UserCreate,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> User:
@@ -79,7 +82,9 @@ async def register(
 
 
 @router.post("/login", response_model=Token)
+@auth_login_limit
 async def login(
+    request: Request,
     db: Annotated[AsyncSession, Depends(get_db)],
     form_data: Annotated[OAuth2PasswordRequestForm, Depends()],
     remember_me: Annotated[bool, Form()] = False,
@@ -144,7 +149,9 @@ async def login(
 
 
 @router.post("/refresh", response_model=Token)
+@auth_refresh_limit
 async def refresh_token(
+    request: Request,
     refresh_request: RefreshTokenRequest,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> dict[str, str]:
@@ -284,7 +291,9 @@ async def verify_email(
 
 
 @router.post("/resend-verification")
+@auth_register_limit  # Same limit as register to prevent email spam
 async def resend_verification_email(
+    request: Request,
     email: Annotated[str, Form()],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> dict[str, str]:
