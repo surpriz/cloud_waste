@@ -1,5 +1,7 @@
 """Application Configuration using Pydantic Settings."""
 
+import os
+from pathlib import Path
 from typing import List
 from urllib.parse import urlparse
 
@@ -7,11 +9,35 @@ from pydantic import EmailStr, PostgresDsn, RedisDsn, ValidationError, field_val
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+def get_env_file() -> str:
+    """
+    Determine which .env file to load based on APP_ENV.
+
+    Returns:
+        Path to the .env file to load
+    """
+    app_env = os.getenv("APP_ENV", "development")
+    base_dir = Path(__file__).parent.parent.parent  # backend/
+
+    if app_env == "test":
+        env_file = base_dir / ".env.test"
+        if env_file.exists():
+            return str(env_file)
+
+    if app_env == "production":
+        env_file = base_dir / ".env.production"
+        if env_file.exists():
+            return str(env_file)
+
+    # Default to .env
+    return str(base_dir / ".env")
+
+
 class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
 
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=get_env_file(),
         env_file_encoding="utf-8",
         case_sensitive=True,
         extra="ignore",
@@ -33,7 +59,8 @@ class Settings(BaseSettings):
     REFRESH_TOKEN_REMEMBER_ME_EXPIRE_DAYS: int = 30
 
     # Database
-    DATABASE_URL: PostgresDsn
+    # Note: Using str instead of PostgresDsn to support SQLite for testing
+    DATABASE_URL: str
 
     # Redis
     REDIS_URL: RedisDsn
