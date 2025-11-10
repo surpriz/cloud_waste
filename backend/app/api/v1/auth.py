@@ -4,7 +4,7 @@ from datetime import timedelta
 from typing import Annotated
 
 import structlog
-from fastapi import APIRouter, Depends, Form, HTTPException, Request, status
+from fastapi import APIRouter, Depends, Form, HTTPException, Request, Response, status
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -27,6 +27,7 @@ logger = structlog.get_logger()
 @auth_register_limit
 async def register(
     request: Request,
+    response: Response,
     user_in: UserCreate,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> User:
@@ -85,6 +86,7 @@ async def register(
 @auth_login_limit
 async def login(
     request: Request,
+    response: Response,
     db: Annotated[AsyncSession, Depends(get_db)],
     form_data: Annotated[OAuth2PasswordRequestForm, Depends()],
     remember_me: Annotated[bool, Form()] = False,
@@ -152,6 +154,7 @@ async def login(
 @auth_refresh_limit
 async def refresh_token(
     request: Request,
+    response: Response,
     refresh_request: RefreshTokenRequest,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> dict[str, str]:
@@ -294,6 +297,7 @@ async def verify_email(
 @auth_register_limit  # Same limit as register to prevent email spam
 async def resend_verification_email(
     request: Request,
+    response: Response,
     email: Annotated[str, Form()],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> dict[str, str]:
