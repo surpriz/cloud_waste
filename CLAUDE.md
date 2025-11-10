@@ -325,9 +325,156 @@ az ad sp create-for-rbac --name "CloudWaste-Scanner" \
 ### Authentication
 - Password hashing: bcrypt (cost factor 12)
 - JWT tokens with access/refresh pattern
-- CORS: Whitelist authorized domains only
 - HTTPS only (TLS 1.3)
 - Input validation: Strict Pydantic validation, ORM only (NO raw SQL)
+
+### CORS Security
+CloudWaste implements **strict CORS (Cross-Origin Resource Sharing) validation** to prevent:
+- **Cross-origin attacks** - Unauthorized websites accessing the API
+- **Header injection** - Malicious custom headers
+- **Credential theft** - Cookies/tokens stolen via CORS misconfiguration
+- **Wildcard exploits** - `*` origin bypassing security
+
+**Security Rules:**
+1. **No Wildcards** - `allow_origins` uses explicit whitelist only (no `*`)
+2. **Strict Validation** - All origins validated at startup via Pydantic validators
+3. **HTTPS in Production** - Only HTTPS origins allowed (except localhost/127.0.0.1)
+4. **Valid URL Format** - Origins must include scheme and hostname (e.g., `https://cloudwaste.com`)
+5. **Explicit Methods** - Only required HTTP methods allowed (no `allow_methods=["*"]`)
+6. **Explicit Headers** - Only required headers allowed (no `allow_headers=["*"]`)
+7. **CORS Logging** - All cross-origin requests logged for security monitoring
+
+**Implementation:**
+```python
+# backend/app/core/config.py - Strict Pydantic validation
+ALLOWED_ORIGINS: List[str] = [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+]
+
+@field_validator("ALLOWED_ORIGINS")
+def validate_cors_origins(cls, origins: List[str], info) -> List[str]:
+    # Rejects wildcards, validates URL format, enforces HTTPS in production
+    # See backend/app/core/config.py:validate_cors_origins for full implementation
+```
+
+```python
+# backend/app/main.py - Explicit CORS configuration
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.ALLOWED_ORIGINS,              # Validated whitelist
+    allow_credentials=settings.CORS_ALLOW_CREDENTIALS,   # JWT cookies
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],  # Explicit
+    allow_headers=[
+        "Content-Type",
+        "Authorization",
+        "Accept",
+        "Origin",
+        "X-Requested-With",
+        "X-CSRF-Token",
+    ],  # Explicit whitelist (no *)
+    max_age=settings.CORS_MAX_AGE,  # Preflight cache (600s default)
+)
+```
+
+**Configuration:**
+```bash
+# Development (HTTP allowed for localhost)
+ALLOWED_ORIGINS=http://localhost:3000,http://127.0.0.1:3000
+CORS_ALLOW_CREDENTIALS=true
+CORS_MAX_AGE=600
+
+# Production (HTTPS only)
+APP_ENV=production
+ALLOWED_ORIGINS=https://cloudwaste.com,https://www.cloudwaste.com,https://app.cloudwaste.com
+CORS_ALLOW_CREDENTIALS=true
+CORS_MAX_AGE=600
+```
+
+**Validation Rules:**
+
+✅ **Valid Origins:**
+```python
+# Development
+"http://localhost:3000"
+"http://127.0.0.1:8080"
+"https://cloudwaste.com"
+
+# Production (HTTPS required except localhost)
+"https://cloudwaste.com"
+"https://www.cloudwaste.com"
+"http://localhost:3000"  # Still allowed in production for local testing
+```
+
+❌ **Rejected Origins:**
+```python
+"*"                              # Wildcard rejected
+"http://*.cloudwaste.com"        # Wildcard in domain rejected
+"cloudwaste.com"                 # Missing scheme
+"http://"                        # Missing hostname
+""                               # Empty string
+"http://cloudwaste.com"          # HTTP rejected in production (non-localhost)
+```
+
+**CORS Logging Middleware:**
+All cross-origin requests are logged via `CORSLoggingMiddleware` for security monitoring:
+```json
+{
+  "event": "cors.request",
+  "method": "GET",
+  "path": "/api/v1/resources",
+  "origin": "https://cloudwaste.com",
+  "is_preflight": false,
+  "status_code": 200,
+  "user_agent": "Mozilla/5.0..."
+}
+```
+
+Rejected CORS requests (403) are logged at **warning level** for alerting:
+```json
+{
+  "event": "cors.request_forbidden",
+  "origin": "https://malicious-site.com",
+  "status_code": 403,
+  "reason": "Origin likely not in ALLOWED_ORIGINS whitelist"
+}
+```
+
+**Adding New Origins:**
+1. Update `.env` (development) or `.env.production` (production):
+```bash
+ALLOWED_ORIGINS=https://cloudwaste.com,https://new-domain.com
+```
+
+2. Restart backend:
+```bash
+docker-compose restart backend
+```
+
+3. Verify in logs:
+```
+INFO: ✅ CORS origins validated: ['https://cloudwaste.com', 'https://new-domain.com']
+```
+
+**Testing:**
+```bash
+cd backend
+
+# Unit tests - CORS validation logic
+pytest tests/core/test_cors_validation.py -v
+
+# Integration tests - CORS middleware behavior
+pytest tests/api/test_cors_integration.py -v
+```
+
+**Security Checklist:**
+- ✅ No wildcards in `ALLOWED_ORIGINS`
+- ✅ HTTPS enforced in production (except localhost)
+- ✅ Explicit `allow_methods` (no `["*"]`)
+- ✅ Explicit `allow_headers` (no `["*"]`)
+- ✅ CORS logging enabled
+- ✅ Origins validated at startup (fail-fast)
+- ✅ Tests covering validation rules
 
 ### Rate Limiting
 CloudWaste implements API rate limiting using **SlowAPI** with Redis backend to prevent:

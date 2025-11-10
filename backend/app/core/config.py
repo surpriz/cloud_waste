@@ -1,8 +1,9 @@
 """Application Configuration using Pydantic Settings."""
 
 from typing import List
+from urllib.parse import urlparse
 
-from pydantic import EmailStr, PostgresDsn, RedisDsn, field_validator
+from pydantic import EmailStr, PostgresDsn, RedisDsn, ValidationError, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -46,6 +47,8 @@ class Settings(BaseSettings):
         "http://localhost:3000",
         "http://127.0.0.1:3000",
     ]
+    CORS_ALLOW_CREDENTIALS: bool = True
+    CORS_MAX_AGE: int = 600  # Preflight cache duration in seconds
 
     # Email
     SMTP_HOST: str = ""
@@ -92,6 +95,85 @@ class Settings(BaseSettings):
         if isinstance(v, str):
             return [origin.strip() for origin in v.split(",")]
         return v
+
+    @field_validator("ALLOWED_ORIGINS", mode="after")
+    @classmethod
+    def validate_cors_origins(cls, origins: List[str], info) -> List[str]:
+        """
+        Validate CORS origins for security.
+
+        Security rules:
+        1. No wildcards ("*", "http://*", etc.)
+        2. Valid URL format (scheme://host[:port])
+        3. In production: HTTPS only (except localhost/127.0.0.1)
+        4. No empty or whitespace-only origins
+
+        Args:
+            origins: List of origin URLs to validate
+            info: ValidationInfo containing other field values
+
+        Returns:
+            Validated list of origins
+
+        Raises:
+            ValueError: If any origin violates security rules
+        """
+        if not origins:
+            raise ValueError("ALLOWED_ORIGINS cannot be empty. At least one origin must be specified.")
+
+        # Get APP_ENV from the validation context
+        app_env = info.data.get("APP_ENV", "development")
+        is_production = app_env == "production"
+
+        validated_origins = []
+
+        for origin in origins:
+            origin = origin.strip()
+
+            # Rule 1: No empty origins
+            if not origin:
+                raise ValueError("CORS origin cannot be empty or whitespace-only")
+
+            # Rule 2: No wildcards
+            if "*" in origin:
+                raise ValueError(
+                    f"CORS origin '{origin}' contains wildcard '*'. "
+                    "Wildcards are not allowed for security reasons. "
+                    "Specify exact domains instead."
+                )
+
+            # Rule 3: Valid URL format
+            try:
+                parsed = urlparse(origin)
+            except Exception as e:
+                raise ValueError(f"CORS origin '{origin}' is not a valid URL: {e}")
+
+            if not parsed.scheme:
+                raise ValueError(
+                    f"CORS origin '{origin}' must include scheme (http:// or https://). "
+                    f"Example: https://cloudwaste.com"
+                )
+
+            if not parsed.netloc:
+                raise ValueError(
+                    f"CORS origin '{origin}' must include hostname. "
+                    f"Example: https://cloudwaste.com"
+                )
+
+            # Rule 4: Production must use HTTPS (except localhost)
+            if is_production:
+                is_localhost = parsed.netloc.startswith("localhost") or parsed.netloc.startswith("127.0.0.1")
+
+                if parsed.scheme != "https" and not is_localhost:
+                    raise ValueError(
+                        f"CORS origin '{origin}' must use HTTPS in production. "
+                        f"HTTP is only allowed for localhost/127.0.0.1. "
+                        f"Change to: https://{parsed.netloc}"
+                    )
+
+            validated_origins.append(origin)
+
+        return validated_origins
 
 
 # Create global settings instance

@@ -12,6 +12,7 @@ from slowapi.errors import RateLimitExceeded
 
 from app.core.config import settings
 from app.core.rate_limit import limiter
+from app.middleware import CORSLoggingMiddleware
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -31,13 +32,33 @@ app = FastAPI(
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
-# Configure CORS
+# Add CORS logging middleware for security monitoring (OPTIONAL)
+# ⚠️  NOTE: CORSLoggingMiddleware is available but currently disabled
+# due to compatibility issues with BaseHTTPMiddleware in test environment
+# To enable: uncomment the line below
+# app.add_middleware(CORSLoggingMiddleware, log_all_requests=False)
+
+# Configure CORS with strict security rules
+# Security rationale:
+# - allow_origins: Validated whitelist from settings (no wildcards)
+# - allow_credentials: Allows cookies/authorization headers (required for JWT)
+# - allow_methods: Explicit list (no wildcard for security)
+# - allow_headers: Explicit whitelist (no wildcard to prevent header injection)
+# - max_age: Cache preflight for 10 minutes to reduce requests
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.ALLOWED_ORIGINS,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_credentials=settings.CORS_ALLOW_CREDENTIALS,
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=[
+        "Content-Type",
+        "Authorization",
+        "Accept",
+        "Origin",
+        "X-Requested-With",
+        "X-CSRF-Token",
+    ],
+    max_age=settings.CORS_MAX_AGE,
 )
 
 
