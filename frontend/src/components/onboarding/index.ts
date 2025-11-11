@@ -6,6 +6,7 @@
 
 export { OnboardingWizard } from "./OnboardingWizard";
 export { OnboardingChecklist } from "./OnboardingChecklist";
+export { OnboardingBanner } from "./OnboardingBanner";
 export { ProgressBar } from "./ProgressBar";
 export { WelcomeStep } from "./WelcomeStep";
 export { AddAccountStep } from "./AddAccountStep";

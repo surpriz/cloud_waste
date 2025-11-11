@@ -97,7 +97,7 @@ async def get_scan_summary(
                 detail="Cloud account not found",
             )
 
-    stats = await scan_crud.get_scan_statistics(db, cloud_account_id)
+    stats = await scan_crud.get_scan_statistics(db, cloud_account_id, user_id=current_user.id)
     return ScanSummary(**stats)
 
 

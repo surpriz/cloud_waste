@@ -5,6 +5,7 @@
 import { create } from "zustand";
 import { scansAPI } from "@/lib/api";
 import type { Scan, ScanCreate, ScanWithResources, ScanSummary } from "@/types";
+import { useOnboardingStore } from "./useOnboardingStore";
 
 interface ScanState {
   scans: Scan[];
@@ -22,6 +23,7 @@ interface ScanState {
   fetchSummary: (cloudAccountId?: string) => Promise<void>;
   fetchScansByAccount: (accountId: string) => Promise<void>;
   clearError: () => void;
+  resetStore: () => void;
 }
 
 export const useScanStore = create<ScanState>((set) => ({
@@ -36,6 +38,12 @@ export const useScanStore = create<ScanState>((set) => ({
     try {
       const scans = await scansAPI.list();
       set({ scans, isLoading: false });
+
+      // Notify onboarding if user has completed scans
+      const hasCompletedScans = scans.some((scan) => scan.status === "completed");
+      if (hasCompletedScans) {
+        useOnboardingStore.getState().setFirstScanCompleted(true);
+      }
     } catch (error: any) {
       set({ error: error.message || "Failed to fetch scans", isLoading: false });
     }
@@ -59,6 +67,12 @@ export const useScanStore = create<ScanState>((set) => ({
         scans: [scan, ...state.scans],
         isLoading: false,
       }));
+
+      // Notify onboarding if scan is completed
+      if (scan.status === "completed") {
+        useOnboardingStore.getState().setFirstScanCompleted(true);
+      }
+
       return scan;
     } catch (error: any) {
       set({ error: error.message || "Failed to create scan", isLoading: false });
@@ -115,4 +129,14 @@ export const useScanStore = create<ScanState>((set) => ({
   },
 
   clearError: () => set({ error: null }),
+
+  resetStore: () => {
+    set({
+      scans: [],
+      selectedScan: null,
+      summary: null,
+      isLoading: false,
+      error: null,
+    });
+  },
 }));

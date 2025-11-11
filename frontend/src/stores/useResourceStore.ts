@@ -30,6 +30,7 @@ interface ResourceState {
   setFilters: (filters: ResourceFilters) => void;
   clearFilters: () => void;
   clearError: () => void;
+  resetStore: () => void;
 }
 
 export const useResourceStore = create<ResourceState>((set, get) => ({
@@ -125,4 +126,16 @@ export const useResourceStore = create<ResourceState>((set, get) => ({
   },
 
   clearError: () => set({ error: null }),
+
+  resetStore: () => {
+    set({
+      resources: [],
+      selectedResource: null,
+      stats: null,
+      topCostResources: [],
+      filters: {},
+      isLoading: false,
+      error: null,
+    });
+  },
 }));

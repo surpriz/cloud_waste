@@ -38,18 +38,14 @@ async def list_orphan_resources(
     """
     if cloud_account_id:
         # Verify account belongs to user
-        account = await cloud_account_crud.get_cloud_account_by_id(db, cloud_account_id)
+        account = await cloud_account_crud.get_cloud_account_by_id(
+            db, cloud_account_id, current_user.id
+        )
 
         if not account:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Cloud account not found",
-            )
-
-        if account.user_id != current_user.id:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Not authorized to view this account's resources",
             )
 
         resources = await orphan_resource_crud.get_orphan_resources_by_account(
@@ -123,16 +119,18 @@ async def get_orphan_resource_stats(
     """
     if cloud_account_id:
         # Verify account belongs to user
-        account = await cloud_account_crud.get_cloud_account_by_id(db, cloud_account_id)
+        account = await cloud_account_crud.get_cloud_account_by_id(
+            db, cloud_account_id, current_user.id
+        )
 
-        if not account or account.user_id != current_user.id:
+        if not account:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Cloud account not found",
             )
 
     stats = await orphan_resource_crud.get_orphan_resource_statistics(
-        db, cloud_account_id, status_filter
+        db, cloud_account_id, status_filter, user_id=current_user.id
     )
     return OrphanResourceStats(**stats)
 
@@ -149,16 +147,18 @@ async def get_top_cost_resources(
     """
     if cloud_account_id:
         # Verify account belongs to user
-        account = await cloud_account_crud.get_cloud_account_by_id(db, cloud_account_id)
+        account = await cloud_account_crud.get_cloud_account_by_id(
+            db, cloud_account_id, current_user.id
+        )
 
-        if not account or account.user_id != current_user.id:
+        if not account:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Cloud account not found",
             )
 
     resources = await orphan_resource_crud.get_top_cost_resources(
-        db, cloud_account_id, limit
+        db, cloud_account_id, limit, user_id=current_user.id
     )
     return resources
 
@@ -182,10 +182,10 @@ async def get_orphan_resource(
 
     # Verify resource belongs to user's account
     account = await cloud_account_crud.get_cloud_account_by_id(
-        db, resource.cloud_account_id
+        db, resource.cloud_account_id, current_user.id
     )
 
-    if not account or account.user_id != current_user.id:
+    if not account:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Not authorized to view this resource",
@@ -214,10 +214,10 @@ async def update_orphan_resource(
 
     # Verify resource belongs to user's account
     account = await cloud_account_crud.get_cloud_account_by_id(
-        db, resource.cloud_account_id
+        db, resource.cloud_account_id, current_user.id
     )
 
-    if not account or account.user_id != current_user.id:
+    if not account:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Not authorized to update this resource",
@@ -281,10 +281,10 @@ async def delete_orphan_resource(
 
     # Verify resource belongs to user's account
     account = await cloud_account_crud.get_cloud_account_by_id(
-        db, resource.cloud_account_id
+        db, resource.cloud_account_id, current_user.id
     )
 
-    if not account or account.user_id != current_user.id:
+    if not account:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Not authorized to delete this resource",

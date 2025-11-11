@@ -275,18 +275,26 @@ async def verify_email(
     # Verify email
     await user_crud.verify_user_email(db, user)
 
-    # Send welcome email
-    email_sent = email_service.send_welcome_email(
-        email=user.email,
-        full_name=user.full_name or "User",
-    )
-
-    logger.info(
-        "auth.email_verified",
-        user_id=str(user.id),
-        email=user.email,
-        welcome_email_sent=email_sent,
-    )
+    # Send welcome email (non-blocking - don't fail if email fails)
+    try:
+        email_sent = email_service.send_welcome_email(
+            email=user.email,
+            full_name=user.full_name or "User",
+        )
+        logger.info(
+            "auth.email_verified",
+            user_id=str(user.id),
+            email=user.email,
+            welcome_email_sent=email_sent,
+        )
+    except Exception as e:
+        # Log error but don't fail verification
+        logger.error(
+            "auth.welcome_email_failed",
+            user_id=str(user.id),
+            email=user.email,
+            error=str(e),
+        )
 
     return {
         "message": "Email verified successfully. You can now login.",

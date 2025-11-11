@@ -22,6 +22,12 @@ export async function getCurrentUser(): Promise<User | null> {
 export function logout(): void {
   authAPI.logout();
   if (typeof window !== "undefined") {
+    // Clear ALL localStorage to prevent state pollution between users
+    // This includes onboarding state, preferences, and any cached data
+    localStorage.clear();
+
+    // Redirect to login page
+    // Note: Store resets are handled by useAuthStore.logout()
     window.location.href = "/auth/login";
   }
 }

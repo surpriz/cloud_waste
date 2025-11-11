@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { useResourceStore } from "@/stores/useResourceStore";
 import { useAccountStore } from "@/stores/useAccountStore";
+import { useOnboardingStore } from "@/stores/useOnboardingStore";
 import {
   Filter,
   RefreshCw,
@@ -257,6 +258,11 @@ export default function ResourcesPage() {
     fetchResources();
     fetchStats();
   }, [fetchAccounts, fetchResources, fetchStats]);
+
+  // Mark results as reviewed when user visits this page
+  useEffect(() => {
+    useOnboardingStore.getState().setResultsReviewed(true);
+  }, []);
 
   const handleFilterChange = (key: string, value: any) => {
     const newFilters = { ...filters, [key]: value };

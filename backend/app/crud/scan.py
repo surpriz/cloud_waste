@@ -145,7 +145,9 @@ async def update_scan(
 
 
 async def get_scan_statistics(
-    db: AsyncSession, cloud_account_id: uuid.UUID | None = None
+    db: AsyncSession,
+    cloud_account_id: uuid.UUID | None = None,
+    user_id: uuid.UUID | None = None,
 ) -> dict[str, int | float]:
     """
     Get scan statistics.
@@ -153,11 +155,20 @@ async def get_scan_statistics(
     Args:
         db: Database session
         cloud_account_id: Optional cloud account UUID to filter by
+        user_id: Optional user UUID to filter by (SECURITY: prevents data leaks)
 
     Returns:
         Dictionary with scan statistics
     """
+    from app.models.cloud_account import CloudAccount
+
     query = select(Scan)
+
+    # SECURITY: Filter by user_id to prevent cross-user data leakage
+    if user_id:
+        query = query.join(CloudAccount, Scan.cloud_account_id == CloudAccount.id).where(
+            CloudAccount.user_id == user_id
+        )
 
     if cloud_account_id:
         query = query.where(Scan.cloud_account_id == cloud_account_id)

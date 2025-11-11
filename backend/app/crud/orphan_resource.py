@@ -196,6 +196,7 @@ async def get_orphan_resource_statistics(
     db: AsyncSession,
     cloud_account_id: uuid.UUID | None = None,
     status: ResourceStatus | None = None,
+    user_id: uuid.UUID | None = None,
 ) -> dict[str, Any]:
     """
     Get orphan resource statistics from the latest scans.
@@ -204,6 +205,7 @@ async def get_orphan_resource_statistics(
         db: Database session
         cloud_account_id: Optional cloud account UUID to filter by
         status: Optional status filter
+        user_id: Optional user UUID to filter by (SECURITY: prevents data leaks)
 
     Returns:
         Dictionary with orphan resource statistics
@@ -213,15 +215,24 @@ async def get_orphan_resource_statistics(
     from sqlalchemy import and_, func
 
     # Get latest scan IDs per cloud account
-    latest_scan_subquery = (
+    # SECURITY: Filter by user_id to prevent cross-user data leakage
+    latest_scan_subquery_query = (
         select(
             Scan.cloud_account_id,
             func.max(Scan.created_at).label("max_created_at")
         )
         .where(Scan.status == "completed")
-        .group_by(Scan.cloud_account_id)
-        .subquery()
     )
+
+    # Add user_id filter if provided (CRITICAL for multi-tenant security)
+    if user_id:
+        latest_scan_subquery_query = latest_scan_subquery_query.join(
+            CloudAccount, Scan.cloud_account_id == CloudAccount.id
+        ).where(CloudAccount.user_id == user_id)
+
+    latest_scan_subquery = latest_scan_subquery_query.group_by(
+        Scan.cloud_account_id
+    ).subquery()
 
     latest_scan_ids = (
         select(Scan.id)
@@ -285,6 +296,7 @@ async def get_top_cost_resources(
     db: AsyncSession,
     cloud_account_id: uuid.UUID | None = None,
     limit: int = 10,
+    user_id: uuid.UUID | None = None,
 ) -> list[OrphanResource]:
     """
     Get top orphan resources by estimated monthly cost from latest scans.
@@ -293,23 +305,34 @@ async def get_top_cost_resources(
         db: Database session
         cloud_account_id: Optional cloud account UUID to filter by
         limit: Maximum number of resources to return
+        user_id: Optional user UUID to filter by (SECURITY: prevents data leaks)
 
     Returns:
         List of orphan resources sorted by cost (descending)
     """
     from app.models.scan import Scan
+    from app.models.cloud_account import CloudAccount
     from sqlalchemy import and_, func
 
     # Get latest scan IDs per cloud account
-    latest_scan_subquery = (
+    # SECURITY: Filter by user_id to prevent cross-user data leakage
+    latest_scan_subquery_query = (
         select(
             Scan.cloud_account_id,
             func.max(Scan.created_at).label("max_created_at")
         )
         .where(Scan.status == "completed")
-        .group_by(Scan.cloud_account_id)
-        .subquery()
     )
+
+    # Add user_id filter if provided (CRITICAL for multi-tenant security)
+    if user_id:
+        latest_scan_subquery_query = latest_scan_subquery_query.join(
+            CloudAccount, Scan.cloud_account_id == CloudAccount.id
+        ).where(CloudAccount.user_id == user_id)
+
+    latest_scan_subquery = latest_scan_subquery_query.group_by(
+        Scan.cloud_account_id
+    ).subquery()
 
     latest_scan_ids = (
         select(Scan.id)

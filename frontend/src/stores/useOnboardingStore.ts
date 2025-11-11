@@ -3,7 +3,7 @@
  */
 
 import { create } from "zustand";
-import { persist } from "zustand/middleware";
+import { persist, StateStorage } from "zustand/middleware";
 import {
   OnboardingStep,
   OnboardingProgress,
@@ -11,6 +11,7 @@ import {
   getNextStep,
   getPreviousStep,
 } from "@/types/onboarding";
+import { decodeToken } from "@/lib/auth";
 
 interface OnboardingState extends OnboardingProgress {
   // Actions
@@ -25,6 +26,49 @@ interface OnboardingState extends OnboardingProgress {
   setFirstScanCompleted: (completed: boolean) => void;
   setResultsReviewed: (reviewed: boolean) => void;
 }
+
+/**
+ * Get current user ID from JWT token
+ */
+function getUserId(): string | null {
+  if (typeof window === "undefined") return null;
+
+  const token = localStorage.getItem("access_token");
+  if (!token) return null;
+
+  try {
+    const decoded = decodeToken(token);
+    // JWT tokens typically have 'sub' (subject) or 'user_id' field
+    return decoded?.sub || decoded?.user_id || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Create user-scoped storage that isolates localStorage by user ID
+ * This prevents state pollution when multiple users use the same browser
+ */
+const createUserScopedStorage = (baseKey: string): StateStorage => {
+  return {
+    getItem: (name: string) => {
+      const userId = getUserId();
+      const key = userId ? `${baseKey}-${userId}` : baseKey;
+      const value = localStorage.getItem(key);
+      return value;
+    },
+    setItem: (name: string, value: string) => {
+      const userId = getUserId();
+      const key = userId ? `${baseKey}-${userId}` : baseKey;
+      localStorage.setItem(key, value);
+    },
+    removeItem: (name: string) => {
+      const userId = getUserId();
+      const key = userId ? `${baseKey}-${userId}` : baseKey;
+      localStorage.removeItem(key);
+    },
+  };
+};
 
 const initialState: OnboardingProgress = {
   currentStep: OnboardingStep.WELCOME,
@@ -125,7 +169,8 @@ export const useOnboardingStore = create<OnboardingState>()(
       },
     }),
     {
-      name: "cloudwaste-onboarding", // LocalStorage key
+      name: "cloudwaste-onboarding", // Base key (will be scoped by user ID)
+      storage: createUserScopedStorage("cloudwaste-onboarding"),
       version: 1,
     }
   )

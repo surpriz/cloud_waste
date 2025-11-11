@@ -4,6 +4,7 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { useAuthStore } from "@/stores/useAuthStore";
+import { useOnboardingRedirect } from "@/hooks/useOnboardingRedirect";
 import { LogIn, Mail, Lock, ArrowRight } from "lucide-react";
 
 export default function LoginPage() {
@@ -12,6 +13,7 @@ export default function LoginPage() {
   const isLoading = useAuthStore((state) => state.isLoading);
   const error = useAuthStore((state) => state.error);
   const clearError = useAuthStore((state) => state.clearError);
+  const redirectToOnboarding = useOnboardingRedirect();
 
   const [formData, setFormData] = useState({
     username: "",
@@ -25,7 +27,8 @@ export default function LoginPage() {
 
     try {
       await login(formData);
-      router.push("/dashboard");
+      // Auto-redirect to onboarding if not completed, otherwise dashboard
+      redirectToOnboarding();
     } catch (err) {
       console.error("Login error:", err);
     }

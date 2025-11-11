@@ -5,6 +5,7 @@
 import { create } from "zustand";
 import { accountsAPI } from "@/lib/api";
 import type { CloudAccount, CloudAccountCreate } from "@/types";
+import { useOnboardingStore } from "./useOnboardingStore";
 
 interface AccountState {
   accounts: CloudAccount[];
@@ -20,6 +21,7 @@ interface AccountState {
   selectAccount: (account: CloudAccount | null) => void;
   validateAccount: (id: string) => Promise<any>;
   clearError: () => void;
+  resetStore: () => void;
 }
 
 export const useAccountStore = create<AccountState>((set, get) => ({
@@ -33,6 +35,11 @@ export const useAccountStore = create<AccountState>((set, get) => ({
     try {
       const accounts = await accountsAPI.list();
       set({ accounts, isLoading: false });
+
+      // Notify onboarding if user has accounts
+      if (accounts.length > 0) {
+        useOnboardingStore.getState().setAccountAdded(true);
+      }
     } catch (error: any) {
       set({ error: error.message || "Failed to fetch accounts", isLoading: false });
     }
@@ -46,6 +53,10 @@ export const useAccountStore = create<AccountState>((set, get) => ({
         accounts: [...state.accounts, account],
         isLoading: false,
       }));
+
+      // Notify onboarding that account was added
+      useOnboardingStore.getState().setAccountAdded(true);
+
       return account;
     } catch (error: any) {
       set({ error: error.message || "Failed to create account", isLoading: false });
@@ -104,4 +115,13 @@ export const useAccountStore = create<AccountState>((set, get) => ({
   },
 
   clearError: () => set({ error: null }),
+
+  resetStore: () => {
+    set({
+      accounts: [],
+      selectedAccount: null,
+      isLoading: false,
+      error: null,
+    });
+  },
 }));

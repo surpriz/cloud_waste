@@ -4,7 +4,7 @@
 
 import { create } from "zustand";
 import { authAPI } from "@/lib/api";
-import { isAuthenticated, logout as authLogout } from "@/lib/auth";
+import { isAuthenticated } from "@/lib/auth";
 import type { User, LoginRequest, RegisterRequest } from "@/types";
 
 interface AuthState {
@@ -18,6 +18,7 @@ interface AuthState {
   logout: () => void;
   fetchCurrentUser: () => Promise<void>;
   clearError: () => void;
+  resetStore: () => void;
 }
 
 export const useAuthStore = create<AuthState>((set) => ({
@@ -55,8 +56,30 @@ export const useAuthStore = create<AuthState>((set) => ({
   },
 
   logout: () => {
-    authLogout();
-    set({ user: null, error: null });
+    // Reset all Zustand stores to prevent memory pollution between users
+    // This is CRITICAL - stores persist in RAM even after localStorage is cleared
+    set({ user: null, error: null, isLoading: false });
+
+    // Import stores dynamically to avoid circular dependencies
+    import("./useAccountStore").then(({ useAccountStore }) => {
+      useAccountStore.getState().resetStore();
+    });
+    import("./useScanStore").then(({ useScanStore }) => {
+      useScanStore.getState().resetStore();
+    });
+    import("./useResourceStore").then(({ useResourceStore }) => {
+      useResourceStore.getState().resetStore();
+    });
+    import("./useOnboardingStore").then(({ useOnboardingStore }) => {
+      useOnboardingStore.getState().resetOnboarding();
+    });
+
+    // Call API logout and clear localStorage
+    authAPI.logout();
+    if (typeof window !== "undefined") {
+      localStorage.clear();
+      window.location.href = "/auth/login";
+    }
   },
 
   fetchCurrentUser: async () => {
@@ -71,9 +94,18 @@ export const useAuthStore = create<AuthState>((set) => ({
       set({ user, isLoading: false });
     } catch (error: any) {
       set({ error: error.message, isLoading: false, user: null });
-      authLogout();
+      // Call the store's own logout to handle cleanup
+      useAuthStore.getState().logout();
     }
   },
 
   clearError: () => set({ error: null }),
+
+  resetStore: () => {
+    set({
+      user: null,
+      isLoading: false,
+      error: null,
+    });
+  },
 }));

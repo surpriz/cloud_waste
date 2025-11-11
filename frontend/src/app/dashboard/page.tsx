@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import { useAccountStore } from "@/stores/useAccountStore";
 import { useScanStore } from "@/stores/useScanStore";
 import { useResourceStore } from "@/stores/useResourceStore";
-import { OnboardingChecklist } from "@/components/onboarding";
+import { useAuthStore } from "@/stores/useAuthStore";
 import {
   Cloud,
   Search,
@@ -90,11 +90,19 @@ export default function DashboardPage() {
   const { accounts, fetchAccounts } = useAccountStore();
   const { summary, fetchSummary, scans, fetchScans } = useScanStore();
   const { stats, fetchStats, resources, fetchResources } = useResourceStore();
+  const { user } = useAuthStore();
   const [showWelcome, setShowWelcome] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
 
   useEffect(() => {
     const loadData = async () => {
+      // SECURITY: Wait for user to be loaded before fetching data
+      // This prevents showing cached data from previous user
+      if (!user) {
+        setIsLoading(true);
+        return;
+      }
+
       setIsLoading(true);
       await Promise.all([fetchAccounts(), fetchSummary(), fetchStats(), fetchScans(), fetchResources()]);
       setIsLoading(false);
@@ -105,7 +113,7 @@ export default function DashboardPage() {
       }
     };
     loadData();
-  }, [fetchAccounts, fetchSummary, fetchStats, fetchScans, fetchResources]);
+  }, [user, fetchAccounts, fetchSummary, fetchStats, fetchScans, fetchResources]);
 
   // Mock trend data for sparklines (would come from API in production)
   const generateSparklineData = (trend: "up" | "down" | "stable") => {
@@ -219,9 +227,6 @@ export default function DashboardPage() {
 
   return (
     <div className="space-y-6 md:space-y-8">
-      {/* Onboarding Checklist */}
-      <OnboardingChecklist />
-
       {/* Page header */}
       <div className="relative">
         <div className="flex items-center gap-3">
