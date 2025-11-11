@@ -1,0 +1,21 @@
+# robots.txt for CloudWaste
+# Allow all crawlers to index public pages
+
+User-agent: *
+Allow: /
+
+# Block private/authenticated pages
+Disallow: /dashboard/
+Disallow: /auth/verify-email/
+Disallow: /debug-onboarding/
+Disallow: /api/
+
+# Allow auth pages (login, register) for SEO
+Allow: /auth/login
+Allow: /auth/register
+
+# Allow legal pages
+Allow: /legal/
+
+# Sitemap location
+Sitemap: https://cloudwaste.com/sitemap.xml
