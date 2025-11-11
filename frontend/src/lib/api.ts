@@ -15,6 +15,7 @@ import type {
   Scan,
   ScanCreate,
   ScanFilters,
+  ScanProgress,
   ScanSummary,
   ScanWithResources,
   User,
@@ -284,6 +285,10 @@ export const scansAPI = {
     return fetchAPI<void>("/api/v1/scans/", {
       method: "DELETE",
     });
+  },
+
+  async getProgress(id: string): Promise<ScanProgress> {
+    return fetchAPI<ScanProgress>(`/api/v1/scans/${id}/progress`);
   },
 };
 

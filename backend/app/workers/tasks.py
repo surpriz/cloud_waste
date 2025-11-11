@@ -94,6 +94,9 @@ async def _scan_cloud_account_async(
             scan.started_at = datetime.now()
             await db.commit()
 
+            # Track start time for elapsed calculation
+            scan_start_time = datetime.now()
+
             # Get cloud account
             result = await db.execute(
                 select(CloudAccount).where(CloudAccount.id == cloud_account_id)
@@ -149,14 +152,34 @@ async def _scan_cloud_account_async(
                 all_orphans = []
                 total_resources = 0
 
+                # Update: Validating credentials
+                task.update_state(
+                    state="PROGRESS",
+                    meta={
+                        "current": 0,
+                        "total": len(regions_to_scan) + 2,
+                        "percent": 0,
+                        "current_step": "Validating credentials...",
+                        "region": "",
+                        "resources_found": 0,
+                        "elapsed_seconds": 0,
+                    },
+                )
+
                 for i, region in enumerate(regions_to_scan):
+                    elapsed = (datetime.now() - scan_start_time).total_seconds()
+
                     # Update task progress
                     task.update_state(
                         state="PROGRESS",
                         meta={
                             "current": i + 1,
-                            "total": len(regions_to_scan),
+                            "total": len(regions_to_scan) + 2,
+                            "percent": int((i + 1) / (len(regions_to_scan) + 2) * 100),
+                            "current_step": f"Scanning region {region}...",
                             "region": region,
+                            "resources_found": len(all_orphans),
+                            "elapsed_seconds": int(elapsed),
                         },
                     )
 
@@ -168,6 +191,21 @@ async def _scan_cloud_account_async(
                     )
                     all_orphans.extend(orphans)
                     total_resources += len(orphans)
+
+                # Update: Saving results
+                elapsed = (datetime.now() - scan_start_time).total_seconds()
+                task.update_state(
+                    state="PROGRESS",
+                    meta={
+                        "current": len(regions_to_scan) + 1,
+                        "total": len(regions_to_scan) + 2,
+                        "percent": 95,
+                        "current_step": "Saving results...",
+                        "region": "",
+                        "resources_found": len(all_orphans),
+                        "elapsed_seconds": int(elapsed),
+                    },
+                )
 
                 # Save orphan resources to database
                 for orphan in all_orphans:

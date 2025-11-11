@@ -94,9 +94,21 @@ export interface Scan {
   orphan_resources_found: number;
   estimated_monthly_waste: number;
   error_message: string | null;
+  celery_task_id: string | null;
   started_at: string | null;
   completed_at: string | null;
   created_at: string;
+}
+
+export interface ScanProgress {
+  state: "PENDING" | "PROGRESS" | "SUCCESS" | "FAILURE";
+  current: number;
+  total: number;
+  percent: number;
+  current_step: string;
+  region: string;
+  resources_found: number;
+  elapsed_seconds: number;
 }
 
 export interface ScanCreate {

@@ -3,6 +3,7 @@
 import uuid
 from typing import Annotated
 
+from celery.result import AsyncResult
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -11,7 +12,8 @@ from app.core.rate_limit import scan_limit
 from app.crud import cloud_account as cloud_account_crud
 from app.crud import scan as scan_crud
 from app.models.user import User
-from app.schemas.scan import Scan, ScanCreate, ScanSummary, ScanWithResources
+from app.schemas.scan import Scan, ScanCreate, ScanProgress, ScanSummary, ScanWithResources
+from app.workers.celery_app import celery_app
 from app.workers.tasks import scan_cloud_account
 
 router = APIRouter()
@@ -55,8 +57,10 @@ async def create_scan(
     # Ensure database transaction is fully committed before queuing task
     await db.commit()
 
-    # Queue background task
-    scan_cloud_account.delay(str(scan.id), str(account.id))
+    # Queue background task and store task ID
+    task = scan_cloud_account.delay(str(scan.id), str(account.id))
+    scan.celery_task_id = task.id
+    await db.commit()
 
     return scan
 
@@ -168,6 +172,117 @@ async def delete_all_scans(
     """
     # Delete all scans for the user
     await scan_crud.delete_all_scans_by_user(db, current_user.id)
+
+
+@router.get("/{scan_id}/progress", response_model=ScanProgress)
+async def get_scan_progress(
+    scan_id: uuid.UUID,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_active_user)],
+) -> ScanProgress:
+    """
+    Get real-time progress of an ongoing scan.
+
+    Returns Celery task state and progress metadata:
+    - PENDING: Task not started yet
+    - PROGRESS: Task is running (with detailed progress info)
+    - SUCCESS: Task completed successfully
+    - FAILURE: Task failed with an error
+    """
+    # Get scan
+    scan = await scan_crud.get_scan_by_id(db, scan_id)
+
+    if not scan:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Scan not found",
+        )
+
+    # Verify scan belongs to user's account
+    account = await cloud_account_crud.get_cloud_account_by_id(
+        db, scan.cloud_account_id, current_user.id
+    )
+
+    if not account:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Not authorized to view this scan",
+        )
+
+    # If scan doesn't have a task ID or is already completed/failed, return default state
+    if not scan.celery_task_id or scan.status in ["completed", "failed"]:
+        return ScanProgress(
+            state=scan.status.upper(),
+            current=scan.total_resources_scanned,
+            total=scan.total_resources_scanned,
+            percent=100 if scan.status == "completed" else 0,
+            current_step="Completed" if scan.status == "completed" else "Failed",
+            region="",
+            resources_found=scan.orphan_resources_found,
+            elapsed_seconds=0,
+        )
+
+    # Get Celery task result
+    task_result = AsyncResult(scan.celery_task_id, app=celery_app)
+
+    # Extract progress info from Celery task
+    if task_result.state == "PENDING":
+        return ScanProgress(
+            state="PENDING",
+            current=0,
+            total=1,
+            percent=0,
+            current_step="Waiting to start...",
+            region="",
+            resources_found=0,
+            elapsed_seconds=0,
+        )
+    elif task_result.state == "PROGRESS":
+        info = task_result.info or {}
+        return ScanProgress(
+            state="PROGRESS",
+            current=info.get("current", 0),
+            total=info.get("total", 1),
+            percent=info.get("percent", 0),
+            current_step=info.get("current_step", "Processing..."),
+            region=info.get("region", ""),
+            resources_found=info.get("resources_found", 0),
+            elapsed_seconds=info.get("elapsed_seconds", 0),
+        )
+    elif task_result.state == "SUCCESS":
+        return ScanProgress(
+            state="SUCCESS",
+            current=scan.total_resources_scanned,
+            total=scan.total_resources_scanned,
+            percent=100,
+            current_step="Completed",
+            region="",
+            resources_found=scan.orphan_resources_found,
+            elapsed_seconds=0,
+        )
+    elif task_result.state == "FAILURE":
+        return ScanProgress(
+            state="FAILURE",
+            current=0,
+            total=1,
+            percent=0,
+            current_step=f"Failed: {str(task_result.info)}",
+            region="",
+            resources_found=0,
+            elapsed_seconds=0,
+        )
+    else:
+        # Unknown state
+        return ScanProgress(
+            state=task_result.state,
+            current=0,
+            total=1,
+            percent=0,
+            current_step=task_result.state,
+            region="",
+            resources_found=0,
+            elapsed_seconds=0,
+        )
 
 
 @router.delete("/{scan_id}", status_code=status.HTTP_204_NO_CONTENT)

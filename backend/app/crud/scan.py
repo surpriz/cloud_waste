@@ -179,8 +179,22 @@ async def get_scan_statistics(
     completed_scans = [s for s in scans if s.status == ScanStatus.COMPLETED.value]
     failed_scans = [s for s in scans if s.status == ScanStatus.FAILED.value]
 
-    total_orphan_resources = sum(s.orphan_resources_found for s in completed_scans)
-    total_monthly_waste = sum(s.estimated_monthly_waste for s in completed_scans)
+    # Only count latest scan per account to avoid duplicate counting
+    # when users run multiple scans on the same account
+    latest_scans_by_account: dict[uuid.UUID, Scan] = {}
+    for scan in completed_scans:
+        account_id = scan.cloud_account_id
+        if account_id not in latest_scans_by_account:
+            latest_scans_by_account[account_id] = scan
+        else:
+            # Keep the most recent scan based on created_at
+            if scan.created_at > latest_scans_by_account[account_id].created_at:
+                latest_scans_by_account[account_id] = scan
+
+    latest_scans = list(latest_scans_by_account.values())
+
+    total_orphan_resources = sum(s.orphan_resources_found for s in latest_scans)
+    total_monthly_waste = sum(s.estimated_monthly_waste for s in latest_scans)
 
     last_scan = None
     if completed_scans:

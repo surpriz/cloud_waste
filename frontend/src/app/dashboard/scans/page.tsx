@@ -3,6 +3,8 @@
 import { useEffect, useState } from "react";
 import { useAccountStore } from "@/stores/useAccountStore";
 import { useScanStore } from "@/stores/useScanStore";
+import { ScanProgressModal } from "@/components/dashboard/ScanProgressModal";
+import { scansAPI } from "@/lib/api";
 import {
   Play,
   RefreshCw,
@@ -26,6 +28,8 @@ export default function ScansPage() {
   const [selectedAccountIds, setSelectedAccountIds] = useState<string[]>([]);
   const [isDeletingAll, setIsDeletingAll] = useState(false);
   const [isScanning, setIsScanning] = useState(false);
+  const [activeScanId, setActiveScanId] = useState<string | null>(null);
+  const [showProgressModal, setShowProgressModal] = useState(false);
 
   useEffect(() => {
     fetchAccounts();
@@ -49,6 +53,37 @@ export default function ScansPage() {
 
     return () => clearInterval(interval);
   }, [scans, fetchScans, fetchSummary]);
+
+  // Auto-open progress modal when a new scan starts
+  useEffect(() => {
+    const inProgressScan = scans.find((scan) => scan.status === "in_progress");
+    if (inProgressScan && !activeScanId) {
+      setActiveScanId(inProgressScan.id);
+      setShowProgressModal(true);
+    }
+  }, [scans, activeScanId]);
+
+  // Get account name for active scan
+  const getActiveScanAccountName = () => {
+    if (!activeScanId) return "Unknown Account";
+    const scan = scans.find((s) => s.id === activeScanId);
+    if (!scan) return "Unknown Account";
+    const account = accounts.find((a) => a.id === scan.cloud_account_id);
+    return account?.account_name || "Unknown Account";
+  };
+
+  // Handle progress modal completion
+  const handleProgressComplete = () => {
+    fetchScans();
+    fetchSummary();
+    setActiveScanId(null);
+  };
+
+  // Handle progress modal close
+  const handleProgressClose = () => {
+    setShowProgressModal(false);
+    // Keep activeScanId so we don't reopen the modal
+  };
 
   const toggleAccountSelection = (accountId: string) => {
     setSelectedAccountIds((prev) =>
@@ -142,6 +177,17 @@ export default function ScansPage() {
 
   return (
     <div className="space-y-4 md:space-y-6">
+      {/* Progress Modal */}
+      {activeScanId && (
+        <ScanProgressModal
+          scanId={activeScanId}
+          accountName={getActiveScanAccountName()}
+          isOpen={showProgressModal}
+          onClose={handleProgressClose}
+          onComplete={handleProgressComplete}
+        />
+      )}
+
       {/* Header */}
       <div>
         <h1 className="text-2xl md:text-3xl font-bold text-gray-900">Scans</h1>
@@ -337,7 +383,16 @@ export default function ScansPage() {
               No scans yet. Start your first scan to detect orphaned resources.
             </div>
           ) : (
-            scans.map((scan) => <ScanRow key={scan.id} scan={scan} />)
+            scans.map((scan) => (
+              <ScanRow
+                key={scan.id}
+                scan={scan}
+                onViewProgress={(scanId: string) => {
+                  setActiveScanId(scanId);
+                  setShowProgressModal(true);
+                }}
+              />
+            ))
           )}
         </div>
       </div>
@@ -368,11 +423,30 @@ function StatCard({ title, value, icon: Icon, color }: any) {
   );
 }
 
-function ScanRow({ scan }: any) {
+function ScanRow({ scan, onViewProgress }: any) {
   const { accounts } = useAccountStore();
   const { deleteScan, fetchScans } = useScanStore();
   const [isDeleting, setIsDeleting] = useState(false);
+  const [progress, setProgress] = useState<any>(null);
   const account = accounts.find((a) => a.id === scan.cloud_account_id);
+
+  // Fetch progress for in_progress scans
+  useEffect(() => {
+    if (scan.status === "in_progress") {
+      const fetchProgress = async () => {
+        try {
+          const data = await scansAPI.getProgress(scan.id);
+          setProgress(data);
+        } catch (err) {
+          console.error("Failed to fetch progress:", err);
+        }
+      };
+
+      fetchProgress();
+      const interval = setInterval(fetchProgress, 3000);
+      return () => clearInterval(interval);
+    }
+  }, [scan.status, scan.id]);
 
   const statusConfig: any = {
     pending: {
@@ -431,13 +505,33 @@ function ScanRow({ scan }: any) {
                 }`}
               />
             </div>
-            <div>
+            <div className="flex-1">
               <h3 className="font-semibold text-gray-900">
                 {account?.account_name || "Unknown Account"}
               </h3>
               <p className="text-sm text-gray-600">
                 {scan.scan_type === "manual" ? "Manual Scan" : "Scheduled Scan"}
               </p>
+
+              {/* Mini Progress Bar for in_progress scans */}
+              {scan.status === "in_progress" && progress && (
+                <div className="mt-2">
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="text-xs text-blue-600 font-medium">
+                      {progress.current_step}
+                    </span>
+                    <span className="text-xs font-semibold text-blue-900">
+                      {progress.percent}%
+                    </span>
+                  </div>
+                  <div className="h-1.5 w-full bg-gray-200 rounded-full overflow-hidden">
+                    <div
+                      className="h-full bg-gradient-to-r from-blue-600 to-purple-600 transition-all duration-500"
+                      style={{ width: `${progress.percent}%` }}
+                    />
+                  </div>
+                </div>
+              )}
             </div>
           </div>
         </div>
@@ -467,6 +561,18 @@ function ScanRow({ scan }: any) {
               ? new Date(scan.completed_at).toLocaleString()
               : new Date(scan.created_at).toLocaleString()}
           </div>
+
+          {/* View Progress Button for in_progress scans */}
+          {scan.status === "in_progress" && (
+            <button
+              onClick={() => onViewProgress && onViewProgress(scan.id)}
+              className="rounded-lg px-3 py-1.5 text-xs font-medium text-blue-600 bg-blue-50 hover:bg-blue-100 transition-colors"
+              title="View detailed progress"
+            >
+              View Progress
+            </button>
+          )}
+
           <button
             onClick={handleDelete}
             disabled={isDeleting}

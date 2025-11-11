@@ -75,6 +75,11 @@ class Scan(Base):
         String(500),
         nullable=True,
     )
+    celery_task_id: Mapped[str | None] = mapped_column(
+        String(100),
+        nullable=True,
+        index=True,
+    )
     started_at: Mapped[datetime | None] = mapped_column(
         nullable=True,
     )
