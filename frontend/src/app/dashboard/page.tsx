@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { useAccountStore } from "@/stores/useAccountStore";
 import { useScanStore } from "@/stores/useScanStore";
 import { useResourceStore } from "@/stores/useResourceStore";
+import { OnboardingChecklist } from "@/components/onboarding";
 import {
   Cloud,
   Search,
@@ -218,62 +219,8 @@ export default function DashboardPage() {
 
   return (
     <div className="space-y-6 md:space-y-8">
-      {/* Welcome Banner for new users */}
-      {showWelcome && accounts.length === 0 && (
-        <div className="relative overflow-hidden rounded-2xl bg-gradient-to-br from-blue-600 via-purple-600 to-pink-600 p-8 text-white shadow-2xl">
-          <button
-            onClick={() => setShowWelcome(false)}
-            className="absolute top-4 right-4 rounded-full bg-white/20 p-2 hover:bg-white/30 transition-colors"
-          >
-            <X className="h-4 w-4" />
-          </button>
-
-          <div className="relative z-10">
-            <div className="flex items-center gap-3 mb-4">
-              <Sparkles className="h-8 w-8" />
-              <h2 className="text-2xl font-bold">Welcome to CloudWaste!</h2>
-            </div>
-            <p className="text-lg mb-6 text-white/90">
-              Get started in 3 simple steps to start saving on your cloud infrastructure:
-            </p>
-            <div className="grid gap-4 md:grid-cols-3">
-              <div className="rounded-xl bg-white/10 backdrop-blur-sm p-4 border border-white/20">
-                <div className="flex items-center gap-2 mb-2">
-                  <div className="flex h-6 w-6 items-center justify-center rounded-full bg-white/20 text-sm font-bold">
-                    1
-                  </div>
-                  <h3 className="font-semibold">Connect Account</h3>
-                </div>
-                <p className="text-sm text-white/80">Add your AWS, Azure, or GCP account</p>
-              </div>
-              <div className="rounded-xl bg-white/10 backdrop-blur-sm p-4 border border-white/20">
-                <div className="flex items-center gap-2 mb-2">
-                  <div className="flex h-6 w-6 items-center justify-center rounded-full bg-white/20 text-sm font-bold">
-                    2
-                  </div>
-                  <h3 className="font-semibold">Run Scan</h3>
-                </div>
-                <p className="text-sm text-white/80">Detect orphaned resources</p>
-              </div>
-              <div className="rounded-xl bg-white/10 backdrop-blur-sm p-4 border border-white/20">
-                <div className="flex items-center gap-2 mb-2">
-                  <div className="flex h-6 w-6 items-center justify-center rounded-full bg-white/20 text-sm font-bold">
-                    3
-                  </div>
-                  <h3 className="font-semibold">Save Money</h3>
-                </div>
-                <p className="text-sm text-white/80">Review and clean up waste</p>
-              </div>
-            </div>
-            <a
-              href="/dashboard/accounts"
-              className="mt-6 inline-flex items-center gap-2 rounded-xl bg-white px-6 py-3 font-semibold text-purple-600 shadow-lg hover:shadow-xl transition-all hover:scale-105"
-            >
-              Get Started Now <ArrowRight className="h-5 w-5" />
-            </a>
-          </div>
-        </div>
-      )}
+      {/* Onboarding Checklist */}
+      <OnboardingChecklist />
 
       {/* Page header */}
       <div className="relative">
