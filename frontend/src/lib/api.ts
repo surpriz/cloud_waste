@@ -84,7 +84,29 @@ async function fetchAPI<T>(
 
   if (!response.ok) {
     const error = await response.json().catch(() => ({ detail: "Unknown error" }));
-    throw new APIError(response.status, error.detail || "API Error");
+    const apiError = new APIError(response.status, error.detail || "API Error");
+
+    // Capture API errors in Sentry (except 401/403 which are normal auth errors)
+    if (typeof window !== "undefined" && response.status !== 401 && response.status !== 403) {
+      try {
+        const Sentry = await import("@sentry/nextjs");
+        Sentry.captureException(apiError, {
+          tags: {
+            api_endpoint: endpoint,
+            http_status: response.status,
+          },
+          extra: {
+            error_detail: error.detail,
+            request_method: options.method || "GET",
+          },
+        });
+      } catch (e) {
+        // Don't fail if Sentry capture fails
+        console.error("Failed to capture error in Sentry:", e);
+      }
+    }
+
+    throw apiError;
   }
 
   // Handle 204 No Content

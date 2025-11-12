@@ -46,8 +46,26 @@ export function ScanProgressModal({
     } catch (err) {
       console.error("Failed to fetch scan progress:", err);
       setError("Failed to fetch progress");
+
+      // Capture error in Sentry
+      if (typeof window !== "undefined") {
+        import("@sentry/nextjs").then((Sentry) => {
+          Sentry.captureException(err, {
+            tags: {
+              component: "ScanProgressModal",
+              action: "fetchProgress",
+            },
+            extra: {
+              scanId,
+              accountName,
+            },
+          });
+        }).catch(() => {
+          // Ignore if Sentry import fails
+        });
+      }
     }
-  }, [scanId, onComplete]);
+  }, [scanId, accountName, onComplete]);
 
   // Poll for progress every 2 seconds while scan is active
   useEffect(() => {

@@ -106,6 +106,12 @@ class Settings(BaseSettings):
     CHAT_CONTEXT_MAX_RESOURCES: int = 20
     CHAT_MODEL: str = "claude-haiku-4-5-20250818"
 
+    # Error Tracking (Sentry)
+    SENTRY_DSN: str = ""  # Sentry Data Source Name (URL from sentry.io dashboard)
+    SENTRY_ENVIRONMENT: str = "development"  # development, staging, production
+    SENTRY_TRACES_SAMPLE_RATE: float = 0.1  # 10% of transactions for performance monitoring
+    SENTRY_PROFILES_SAMPLE_RATE: float = 0.1  # 10% of transactions for profiling
+
     # Rate Limiting
     RATE_LIMIT_ENABLED: bool = True
     RATE_LIMIT_AUTH_LOGIN: str = "5/minute"  # Login attempts (brute-force protection)

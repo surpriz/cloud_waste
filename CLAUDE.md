@@ -26,6 +26,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **AI:** Anthropic Claude Haiku 4.5 (claude-haiku-4-5-20250818)
 - **Rate Limiting:** SlowAPI + Redis
 - **Streaming:** SSE (Server-Sent Events) for chat responses
+- **Error Tracking:** Sentry (backend + frontend integration)
 
 ## Directory Structure
 
@@ -1010,6 +1011,121 @@ function MyComponent() {
 }
 ```
 
+## Sentry Error Tracking
+
+CloudWaste uses **Sentry** for real-time error tracking and performance monitoring in both backend and frontend.
+
+### Features
+- **Automatic Error Capture** - All unhandled exceptions captured with full stack traces
+- **Performance Monitoring** - Transaction tracing for API endpoints and page loads
+- **User Context** - Errors tagged with user email and account info
+- **Breadcrumbs** - Action trail before errors occur
+- **Custom Context** - Scan details, cloud account info, resource metadata
+- **Production Source Maps** - Readable stack traces in production (minified code)
+
+### Architecture
+
+**Backend (FastAPI):**
+- `app/main.py` - Sentry initialization with integrations (FastAPI, SQLAlchemy, Redis, Celery)
+- `app/workers/tasks.py` - Celery task error capture with scan context
+- `app/providers/aws.py` - AWS credential validation error capture
+- `app/api/v1/test_sentry.py` - Test endpoints (DEBUG mode only)
+
+**Frontend (Next.js 14):**
+- `src/components/providers/SentryProvider.tsx` - React component for client-side initialization
+- `instrumentation.ts` - Server-side rendering (Node.js + Edge runtime) initialization
+- `next.config.js` - Webpack plugin for automatic source map uploads
+- `lib/api.ts` - Automatic API error capture (except 401/403)
+
+**Key Design Decision:**
+CloudWaste uses a **SentryProvider React component** instead of the traditional `sentry.client.config.ts` file. This ensures Sentry initializes correctly without conflicts and makes `window.Sentry` available for console testing.
+
+### Configuration
+
+**Backend `.env`:**
+```bash
+SENTRY_DSN=https://your-backend-dsn@o123456.ingest.sentry.io/456789
+SENTRY_ENVIRONMENT=development  # development, staging, production
+SENTRY_TRACES_SAMPLE_RATE=0.1  # 10% of transactions
+SENTRY_PROFILES_SAMPLE_RATE=0.1
+```
+
+**Frontend `.env.local`:**
+```bash
+NEXT_PUBLIC_SENTRY_DSN=https://your-frontend-dsn@o123456.ingest.sentry.io/789012
+NEXT_PUBLIC_SENTRY_ENVIRONMENT=development
+SENTRY_ORG=cloudwaste
+SENTRY_PROJECT=cloudwaste-frontend
+SENTRY_AUTH_TOKEN=  # For source map uploads in production
+```
+
+### API Endpoints (DEBUG mode only)
+
+**Test Sentry backend:**
+```bash
+# Trigger test error
+POST /api/v1/test/sentry/error
+Authorization: Bearer <token>
+
+# Check Sentry status
+GET /api/v1/test/sentry/status
+Authorization: Bearer <token>
+
+# Send test message
+POST /api/v1/test/sentry/message
+Authorization: Bearer <token>
+```
+
+### Testing
+
+**Backend:**
+```bash
+curl -X POST "http://localhost:8000/api/v1/test/sentry/error" \
+  -H "Authorization: Bearer YOUR_TOKEN"
+```
+
+**Frontend (browser console):**
+```javascript
+// Verify Sentry is initialized
+window.Sentry  // Should be available
+
+// Capture test exception
+window.Sentry.captureException(new Error("🚨 TEST ERROR"));
+```
+
+### What Sentry Captures
+
+**Backend:**
+- ✅ Unhandled exceptions (FastAPI routes, background tasks)
+- ✅ Celery task failures (with scan context)
+- ✅ AWS/Azure/GCP provider errors (with credentials validation context)
+- ✅ Database errors (SQLAlchemy)
+- ✅ Redis connection errors
+- ✅ Performance traces (API endpoint response times)
+
+**Frontend:**
+- ✅ React component errors (uncaught exceptions)
+- ✅ API errors (except auth errors 401/403)
+- ✅ Unhandled promise rejections
+- ✅ Performance traces (page loads, route transitions)
+- ❌ Session Replay disabled (to avoid conflicts)
+
+### Troubleshooting
+
+**"No outcomes to send" warning:**
+- This is a benign warning in development mode with `debug: true`
+- Events are still captured successfully
+- Disappears in production with `debug: false`
+
+**"Multiple Sentry Session Replay instances" error:**
+- This error should NOT occur with the current architecture
+- If it appears, verify `replaysSessionSampleRate: 0` in all configs
+- Check that only ONE place calls `Sentry.init()` on the client-side
+
+### Documentation
+
+See `SENTRY_SETUP.md` for comprehensive setup guide.
+
 ## Impact Tracking
 
 CloudWaste tracks **environmental impact** of cloud waste, converting cost savings to CO2 emissions and equivalent metrics.
@@ -1318,12 +1434,27 @@ RATE_LIMIT_API_DEFAULT=100/minute
 # Celery
 CELERY_BROKER_URL=redis://localhost:6379/0
 CELERY_RESULT_BACKEND=redis://localhost:6379/0
+
+# Sentry Error Tracking
+SENTRY_DSN=https://your-backend-dsn@o123456.ingest.sentry.io/456789
+SENTRY_ENVIRONMENT=development
+SENTRY_TRACES_SAMPLE_RATE=0.1
+SENTRY_PROFILES_SAMPLE_RATE=0.1
 ```
 
 ### Frontend `.env.local`
 ```bash
 NEXT_PUBLIC_API_URL=http://localhost:8000
 NEXT_PUBLIC_APP_NAME=CloudWaste
+
+# Sentry Error Tracking
+NEXT_PUBLIC_SENTRY_DSN=https://your-frontend-dsn@o123456.ingest.sentry.io/789012
+NEXT_PUBLIC_SENTRY_ENVIRONMENT=development
+
+# Optionnel: Pour upload de source maps en production
+SENTRY_ORG=cloudwaste
+SENTRY_PROJECT=cloudwaste-frontend
+SENTRY_AUTH_TOKEN=  # Obtenir dans sentry.io → Settings → Auth Tokens
 ```
 
 ## GDPR/Legal Compliance

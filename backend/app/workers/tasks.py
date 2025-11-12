@@ -589,6 +589,19 @@ async def _scan_cloud_account_async(
                 return {"error": scan.error_message}
 
         except Exception as e:
+            # Capture exception in Sentry with context
+            try:
+                import sentry_sdk
+                sentry_sdk.set_context("scan_details", {
+                    "scan_id": scan_id,
+                    "cloud_account_id": cloud_account_id,
+                    "provider": account.provider if 'account' in locals() else "unknown",
+                    "account_name": account.account_name if 'account' in locals() else "unknown",
+                })
+                sentry_sdk.capture_exception(e)
+            except Exception:
+                pass  # Don't fail if Sentry capture fails
+
             # Try to update scan with error if scan was retrieved
             try:
                 result = await db.execute(select(Scan).where(Scan.id == scan_id))

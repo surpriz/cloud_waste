@@ -234,6 +234,18 @@ class AWSProvider(CloudProviderBase):
             logger.error(f"   Error type: {type(e).__name__}")
             logger.error(f"   Error: {str(e)}")
             logger.exception("Full traceback:")
+
+            # Capture in Sentry for monitoring
+            try:
+                import sentry_sdk
+                sentry_sdk.set_context("aws_credentials", {
+                    "error_type": type(e).__name__,
+                    "region": "us-east-1",
+                })
+                sentry_sdk.capture_exception(e)
+            except Exception:
+                pass  # Don't fail if Sentry capture fails
+
             raise
 
     async def get_available_regions(self) -> list[str]:

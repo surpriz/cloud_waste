@@ -3,6 +3,7 @@ import { Inter } from "next/font/google";
 import "./globals.css";
 import { CookieBanner } from "@/components/legal/CookieBanner";
 import { StructuredData } from "@/components/seo/StructuredData";
+import { SentryProvider } from "@/components/providers/SentryProvider";
 
 const inter = Inter({ subsets: ["latin"] });
 
@@ -104,8 +105,10 @@ export default function RootLayout({
         <StructuredData />
       </head>
       <body className={inter.className}>
-        {children}
-        <CookieBanner />
+        <SentryProvider>
+          {children}
+          <CookieBanner />
+        </SentryProvider>
       </body>
     </html>
   );

@@ -84,6 +84,9 @@ aiohttp==3.9.3
 # Logging
 structlog==24.1.0
 
+# Error Tracking
+sentry-sdk[fastapi]==2.18.0
+
 # Rate Limiting
 slowapi==0.1.9
 

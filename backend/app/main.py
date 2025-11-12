@@ -2,6 +2,7 @@
 
 import hashlib
 import logging
+import os
 from pathlib import Path
 
 from fastapi import FastAPI, Request, status
@@ -17,6 +18,40 @@ from app.middleware import CORSLoggingMiddleware
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Initialize Sentry for error tracking
+# IMPORTANT: Must be done BEFORE creating FastAPI app
+if settings.SENTRY_DSN:
+    import sentry_sdk
+    from sentry_sdk.integrations.fastapi import FastApiIntegration
+    from sentry_sdk.integrations.sqlalchemy import SqlalchemyIntegration
+    from sentry_sdk.integrations.redis import RedisIntegration
+    from sentry_sdk.integrations.celery import CeleryIntegration
+
+    sentry_sdk.init(
+        dsn=settings.SENTRY_DSN,
+        environment=settings.SENTRY_ENVIRONMENT,
+        # Performance monitoring
+        traces_sample_rate=settings.SENTRY_TRACES_SAMPLE_RATE,
+        profiles_sample_rate=settings.SENTRY_PROFILES_SAMPLE_RATE,
+        # Integrations
+        integrations=[
+            FastApiIntegration(transaction_style="endpoint"),  # Track API endpoint performance
+            SqlalchemyIntegration(),  # Track database queries
+            RedisIntegration(),  # Track Redis operations
+            CeleryIntegration(),  # Track Celery tasks
+        ],
+        # User context (GDPR: Only enable if user consents)
+        send_default_pii=False,  # Don't send PII by default
+        # Release tracking (helps identify which version introduced bugs)
+        release=f"cloudwaste-backend@{os.getenv('GIT_COMMIT', 'dev')}",
+        # Additional configuration
+        attach_stacktrace=True,  # Attach stack traces to messages
+        max_breadcrumbs=50,  # Number of breadcrumbs to keep
+    )
+    logger.info(f"✅ Sentry initialized (environment: {settings.SENTRY_ENVIRONMENT})")
+else:
+    logger.info("⚠️  Sentry DSN not set - Error tracking disabled")
 
 # Create FastAPI application
 app = FastAPI(
