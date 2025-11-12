@@ -22,6 +22,31 @@ jobs:
           chmod 600 ~/.ssh/id_rsa
           ssh-keyscan -H ${{ secrets.VPS_HOST }} >> ~/.ssh/known_hosts
       
+      - name: 🔄 Pre-Deploy: Check Disk Space & Sync Sentry Config
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+        run: |
+          ssh ${VPS_USER}@${VPS_HOST} << 'ENDSSH'
+            echo "🔍 Vérification de l'espace disque..."
+            DISK_USAGE=$(df /opt/cloudwaste | tail -1 | awk '{print $5}' | sed 's/%//')
+            echo "   • Utilisation disque: ${DISK_USAGE}%"
+
+            if [ "$DISK_USAGE" -gt 85 ]; then
+                echo "⚠️  Espace disque faible (${DISK_USAGE}%) - Nettoyage Docker..."
+                docker system prune -af --volumes
+                echo "✓ Nettoyage terminé"
+            else
+                echo "✓ Espace disque OK"
+            fi
+
+            echo ""
+            echo "🔄 Synchronisation des variables Sentry..."
+            cd /opt/cloudwaste
+            bash deployment/sync-sentry-env.sh --local
+            echo "✓ Variables Sentry synchronisées"
+          ENDSSH
+
       - name: 🚀 Deploy to Production (Zero Downtime)
         env:
           VPS_HOST: ${{ secrets.VPS_HOST }}
@@ -31,6 +56,7 @@ jobs:
             # Disable immediate exit on error - we want to handle rollback ourselves
             set +e
 
+            echo ""
             echo "╔════════════════════════════════════════════════════════════════════╗"
             echo "║                                                                    ║"
             echo "║         🚀 DÉPLOIEMENT AUTOMATIQUE (GitHub Actions)                ║"

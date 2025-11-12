@@ -134,9 +134,35 @@ echo ""
 print_step "Construction des nouvelles images Docker..."
 print_warning "Les conteneurs actuels restent actifs pendant le build"
 
-docker compose -f "$COMPOSE_FILE" build --no-cache --parallel
+# Set Docker build timeout to 10 minutes (600s)
+export DOCKER_BUILDKIT_TIMEOUT=600
 
-print_success "Nouvelles images construites"
+# Build with cache for faster builds (only use --no-cache if explicitly needed)
+# Retry up to 3 times in case of network timeouts
+MAX_BUILD_RETRIES=3
+BUILD_RETRY_COUNT=0
+BUILD_SUCCESS=false
+
+while [ $BUILD_RETRY_COUNT -lt $MAX_BUILD_RETRIES ]; do
+    print_step "Tentative de build #$((BUILD_RETRY_COUNT + 1))/$MAX_BUILD_RETRIES..."
+
+    if docker compose -f "$COMPOSE_FILE" build --parallel; then
+        BUILD_SUCCESS=true
+        print_success "Nouvelles images construites avec succès"
+        break
+    else
+        BUILD_RETRY_COUNT=$((BUILD_RETRY_COUNT + 1))
+        if [ $BUILD_RETRY_COUNT -lt $MAX_BUILD_RETRIES ]; then
+            print_warning "Build échoué - Retry dans 30 secondes..."
+            sleep 30
+        fi
+    fi
+done
+
+if [ "$BUILD_SUCCESS" != true ]; then
+    print_error "Build échoué après $MAX_BUILD_RETRIES tentatives"
+    rollback
+fi
 
 # ============================================================================
 # Step 2: Start New Containers (Blue-Green Deployment)
