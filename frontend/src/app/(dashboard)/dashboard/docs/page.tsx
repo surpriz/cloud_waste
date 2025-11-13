@@ -148,7 +148,7 @@ export default function DocsPage() {
 function IntroductionSection() {
   return (
     <div className="space-y-6">
-      <h1 className="text-4xl font-bold text-gray-900">Welcome to CloudWaste</h1>
+      <h1 className="text-4xl font-bold text-gray-900">Welcome to CutCosts</h1>
       <p className="text-xl text-gray-600">
         Automatically detect and eliminate wasted cloud spending on orphaned AWS, Azure & GCP resources
       </p>
@@ -172,11 +172,11 @@ function IntroductionSection() {
       </div>
 
       <div className="rounded-lg bg-blue-50 border border-blue-200 p-6">
-        <h3 className="text-lg font-semibold text-blue-900 mb-2">What is CloudWaste?</h3>
+        <h3 className="text-lg font-semibold text-blue-900 mb-2">What is CutCosts?</h3>
         <p className="text-blue-800">
-          CloudWaste is a SaaS platform that helps businesses reduce cloud costs by automatically
+          CutCosts is a SaaS platform that helps businesses reduce cloud costs by automatically
           detecting <strong>orphaned and unused resources</strong> in their AWS, Azure & GCP infrastructure.
-          Unlike simple monitoring tools, CloudWaste uses intelligent detection with CloudWatch (AWS),
+          Unlike simple monitoring tools, CutCosts uses intelligent detection with CloudWatch (AWS),
           Azure Monitor, and Cloud Monitoring (GCP) metrics to identify resources that are truly wasted, not just temporarily idle.
         </p>
       </div>
@@ -194,7 +194,7 @@ function IntroductionSection() {
       <div className="rounded-lg bg-green-50 border border-green-200 p-6">
         <h3 className="text-lg font-semibold text-green-900 mb-2">🔒 Security First</h3>
         <p className="text-green-800">
-          CloudWaste uses <strong>read-only AWS, Azure & GCP permissions</strong>. We NEVER delete, modify,
+          CutCosts uses <strong>read-only AWS, Azure & GCP permissions</strong>. We NEVER delete, modify,
           or write to your cloud resources. All credentials are encrypted in our database. You
           maintain full control and delete resources manually in your AWS, Azure or GCP console.
         </p>
@@ -228,7 +228,7 @@ function GettingStartedSection() {
               </ul>
               <p className="mt-2 text-blue-600">
                 💡 <strong>Tip:</strong> Use AWS IAM to create a dedicated user with these permissions
-                and generate access keys for CloudWaste.
+                and generate access keys for CutCosts.
               </p>
             </div>
 
@@ -267,7 +267,7 @@ function GettingStartedSection() {
         >
           <div className="space-y-3 text-sm text-gray-700">
             <p>Go to <strong>Scans</strong> page and click <strong>"Start New Scan"</strong></p>
-            <p>CloudWaste will:</p>
+            <p>CutCosts will:</p>
             <ul className="list-disc list-inside space-y-1 ml-4">
               <li>Scan all enabled AWS regions</li>
               <li>Check CloudWatch metrics for resource usage history</li>
@@ -306,11 +306,11 @@ function GettingStartedSection() {
             <div className="space-y-2 mt-3">
               <ActionButton icon={Eye} label="View Details" description="See full metadata and usage history" />
               <ActionButton icon={EyeOff} label="Ignore" description="Mark as intentionally kept (removes from active list)" />
-              <ActionButton icon={Trash2} label="Mark for Deletion" description="Flag for cleanup (CloudWaste doesn't delete)" color="orange" />
-              <ActionButton icon={Trash2} label="Delete Record" description="Remove from CloudWaste (doesn't delete AWS resource)" color="red" />
+              <ActionButton icon={Trash2} label="Mark for Deletion" description="Flag for cleanup (CutCosts doesn't delete)" color="orange" />
+              <ActionButton icon={Trash2} label="Delete Record" description="Remove from CutCosts (doesn't delete AWS resource)" color="red" />
             </div>
             <p className="mt-4 text-amber-700 bg-amber-50 p-3 rounded">
-              ⚠️ <strong>Important:</strong> CloudWaste only detects and tracks orphaned resources.
+              ⚠️ <strong>Important:</strong> CutCosts only detects and tracks orphaned resources.
               You must delete resources manually in your AWS, Azure or GCP console.
             </p>
           </div>
@@ -325,7 +325,7 @@ function DetectionStrategySection() {
     <div className="space-y-6">
       <h1 className="text-4xl font-bold text-gray-900">Detection Strategy</h1>
       <p className="text-xl text-gray-600">
-        How CloudWaste identifies truly orphaned resources
+        How CutCosts identifies truly orphaned resources
       </p>
 
       <div className="rounded-lg bg-purple-50 border border-purple-200 p-6">
@@ -343,7 +343,7 @@ function DetectionStrategySection() {
       <div className="space-y-4">
         <h3 className="text-2xl font-bold text-gray-900">Intelligent Detection with CloudWatch & Azure Monitor</h3>
         <p className="text-gray-700">
-          Unlike basic tools that only check resource status (attached/unattached), CloudWaste uses
+          Unlike basic tools that only check resource status (attached/unattached), CutCosts uses
           <strong> AWS CloudWatch Metrics and Azure Monitor</strong> to analyze actual usage patterns.
         </p>
 
@@ -681,7 +681,7 @@ function DetectionRulesSection() {
   return (
     <div className="space-y-6">
       <h1 className="text-4xl font-bold text-gray-900">Detection Rules</h1>
-      <p className="text-xl text-gray-600">Customize how CloudWaste identifies orphaned resources</p>
+      <p className="text-xl text-gray-600">Customize how CutCosts identifies orphaned resources</p>
 
       <div className="space-y-4">
         <p className="text-gray-700">
@@ -743,13 +743,13 @@ function UnderstandingResultsSection() {
             <ActionExplanation
               icon={Trash2}
               title="Mark for Deletion"
-              description="Flag this resource for cleanup. CloudWaste doesn't delete anything - you must manually delete in AWS console."
+              description="Flag this resource for cleanup. CutCosts doesn't delete anything - you must manually delete in AWS console."
               color="orange"
             />
             <ActionExplanation
               icon={Trash2}
               title="Delete Record"
-              description="Remove this resource from CloudWaste database only. Does NOT delete the actual cloud resource."
+              description="Remove this resource from CutCosts database only. Does NOT delete the actual cloud resource."
               color="red"
             />
           </div>
@@ -778,8 +778,8 @@ function UnderstandingResultsSection() {
 function FAQSection() {
   const faqs = [
     {
-      q: "Does CloudWaste delete my AWS, Azure or GCP resources?",
-      a: "No. CloudWaste only detects and reports orphaned resources. You maintain full control and must delete resources manually in your AWS, Azure or GCP console. We use read-only permissions (AWS IAM / Azure Service Principal / GCP Service Account)."
+      q: "Does CutCosts delete my AWS, Azure or GCP resources?",
+      a: "No. CutCosts only detects and reports orphaned resources. You maintain full control and must delete resources manually in your AWS, Azure or GCP console. We use read-only permissions (AWS IAM / Azure Service Principal / GCP Service Account)."
     },
     {
       q: "Why is my recently created resource flagged as orphaned?",
@@ -799,7 +799,7 @@ function FAQSection() {
     },
     {
       q: "How often should I run scans?",
-      a: "CloudWaste automatically runs daily scans. You can also trigger manual scans anytime. More frequent scans help catch waste early."
+      a: "CutCosts automatically runs daily scans. You can also trigger manual scans anytime. More frequent scans help catch waste early."
     },
     {
       q: "Is my cloud data secure?",
@@ -823,7 +823,7 @@ function FAQSection() {
       <div className="rounded-lg bg-blue-50 border border-blue-200 p-6">
         <h3 className="text-lg font-semibold text-blue-900 mb-2">Need More Help?</h3>
         <p className="text-blue-800">
-          Contact us at <strong>support@cloudwaste.com</strong> or visit our GitHub issues page
+          Contact us at <strong>support@cutcosts.tech</strong> or visit our GitHub issues page
           for feature requests and bug reports.
         </p>
       </div>

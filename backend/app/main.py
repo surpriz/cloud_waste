@@ -44,7 +44,7 @@ if settings.SENTRY_DSN:
         # User context (GDPR: Only enable if user consents)
         send_default_pii=False,  # Don't send PII by default
         # Release tracking (helps identify which version introduced bugs)
-        release=f"cloudwaste-backend@{os.getenv('GIT_COMMIT', 'dev')}",
+        release=f"cutcosts-backend@{os.getenv('GIT_COMMIT', 'dev')}",
         # Additional configuration
         attach_stacktrace=True,  # Attach stack traces to messages
         max_breadcrumbs=50,  # Number of breadcrumbs to keep
@@ -56,7 +56,7 @@ else:
 # Create FastAPI application
 app = FastAPI(
     title=settings.APP_NAME,
-    description="CloudWaste - Detect and identify orphaned cloud resources",
+    description="CutCosts - Detect and identify orphaned cloud resources",
     version="1.0.0",
     docs_url="/api/docs",
     redoc_url="/api/redoc",
@@ -168,7 +168,7 @@ async def health_check() -> JSONResponse:
 async def root() -> dict[str, str]:
     """Root endpoint."""
     return {
-        "message": "Welcome to CloudWaste API",
+        "message": "Welcome to CutCosts API",
         "docs": "/api/docs",
         "health": "/api/v1/health",
     }

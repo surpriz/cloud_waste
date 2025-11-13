@@ -19,7 +19,7 @@ export function Footer() {
           {/* Company Info */}
           <div className="space-y-4">
             <h3 className="text-2xl font-bold bg-gradient-to-r from-blue-400 to-indigo-400 bg-clip-text text-transparent">
-              CloudWaste
+              CutCosts
             </h3>
             <p className="text-sm text-gray-400">
               Detect orphaned cloud resources and reduce your cloud costs automatically.
@@ -187,7 +187,7 @@ export function Footer() {
         <div className="mt-12 pt-8 border-t border-gray-800">
           <div className="flex flex-col md:flex-row justify-between items-center gap-4">
             <p className="text-sm text-gray-400">
-              © {currentYear} CloudWaste. All rights reserved.
+              © {currentYear} CutCosts. All rights reserved.
             </p>
             <div className="flex flex-wrap justify-center gap-4 text-xs text-gray-400">
               <span>🔒 GDPR Compliant</span>

@@ -2,9 +2,9 @@ import type { Metadata } from "next";
 import { Cookie, Check, X, Settings, AlertCircle } from "lucide-react";
 
 export const metadata: Metadata = {
-  title: "Cookie Policy - CloudWaste | GDPR Compliant",
+  title: "Cookie Policy - CutCosts | GDPR Compliant",
   description:
-    "CloudWaste Cookie Policy - Learn about the cookies we use, their purpose, and how to manage your preferences.",
+    "CutCosts Cookie Policy - Learn about the cookies we use, their purpose, and how to manage your preferences.",
 };
 
 export default function CookiePolicyPage() {
@@ -20,7 +20,7 @@ export default function CookiePolicyPage() {
           Last updated: <strong>January 2025</strong>
         </p>
         <p className="text-gray-600 mt-2">
-          This Cookie Policy explains how CloudWaste uses cookies and similar tracking technologies on our website
+          This Cookie Policy explains how CutCosts uses cookies and similar tracking technologies on our website
           and application.
         </p>
       </div>
@@ -108,7 +108,7 @@ export default function CookiePolicyPage() {
             <strong>Persistent cookies:</strong> Remain on your device for a set period or until you delete them
           </li>
           <li>
-            <strong>First-party cookies:</strong> Set by CloudWaste directly
+            <strong>First-party cookies:</strong> Set by CutCosts directly
           </li>
           <li>
             <strong>Third-party cookies:</strong> Set by external services we use (e.g., analytics)
@@ -136,7 +136,7 @@ export default function CookiePolicyPage() {
             <strong>Improve performance:</strong> Cache data to make the website faster
           </li>
           <li>
-            <strong>Analyze usage:</strong> Understand how users interact with CloudWaste (with your consent)
+            <strong>Analyze usage:</strong> Understand how users interact with CutCosts (with your consent)
           </li>
         </ul>
       </section>
@@ -248,7 +248,7 @@ export default function CookiePolicyPage() {
             <div>
               <h3 className="text-lg font-semibold text-gray-900">Analytics Cookies (Optional)</h3>
               <p className="text-gray-600 text-sm mt-1">
-                These cookies help us understand how users interact with CloudWaste. <strong>Requires your consent.</strong>
+                These cookies help us understand how users interact with CutCosts. <strong>Requires your consent.</strong>
               </p>
             </div>
           </div>
@@ -342,7 +342,7 @@ export default function CookiePolicyPage() {
       <section id="manage-cookies" className="mb-12">
         <h2 className="text-2xl font-bold text-gray-900 mb-4">5. How to Manage Cookies</h2>
 
-        <h3 className="text-xl font-semibold text-gray-900 mt-6 mb-3">5.1 CloudWaste Cookie Preferences</h3>
+        <h3 className="text-xl font-semibold text-gray-900 mt-6 mb-3">5.1 CutCosts Cookie Preferences</h3>
         <p>
           You can manage your cookie preferences at any time by:
         </p>
@@ -388,7 +388,7 @@ export default function CookiePolicyPage() {
 
         <div className="not-prose bg-yellow-50 border border-yellow-200 rounded-lg p-4 mt-6">
           <p className="text-yellow-900 text-sm">
-            <strong>Warning:</strong> Blocking essential cookies will prevent CloudWaste from functioning properly.
+            <strong>Warning:</strong> Blocking essential cookies will prevent CutCosts from functioning properly.
             You will not be able to log in or use the service.
           </p>
         </div>
@@ -423,11 +423,11 @@ export default function CookiePolicyPage() {
           If you have questions about our use of cookies, please contact us:
         </p>
         <div className="not-prose bg-blue-50 rounded-lg p-6 mt-4">
-          <p className="text-gray-900 font-semibold text-lg">CloudWaste Privacy Team</p>
+          <p className="text-gray-900 font-semibold text-lg">CutCosts Privacy Team</p>
           <p className="text-gray-700 mt-2">
             Email:{" "}
-            <a href="mailto:privacy@cloudwaste.com" className="text-blue-600 hover:underline font-semibold">
-              privacy@cloudwaste.com
+            <a href="mailto:privacy@cutcosts.tech" className="text-blue-600 hover:underline font-semibold">
+              privacy@cutcosts.tech
             </a>
           </p>
           <p className="text-gray-700">
@@ -439,7 +439,7 @@ export default function CookiePolicyPage() {
       {/* Footer */}
       <div className="not-prose border-t border-gray-200 pt-8 mt-12">
         <p className="text-sm text-gray-500 text-center">
-          © {new Date().getFullYear()} CloudWaste. All rights reserved.
+          © {new Date().getFullYear()} CutCosts. All rights reserved.
         </p>
         <p className="text-xs text-gray-400 text-center mt-2">
           This Cookie Policy is part of our{" "}

@@ -8,10 +8,10 @@ import { SentryProvider } from "@/components/providers/SentryProvider";
 const inter = Inter({ subsets: ["latin"] });
 
 export const metadata: Metadata = {
-  metadataBase: new URL("https://cloudwaste.com"),
+  metadataBase: new URL("https://cutcosts.tech"),
   title: {
-    default: "CloudWaste - Detect Orphaned Cloud Resources",
-    template: "%s | CloudWaste",
+    default: "CutCosts - Detect Orphaned Cloud Resources",
+    template: "%s | CutCosts",
   },
   description: "Identify and track unused cloud resources to reduce costs across AWS, Azure, and GCP. Save up to 40% with automated orphaned resource detection and intelligent cost optimization.",
   keywords: [
@@ -26,9 +26,9 @@ export const metadata: Metadata = {
     "cloud cost management",
     "infrastructure optimization",
   ],
-  authors: [{ name: "CloudWaste", url: "https://cloudwaste.com" }],
-  creator: "CloudWaste",
-  publisher: "CloudWaste",
+  authors: [{ name: "CutCosts", url: "https://cutcosts.tech" }],
+  creator: "CutCosts",
+  publisher: "CutCosts",
   robots: {
     index: true,
     follow: true,
@@ -43,26 +43,26 @@ export const metadata: Metadata = {
   openGraph: {
     type: "website",
     locale: "en_US",
-    url: "https://cloudwaste.com",
-    siteName: "CloudWaste",
-    title: "CloudWaste - Detect Orphaned Cloud Resources",
+    url: "https://cutcosts.tech",
+    siteName: "CutCosts",
+    title: "CutCosts - Detect Orphaned Cloud Resources",
     description: "Identify and track unused cloud resources to reduce costs across AWS, Azure, and GCP. Save up to 40% on your cloud bills.",
     images: [
       {
         url: "/og-image.png",
         width: 1200,
         height: 630,
-        alt: "CloudWaste - Cloud Cost Optimization Platform",
+        alt: "CutCosts - Cloud Cost Optimization Platform",
       },
     ],
   },
   twitter: {
     card: "summary_large_image",
-    title: "CloudWaste - Detect Orphaned Cloud Resources",
+    title: "CutCosts - Detect Orphaned Cloud Resources",
     description: "Identify and track unused cloud resources to reduce costs across AWS, Azure, and GCP. Save up to 40% on your cloud bills.",
     images: ["/og-image.png"],
-    creator: "@cloudwaste",
-    site: "@cloudwaste",
+    creator: "@cutcosts",
+    site: "@cutcosts",
   },
   icons: {
     icon: [
@@ -82,7 +82,7 @@ export const metadata: Metadata = {
     // bing: "your-bing-verification-code",
   },
   alternates: {
-    canonical: "https://cloudwaste.com",
+    canonical: "https://cutcosts.tech",
   },
   category: "technology",
 };

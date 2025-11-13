@@ -1,4 +1,4 @@
-"""GCP provider implementation for CloudWaste."""
+"""GCP provider implementation for CutCosts."""
 
 import asyncio
 import hashlib

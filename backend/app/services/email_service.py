@@ -106,7 +106,7 @@ def get_verification_email_html(full_name: str, verification_url: str) -> str:
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Verify your email - CloudWaste</title>
+    <title>Verify your email - CutCosts</title>
 </head>
 <body style="margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; background-color: #f3f4f6;">
     <table width="100%" border="0" cellspacing="0" cellpadding="0" style="background-color: #f3f4f6;">
@@ -117,7 +117,7 @@ def get_verification_email_html(full_name: str, verification_url: str) -> str:
                     <tr>
                         <td style="padding: 40px 40px 20px; text-align: center;">
                             <h1 style="margin: 0; color: #1f2937; font-size: 28px; font-weight: 700;">
-                                🛡️ CloudWaste
+                                🛡️ CutCosts
                             </h1>
                             <p style="margin: 10px 0 0; color: #6b7280; font-size: 14px;">
                                 Cloud Cost Optimization
@@ -132,7 +132,7 @@ def get_verification_email_html(full_name: str, verification_url: str) -> str:
                                 Welcome {full_name}! 👋
                             </h2>
                             <p style="margin: 0 0 15px; color: #374151; font-size: 16px; line-height: 1.6;">
-                                Thank you for signing up for <strong>CloudWaste</strong>. To start optimizing your cloud costs, please confirm your email address by clicking the button below:
+                                Thank you for signing up for <strong>CutCosts</strong>. To start optimizing your cloud costs, please confirm your email address by clicking the button below:
                             </p>
 
                             <!-- CTA Button -->
@@ -162,7 +162,7 @@ def get_verification_email_html(full_name: str, verification_url: str) -> str:
                             </div>
 
                             <p style="margin: 20px 0 0; color: #6b7280; font-size: 14px; line-height: 1.6;">
-                                If you didn't create a CloudWaste account, you can ignore this email.
+                                If you didn't create a CutCosts account, you can ignore this email.
                             </p>
                         </td>
                     </tr>
@@ -171,8 +171,8 @@ def get_verification_email_html(full_name: str, verification_url: str) -> str:
                     <tr>
                         <td style="padding: 30px 40px; background-color: #f9fafb; border-top: 1px solid #e5e7eb; border-radius: 0 0 8px 8px;">
                             <p style="margin: 0; color: #9ca3af; font-size: 12px; text-align: center; line-height: 1.5;">
-                                This email was sent by <strong>CloudWaste</strong><br>
-                                © 2025 CloudWaste. All rights reserved.
+                                This email was sent by <strong>CutCosts</strong><br>
+                                © 2025 CutCosts. All rights reserved.
                             </p>
                         </td>
                     </tr>
@@ -199,17 +199,17 @@ def get_verification_email_text(full_name: str, verification_url: str) -> str:
     return f"""
 Welcome {full_name}!
 
-Thank you for signing up for CloudWaste. To start optimizing your cloud costs, please confirm your email address by clicking the link below:
+Thank you for signing up for CutCosts. To start optimizing your cloud costs, please confirm your email address by clicking the link below:
 
 {verification_url}
 
 ⏱️ This link expires in 7 days. After this period, your account will be automatically deleted.
 
-If you didn't create a CloudWaste account, you can ignore this email.
+If you didn't create a CutCosts account, you can ignore this email.
 
 ---
-This email was sent by CloudWaste
-© 2025 CloudWaste. All rights reserved.
+This email was sent by CutCosts
+© 2025 CutCosts. All rights reserved.
 """
 
 
@@ -236,7 +236,7 @@ def send_verification_email(
 
     return send_email(
         to_email=email,
-        subject="Verify your email - CloudWaste",
+        subject="Verify your email - CutCosts",
         html_content=html_content,
         text_content=text_content,
     )
@@ -260,7 +260,7 @@ def get_welcome_email_html(full_name: str) -> str:
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Welcome to CloudWaste</title>
+    <title>Welcome to CutCosts</title>
 </head>
 <body style="margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; background-color: #f3f4f6;">
     <table width="100%" border="0" cellspacing="0" cellpadding="0" style="background-color: #f3f4f6;">
@@ -283,7 +283,7 @@ def get_welcome_email_html(full_name: str) -> str:
                                 Your account is activated, {full_name}!
                             </h2>
                             <p style="margin: 0 0 15px; color: #374151; font-size: 16px; line-height: 1.6;">
-                                Your email address has been verified successfully. You can now access all <strong>CloudWaste</strong> features:
+                                Your email address has been verified successfully. You can now access all <strong>CutCosts</strong> features:
                             </p>
 
                             <!-- Features list -->
@@ -316,7 +316,7 @@ def get_welcome_email_html(full_name: str) -> str:
                                 <tr>
                                     <td align="center">
                                         <a href="{app_url}/auth/login" style="display: inline-block; padding: 14px 32px; background-color: #10b981; color: #ffffff; text-decoration: none; border-radius: 6px; font-size: 16px; font-weight: 600;">
-                                            🚀 Access CloudWaste
+                                            🚀 Access CutCosts
                                         </a>
                                     </td>
                                 </tr>
@@ -344,7 +344,7 @@ def get_welcome_email_html(full_name: str) -> str:
                                 Need help? Check out our documentation or contact support.
                             </p>
                             <p style="margin: 0; color: #9ca3af; font-size: 12px; text-align: center; line-height: 1.5;">
-                                © 2025 CloudWaste. All rights reserved.
+                                © 2025 CutCosts. All rights reserved.
                             </p>
                         </td>
                     </tr>
@@ -374,7 +374,7 @@ def get_welcome_email_text(full_name: str) -> str:
 
 Your account is activated, {full_name}!
 
-Your email address has been verified successfully. You can now access all CloudWaste features:
+Your email address has been verified successfully. You can now access all CutCosts features:
 
 📊 Automated scans
    Detection of orphaned AWS and Azure resources
@@ -385,7 +385,7 @@ Your email address has been verified successfully. You can now access all CloudW
 🤖 FinOps AI Assistant
    Personalized advice by Claude AI
 
-🚀 Access CloudWaste: {app_url}/auth/login
+🚀 Access CutCosts: {app_url}/auth/login
 
 🎯 Next steps:
 1. Connect your AWS or Azure account
@@ -395,7 +395,7 @@ Your email address has been verified successfully. You can now access all CloudW
 
 ---
 Need help? Check out our documentation or contact support.
-© 2025 CloudWaste. All rights reserved.
+© 2025 CutCosts. All rights reserved.
 """
 
 
@@ -415,7 +415,7 @@ def send_welcome_email(email: str, full_name: str) -> bool:
 
     return send_email(
         to_email=email,
-        subject="🎉 Welcome to CloudWaste - Your account is activated!",
+        subject="🎉 Welcome to CutCosts - Your account is activated!",
         html_content=html_content,
         text_content=text_content,
     )
@@ -466,7 +466,7 @@ def get_scan_summary_email_html(
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Scan result - CloudWaste</title>
+    <title>Scan result - CutCosts</title>
 </head>
 <body style="margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; background-color: #f3f4f6;">
     <table width="100%" border="0" cellspacing="0" cellpadding="0" style="background-color: #f3f4f6;">
@@ -477,7 +477,7 @@ def get_scan_summary_email_html(
                     <tr>
                         <td style="padding: 40px 40px 20px; text-align: center;">
                             <h1 style="margin: 0; color: #1f2937; font-size: 28px; font-weight: 700;">
-                                🛡️ CloudWaste
+                                🛡️ CutCosts
                             </h1>
                             <p style="margin: 10px 0 0; color: #6b7280; font-size: 14px;">
                                 Cloud Cost Optimization
@@ -576,8 +576,8 @@ def get_scan_summary_email_html(
                     <tr>
                         <td style="padding: 30px 40px; background-color: #f9fafb; border-top: 1px solid #e5e7eb; border-radius: 0 0 8px 8px;">
                             <p style="margin: 0; color: #9ca3af; font-size: 12px; text-align: center; line-height: 1.5;">
-                                This email was sent by <strong>CloudWaste</strong><br>
-                                © 2025 CloudWaste. All rights reserved.
+                                This email was sent by <strong>CutCosts</strong><br>
+                                © 2025 CutCosts. All rights reserved.
                             </p>
                         </td>
                     </tr>
@@ -597,7 +597,7 @@ def get_scan_summary_email_html(
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Scan failed - CloudWaste</title>
+    <title>Scan failed - CutCosts</title>
 </head>
 <body style="margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; background-color: #f3f4f6;">
     <table width="100%" border="0" cellspacing="0" cellpadding="0" style="background-color: #f3f4f6;">
@@ -608,7 +608,7 @@ def get_scan_summary_email_html(
                     <tr>
                         <td style="padding: 40px 40px 20px; text-align: center;">
                             <h1 style="margin: 0; color: #1f2937; font-size: 28px; font-weight: 700;">
-                                🛡️ CloudWaste
+                                🛡️ CutCosts
                             </h1>
                             <p style="margin: 10px 0 0; color: #6b7280; font-size: 14px;">
                                 Cloud Cost Optimization
@@ -673,8 +673,8 @@ def get_scan_summary_email_html(
                     <tr>
                         <td style="padding: 30px 40px; background-color: #f9fafb; border-top: 1px solid #e5e7eb; border-radius: 0 0 8px 8px;">
                             <p style="margin: 0; color: #9ca3af; font-size: 12px; text-align: center; line-height: 1.5;">
-                                This email was sent by <strong>CloudWaste</strong><br>
-                                © 2025 CloudWaste. All rights reserved.
+                                This email was sent by <strong>CutCosts</strong><br>
+                                © 2025 CutCosts. All rights reserved.
                             </p>
                         </td>
                     </tr>
@@ -749,8 +749,8 @@ Check the dashboard to see details for each orphaned resource and optimize your 
 👉 View detailed results: {app_url}/dashboard/resources
 
 ---
-This email was sent by CloudWaste
-© 2025 CloudWaste. All rights reserved.
+This email was sent by CutCosts
+© 2025 CutCosts. All rights reserved.
 """
 
     # Failure template
@@ -776,8 +776,8 @@ If the problem persists, contact our technical support for assistance.
 👉 Check my cloud accounts: {app_url}/dashboard/accounts
 
 ---
-This email was sent by CloudWaste
-© 2025 CloudWaste. All rights reserved.
+This email was sent by CutCosts
+© 2025 CutCosts. All rights reserved.
 """
 
 
@@ -844,9 +844,9 @@ def send_scan_summary_email(
 
     # Determine subject based on status
     if status == "completed":
-        subject = f"✅ Scan completed - {account_name} - CloudWaste"
+        subject = f"✅ Scan completed - {account_name} - CutCosts"
     else:
-        subject = f"❌ Scan failed - {account_name} - CloudWaste"
+        subject = f"❌ Scan failed - {account_name} - CutCosts"
 
     return send_email(
         to_email=email,

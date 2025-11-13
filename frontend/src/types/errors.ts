@@ -1,5 +1,5 @@
 /**
- * Error handling types for CloudWaste
+ * Error handling types for CutCosts
  */
 
 export enum ErrorCategory {

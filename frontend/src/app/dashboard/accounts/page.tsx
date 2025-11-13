@@ -310,7 +310,7 @@ function AWSCredentialsHelp() {
               </button>
             </div>
             <p className="text-xs text-gray-500 mt-2">
-              Policy name: <code className="bg-gray-200 px-2 py-0.5 rounded">CloudWasteReadOnlyPolicy</code>
+              Policy name: <code className="bg-gray-200 px-2 py-0.5 rounded">CutCostsReadOnlyPolicy</code>
             </p>
           </div>
         </div>
@@ -343,7 +343,7 @@ function AWSCredentialsHelp() {
 
       <div className="mt-6 rounded-lg bg-blue-50 border border-blue-200 p-4">
         <p className="text-sm text-blue-900">
-          <strong>🔒 Security:</strong> CloudWaste only uses READ-ONLY permissions. We never modify or delete your AWS resources.
+          <strong>🔒 Security:</strong> CutCosts only uses READ-ONLY permissions. We never modify or delete your AWS resources.
         </p>
       </div>
     </div>
@@ -1175,7 +1175,7 @@ function AzureCredentialsHelp() {
             <p className="text-sm text-gray-600 mt-1">
               In your app → Certificates & secrets → New client secret
               <br />
-              Description: CloudWaste Scanner
+              Description: CutCosts Scanner
               <br />
               Expires: 24 months (recommended)
             </p>
@@ -1228,7 +1228,7 @@ function AzureCredentialsHelp() {
 
       <div className="mt-6 rounded-lg bg-blue-50 border border-blue-200 p-4">
         <p className="text-sm text-blue-900">
-          <strong>🔒 Security:</strong> CloudWaste only uses READ-ONLY permissions (Reader role). We never modify or delete your Azure resources.
+          <strong>🔒 Security:</strong> CutCosts only uses READ-ONLY permissions (Reader role). We never modify or delete your Azure resources.
         </p>
       </div>
     </div>
@@ -1848,7 +1848,7 @@ function GCPCredentialsHelp() {
     <div className="rounded-xl bg-red-50 border-2 border-red-200 p-6 space-y-4 mb-6">
       <h3 className="font-bold text-red-900 flex items-center gap-2">
         <Info className="h-5 w-5" />
-        How to create a GCP Service Account for CloudWaste
+        How to create a GCP Service Account for CutCosts
       </h3>
 
       <div className="space-y-3 text-sm text-red-800">
@@ -1882,10 +1882,10 @@ function GCPCredentialsHelp() {
               Click <strong>"+ CREATE SERVICE ACCOUNT"</strong>
             </p>
             <p className="text-red-700 mt-1">
-              Name: <code className="bg-red-100 px-1 rounded">CloudWaste-Scanner</code>
+              Name: <code className="bg-red-100 px-1 rounded">CutCosts-Scanner</code>
             </p>
             <p className="text-red-700 mt-1">
-              Description: <code className="bg-red-100 px-1 rounded">Read-only access for CloudWaste waste detection</code>
+              Description: <code className="bg-red-100 px-1 rounded">Read-only access for CutCosts waste detection</code>
             </p>
           </div>
         </div>
@@ -1944,7 +1944,7 @@ function GCPCredentialsHelp() {
           <AlertCircle className="h-4 w-4 flex-shrink-0 mt-0.5" />
           <span>
             <strong>Security Best Practice:</strong> The Viewer role provides read-only access to all resources in your GCP project.
-            CloudWaste will NEVER modify, delete, or create resources. The JSON key will be encrypted before storage.
+            CutCosts will NEVER modify, delete, or create resources. The JSON key will be encrypted before storage.
             You can revoke access anytime by deleting the service account in GCP Console.
           </span>
         </p>
@@ -2016,7 +2016,7 @@ function Microsoft365CredentialsHelp() {
           <div className="flex-1">
             <h4 className="font-semibold text-gray-900">Create App Registration</h4>
             <p className="text-sm text-gray-600 mt-1">
-              Name: <code className="bg-gray-200 px-2 py-0.5 rounded">CloudWaste-Scanner</code>
+              Name: <code className="bg-gray-200 px-2 py-0.5 rounded">CutCosts-Scanner</code>
               <br />
               Supported account types: Single tenant
               <br />
@@ -2035,7 +2035,7 @@ function Microsoft365CredentialsHelp() {
             <p className="text-sm text-gray-600 mt-1">
               In your app → Certificates & secrets → New client secret
               <br />
-              Description: CloudWaste Scanner
+              Description: CutCosts Scanner
               <br />
               Expires: 24 months (recommended)
             </p>
@@ -2095,7 +2095,7 @@ function Microsoft365CredentialsHelp() {
 
       <div className="mt-6 rounded-lg bg-blue-50 border border-blue-200 p-4">
         <p className="text-sm text-blue-900">
-          <strong>🔒 Security:</strong> CloudWaste only uses READ-ONLY permissions. We never modify or delete your Microsoft 365 data.
+          <strong>🔒 Security:</strong> CutCosts only uses READ-ONLY permissions. We never modify or delete your Microsoft 365 data.
         </p>
       </div>
     </div>

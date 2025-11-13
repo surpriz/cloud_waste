@@ -90,7 +90,7 @@ export function OnboardingBanner() {
               🚀 Complete Your Setup
             </h3>
             <p className="text-sm text-white/90">
-              {completedCount} of {totalCount} steps completed • Get the most out of CloudWaste
+              {completedCount} of {totalCount} steps completed • Get the most out of CutCosts
             </p>
           </div>
 

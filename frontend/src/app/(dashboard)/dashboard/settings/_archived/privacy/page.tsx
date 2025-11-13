@@ -194,7 +194,7 @@ export default function PrivacySettingsPage() {
             Privacy & Data Collection
           </h1>
           <p className="text-gray-600 dark:text-gray-400 mt-2">
-            Manage how CloudWaste collects and uses your data
+            Manage how CutCosts collects and uses your data
           </p>
         </div>
 
@@ -222,7 +222,7 @@ export default function PrivacySettingsPage() {
                 ML Data Collection
               </h2>
               <p className="text-sm text-gray-600 dark:text-gray-400 mt-1">
-                Help improve CloudWaste predictions by contributing anonymized data
+                Help improve CutCosts predictions by contributing anonymized data
               </p>
             </div>
 

@@ -1,5 +1,5 @@
 /**
- * TypeScript type definitions for CloudWaste
+ * TypeScript type definitions for CutCosts
  */
 
 // User types

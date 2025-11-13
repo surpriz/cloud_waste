@@ -370,10 +370,10 @@ export default function ImpactDashboardPage() {
       {/* Header Section */}
       <div className="text-center mb-8 relative">
         <h1 className="text-4xl md:text-5xl font-bold bg-gradient-to-r from-blue-600 to-purple-600 bg-clip-text text-transparent mb-3">
-          Your CloudWaste Impact Report 🎉
+          Your CutCosts Impact Report 🎉
         </h1>
         <p className="text-gray-600 text-lg md:text-xl mb-4">
-          Since you started using CloudWaste, here&apos;s your positive impact...
+          Since you started using CutCosts, here&apos;s your positive impact...
         </p>
         <button
           onClick={() => fetchAll(selectedPeriod)}

@@ -2,7 +2,7 @@
  * StructuredData Component
  *
  * Provides JSON-LD structured data for SEO using Schema.org vocabulary.
- * Helps search engines understand the content and context of CloudWaste.
+ * Helps search engines understand the content and context of CutCosts.
  */
 
 interface StructuredDataProps {
@@ -16,7 +16,7 @@ export function StructuredData({ type = 'all' }: StructuredDataProps) {
   const organizationSchema = {
     '@context': 'https://schema.org',
     '@type': 'Organization',
-    name: 'CloudWaste',
+    name: 'CutCosts',
     url: baseUrl,
     logo: `${baseUrl}/icon-512.png`,
     description: 'Detect orphaned cloud resources and reduce costs across AWS, Azure, and GCP with automated waste detection and intelligent cost optimization.',
@@ -39,7 +39,7 @@ export function StructuredData({ type = 'all' }: StructuredDataProps) {
   const websiteSchema = {
     '@context': 'https://schema.org',
     '@type': 'WebSite',
-    name: 'CloudWaste',
+    name: 'CutCosts',
     url: baseUrl,
     description: 'Detect orphaned cloud resources and reduce costs across AWS, Azure, and GCP',
     potentialAction: {
@@ -56,7 +56,7 @@ export function StructuredData({ type = 'all' }: StructuredDataProps) {
   const softwareSchema = {
     '@context': 'https://schema.org',
     '@type': 'SoftwareApplication',
-    name: 'CloudWaste',
+    name: 'CutCosts',
     applicationCategory: 'BusinessApplication',
     operatingSystem: 'Web',
     offers: {
@@ -72,7 +72,7 @@ export function StructuredData({ type = 'all' }: StructuredDataProps) {
       ratingValue: '4.8',
       ratingCount: '127',
     },
-    description: 'CloudWaste helps businesses detect and eliminate orphaned cloud resources across AWS, Azure, and GCP. Save up to 40% on cloud costs with intelligent, CloudWatch-powered detection of unused resources.',
+    description: 'CutCosts helps businesses detect and eliminate orphaned cloud resources across AWS, Azure, and GCP. Save up to 40% on cloud costs with intelligent, CloudWatch-powered detection of unused resources.',
     featureList: [
       'Multi-cloud support (AWS, Azure, GCP)',
       '400+ resource types detection',

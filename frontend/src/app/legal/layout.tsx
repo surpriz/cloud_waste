@@ -31,7 +31,7 @@ export default function LegalLayout({
               href="/"
               className="text-2xl font-bold bg-gradient-to-r from-blue-600 to-indigo-600 bg-clip-text text-transparent"
             >
-              CloudWaste
+              CutCosts
             </Link>
           </div>
         </div>

@@ -62,7 +62,7 @@ export function CompletionStep({ onFinish }: CompletionStepProps) {
         </p>
 
         <p className="text-lg text-gray-500">
-          CloudWaste is now monitoring your cloud for wasteful spending
+          CutCosts is now monitoring your cloud for wasteful spending
         </p>
       </div>
 

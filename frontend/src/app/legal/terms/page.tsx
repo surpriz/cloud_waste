@@ -2,9 +2,9 @@ import type { Metadata } from "next";
 import { FileText, AlertTriangle, Shield, Ban, Scale } from "lucide-react";
 
 export const metadata: Metadata = {
-  title: "Terms of Service - CloudWaste",
+  title: "Terms of Service - CutCosts",
   description:
-    "CloudWaste Terms of Service - Read our terms and conditions for using the CloudWaste platform.",
+    "CutCosts Terms of Service - Read our terms and conditions for using the CutCosts platform.",
 };
 
 export default function TermsOfServicePage() {
@@ -20,7 +20,7 @@ export default function TermsOfServicePage() {
           Last updated: <strong>January 2025</strong>
         </p>
         <p className="text-gray-600 mt-2">
-          These Terms of Service ("Terms") govern your access to and use of CloudWaste ("Service", "we", "us", or
+          These Terms of Service ("Terms") govern your access to and use of CutCosts ("Service", "we", "us", or
           "our"). By accessing or using our Service, you agree to be bound by these Terms.
         </p>
       </div>
@@ -32,7 +32,7 @@ export default function TermsOfServicePage() {
           Important Notice
         </h3>
         <p className="text-yellow-800 text-sm">
-          Please read these Terms carefully before using CloudWaste. By creating an account or using our Service,
+          Please read these Terms carefully before using CutCosts. By creating an account or using our Service,
           you acknowledge that you have read, understood, and agree to be bound by these Terms. If you do not agree,
           please do not use our Service.
         </p>
@@ -119,11 +119,11 @@ export default function TermsOfServicePage() {
       <section id="acceptance" className="mb-12">
         <h2 className="text-2xl font-bold text-gray-900 mb-4">1. Acceptance of Terms</h2>
         <p>
-          By accessing or using CloudWaste, you agree to comply with and be bound by these Terms. These Terms
-          constitute a legally binding agreement between you and CloudWaste.
+          By accessing or using CutCosts, you agree to comply with and be bound by these Terms. These Terms
+          constitute a legally binding agreement between you and CutCosts.
         </p>
         <p className="mt-4">
-          If you are using CloudWaste on behalf of an organization, you represent and warrant that you have the
+          If you are using CutCosts on behalf of an organization, you represent and warrant that you have the
           authority to bind that organization to these Terms, and your acceptance of these Terms will be treated as
           acceptance by that organization.
         </p>
@@ -134,10 +134,10 @@ export default function TermsOfServicePage() {
         <h2 className="text-2xl font-bold text-gray-900 mb-4">2. Eligibility</h2>
         <p>
           You must be at least <strong>18 years old</strong> (or the age of majority in your jurisdiction) to use
-          CloudWaste. By using our Service, you represent and warrant that you meet this age requirement.
+          CutCosts. By using our Service, you represent and warrant that you meet this age requirement.
         </p>
         <p className="mt-4">
-          You may not use CloudWaste if you are prohibited from receiving our Service under applicable law.
+          You may not use CutCosts if you are prohibited from receiving our Service under applicable law.
         </p>
       </section>
 
@@ -145,7 +145,7 @@ export default function TermsOfServicePage() {
       <section id="description" className="mb-12">
         <h2 className="text-2xl font-bold text-gray-900 mb-4">3. Service Description</h2>
         <p>
-          CloudWaste is a cloud resource optimization platform that helps you:
+          CutCosts is a cloud resource optimization platform that helps you:
         </p>
         <ul className="space-y-2 mt-4">
           <li>
@@ -166,7 +166,7 @@ export default function TermsOfServicePage() {
           <p className="text-blue-900 text-sm flex items-start gap-2">
             <Shield className="w-5 h-5 text-blue-600 flex-shrink-0 mt-0.5" />
             <span>
-              <strong>Read-Only Access:</strong> CloudWaste only requests <strong>read-only permissions</strong> to
+              <strong>Read-Only Access:</strong> CutCosts only requests <strong>read-only permissions</strong> to
               your cloud accounts. We <strong>cannot and will not</strong> delete, modify, or create any resources in
               your cloud environments. All actions must be performed manually by you.
             </span>
@@ -179,7 +179,7 @@ export default function TermsOfServicePage() {
         <h2 className="text-2xl font-bold text-gray-900 mb-4">4. User Accounts</h2>
         <h3 className="text-xl font-semibold text-gray-900 mt-6 mb-3">4.1 Account Creation</h3>
         <p>
-          To use CloudWaste, you must create an account by providing accurate and complete information. You are
+          To use CutCosts, you must create an account by providing accurate and complete information. You are
           responsible for:
         </p>
         <ul className="space-y-2 mt-2">
@@ -197,8 +197,8 @@ export default function TermsOfServicePage() {
         <h3 className="text-xl font-semibold text-gray-900 mt-6 mb-3">4.2 Account Termination</h3>
         <p>
           You may terminate your account at any time by contacting us at{" "}
-          <a href="mailto:support@cloudwaste.com" className="text-blue-600 hover:underline">
-            support@cloudwaste.com
+          <a href="mailto:support@cutcosts.tech" className="text-blue-600 hover:underline">
+            support@cutcosts.tech
           </a>
           . We may suspend or terminate your account if you violate these Terms.
         </p>
@@ -208,7 +208,7 @@ export default function TermsOfServicePage() {
       <section id="cloud-access" className="mb-12">
         <h2 className="text-2xl font-bold text-gray-900 mb-4">5. Cloud Account Access</h2>
         <p>
-          When you connect your cloud accounts (AWS, Azure, GCP) to CloudWaste, you grant us <strong>limited,
+          When you connect your cloud accounts (AWS, Azure, GCP) to CutCosts, you grant us <strong>limited,
           read-only access</strong> to:
         </p>
         <ul className="space-y-2 mt-4">
@@ -228,7 +228,7 @@ export default function TermsOfServicePage() {
             <strong>Credential security:</strong> Rotating credentials regularly (we recommend every 90 days)
           </li>
           <li>
-            <strong>Revoking access:</strong> Removing CloudWaste's access from your cloud console if you no longer
+            <strong>Revoking access:</strong> Removing CutCosts's access from your cloud console if you no longer
             use our Service
           </li>
         </ul>
@@ -243,21 +243,21 @@ export default function TermsOfServicePage() {
       {/* 6. User Responsibilities */}
       <section id="user-responsibilities" className="mb-12">
         <h2 className="text-2xl font-bold text-gray-900 mb-4">6. User Responsibilities</h2>
-        <p>As a user of CloudWaste, you agree to:</p>
+        <p>As a user of CutCosts, you agree to:</p>
         <ul className="space-y-2 mt-4">
           <li>
             <strong>Verify recommendations:</strong> Review all resource recommendations before taking action in your
             cloud console
           </li>
           <li>
-            <strong>Understand limitations:</strong> CloudWaste provides <strong>recommendations only</strong> and
+            <strong>Understand limitations:</strong> CutCosts provides <strong>recommendations only</strong> and
             cannot delete resources on your behalf
           </li>
           <li>
             <strong>Backup critical data:</strong> Always backup important data before deleting any cloud resources
           </li>
           <li>
-            <strong>Comply with laws:</strong> Use CloudWaste in compliance with all applicable laws and regulations
+            <strong>Comply with laws:</strong> Use CutCosts in compliance with all applicable laws and regulations
           </li>
           <li>
             <strong>Respect rate limits:</strong> Not abuse our API or attempt to bypass rate limiting
@@ -271,7 +271,7 @@ export default function TermsOfServicePage() {
           <Ban className="w-6 h-6 text-red-600" />
           7. Prohibited Activities
         </h2>
-        <p>You may NOT use CloudWaste to:</p>
+        <p>You may NOT use CutCosts to:</p>
         <div className="not-prose bg-red-50 border border-red-200 rounded-lg p-6 mt-4">
           <ul className="space-y-2 text-red-900 text-sm">
             <li>✗ Reverse engineer, decompile, or disassemble the Service</li>
@@ -282,7 +282,7 @@ export default function TermsOfServicePage() {
             <li>✗ Interfere with or disrupt the Service's operation</li>
             <li>✗ Impersonate another person or entity</li>
             <li>✗ Share your account credentials with others</li>
-            <li>✗ Use the Service to compete with CloudWaste or build a similar product</li>
+            <li>✗ Use the Service to compete with CutCosts or build a similar product</li>
           </ul>
         </div>
         <p className="mt-4 text-sm text-gray-600">
@@ -293,16 +293,16 @@ export default function TermsOfServicePage() {
       {/* 8. Intellectual Property */}
       <section id="intellectual-property" className="mb-12">
         <h2 className="text-2xl font-bold text-gray-900 mb-4">8. Intellectual Property</h2>
-        <h3 className="text-xl font-semibold text-gray-900 mt-6 mb-3">8.1 CloudWaste IP</h3>
+        <h3 className="text-xl font-semibold text-gray-900 mt-6 mb-3">8.1 CutCosts IP</h3>
         <p>
-          All content, features, and functionality of CloudWaste (including but not limited to design, text,
-          graphics, logos, code, and software) are owned by CloudWaste and are protected by copyright, trademark,
+          All content, features, and functionality of CutCosts (including but not limited to design, text,
+          graphics, logos, code, and software) are owned by CutCosts and are protected by copyright, trademark,
           and other intellectual property laws.
         </p>
 
         <h3 className="text-xl font-semibold text-gray-900 mt-6 mb-3">8.2 Your Data</h3>
         <p>
-          You retain all rights to your cloud data. By using CloudWaste, you grant us a limited license to process
+          You retain all rights to your cloud data. By using CutCosts, you grant us a limited license to process
           your data solely for providing the Service. We do not claim ownership of your data.
         </p>
       </section>
@@ -316,7 +316,7 @@ export default function TermsOfServicePage() {
           </p>
           <ul className="space-y-3 text-gray-800 text-sm">
             <li>
-              CloudWaste provides recommendations and analysis <strong>for informational purposes only</strong>. We
+              CutCosts provides recommendations and analysis <strong>for informational purposes only</strong>. We
               are not responsible for:
               <ul className="ml-6 mt-2 space-y-1">
                 <li>• Accidental deletion of cloud resources</li>
@@ -330,7 +330,7 @@ export default function TermsOfServicePage() {
               take in your cloud console.
             </li>
             <li>
-              CloudWaste's total liability for any claims shall not exceed the amount you paid us in the 12 months
+              CutCosts's total liability for any claims shall not exceed the amount you paid us in the 12 months
               preceding the claim (or $100 if you have not paid us).
             </li>
             <li>
@@ -344,7 +344,7 @@ export default function TermsOfServicePage() {
       <section id="warranties" className="mb-12">
         <h2 className="text-2xl font-bold text-gray-900 mb-4">10. Warranties and Disclaimers</h2>
         <p>
-          CloudWaste is provided on an <strong>"AS IS"</strong> and <strong>"AS AVAILABLE"</strong> basis. We do not
+          CutCosts is provided on an <strong>"AS IS"</strong> and <strong>"AS AVAILABLE"</strong> basis. We do not
           warrant that:
         </p>
         <ul className="space-y-2 mt-4">
@@ -364,15 +364,15 @@ export default function TermsOfServicePage() {
         <h2 className="text-2xl font-bold text-gray-900 mb-4">11. Termination</h2>
         <h3 className="text-xl font-semibold text-gray-900 mt-6 mb-3">11.1 Termination by You</h3>
         <p>
-          You may stop using CloudWaste at any time. To delete your account, contact{" "}
-          <a href="mailto:support@cloudwaste.com" className="text-blue-600 hover:underline">
-            support@cloudwaste.com
+          You may stop using CutCosts at any time. To delete your account, contact{" "}
+          <a href="mailto:support@cutcosts.tech" className="text-blue-600 hover:underline">
+            support@cutcosts.tech
           </a>
           .
         </p>
 
         <h3 className="text-xl font-semibold text-gray-900 mt-6 mb-3">11.2 Termination by Us</h3>
-        <p>We may suspend or terminate your access to CloudWaste:</p>
+        <p>We may suspend or terminate your access to CutCosts:</p>
         <ul className="space-y-2 mt-2">
           <li>If you violate these Terms</li>
           <li>If your account is inactive for more than 12 months</li>
@@ -382,7 +382,7 @@ export default function TermsOfServicePage() {
 
         <h3 className="text-xl font-semibold text-gray-900 mt-6 mb-3">11.3 Effect of Termination</h3>
         <p>
-          Upon termination, your right to use CloudWaste will cease immediately. We will delete your account data
+          Upon termination, your right to use CutCosts will cease immediately. We will delete your account data
           within 30 days, except as required by law or to enforce these Terms.
         </p>
       </section>
@@ -398,7 +398,7 @@ export default function TermsOfServicePage() {
           <li>A prominent notice on our website</li>
         </ul>
         <p className="mt-4">
-          Continued use of CloudWaste after changes constitutes acceptance of the revised Terms. If you do not agree,
+          Continued use of CutCosts after changes constitutes acceptance of the revised Terms. If you do not agree,
           you must stop using the Service.
         </p>
       </section>
@@ -414,7 +414,7 @@ export default function TermsOfServicePage() {
           of law principles.
         </p>
         <p className="mt-4">
-          Any disputes arising from these Terms or your use of CloudWaste shall be resolved in the courts of{" "}
+          Any disputes arising from these Terms or your use of CutCosts shall be resolved in the courts of{" "}
           <strong>[YOUR JURISDICTION]</strong>.
         </p>
         <p className="mt-4 text-sm text-gray-600">
@@ -429,11 +429,11 @@ export default function TermsOfServicePage() {
           If you have any questions about these Terms, please contact us:
         </p>
         <div className="not-prose bg-blue-50 rounded-lg p-6 mt-4">
-          <p className="text-gray-900 font-semibold text-lg">CloudWaste Legal Team</p>
+          <p className="text-gray-900 font-semibold text-lg">CutCosts Legal Team</p>
           <p className="text-gray-700 mt-2">
             Email:{" "}
-            <a href="mailto:legal@cloudwaste.com" className="text-blue-600 hover:underline font-semibold">
-              legal@cloudwaste.com
+            <a href="mailto:legal@cutcosts.tech" className="text-blue-600 hover:underline font-semibold">
+              legal@cutcosts.tech
             </a>
           </p>
           <p className="text-gray-700">
@@ -445,10 +445,10 @@ export default function TermsOfServicePage() {
       {/* Footer */}
       <div className="not-prose border-t border-gray-200 pt-8 mt-12">
         <p className="text-sm text-gray-500 text-center">
-          © {new Date().getFullYear()} CloudWaste. All rights reserved.
+          © {new Date().getFullYear()} CutCosts. All rights reserved.
         </p>
         <p className="text-xs text-gray-400 text-center mt-2">
-          By using CloudWaste, you agree to these Terms of Service and our{" "}
+          By using CutCosts, you agree to these Terms of Service and our{" "}
           <a href="/legal/privacy" className="text-blue-600 hover:underline">
             Privacy Policy
           </a>

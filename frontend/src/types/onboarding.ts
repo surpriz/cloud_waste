@@ -1,5 +1,5 @@
 /**
- * Onboarding types for CloudWaste
+ * Onboarding types for CutCosts
  */
 
 /**

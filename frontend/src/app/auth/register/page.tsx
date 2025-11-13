@@ -54,7 +54,7 @@ export default function RegisterPage() {
             <UserPlus className="h-7 w-7 md:h-8 md:w-8 text-white" />
           </div>
           <h1 className="text-3xl md:text-4xl font-extrabold bg-gradient-to-r from-green-600 to-blue-600 bg-clip-text text-transparent">
-            Join CloudWaste
+            Join CutCosts
           </h1>
           <p className="mt-2 md:mt-3 text-gray-600 text-base md:text-lg">Start saving on cloud costs today</p>
         </div>

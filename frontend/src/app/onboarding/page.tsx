@@ -2,8 +2,8 @@ import { Metadata } from "next";
 import { OnboardingWizard } from "@/components/onboarding";
 
 export const metadata: Metadata = {
-  title: "Get Started | CloudWaste",
-  description: "Welcome to CloudWaste - Let's get you set up to start detecting cloud waste",
+  title: "Get Started | CutCosts",
+  description: "Welcome to CutCosts - Let's get you set up to start detecting cloud waste",
 };
 
 /**

@@ -4,7 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**CloudWaste** is a SaaS platform for detecting orphaned and unused cloud resources (zombies) that generate unnecessary costs for businesses. Currently supports **25 AWS resource types** + **Azure resources** + **14+ GCP resource types** + **Microsoft 365** with intelligent CloudWatch-based detection.
+**CutCosts** (formerly CloudWaste) is a SaaS platform for detecting orphaned and unused cloud resources (zombies) that generate unnecessary costs for businesses. Currently supports **25 AWS resource types** + **Azure resources** + **14+ GCP resource types** + **Microsoft 365** with intelligent CloudWatch-based detection.
+
+> **📝 Historical Note:** This project was initially named "CloudWaste" but was renamed to "CutCosts" on November 12, 2025 to better reflect its mission and broaden its market appeal. The codebase still contains internal references to "cloudwaste" in technical infrastructure (database names, container names, Docker volumes) which is intentional and does not affect the public-facing brand.
 
 
 **Key Features:**

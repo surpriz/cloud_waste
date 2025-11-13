@@ -2,9 +2,9 @@ import type { Metadata } from "next";
 import { Scale, Building, Server, User, Mail, Globe } from "lucide-react";
 
 export const metadata: Metadata = {
-  title: "Legal Notice - CloudWaste | Mentions Légales",
+  title: "Legal Notice - CutCosts | Mentions Légales",
   description:
-    "CloudWaste Legal Notice - Information about the publisher, hosting, and legal compliance.",
+    "CutCosts Legal Notice - Information about the publisher, hosting, and legal compliance.",
 };
 
 export default function LegalNoticePage() {
@@ -21,7 +21,7 @@ export default function LegalNoticePage() {
           Last updated: <strong>January 2025</strong>
         </p>
         <p className="text-gray-600 mt-2">
-          This page provides legal information about CloudWaste in compliance with French law (Article 6-III and
+          This page provides legal information about CutCosts in compliance with French law (Article 6-III and
           19 of Law n° 2004-575 dated June 21, 2004 for Confidence in the Digital Economy - LCEN) and EU
           regulations.
         </p>
@@ -37,7 +37,7 @@ export default function LegalNoticePage() {
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
             <div>
               <p className="text-sm text-gray-600 mb-1">Company Name</p>
-              <p className="font-semibold text-gray-900">CloudWaste</p>
+              <p className="font-semibold text-gray-900">CutCosts</p>
             </div>
             <div>
               <p className="text-sm text-gray-600 mb-1">Legal Form</p>
@@ -72,14 +72,14 @@ export default function LegalNoticePage() {
             <p className="text-sm text-gray-600 mb-1">Contact</p>
             <p className="text-gray-900 flex items-center gap-2 mt-2">
               <Mail className="w-4 h-4 text-blue-600" />
-              <a href="mailto:contact@cloudwaste.com" className="text-blue-600 hover:underline font-semibold">
-                contact@cloudwaste.com
+              <a href="mailto:contact@cutcosts.tech" className="text-blue-600 hover:underline font-semibold">
+                contact@cutcosts.tech
               </a>
             </p>
             <p className="text-gray-900 flex items-center gap-2 mt-2">
               <Globe className="w-4 h-4 text-blue-600" />
-              <a href="https://cloudwaste.com" className="text-blue-600 hover:underline font-semibold">
-                https://cloudwaste.com
+              <a href="https://cutcosts.tech" className="text-blue-600 hover:underline font-semibold">
+                https://cutcosts.tech
               </a>
             </p>
           </div>
@@ -100,7 +100,7 @@ export default function LegalNoticePage() {
             <strong>Position:</strong> [CEO / Managing Director / President]
           </p>
           <p className="text-gray-600 text-sm mt-4">
-            The Publication Director is responsible for the content published on cloudwaste.com in accordance with
+            The Publication Director is responsible for the content published on cutcosts.tech in accordance with
             French law (Article 93-2 of Law n° 82-652 of July 29, 1982).
           </p>
         </div>
@@ -135,7 +135,7 @@ export default function LegalNoticePage() {
 
         <div className="not-prose bg-blue-50 border border-blue-200 rounded-lg p-4 mt-4">
           <p className="text-blue-900 text-sm">
-            <strong>Server Location:</strong> The CloudWaste application is hosted on servers located in{" "}
+            <strong>Server Location:</strong> The CutCosts application is hosted on servers located in{" "}
             <strong>[EU/France/Your Location]</strong>, ensuring compliance with GDPR data residency requirements.
           </p>
         </div>
@@ -145,19 +145,19 @@ export default function LegalNoticePage() {
       <section className="mb-12">
         <h2 className="text-2xl font-bold text-gray-900 mb-4">4. Intellectual Property</h2>
         <p>
-          All content on cloudwaste.com (text, graphics, logos, icons, images, audio clips, digital downloads, data
-          compilations, and software) is the property of CloudWaste or its content suppliers and is protected by
+          All content on cutcosts.tech (text, graphics, logos, icons, images, audio clips, digital downloads, data
+          compilations, and software) is the property of CutCosts or its content suppliers and is protected by
           international copyright laws.
         </p>
         <p className="mt-4">
-          The compilation of all content on this site is the exclusive property of CloudWaste and is protected by
-          international copyright laws. All software used on this site is the property of CloudWaste or its software
+          The compilation of all content on this site is the exclusive property of CutCosts and is protected by
+          international copyright laws. All software used on this site is the property of CutCosts or its software
           suppliers and is protected by international copyright laws.
         </p>
 
         <h3 className="text-xl font-semibold text-gray-900 mt-6 mb-3">Trademarks</h3>
         <p>
-          "CloudWaste" and the CloudWaste logo are trademarks of CloudWaste. All other trademarks, service marks,
+          "CutCosts" and the CutCosts logo are trademarks of CutCosts. All other trademarks, service marks,
           and trade names referenced on this site are the property of their respective owners.
         </p>
 
@@ -165,7 +165,7 @@ export default function LegalNoticePage() {
         <p>
           Any reproduction, representation, modification, publication, or adaptation of all or part of the elements
           of the site, regardless of the means or process used, is prohibited without the prior written permission
-          of CloudWaste.
+          of CutCosts.
         </p>
       </section>
 
@@ -173,7 +173,7 @@ export default function LegalNoticePage() {
       <section className="mb-12">
         <h2 className="text-2xl font-bold text-gray-900 mb-4">5. Data Protection Officer (DPO)</h2>
         <p>
-          In accordance with the General Data Protection Regulation (GDPR - Regulation EU 2016/679), CloudWaste has
+          In accordance with the General Data Protection Regulation (GDPR - Regulation EU 2016/679), CutCosts has
           appointed a Data Protection Officer (Délégué à la Protection des Données - DPD).
         </p>
         <div className="not-prose bg-gray-50 border border-gray-200 rounded-lg p-6 mt-4">
@@ -182,8 +182,8 @@ export default function LegalNoticePage() {
           </p>
           <p className="text-gray-900 mt-2 flex items-center gap-2">
             <Mail className="w-4 h-4 text-blue-600" />
-            <a href="mailto:dpo@cloudwaste.com" className="text-blue-600 hover:underline font-semibold">
-              dpo@cloudwaste.com
+            <a href="mailto:dpo@cutcosts.tech" className="text-blue-600 hover:underline font-semibold">
+              dpo@cutcosts.tech
             </a>
           </p>
           <p className="text-gray-600 text-sm mt-4">
@@ -216,7 +216,7 @@ export default function LegalNoticePage() {
       <section className="mb-12">
         <h2 className="text-2xl font-bold text-gray-900 mb-4">7. Cookies</h2>
         <p>
-          CloudWaste uses cookies in accordance with applicable regulations, including the GDPR and the French Data
+          CutCosts uses cookies in accordance with applicable regulations, including the GDPR and the French Data
           Protection Act (Loi Informatique et Libertés).
         </p>
         <p className="mt-4">
@@ -232,7 +232,7 @@ export default function LegalNoticePage() {
       <section className="mb-12">
         <h2 className="text-2xl font-bold text-gray-900 mb-4">8. Personal Data</h2>
         <p>
-          CloudWaste processes personal data in accordance with the GDPR and French data protection laws.
+          CutCosts processes personal data in accordance with the GDPR and French data protection laws.
         </p>
         <p className="mt-4">
           For detailed information about how we collect, use, and protect your personal data, please refer to our{" "}
@@ -257,8 +257,8 @@ export default function LegalNoticePage() {
         </ul>
         <p className="mt-4">
           To exercise these rights, contact us at:{" "}
-          <a href="mailto:privacy@cloudwaste.com" className="text-blue-600 hover:underline font-semibold">
-            privacy@cloudwaste.com
+          <a href="mailto:privacy@cutcosts.tech" className="text-blue-600 hover:underline font-semibold">
+            privacy@cutcosts.tech
           </a>
         </p>
       </section>
@@ -267,11 +267,11 @@ export default function LegalNoticePage() {
       <section className="mb-12">
         <h2 className="text-2xl font-bold text-gray-900 mb-4">9. Liability</h2>
         <p>
-          CloudWaste strives to provide accurate and up-to-date information on this website. However, we cannot
+          CutCosts strives to provide accurate and up-to-date information on this website. However, we cannot
           guarantee the accuracy, completeness, or timeliness of the information provided.
         </p>
         <p className="mt-4">
-          CloudWaste shall not be held liable for:
+          CutCosts shall not be held liable for:
         </p>
         <ul className="space-y-2 mt-2">
           <li>Errors or omissions in the content</li>
@@ -292,11 +292,11 @@ export default function LegalNoticePage() {
       <section className="mb-12">
         <h2 className="text-2xl font-bold text-gray-900 mb-4">10. External Links (Liens Hypertextes)</h2>
         <p>
-          CloudWaste may contain links to external websites. We are not responsible for the content, privacy
+          CutCosts may contain links to external websites. We are not responsible for the content, privacy
           policies, or practices of these third-party websites.
         </p>
         <p className="mt-4">
-          The inclusion of any link does not imply endorsement by CloudWaste. We encourage you to review the terms
+          The inclusion of any link does not imply endorsement by CutCosts. We encourage you to review the terms
           and privacy policies of any external websites you visit.
         </p>
       </section>
@@ -305,14 +305,14 @@ export default function LegalNoticePage() {
       <section className="mb-12">
         <h2 className="text-2xl font-bold text-gray-900 mb-4">11. Reporting Illegal Content (Signalement)</h2>
         <p>
-          In accordance with Article 6.I.5 of the LCEN, if you believe that content on cloudwaste.com is illegal or
+          In accordance with Article 6.I.5 of the LCEN, if you believe that content on cutcosts.tech is illegal or
           violates your rights, you may report it by contacting:
         </p>
         <div className="not-prose bg-gray-50 border border-gray-200 rounded-lg p-6 mt-4">
           <p className="text-gray-900 flex items-center gap-2">
             <Mail className="w-4 h-4 text-blue-600" />
-            <a href="mailto:legal@cloudwaste.com" className="text-blue-600 hover:underline font-semibold">
-              legal@cloudwaste.com
+            <a href="mailto:legal@cutcosts.tech" className="text-blue-600 hover:underline font-semibold">
+              legal@cutcosts.tech
             </a>
           </p>
           <p className="text-gray-600 text-sm mt-4">
@@ -331,26 +331,26 @@ export default function LegalNoticePage() {
       <section className="mb-12">
         <h2 className="text-2xl font-bold text-gray-900 mb-4">12. Contact Information</h2>
         <p>
-          For any questions about this Legal Notice or CloudWaste, please contact us:
+          For any questions about this Legal Notice or CutCosts, please contact us:
         </p>
         <div className="not-prose bg-blue-50 rounded-lg p-6 mt-4">
-          <p className="text-gray-900 font-semibold text-lg">CloudWaste</p>
+          <p className="text-gray-900 font-semibold text-lg">CutCosts</p>
           <p className="text-gray-700 mt-2">
             Email:{" "}
-            <a href="mailto:contact@cloudwaste.com" className="text-blue-600 hover:underline font-semibold">
-              contact@cloudwaste.com
+            <a href="mailto:contact@cutcosts.tech" className="text-blue-600 hover:underline font-semibold">
+              contact@cutcosts.tech
             </a>
           </p>
           <p className="text-gray-700 mt-1">
             Legal:{" "}
-            <a href="mailto:legal@cloudwaste.com" className="text-blue-600 hover:underline font-semibold">
-              legal@cloudwaste.com
+            <a href="mailto:legal@cutcosts.tech" className="text-blue-600 hover:underline font-semibold">
+              legal@cutcosts.tech
             </a>
           </p>
           <p className="text-gray-700 mt-1">
             Privacy:{" "}
-            <a href="mailto:privacy@cloudwaste.com" className="text-blue-600 hover:underline font-semibold">
-              privacy@cloudwaste.com
+            <a href="mailto:privacy@cutcosts.tech" className="text-blue-600 hover:underline font-semibold">
+              privacy@cutcosts.tech
             </a>
           </p>
           <p className="text-gray-700 mt-4">
@@ -362,7 +362,7 @@ export default function LegalNoticePage() {
       {/* Footer */}
       <div className="not-prose border-t border-gray-200 pt-8 mt-12">
         <p className="text-sm text-gray-500 text-center">
-          © {new Date().getFullYear()} CloudWaste. All rights reserved.
+          © {new Date().getFullYear()} CutCosts. All rights reserved.
         </p>
         <p className="text-xs text-gray-400 text-center mt-2">
           This Legal Notice is compliant with French law (LCEN) and GDPR requirements.

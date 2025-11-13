@@ -44,7 +44,7 @@ class Settings(BaseSettings):
     )
 
     # Application
-    APP_NAME: str = "CloudWaste"
+    APP_NAME: str = "CutCosts"
     APP_ENV: str = "development"
     DEBUG: bool = True
     SECRET_KEY: str
@@ -83,7 +83,7 @@ class Settings(BaseSettings):
     SMTP_USER: str = ""
     SMTP_PASSWORD: str = ""
     EMAILS_FROM_EMAIL: str = ""  # Changed from EmailStr to str to accept empty values
-    EMAILS_FROM_NAME: str = "CloudWaste"
+    EMAILS_FROM_NAME: str = "CutCosts"
 
     # Email verification
     EMAIL_VERIFICATION_TOKEN_EXPIRE_HOURS: int = 168  # 7 days

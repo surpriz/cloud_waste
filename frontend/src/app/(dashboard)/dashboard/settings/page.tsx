@@ -1605,7 +1605,7 @@ export default function SettingsPage() {
                   <div className="flex-1">
                     <h2 className="text-lg md:text-xl font-bold text-blue-900 mb-2">🎯 Configure Detection Criteria</h2>
                     <p className="text-sm md:text-base text-blue-700">
-                      Customize how CloudWaste identifies orphaned resources across AWS and Azure.
+                      Customize how CutCosts identifies orphaned resources across AWS and Azure.
                       Adjust age thresholds and confidence levels to match your workflow.
                     </p>
                   </div>

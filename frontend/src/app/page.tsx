@@ -19,7 +19,7 @@ export default function Home() {
           </div>
 
           <h1 className="text-7xl md:text-8xl font-extrabold text-white mb-6 leading-tight">
-            Cloud<span className="bg-gradient-to-r from-yellow-300 to-orange-400 bg-clip-text text-transparent">Waste</span>
+            Cut<span className="bg-gradient-to-r from-yellow-300 to-orange-400 bg-clip-text text-transparent">Costs</span>
           </h1>
 
           <p className="mt-6 text-2xl md:text-3xl text-blue-100 max-w-3xl mx-auto font-light">

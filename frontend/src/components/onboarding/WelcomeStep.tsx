@@ -7,7 +7,7 @@ interface WelcomeStepProps {
 /**
  * Welcome Step - First onboarding step
  *
- * Introduces CloudWaste and its benefits
+ * Introduces CutCosts and its benefits
  */
 export function WelcomeStep({ onNext }: WelcomeStepProps) {
   const benefits = [
@@ -40,7 +40,7 @@ export function WelcomeStep({ onNext }: WelcomeStepProps) {
         </div>
 
         <h1 className="text-4xl md:text-5xl font-extrabold bg-gradient-to-r from-blue-600 via-purple-600 to-pink-600 bg-clip-text text-transparent mb-4">
-          Welcome to CloudWaste!
+          Welcome to CutCosts!
         </h1>
 
         <p className="text-xl text-gray-600 mb-2">

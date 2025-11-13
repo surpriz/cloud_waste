@@ -136,7 +136,7 @@ export function CookieBanner() {
                   🍪 We Value Your Privacy
                 </h2>
                 <p className="text-gray-700 dark:text-gray-300 text-sm md:text-base mb-4">
-                  CloudWaste uses <strong>essential cookies</strong> to provide secure authentication and core
+                  CutCosts uses <strong>essential cookies</strong> to provide secure authentication and core
                   functionality. We'd also like to use <strong>optional cookies</strong> for analytics to help us
                   improve the service. You can customize your preferences at any time.
                 </p>
@@ -279,7 +279,7 @@ export function CookieBanner() {
                       Analytics Cookies
                     </h3>
                     <p className="text-sm text-gray-600 dark:text-gray-400 mb-2">
-                      Help us understand how you use CloudWaste so we can improve the service. All data is
+                      Help us understand how you use CutCosts so we can improve the service. All data is
                       anonymized.
                     </p>
                     <details className="text-xs text-gray-500 dark:text-gray-500">

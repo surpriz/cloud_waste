@@ -42,7 +42,7 @@ export function Sidebar({ isMobileMenuOpen = false, onCloseMobileMenu }: Sidebar
     <>
       {/* Logo */}
       <div className="flex h-16 items-center justify-between px-4 border-b border-gray-800">
-        <h1 className="text-2xl font-bold text-white">CloudWaste</h1>
+        <h1 className="text-2xl font-bold text-white">CutCosts</h1>
         {/* Close button (mobile only) */}
         {onCloseMobileMenu && (
           <button

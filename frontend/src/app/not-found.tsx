@@ -3,7 +3,7 @@ import { Cloud, Home, LayoutDashboard, SearchX } from "lucide-react";
 import type { Metadata } from "next";
 
 export const metadata: Metadata = {
-  title: "404 - Page Not Found | CloudWaste",
+  title: "404 - Page Not Found | CutCosts",
   description: "The page you're looking for has drifted into the cloud",
 };
 

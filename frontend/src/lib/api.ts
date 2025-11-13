@@ -1,5 +1,5 @@
 /**
- * API client for CloudWaste backend
+ * API client for CutCosts backend
  */
 
 import type {

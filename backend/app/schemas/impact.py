@@ -49,7 +49,7 @@ class ImpactSummary(BaseModel):
         description="Date of user's first scan"
     )
     days_since_first_scan: int = Field(
-        description="Days since user started using CloudWaste"
+        description="Days since user started using CutCosts"
     )
     last_cleanup_date: datetime | None = Field(
         description="Date of last resource deletion"

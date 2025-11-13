@@ -75,7 +75,7 @@ async def check_aws_read_permissions(credentials: AWSCredentials) -> dict[str, b
     """
     Check if AWS credentials have the required read-only permissions.
 
-    Tests specific permissions required for CloudWaste scanning:
+    Tests specific permissions required for CutCosts scanning:
     - EC2 Describe operations
     - RDS Describe operations
     - S3 List operations

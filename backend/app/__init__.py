@@ -1,1 +1,1 @@
-"""CloudWaste Backend Application."""
+"""CutCosts Backend Application."""

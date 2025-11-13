@@ -2,9 +2,9 @@ import type { Metadata } from "next";
 import { Shield, Mail, Lock, Database, UserX, Download, AlertTriangle } from "lucide-react";
 
 export const metadata: Metadata = {
-  title: "Privacy Policy - CloudWaste | GDPR Compliant",
+  title: "Privacy Policy - CutCosts | GDPR Compliant",
   description:
-    "CloudWaste Privacy Policy - Learn how we collect, use, and protect your personal data in compliance with GDPR and data protection laws.",
+    "CutCosts Privacy Policy - Learn how we collect, use, and protect your personal data in compliance with GDPR and data protection laws.",
 };
 
 export default function PrivacyPolicyPage() {
@@ -20,7 +20,7 @@ export default function PrivacyPolicyPage() {
           Last updated: <strong>January 2025</strong>
         </p>
         <p className="text-gray-600 mt-2">
-          This Privacy Policy explains how CloudWaste ("we", "us", or "our") collects, uses, and protects your
+          This Privacy Policy explains how CutCosts ("we", "us", or "our") collects, uses, and protects your
           personal data in compliance with the{" "}
           <strong>General Data Protection Regulation (GDPR)</strong> and other applicable data protection laws.
         </p>
@@ -63,8 +63,8 @@ export default function PrivacyPolicyPage() {
         </ul>
         <p className="text-sm text-blue-700 mt-4">
           To exercise any of these rights, contact us at:{" "}
-          <a href="mailto:privacy@cloudwaste.com" className="font-semibold underline">
-            privacy@cloudwaste.com
+          <a href="mailto:privacy@cutcosts.tech" className="font-semibold underline">
+            privacy@cutcosts.tech
           </a>
         </p>
       </div>
@@ -151,13 +151,13 @@ export default function PrivacyPolicyPage() {
           The data controller responsible for your personal data is:
         </p>
         <div className="not-prose bg-gray-50 rounded-lg p-4 mt-4">
-          <p className="text-gray-900 font-semibold">CloudWaste</p>
+          <p className="text-gray-900 font-semibold">CutCosts</p>
           <p className="text-gray-600 text-sm mt-1">[YOUR COMPANY ADDRESS]</p>
           <p className="text-gray-600 text-sm">[CITY, POSTAL CODE, COUNTRY]</p>
           <p className="text-gray-600 text-sm mt-2">
             Email:{" "}
-            <a href="mailto:privacy@cloudwaste.com" className="text-blue-600 hover:underline">
-              privacy@cloudwaste.com
+            <a href="mailto:privacy@cutcosts.tech" className="text-blue-600 hover:underline">
+              privacy@cutcosts.tech
             </a>
           </p>
           <p className="text-gray-600 text-sm">
@@ -174,7 +174,7 @@ export default function PrivacyPolicyPage() {
       <section id="data-collection" className="mb-12">
         <h2 className="text-2xl font-bold text-gray-900 mb-4">2. What Data We Collect</h2>
         <p>
-          We collect different types of data depending on how you interact with CloudWaste:
+          We collect different types of data depending on how you interact with CutCosts:
         </p>
 
         <h3 className="text-xl font-semibold text-gray-900 mt-6 mb-3">2.1 Account Information</h3>
@@ -281,7 +281,7 @@ export default function PrivacyPolicyPage() {
               (b) <strong>Contract Performance</strong> (Article 6(1)(b) GDPR)
             </p>
             <p className="text-gray-600 text-sm mt-1">
-              For providing CloudWaste services (scanning, resource detection, cost analysis)
+              For providing CutCosts services (scanning, resource detection, cost analysis)
             </p>
           </div>
           <div className="border-l-4 border-blue-500 pl-4">
@@ -376,7 +376,7 @@ export default function PrivacyPolicyPage() {
             <strong>Account data:</strong> Until you delete your account + 30 days (for recovery)
           </li>
           <li>
-            <strong>Cloud credentials:</strong> Until you remove the cloud account from CloudWaste
+            <strong>Cloud credentials:</strong> Until you remove the cloud account from CutCosts
           </li>
           <li>
             <strong>Scan history:</strong> 12 months (configurable in settings)
@@ -498,8 +498,8 @@ export default function PrivacyPolicyPage() {
                 <p className="font-semibold text-gray-900">Contact Us</p>
                 <p className="text-gray-600 text-sm mt-1">
                   Email{" "}
-                  <a href="mailto:privacy@cloudwaste.com" className="text-blue-600 hover:underline">
-                    privacy@cloudwaste.com
+                  <a href="mailto:privacy@cutcosts.tech" className="text-blue-600 hover:underline">
+                    privacy@cutcosts.tech
                   </a>{" "}
                   for any privacy-related requests
                 </p>
@@ -518,11 +518,11 @@ export default function PrivacyPolicyPage() {
       <section id="children" className="mb-12">
         <h2 className="text-2xl font-bold text-gray-900 mb-4">11. Children's Privacy</h2>
         <p>
-          CloudWaste is not intended for children under <strong>16 years old</strong> (or the minimum age in your
+          CutCosts is not intended for children under <strong>16 years old</strong> (or the minimum age in your
           country). We do not knowingly collect data from children. If you believe we have collected data from a
           child, contact us immediately at{" "}
-          <a href="mailto:privacy@cloudwaste.com" className="text-blue-600 hover:underline">
-            privacy@cloudwaste.com
+          <a href="mailto:privacy@cutcosts.tech" className="text-blue-600 hover:underline">
+            privacy@cutcosts.tech
           </a>
           .
         </p>
@@ -533,7 +533,7 @@ export default function PrivacyPolicyPage() {
         <h2 className="text-2xl font-bold text-gray-900 mb-4">12. Changes to This Policy</h2>
         <p>
           We may update this Privacy Policy from time to time. If we make significant changes, we will notify you by
-          email or a prominent notice on our website. Continued use of CloudWaste after changes constitutes
+          email or a prominent notice on our website. Continued use of CutCosts after changes constitutes
           acceptance.
         </p>
         <p className="mt-4 text-sm text-gray-600">
@@ -551,11 +551,11 @@ export default function PrivacyPolicyPage() {
           For any questions about this Privacy Policy or our data practices, please contact us:
         </p>
         <div className="not-prose bg-blue-50 rounded-lg p-6 mt-4">
-          <p className="text-gray-900 font-semibold text-lg">CloudWaste Privacy Team</p>
+          <p className="text-gray-900 font-semibold text-lg">CutCosts Privacy Team</p>
           <p className="text-gray-700 mt-2">
             Email:{" "}
-            <a href="mailto:privacy@cloudwaste.com" className="text-blue-600 hover:underline font-semibold">
-              privacy@cloudwaste.com
+            <a href="mailto:privacy@cutcosts.tech" className="text-blue-600 hover:underline font-semibold">
+              privacy@cutcosts.tech
             </a>
           </p>
           <p className="text-gray-700">

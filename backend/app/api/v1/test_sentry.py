@@ -163,7 +163,7 @@ async def test_sentry_message(
 
     # Send test message
     sentry_sdk.capture_message(
-        "✅ Sentry test message from CloudWaste",
+        "✅ Sentry test message from CutCosts",
         level="info",
         extras={
             "endpoint": "/api/v1/test/sentry/message",
