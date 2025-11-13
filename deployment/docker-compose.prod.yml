@@ -145,6 +145,8 @@ services:
         NEXT_PUBLIC_SENTRY_ENVIRONMENT: ${NEXT_PUBLIC_SENTRY_ENVIRONMENT:-production}
     container_name: cloudwaste_frontend
     restart: always
+    env_file:
+      - ../.env.prod
     environment:
       - NODE_ENV=production
       - HOSTNAME=0.0.0.0

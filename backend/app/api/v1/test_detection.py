@@ -21,7 +21,6 @@ from app.providers.azure import AzureProvider
 from app.services.pricing_service import PricingService
 from sqlalchemy import select
 import json
-import sentry_sdk
 
 router = APIRouter()
 
@@ -242,88 +241,3 @@ async def test_resource_detection(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Test detection failed: {str(e)}",
         )
-
-
-@router.get("/sentry-test")
-async def test_sentry(
-    current_user: Annotated[User, Depends(get_current_superuser)],
-) -> dict:
-    """
-    Test Sentry error tracking by triggering different types of errors.
-
-    ⚠️ Only available in DEBUG mode with superuser authentication.
-
-    This endpoint tests:
-    - Exception capture
-    - Breadcrumbs
-    - User context
-    - Tags and extras
-    """
-    if not settings.DEBUG:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Test endpoints are only available in DEBUG mode",
-        )
-
-    # Add breadcrumb
-    sentry_sdk.add_breadcrumb(
-        category="test",
-        message="Sentry test endpoint called",
-        level="info",
-    )
-
-    # Set user context
-    sentry_sdk.set_user({
-        "id": str(current_user.id),
-        "email": current_user.email,
-        "username": current_user.full_name,
-    })
-
-    # Set tags and extras
-    sentry_sdk.set_tag("test_type", "manual_sentry_test")
-    sentry_sdk.set_tag("environment", settings.APP_ENV)
-    sentry_sdk.set_context("test_info", {
-        "endpoint": "/api/v1/test/sentry-test",
-        "purpose": "Manual Sentry integration test",
-    })
-
-    # Capture a test exception (this will be sent to Sentry)
-    try:
-        # Intentionally raise an exception to test Sentry
-        raise ValueError("🧪 Test Sentry Exception - This is a controlled test error to verify Sentry integration")
-    except ValueError as e:
-        # Capture the exception and send to Sentry
-        sentry_sdk.capture_exception(e)
-
-        # Return success (we caught the exception, but it was sent to Sentry)
-        return {
-            "status": "success",
-            "message": "Test exception sent to Sentry successfully",
-            "sentry_dsn_configured": bool(settings.SENTRY_DSN),
-            "sentry_environment": settings.SENTRY_ENVIRONMENT,
-            "user_context": {
-                "id": str(current_user.id),
-                "email": current_user.email,
-            },
-            "instructions": "Check your Sentry dashboard at https://sentry.io for the captured exception",
-        }
-
-
-@router.get("/sentry-test-division-by-zero")
-async def test_sentry_division_by_zero(
-    current_user: Annotated[User, Depends(get_current_superuser)],
-) -> dict:
-    """
-    Test Sentry by triggering a ZeroDivisionError (uncaught exception).
-
-    ⚠️ This will return HTTP 500 - use for testing error handling.
-    """
-    if not settings.DEBUG:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Test endpoints are only available in DEBUG mode",
-        )
-
-    # This will be caught by FastAPI's exception handler and sent to Sentry
-    result = 1 / 0  # Intentional ZeroDivisionError
-    return {"result": result}
