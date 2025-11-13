@@ -141,11 +141,15 @@ services:
       args:
         NEXT_PUBLIC_API_URL: https://cutcosts.tech
         NEXT_PUBLIC_APP_NAME: CloudWaste
+        NEXT_PUBLIC_SENTRY_DSN: ${NEXT_PUBLIC_SENTRY_DSN}
+        NEXT_PUBLIC_SENTRY_ENVIRONMENT: ${NEXT_PUBLIC_SENTRY_ENVIRONMENT:-production}
     container_name: cloudwaste_frontend
     restart: always
     environment:
       - NODE_ENV=production
       - HOSTNAME=0.0.0.0
+      - NEXT_PUBLIC_SENTRY_DSN=${NEXT_PUBLIC_SENTRY_DSN}
+      - NEXT_PUBLIC_SENTRY_ENVIRONMENT=${NEXT_PUBLIC_SENTRY_ENVIRONMENT:-production}
     depends_on:
       - backend
     healthcheck:
