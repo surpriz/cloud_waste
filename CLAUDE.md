@@ -6,6 +6,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **CloudWaste** is a SaaS platform for detecting orphaned and unused cloud resources (zombies) that generate unnecessary costs for businesses. Currently supports **25 AWS resource types** + **Azure resources** + **14+ GCP resource types** + **Microsoft 365** with intelligent CloudWatch-based detection.
 
+DON'T create useless documentation or too often.
+DON'T Commit or Push without my permission
+If you create a test file, delete it once it has been used
+
 **Key Features:**
 - **Multi-Cloud Support:** AWS (25 types), Azure (managed disks + more), GCP (14+ types), Microsoft 365 (SharePoint/OneDrive)
 - **AI Chat Assistant:** Anthropic Claude Haiku 4.5 integration with context-aware responses
