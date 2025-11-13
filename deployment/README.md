@@ -1,51 +1,48 @@
 # CloudWaste - Production Deployment Guide
 
-Complete guide for deploying CloudWaste to your VPS using Docker + GitHub Actions.
+Complete guide for deploying CloudWaste to production using Docker + GitHub Actions CI/CD.
 
 ---
 
-## 🎯 Deployment Overview
+## 🎯 Quick Overview
 
 **Infrastructure:**
 - **VPS:** Ubuntu Server 24 LTS
 - **Domain:** cutcosts.tech (155.117.43.17)
 - **SSL:** Let's Encrypt (auto-renewal)
-- **Stack:** Docker Compose with Nginx reverse proxy
+- **Stack:** Docker Compose + Nginx reverse proxy
+- **Monitoring:** Sentry (backend + frontend)
 
-**Automated CI/CD:**
-```
-Local Dev → git push → GitHub Actions → VPS → Production Live
-```
-
-**Deployment Time:** ~2-3 minutes per deployment
+**Deployment:** Zero-downtime Blue-Green with automatic rollback
+**Deployment Time:** ~2-3 minutes per push to `master`
 
 ---
 
 ## 📁 Deployment Files
 
-```
-deployment/
-├── docker-compose.prod.yml       # Production Docker stack
-├── nginx.conf                    # Reverse proxy + SSL config
-├── setup-server.sh               # Initial VPS setup (run once)
-├── zero-downtime-deploy.sh       # Blue-green deployment with auto-rollback
-├── backup-full.sh                # Full system backup automation
-├── backup-db.sh                  # Database-only backup (legacy)
-├── restore-full.sh               # Interactive restore utility
-├── setup-backup-cron.sh          # Configure automated backups
-├── BACKUP_GUIDE.md               # Comprehensive backup documentation
-└── README.md                     # This file
-```
+| File | Purpose |
+|------|---------|
+| `docker-compose.prod.yml` | Production Docker stack |
+| `nginx.conf` | Reverse proxy + SSL configuration |
+| `zero-downtime-deploy.sh` | **Main deployment script** (Blue-Green + rollback) |
+| `setup-server.sh` | Initial VPS setup (run once) |
+| `sync-sentry-env.sh` | Sentry variables synchronization |
+| `diagnose.sh` | System health diagnostics |
+| `debug-last-deployment.sh` | Deployment debugging |
+| `backup-full.sh` | Full system backup (DB + volumes + config) |
+| `restore-full.sh` | Interactive restore utility |
+| `backup-db.sh` | Legacy database-only backup |
+| `setup-backup-cron.sh` | Configure automated daily backups |
+| `activate-user.sh` | User management utilities |
 
 ---
 
 ## 🚀 Initial Setup (One-Time)
 
-### Step 1: Prepare Your Local Machine
+### Step 1: Configure GitHub Repository
 
-1. **Update GitHub repository URL** in `deployment/setup-server.sh`:
+1. **Update repository URL** in `setup-server.sh` (line 37):
    ```bash
-   # Line 37
    GITHUB_REPO="https://github.com/YOUR_USERNAME/CloudWaste.git"
    ```
 
@@ -57,7 +54,7 @@ deployment/
 
 3. **Add SSH public key to VPS:**
    ```bash
-   ssh administrator@155.117.43.17
+   ssh administrator@YOUR_VPS_IP
    mkdir -p ~/.ssh
    echo "YOUR_PUBLIC_KEY_HERE" >> ~/.ssh/authorized_keys
    chmod 600 ~/.ssh/authorized_keys
@@ -66,183 +63,271 @@ deployment/
 
 4. **Configure GitHub Secrets:**
 
-   Go to your GitHub repo → Settings → Secrets and variables → Actions → New repository secret
+   Go to: **GitHub repo → Settings → Secrets and variables → Actions**
 
-   Add these secrets:
+   Add these 3 secrets:
 
    | Secret Name | Value |
    |-------------|-------|
-   | `VPS_HOST` | `155.117.43.17` |
-   | `VPS_USER` | `administrator` |
+   | `VPS_HOST` | `YOUR_VPS_IP` |
+   | `VPS_USER` | `administrator` (or your admin user) |
    | `VPS_SSH_PRIVATE_KEY` | Content of `~/.ssh/cloudwaste_deploy` |
 
 ### Step 2: Initial VPS Setup
 
-1. **Connect to your VPS:**
-   ```bash
-   ssh administrator@155.117.43.17
-   ```
+```bash
+# 1. Connect to VPS
+ssh administrator@YOUR_VPS_IP
 
-2. **Download and run setup script:**
-   ```bash
-   # Download setup script (adjust URL to your repo)
-   wget https://raw.githubusercontent.com/YOUR_USERNAME/CloudWaste/master/deployment/setup-server.sh
+# 2. Download setup script
+wget https://raw.githubusercontent.com/YOUR_USERNAME/CloudWaste/master/deployment/setup-server.sh
 
-   # OR if repo is already cloned locally, use scp:
-   # scp deployment/setup-server.sh administrator@155.117.43.17:~/
+# 3. Run setup (installs Docker, Nginx, SSL, monitoring)
+chmod +x setup-server.sh
+sudo ./setup-server.sh
+```
 
-   # Make executable and run
-   chmod +x setup-server.sh
-   sudo ./setup-server.sh
-   ```
+**What the setup script does:**
+- ✅ Installs Docker & Docker Compose
+- ✅ Configures UFW firewall (ports 22, 80, 443)
+- ✅ Installs Certbot + generates SSL certificates
+- ✅ Clones repository to `/opt/cloudwaste`
+- ✅ Generates `.env.prod` with secure secrets
+- ✅ Sets up automatic SSL renewal
 
-3. **What the setup script does:**
-   - ✅ Installs Docker & Docker Compose
-   - ✅ Configures firewall (ports 22, 80, 443)
-   - ✅ Installs Certbot for SSL
-   - ✅ Generates SSL certificates for cutcosts.tech
-   - ✅ Clones repository to `/opt/cloudwaste`
-   - ✅ Generates `.env.prod` with secure secrets
-   - ✅ Sets up automatic SSL renewal
+### Step 3: Configure Environment (Optional)
 
-4. **Configure email settings (optional):**
-   ```bash
-   nano /opt/cloudwaste/.env.prod
+```bash
+nano /opt/cloudwaste/.env.prod
 
-   # Update these lines:
-   SMTP_HOST=smtp.sendgrid.net
-   SMTP_PORT=587
-   SMTP_USER=apikey
-   SMTP_PASSWORD=YOUR_SENDGRID_API_KEY
-   ```
+# Update SMTP settings (if using email notifications)
+SMTP_HOST=smtp.sendgrid.net
+SMTP_PORT=587
+SMTP_USER=apikey
+SMTP_PASSWORD=YOUR_SENDGRID_API_KEY
 
-5. **Initial deployment:**
-   ```bash
-   cd /opt/cloudwaste
-   bash deployment/zero-downtime-deploy.sh
-   ```
+# Update Sentry DSN (error monitoring)
+SENTRY_DSN=https://...@o4510350814085121.ingest.de.sentry.io/...
+NEXT_PUBLIC_SENTRY_DSN=https://...@o4510350814085121.ingest.de.sentry.io/...
+```
 
-6. **Verify deployment:**
+### Step 4: Initial Deployment
 
-   Open in browser:
-   - 🌐 https://cutcosts.tech
-   - 📚 https://cutcosts.tech/api/docs
+```bash
+cd /opt/cloudwaste
+bash deployment/zero-downtime-deploy.sh
+```
+
+**Verify deployment:**
+- 🌐 https://cutcosts.tech
+- 📚 https://cutcosts.tech/api/docs
+- ✅ https://cutcosts.tech/api/v1/health
 
 ---
 
-## 🔄 Automated Deployments (GitHub Actions)
+## 🔄 Automated CI/CD Deployments
 
-Once initial setup is complete, every `git push` to the `master` branch triggers automatic **zero-downtime deployment**.
+Once initial setup is complete, every `git push` to `master` triggers **automatic zero-downtime deployment** via GitHub Actions.
 
-### 🔵🟢 Blue-Green Deployment Strategy:
+### 🔵🟢 Blue-Green Deployment Strategy
 
-CloudWaste uses a sophisticated deployment strategy that ensures **zero service interruption**:
+CloudWaste uses an advanced deployment strategy ensuring **zero service interruption**:
 
-1. **Build Phase** - New Docker images are built while old containers keep running
-2. **Health Check Phase** - New containers are tested before switching traffic
-3. **Switch Phase** - Traffic is switched to new containers only if healthy
-4. **Cleanup Phase** - Old containers are removed after successful deployment
-5. **Rollback Phase** - If anything fails, automatic rollback to last stable version
+1. **Build Phase** → New images built while old containers run
+2. **Migration Phase** → Database migrations applied
+3. **Health Check Phase** → New containers tested before switching
+4. **Switch Phase** → Traffic switched to new containers only if healthy
+5. **Cleanup Phase** → Old containers removed after success
+6. **Rollback Phase** → Automatic rollback to last stable version on failure
 
-### Workflow:
+### CI/CD Workflow
 
 ```bash
-# On your local machine
+# Local machine
 git add .
 git commit -m "feat: add new feature"
 git push origin master
 
 # GitHub Actions automatically:
-# 1. Connects to VPS via SSH
-# 2. Pulls latest code (git reset --hard)
-# 3. Runs deployment/zero-downtime-deploy.sh
-# 4. Builds new images (site stays online)
-# 5. Starts new containers alongside old ones
-# 6. Performs health checks on NEW containers
-# 7. Switches traffic if healthy
-# 8. Saves commit as stable version
-# 9. OR performs automatic rollback if any step fails
+# 1. SSH to VPS
+# 2. Sync Sentry variables (sync-sentry-env.sh)
+# 3. Pull latest code (git reset --hard origin/master)
+# 4. Run zero-downtime-deploy.sh
+# 5. Build new images (site stays online)
+# 6. Start new containers alongside old ones
+# 7. Perform internal + external health checks
+# 8. Switch traffic if healthy
+# 9. Save commit as stable version
+# 10. OR perform automatic rollback if failure
 ```
 
-### 🔒 Safety Features:
+### 🛡️ Safety Features
 
-- ✅ **No downtime** - Site stays online during entire deployment
-- ✅ **Health checks** - Backend, frontend, and public URL verification
-- ✅ **Auto-rollback** - Automatic restoration to last stable version on failure
-- ✅ **Version tracking** - Last stable commit saved in `.last_stable_commit`
+- ✅ **No downtime** - Site stays online during deployment
+- ✅ **Health checks** - Backend, frontend, public URL verification
+- ✅ **Auto-rollback** - Automatic restoration to last stable version
+- ✅ **Version tracking** - Last stable commit in `.last_stable_commit`
 - ✅ **Error handling** - Any script error triggers rollback
+- ✅ **Retry logic** - Build retries up to 3 times on network errors
 
-### Manual Trigger:
+### Manual Trigger
 
-You can also trigger deployment manually via GitHub Actions UI:
-1. Go to your repo → Actions tab
-2. Select "Deploy to Production" workflow
-3. Click "Run workflow"
+GitHub Actions UI: **Actions tab → Deploy to Production → Run workflow**
 
 ---
 
-## 📦 Manual Deployments
+## 📊 Sentry Error Monitoring
 
-If you need to deploy manually from the VPS:
+CloudWaste includes **full Sentry integration** for backend (FastAPI) and frontend (Next.js).
 
+### What Sentry Captures
+
+**Backend (Python):**
+- ✅ Unhandled exceptions
+- ✅ API errors (500, 400, etc.)
+- ✅ Database errors
+- ✅ Cloud SDK errors (AWS, Azure, GCP)
+- ✅ User context (email, user ID)
+- ✅ Performance monitoring (10% sample rate)
+
+**Frontend (JavaScript/Next.js):**
+- ✅ React errors (component crashes)
+- ✅ API request failures
+- ✅ Promise rejections
+- ✅ Navigation errors
+- ✅ Source maps for readable stack traces
+
+### Sentry CI/CD Integration
+
+**Critical:** Frontend Sentry requires variables injected **at build time** (not runtime).
+
+**How it works:**
+1. `sync-sentry-env.sh` verifies Sentry variables in `.env.prod`
+2. `zero-downtime-deploy.sh` passes variables as `--build-arg` to Docker:
+   ```bash
+   docker compose build \
+     --build-arg NEXT_PUBLIC_SENTRY_DSN="$NEXT_PUBLIC_SENTRY_DSN" \
+     --build-arg NEXT_PUBLIC_SENTRY_ENVIRONMENT="production" \
+     --parallel
+   ```
+3. Frontend built with Sentry DSN embedded
+4. Errors automatically captured in production
+
+**Verify Sentry after deployment:**
 ```bash
-ssh administrator@155.117.43.17
-cd /opt/cloudwaste
-git pull origin master
-bash deployment/zero-downtime-deploy.sh
+# Backend variables (runtime)
+docker exec cloudwaste_backend env | grep "^SENTRY"
+
+# Frontend variables (build-time)
+docker exec cloudwaste_frontend env | grep "^NEXT_PUBLIC_SENTRY"
+
+# Browser console should show:
+# [SentryProvider] DSN: https://...
+# [SentryProvider] Sentry initialisé avec succès !
 ```
 
-**Note:** Manual deployments also benefit from zero-downtime strategy and automatic rollback protection.
+**Access Sentry Dashboard:**
+- 🌐 https://sentry.io
+- Organization: jerome-laval-x3
+- Projects: `cloudwaste` (backend), `cloudwaste-frontend` (frontend)
+
+---
+
+## 💾 Backups & Disaster Recovery
+
+### Automated Local Backups
+
+CloudWaste includes comprehensive automated backup system (runs nightly at 3 AM).
+
+**What gets backed up:**
+- ✅ PostgreSQL database
+- ✅ Redis database
+- ✅ Encryption key (🔴 CRITICAL)
+- ✅ Docker volumes (postgres_data, redis_data)
+- ✅ Configuration files (.env.prod, docker-compose, nginx)
+- ✅ Git repository state
+
+**Backup rotation:**
+- Daily: Last 7 days
+- Weekly: Last 4 weeks
+- Monthly: Last 3 months
+
+**Storage location:** `/opt/cloudwaste/backups/`
+
+### Setup Automated Backups
+
+```bash
+cd /opt/cloudwaste
+sudo bash deployment/setup-backup-cron.sh
+```
+
+This creates a cron job (daily 3 AM) and runs initial test backup.
+
+### Manual Backup & Restore
+
+```bash
+# Manual backup
+bash deployment/backup-full.sh
+
+# Restore (interactive menu)
+bash deployment/restore-full.sh
+
+# View backups
+ls -lh /opt/cloudwaste/backups/daily/
+ls -lh /opt/cloudwaste/backups/weekly/
+ls -lh /opt/cloudwaste/backups/monthly/
+
+# Check backup logs
+tail -f /var/log/cloudwaste-backup.log
+```
+
+### Storage Requirements
+
+- **Per backup:** ~100-500MB (compressed)
+- **Total (30 days):** ~2-5GB
+- **Check space:** `df -h /opt/cloudwaste/backups`
+
+### ⚠️ Important Notes
+
+**Current setup (MVP):**
+- ✅ Backups are LOCAL on VPS
+- ✅ Protects against data corruption, accidental deletion
+- ❌ Does NOT protect against VPS failure/loss
+
+**Recommended upgrade for production:**
+- Add off-site backup to cloud storage:
+  - Restic + Backblaze B2 (~$1-3/month)
+  - rclone + S3 (~$2-5/month)
+  - Hetzner Storage Box (€3.81/month, EU-based)
 
 ---
 
 ## 🔍 Monitoring & Logs
 
-### 🐳 Portainer (Container Management UI)
+### Portainer (Container Management UI)
 
-CloudWaste VPS includes **Portainer CE** for visual container management and monitoring.
+Visual container management included on VPS.
 
-**Access Portainer:**
-- 🌐 **HTTPS (recommended):** https://155.117.43.17:9443
-- 🌐 **HTTP:** http://155.117.43.17:9000
+**Access:**
+- 🌐 **HTTPS:** https://YOUR_VPS_IP:9443 (self-signed cert warning is normal)
+- 🌐 **HTTP:** http://YOUR_VPS_IP:9000
 
-**Installation (Already done on VPS):**
-```bash
-# Portainer is installed as standalone container
-docker ps | grep portainer
-```
+**Features:**
+- Dashboard → Overview of containers, images, volumes
+- Containers → Status, logs, stats, shell access
+- Logs → Real-time logs with search/filter
+- Stats → CPU, Memory, Network I/O per container
+- Console → Execute commands inside containers
 
-**Using Portainer:**
-1. **Dashboard** → Overview of all containers, images, volumes, networks
-2. **Containers** → View status, logs, stats, shell access for each container
-3. **Logs** → Real-time logs with search/filter capabilities
-4. **Stats** → CPU, Memory, Network I/O per container
-5. **Console** → Execute commands inside containers without SSH
+### View Container Status
 
-**Benefits:**
-- ✅ Visual healthcheck status (healthy/unhealthy/starting)
-- ✅ One-click access to container logs
-- ✅ Restart/stop/start containers with UI
-- ✅ Resource usage graphs
-- ✅ No need to memorize docker commands
-
-**Common Tasks in Portainer:**
-
-| Task | How to do it |
-|------|--------------|
-| View logs | Containers → Click container → Logs tab |
-| Restart container | Containers → Select container → Restart button |
-| Check healthcheck | Containers → Click container → Inspect → Health section |
-| Open shell | Containers → Click container → Console tab |
-| View resource usage | Containers → Click container → Stats tab |
-
-### View Container Status (CLI):
 ```bash
 cd /opt/cloudwaste
 docker compose -f deployment/docker-compose.prod.yml ps
 ```
 
-### View Logs (CLI):
+### View Logs
+
 ```bash
 # Backend
 docker logs -f cloudwaste_backend
@@ -260,7 +345,8 @@ docker logs -f cloudwaste_nginx
 docker compose -f deployment/docker-compose.prod.yml logs -f
 ```
 
-### Container Stats (CPU, Memory):
+### Container Resource Usage
+
 ```bash
 docker stats
 ```
@@ -269,276 +355,47 @@ docker stats
 
 ## 🛠 Common Operations
 
-### Restart a Service:
+### Restart a Service
+
 ```bash
 docker compose -f deployment/docker-compose.prod.yml restart backend
 ```
 
-### Access Container Shell:
+### Access Container Shell
+
 ```bash
 docker exec -it cloudwaste_backend bash
 ```
 
-### Run Database Migrations:
+### Run Database Migrations
+
 ```bash
 docker compose -f deployment/docker-compose.prod.yml run --rm backend alembic upgrade head
 ```
 
-### Access PostgreSQL:
+### Access PostgreSQL
+
 ```bash
-# From container
+# Interactive psql
 docker exec -it cloudwaste_postgres psql -U cloudwaste -d cloudwaste
 
 # Run SQL query
 docker exec cloudwaste_postgres psql -U cloudwaste -d cloudwaste -c "SELECT COUNT(*) FROM users;"
 ```
 
-### Rebuild Single Service:
+### Rebuild Single Service
+
 ```bash
 docker compose -f deployment/docker-compose.prod.yml up -d --build --no-deps backend
 ```
 
----
+### Manual Deployment
 
-## 💾 Backups & Disaster Recovery
-
-### 🛡 Automated Local Backups
-
-CloudWaste includes a comprehensive automated backup system that runs nightly on your VPS.
-
-**What gets backed up:**
-- ✅ PostgreSQL database (all data)
-- ✅ Redis database (cache, celery results)
-- ✅ Encryption key (🔴 CRITICAL)
-- ✅ Docker volumes (postgres_data, redis_data)
-- ✅ Configuration files (.env.prod, docker-compose, nginx)
-- ✅ Git repository state
-
-**Backup rotation:**
-- Daily: Last 7 days
-- Weekly: Last 4 weeks
-- Monthly: Last 3 months
-
-### ⚡ Quick Setup
-
-**Initial setup (run once on VPS):**
 ```bash
+ssh administrator@YOUR_VPS_IP
 cd /opt/cloudwaste
-sudo bash deployment/setup-backup-cron.sh
-```
-
-This will:
-1. Create cron job (runs daily at 3 AM)
-2. Set up logging (`/var/log/cloudwaste-backup.log`)
-3. Run initial test backup
-4. Verify everything works
-
-**Backups are stored in:** `/opt/cloudwaste/backups/`
-
-### 📋 Backup Management
-
-**Manual backup:**
-```bash
-bash deployment/backup-full.sh
-```
-
-**Restore from backup:**
-```bash
-bash deployment/restore-full.sh
-```
-
-**View backups:**
-```bash
-ls -lh /opt/cloudwaste/backups/daily/
-ls -lh /opt/cloudwaste/backups/weekly/
-ls -lh /opt/cloudwaste/backups/monthly/
-```
-
-**Check backup logs:**
-```bash
-tail -f /var/log/cloudwaste-backup.log
-```
-
-### 🔄 Restore Process
-
-The restore script provides an interactive menu:
-
-1. Lists all available backups (daily/weekly/monthly)
-2. Shows backup information (size, date, contents)
-3. Offers restore options:
-   - Full restore (recommended)
-   - Database only
-   - Configuration only
-   - Encryption key only
-4. Safely stops containers
-5. Restores selected data
-6. Restarts containers
-7. Verifies restoration
-
-### 💾 Storage Requirements
-
-- **Per backup:** ~100-500MB (compressed)
-- **Total (30 days):** ~2-5GB
-- **Check disk space:** `df -h /opt/cloudwaste/backups`
-
-### ⚠️ Important Notes
-
-**For MVP (current setup):**
-- ✅ Backups are LOCAL on VPS
-- ✅ Protects against data corruption, accidental deletion
-- ❌ Does NOT protect against VPS failure/loss
-
-**For Production (recommended upgrade):**
-- Add off-site backup to cloud storage:
-  - **Restic + Backblaze B2** (~$1-3/month)
-  - **rclone + S3** (~$2-5/month)
-  - **Hetzner Storage Box** (€3.81/month, EU-based)
-
-📚 **Complete guide:** See [BACKUP_GUIDE.md](BACKUP_GUIDE.md) for detailed documentation
-
----
-
-## 💾 Legacy Backup Script (Database Only)
-
-### Manual Backup:
-```bash
-cd /opt/cloudwaste
-bash deployment/backup-db.sh
-```
-
-Backups are stored in `/opt/cloudwaste/backups/` and include:
-- 📦 PostgreSQL database dump (compressed)
-- 🔐 Encryption key (CRITICAL for credentials)
-- 📋 Backup manifest with restore instructions
-
-### Automated Daily Backups:
-
-Add to crontab:
-```bash
-crontab -e
-
-# Add this line (runs daily at 2 AM)
-0 2 * * * /opt/cloudwaste/deployment/backup-db.sh >> /var/log/cloudwaste-backup.log 2>&1
-```
-
-### Restore from Backup:
-
-See backup manifest file for specific restore instructions:
-```bash
-cat /opt/cloudwaste/backups/backup_manifest_TIMESTAMP.txt
-```
-
-**General restore process:**
-```bash
-# 1. Stop containers
-docker compose -f deployment/docker-compose.prod.yml down
-
-# 2. Restore encryption key
-docker run --rm \
-  -v cloudwaste_encryption_key:/data \
-  -v /opt/cloudwaste/backups:/backup \
-  alpine sh -c "cp /backup/encryption_key_TIMESTAMP.txt /data/.encryption_key"
-
-# 3. Restore database
-gunzip < /opt/cloudwaste/backups/db_backup_TIMESTAMP.sql.gz | \
-  docker exec -i cloudwaste_postgres psql -U cloudwaste -d cloudwaste
-
-# 4. Start containers
-docker compose -f deployment/docker-compose.prod.yml up -d
-```
-
----
-
-## 🔐 Security Best Practices
-
-### 1. Keep .env.prod Secure:
-```bash
-# Never commit to Git
-chmod 600 /opt/cloudwaste/.env.prod
-
-# Verify it's in .gitignore
-grep "\.env\.prod" /opt/cloudwaste/.gitignore
-```
-
-### 2. Rotate Secrets Regularly:
-
-Generate new secrets:
-```bash
-# Generate new secret
-openssl rand -hex 32
-
-# Update .env.prod
-nano /opt/cloudwaste/.env.prod
-
-# Restart services
-docker compose -f deployment/docker-compose.prod.yml restart
-```
-
-### 3. Monitor Failed Login Attempts:
-```bash
-# Backend logs
-docker logs cloudwaste_backend | grep "401\|403"
-```
-
-### 4. Update SSL Certificates:
-
-Certificates auto-renew via cron, but you can manually renew:
-```bash
-sudo certbot renew
-docker exec cloudwaste_nginx nginx -s reload
-```
-
----
-
-## 🐛 Troubleshooting
-
-### Issue: Containers Keep Restarting
-
-**Solution:**
-```bash
-# Check logs
-docker logs cloudwaste_backend
-
-# Common causes:
-# - Missing .env.prod
-# - Database connection failed
-# - Port already in use
-```
-
-### Issue: SSL Certificate Error
-
-**Solution:**
-```bash
-# Verify certificates exist
-sudo ls -la /etc/letsencrypt/live/cutcosts.tech/
-
-# Regenerate if missing
-sudo certbot certonly --standalone -d cutcosts.tech -d www.cutcosts.tech
-```
-
-### Issue: Frontend Shows 502 Bad Gateway
-
-**Solution:**
-```bash
-# Check if backend is healthy
-docker exec cloudwaste_backend curl -f http://localhost:8000/api/v1/health
-
-# Restart nginx
-docker compose -f deployment/docker-compose.prod.yml restart nginx
-```
-
-### Issue: Database Connection Error
-
-**Solution:**
-```bash
-# Verify PostgreSQL is running
-docker exec cloudwaste_postgres pg_isready -U cloudwaste
-
-# Check credentials in .env.prod
-cat /opt/cloudwaste/.env.prod | grep POSTGRES
-
-# Restart database
-docker compose -f deployment/docker-compose.prod.yml restart postgres
+git pull origin master
+bash deployment/zero-downtime-deploy.sh
 ```
 
 ---
@@ -547,21 +404,18 @@ docker compose -f deployment/docker-compose.prod.yml restart postgres
 
 ### Automatic Rollback (Recommended)
 
-**Rollback happens automatically** when deployment fails! The system:
-- Detects any deployment failure (build error, health check failure, etc.)
-- Reads the last stable commit from `.last_stable_commit`
+**Rollback happens automatically** when deployment fails:
+- Detects any failure (build error, health check failure, etc.)
+- Reads last stable commit from `.last_stable_commit`
 - Resets code to that commit
-- Rebuilds and restarts with the stable version
-- Your site stays online throughout the process
+- Rebuilds and restarts with stable version
+- Site stays online throughout
 
 **No manual intervention required!**
 
 ### Manual Rollback (Edge Cases)
 
-If you need to manually rollback for any reason:
-
 ```bash
-# On VPS
 cd /opt/cloudwaste
 
 # Check last stable commit
@@ -578,7 +432,6 @@ bash deployment/zero-downtime-deploy.sh
 ### Check Rollback Status
 
 ```bash
-# View current commit vs stable commit
 cd /opt/cloudwaste
 echo "Current: $(git rev-parse --short HEAD)"
 echo "Stable:  $(cat .last_stable_commit | cut -c1-7)"
@@ -586,14 +439,140 @@ echo "Stable:  $(cat .last_stable_commit | cut -c1-7)"
 
 ---
 
+## 🐛 Troubleshooting
+
+### Issue: Containers Keep Restarting
+
+```bash
+# Check logs
+docker logs cloudwaste_backend
+
+# Common causes:
+# - Missing .env.prod
+# - Database connection failed
+# - Port already in use
+```
+
+### Issue: SSL Certificate Error
+
+```bash
+# Verify certificates exist
+sudo ls -la /etc/letsencrypt/live/cutcosts.tech/
+
+# Regenerate if missing
+sudo certbot certonly --standalone -d cutcosts.tech -d www.cutcosts.tech
+
+# Restart nginx
+docker compose -f deployment/docker-compose.prod.yml restart nginx
+```
+
+### Issue: Frontend Shows 502 Bad Gateway
+
+```bash
+# Check if backend is healthy
+docker exec cloudwaste_backend curl -f http://localhost:8000/api/v1/health
+
+# Restart nginx
+docker compose -f deployment/docker-compose.prod.yml restart nginx
+
+# Check nginx logs
+docker logs cloudwaste_nginx --tail 100
+```
+
+### Issue: Database Connection Error
+
+```bash
+# Verify PostgreSQL is running
+docker exec cloudwaste_postgres pg_isready -U cloudwaste
+
+# Check credentials in .env.prod
+cat /opt/cloudwaste/.env.prod | grep POSTGRES
+
+# Restart database
+docker compose -f deployment/docker-compose.prod.yml restart postgres
+```
+
+### Issue: Frontend Sentry DSN Undefined
+
+```bash
+# Verify variables in container
+docker exec cloudwaste_frontend env | grep "^NEXT_PUBLIC_SENTRY"
+
+# If empty, rebuild with variables
+cd /opt/cloudwaste
+set -a
+source .env.prod
+set +a
+docker compose -f deployment/docker-compose.prod.yml up -d --build frontend
+```
+
+### Use Diagnostic Script
+
+```bash
+bash deployment/diagnose.sh
+```
+
+This script checks:
+- ✅ Container status and health
+- ✅ Environment variables
+- ✅ Database connectivity
+- ✅ Nginx configuration
+- ✅ SSL certificates
+- ✅ Disk space
+
+---
+
+## 🔐 Security Best Practices
+
+### 1. Keep .env.prod Secure
+
+```bash
+# Never commit to Git
+chmod 600 /opt/cloudwaste/.env.prod
+
+# Verify in .gitignore
+grep "\.env\.prod" /opt/cloudwaste/.gitignore
+```
+
+### 2. Rotate Secrets Regularly
+
+```bash
+# Generate new secret
+openssl rand -hex 32
+
+# Update .env.prod
+nano /opt/cloudwaste/.env.prod
+
+# Restart services
+docker compose -f deployment/docker-compose.prod.yml restart
+```
+
+### 3. Monitor Failed Login Attempts
+
+```bash
+docker logs cloudwaste_backend | grep "401\|403"
+```
+
+### 4. Update SSL Certificates
+
+```bash
+# Auto-renewal via cron, or manually:
+sudo certbot renew
+docker exec cloudwaste_nginx nginx -s reload
+```
+
+---
+
 ## 📊 Performance Optimization
 
-### Monitor Container Resources:
+### Monitor Container Resources
+
 ```bash
 docker stats --no-stream
 ```
 
-### Scale Services (if needed):
+### Scale Services
+
 ```bash
 # Edit docker-compose.prod.yml
 # Change --workers 4 to --workers 8 for backend
@@ -601,7 +580,8 @@ docker stats --no-stream
 docker compose -f deployment/docker-compose.prod.yml up -d --no-deps --build backend
 ```
 
-### Database Optimization:
+### Database Optimization
+
 ```bash
 # Run VACUUM and ANALYZE
 docker exec cloudwaste_postgres psql -U cloudwaste -d cloudwaste -c "VACUUM ANALYZE;"
@@ -612,37 +592,30 @@ docker exec cloudwaste_postgres psql -U cloudwaste -d cloudwaste -c "VACUUM ANAL
 ## 📝 Maintenance Checklist
 
 **Daily:**
-- ✅ Check application uptime: `curl https://cutcosts.tech/api/v1/health`
-- ✅ Verify backups completed: `ls -lh /opt/cloudwaste/backups/`
+- ✅ Check uptime: `curl https://cutcosts.tech/api/v1/health`
+- ✅ Verify backups: `ls -lh /opt/cloudwaste/backups/daily/`
 
 **Weekly:**
-- ✅ Review logs for errors: `docker logs cloudwaste_backend | grep ERROR`
+- ✅ Review error logs: `docker logs cloudwaste_backend | grep ERROR`
 - ✅ Check disk space: `df -h`
-- ✅ Update Docker images: `docker compose -f deployment/docker-compose.prod.yml pull`
+- ✅ Update images: `docker compose -f deployment/docker-compose.prod.yml pull`
 
 **Monthly:**
 - ✅ Rotate secrets (JWT_SECRET, POSTGRES_PASSWORD)
-- ✅ Review SSL certificate expiration: `sudo certbot certificates`
-- ✅ Test backup restoration process
-
----
-
-## 🆘 Emergency Contacts
-
-**VPS Provider:** [Your VPS provider support]
-**Domain Registrar:** [Your domain registrar]
-**SSL Issues:** Let's Encrypt Community: https://community.letsencrypt.org/
+- ✅ Review SSL expiration: `sudo certbot certificates`
+- ✅ Test backup restoration
 
 ---
 
 ## 📚 Additional Resources
 
-- **Docker Compose Docs:** https://docs.docker.com/compose/
-- **Nginx Docs:** https://nginx.org/en/docs/
+- **Docker Compose:** https://docs.docker.com/compose/
+- **Nginx:** https://nginx.org/en/docs/
 - **Let's Encrypt:** https://letsencrypt.org/docs/
+- **Sentry:** https://docs.sentry.io/
 - **PostgreSQL Backups:** https://www.postgresql.org/docs/current/backup.html
 
 ---
 
-**Last Updated:** 2025-10-31
-**Deployment Version:** 2.0.0 (Zero-Downtime Blue-Green Deployment + Auto-Rollback)
+**Last Updated:** 2025-01-13
+**Version:** 3.0.0 (Zero-Downtime + Auto-Rollback + Sentry Integration)

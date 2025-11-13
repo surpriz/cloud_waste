@@ -6,9 +6,6 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **CloudWaste** is a SaaS platform for detecting orphaned and unused cloud resources (zombies) that generate unnecessary costs for businesses. Currently supports **25 AWS resource types** + **Azure resources** + **14+ GCP resource types** + **Microsoft 365** with intelligent CloudWatch-based detection.
 
-DON'T create useless documentation or too often.
-DON'T Commit or Push without my permission
-If you create a test file, delete it once it has been used
 
 **Key Features:**
 - **Multi-Cloud Support:** AWS (25 types), Azure (managed disks + more), GCP (14+ types), Microsoft 365 (SharePoint/OneDrive)
@@ -1226,6 +1223,17 @@ By default, CloudWaste ignores resources created within the last 3 days to avoid
 ### Solution: Test Detection Endpoint
 A special endpoint allows overriding detection rules **in DEBUG mode only**.
 
+### ⚠️ IMPORTANT: Temporary Test Scripts Cleanup
+**ALWAYS delete temporary test scripts immediately after testing is complete.**
+
+When creating test scripts (e.g., `test_*.sh`, `validate_*.py`, `debug_*.js`):
+1. Use them for testing
+2. Verify everything works correctly
+3. **DELETE THEM IMMEDIATELY** - do not leave them in the codebase
+4. Only keep permanent test files in the `tests/` directory
+
+**Rationale:** Accumulation of temporary test scripts creates clutter and makes the codebase harder to maintain.
+
 **Prerequisites:**
 ```bash
 # Enable DEBUG mode in backend .env
@@ -1327,6 +1335,10 @@ AWS_SES_SECRET_ACCESS_KEY=...
   feat(chat): add AI chat assistant with Claude Haiku 4.5
   ```
 - **Pre-commit hooks:** black, ruff, mypy (backend), prettier, eslint (frontend)
+- **NEVER add these commit messages:**
+  - ❌ `🎯 Generated with Claude Code`
+  - ❌ `Co-Authored-By: Claude <noreply@anthropic.com>`
+  - Keep commits clean and professional without AI attribution
 
 ## Critical Rules
 
@@ -1357,6 +1369,9 @@ AWS_SES_SECRET_ACCESS_KEY=...
 10. NEVER store PII in ML training data
 11. NEVER enable DEBUG mode in production (disables test detection endpoint)
 12. NEVER change ENCRYPTION_KEY in production (data loss!)
+13. NEVER create documentation files (.md) automatically after code changes - documentation should only be created when explicitly requested by the user
+14. NEVER leave temporary test scripts in the codebase - delete them immediately after the testing is complete and everything works correctly
+15. NEVER add AI attribution in commit messages (no "Generated with Claude Code" or "Co-Authored-By: Claude")
 
 ## Performance Targets
 
@@ -1656,6 +1671,24 @@ A feature is complete when:
 - **SETUP_GUIDE.md** - Detailed setup instructions
 - **README.md** - Project overview and quick start
 
+### ⚠️ IMPORTANT: Documentation Creation Policy
+
+**DO NOT create new documentation files (.md) automatically after every code change.**
+
+Documentation should ONLY be created when:
+- ✅ Explicitly requested by the user
+- ✅ A major new feature is added that requires user-facing documentation
+- ✅ API contracts change significantly
+
+**DO NOT create documentation for:**
+- ❌ Minor code changes or refactoring
+- ❌ Bug fixes
+- ❌ Internal implementation changes
+- ❌ Routine maintenance
+- ❌ "What I did" summaries
+
+**Rationale:** Excessive documentation creates clutter and makes the codebase harder to navigate. Keep documentation minimal, high-quality, and user-focused.
+
 ## Quick Reference
 
 ### Most Common Tasks
@@ -1699,6 +1732,11 @@ docker exec cloudwaste_postgres psql -U cloudwaste -d cloudwaste -c \
 
 ---
 
-**Version:** 2.0
-**Last Updated:** 2025-11-11
+**Version:** 2.1
+**Last Updated:** 2025-11-13
 **Status:** Phase 1 Complete (ML, Chat, Onboarding, Pricing, GDPR, Error Handling)
+
+**Changelog v2.1:**
+- Added rule: Never add AI attribution in commit messages
+- Added rule: Never create documentation automatically after code changes
+- Added rule: Always delete temporary test scripts after testing
