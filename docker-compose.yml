@@ -43,7 +43,7 @@ services:
     volumes:
       - ./backend:/app
       - encryption_key:/encryption_key_data  # Persistent encryption key storage
-      - ./init_encryption.sh:/app/init_encryption.sh:ro  # Mount init script
+      - ./scripts/init_encryption.sh:/app/init_encryption.sh:ro  # Mount init script
     env_file:
       - .env
     environment:
@@ -67,7 +67,7 @@ services:
     volumes:
       - ./backend:/app
       - encryption_key:/encryption_key_data  # Persistent encryption key storage
-      - ./init_encryption.sh:/app/init_encryption.sh:ro  # Mount init script
+      - ./scripts/init_encryption.sh:/app/init_encryption.sh:ro  # Mount init script
     env_file:
       - .env
     environment:
@@ -91,7 +91,7 @@ services:
     volumes:
       - ./backend:/app
       - encryption_key:/encryption_key_data  # Persistent encryption key storage
-      - ./init_encryption.sh:/app/init_encryption.sh:ro  # Mount init script
+      - ./scripts/init_encryption.sh:/app/init_encryption.sh:ro  # Mount init script
     env_file:
       - .env
     environment:
