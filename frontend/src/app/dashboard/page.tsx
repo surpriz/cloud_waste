@@ -195,7 +195,7 @@ export default function DashboardPage() {
       sparkline: generateSparklineData("stable"),
     },
     {
-      title: "Orphan Resources",
+      title: "Waste Detected",
       value: stats?.total_resources || 0,
       icon: AlertTriangle,
       gradient: "from-orange-500 to-amber-600",

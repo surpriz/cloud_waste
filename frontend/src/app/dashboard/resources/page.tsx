@@ -308,9 +308,11 @@ export default function ResourcesPage() {
       {/* Header */}
       <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
         <div>
-          <h1 className="text-2xl md:text-3xl font-bold text-gray-900">Orphan Resources</h1>
+          <h1 className="text-2xl md:text-3xl font-bold text-gray-900 flex items-center gap-2">
+            <span className="text-3xl">💸</span> Waste Detection
+          </h1>
           <p className="mt-1 md:mt-2 text-sm md:text-base text-gray-600">
-            View orphaned resources that are wasting money
+            Resources wasting money unnecessarily - take immediate action to delete or ignore them
           </p>
         </div>
         <button

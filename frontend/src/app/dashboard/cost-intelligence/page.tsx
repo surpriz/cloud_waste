@@ -218,8 +218,10 @@ export default function CostIntelligencePage() {
   };
 
   // Filter resources based on priority and type
+  // IMPORTANT: Exclude orphan resources (they are shown in Waste Detection tab)
   const filteredResources = React.useMemo(() => {
-    let filtered = allResources;
+    // First, exclude orphan resources (waste) - they belong in Waste Detection tab
+    let filtered = allResources.filter((resource) => !resource.is_orphan);
 
     // Filter by priority
     if (priorityFilter !== "all") {
@@ -238,9 +240,10 @@ export default function CostIntelligencePage() {
     return filtered;
   }, [allResources, priorityFilter, resourceTypeFilter]);
 
-  // Get unique resource types for filter dropdown
+  // Get unique resource types for filter dropdown (excluding orphan resources)
   const uniqueResourceTypes = React.useMemo(() => {
-    const types = new Set(allResources.map((r) => r.resource_type));
+    const nonOrphanResources = allResources.filter((r) => !r.is_orphan);
+    const types = new Set(nonOrphanResources.map((r) => r.resource_type));
     return Array.from(types).sort();
   }, [allResources]);
 
@@ -261,11 +264,14 @@ export default function CostIntelligencePage() {
             <Sparkles className="h-6 w-6 text-white" />
           </div>
           <div>
-            <h1 className="text-4xl font-extrabold bg-gradient-to-r from-blue-600 to-purple-600 bg-clip-text text-transparent">
-              Cost Intelligence
+            <h1 className="text-4xl font-extrabold bg-gradient-to-r from-blue-600 to-purple-600 bg-clip-text text-transparent flex items-center gap-2">
+              <span className="text-4xl">💡</span> Cost Optimization Hub
             </h1>
             <p className="mt-1 text-gray-600 text-lg">
-              Complete view of all your cloud resources and costs - data updated automatically when you run a scan
+              Discover cost-saving opportunities across ALL your cloud infrastructure
+            </p>
+            <p className="mt-1 text-sm text-blue-600 font-medium">
+              💡 Note: Orphaned resources (waste) are shown in Waste Detection tab
             </p>
           </div>
         </div>
@@ -517,10 +523,10 @@ export default function CostIntelligencePage() {
         <div className="rounded-2xl border border-gray-200 bg-white p-8 shadow-lg">
           <div className="flex items-center justify-between mb-6">
             <h2 className="text-2xl font-bold text-gray-900">
-              All Resources
+              Cost Optimization Opportunities
             </h2>
             <span className="inline-flex items-center px-3 py-1 rounded-full bg-blue-100 text-blue-800 text-sm font-semibold">
-              {filteredResources.length} of {allResources.length} resources
+              {filteredResources.length} of {allResources.filter(r => !r.is_orphan).length} resources
             </span>
           </div>
 
@@ -578,15 +584,11 @@ export default function CostIntelligencePage() {
             <span className="text-sm font-medium text-gray-700">Legend:</span>
             <div className="flex items-center gap-2">
               <div className="w-4 h-4 bg-gradient-to-r from-green-50 to-emerald-50 border border-green-200 rounded"></div>
-              <span className="text-sm text-gray-600">Optimized</span>
+              <span className="text-sm text-gray-600">Optimized (no savings)</span>
             </div>
             <div className="flex items-center gap-2">
               <div className="w-4 h-4 bg-gradient-to-r from-orange-50 to-amber-50 border border-orange-200 rounded"></div>
-              <span className="text-sm text-gray-600">Optimizable</span>
-            </div>
-            <div className="flex items-center gap-2">
-              <div className="w-4 h-4 bg-gradient-to-r from-red-50 to-rose-50 border border-red-200 rounded"></div>
-              <span className="text-sm text-gray-600">Orphan (Waste)</span>
+              <span className="text-sm text-gray-600">Optimizable (potential savings)</span>
             </div>
           </div>
 

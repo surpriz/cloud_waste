@@ -44,7 +44,7 @@ export function ReviewResultsStep({ onNext }: ReviewResultsStepProps) {
           <div className="inline-flex items-center justify-center h-12 w-12 rounded-xl bg-orange-600 mb-3">
             <AlertTriangle className="h-6 w-6 text-white" />
           </div>
-          <p className="text-sm text-gray-600 mb-1">Orphan Resources</p>
+          <p className="text-sm text-gray-600 mb-1">Waste Detected</p>
           <p className="text-4xl font-extrabold text-orange-600">
             {stats?.total_resources || 0}
           </p>

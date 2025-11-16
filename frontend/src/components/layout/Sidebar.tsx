@@ -6,7 +6,6 @@ import {
   LayoutDashboard,
   Cloud,
   Search,
-  FolderOpen,
   Settings,
   BookOpen,
   LogOut,
@@ -14,7 +13,8 @@ import {
   TrendingUp,
   MessageSquare,
   Shield,
-  DollarSign,
+  Trash2,
+  Sparkles,
 } from "lucide-react";
 import { useAuthStore } from "@/stores/useAuthStore";
 
@@ -22,8 +22,8 @@ const navigation = [
   { name: "Dashboard", href: "/dashboard", icon: LayoutDashboard },
   { name: "Cloud Accounts", href: "/dashboard/accounts", icon: Cloud },
   { name: "Scans", href: "/dashboard/scans", icon: Search },
-  { name: "Resources", href: "/dashboard/resources", icon: FolderOpen },
-  { name: "💡 Cost Intelligence", href: "/dashboard/cost-intelligence", icon: DollarSign },
+  { name: "Waste Detection", href: "/dashboard/resources", icon: Trash2 },
+  { name: "Cost Optimization", href: "/dashboard/cost-intelligence", icon: Sparkles },
   { name: "🤖 AI Assistant", href: "/dashboard/assistant", icon: MessageSquare },
   { name: "💰 Impact & Savings", href: "/dashboard/impact", icon: TrendingUp },
   { name: "Settings", href: "/dashboard/settings", icon: Settings },
