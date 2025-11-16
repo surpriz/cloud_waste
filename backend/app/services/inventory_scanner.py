@@ -1434,6 +1434,10 @@ class AzureInventoryScanner:
         """
         Calculate VM optimization score and recommendations.
 
+        IMPORTANT: Orphan resources (deallocated VMs or very low CPU <5%) are NOT "optimizable".
+        They are WASTE that should be deleted, not optimized.
+        Only non-orphan resources can be optimizable (e.g., low CPU 5-30%).
+
         Args:
             vm: Azure VM object
             power_state: VM power state
@@ -1449,38 +1453,18 @@ class AzureInventoryScanner:
         potential_savings = 0.0
         recommendations = []
 
-        # Scenario 1: Deallocated VM (Critical waste)
+        # Scenario 1: Deallocated VM → This is an ORPHAN (waste), not optimizable
+        # It should be deleted, not optimized. Return no optimization.
         if power_state == "deallocated":
-            is_optimizable = True
-            optimization_score = 90
-            priority = "critical"
-            potential_savings = monthly_cost
-            recommendations.append({
-                "action": "Delete or reallocate this deallocated VM",
-                "details": f"VM has been deallocated. Consider deleting if no longer needed.",
-                "alternatives": [
-                    {"name": "Delete VM", "cost": 0, "savings": monthly_cost},
-                ],
-                "priority": "critical",
-            })
+            return False, 0, "none", 0.0, []
 
-        # Scenario 2: Running VM with very low CPU (<5%)
+        # Scenario 2: Running VM with very low CPU (<5%) → This is also an ORPHAN (waste), not optimizable
+        # It should be stopped/deleted, not optimized. Return no optimization.
         elif power_state == "running" and cpu_util < 5.0:
-            is_optimizable = True
-            optimization_score = 70
-            priority = "high"
-            potential_savings = monthly_cost * 0.8
-            recommendations.append({
-                "action": "Downsize or stop this underutilized VM",
-                "details": f"CPU utilization is only {cpu_util:.1f}%. Consider downsizing to a smaller SKU.",
-                "alternatives": [
-                    {"name": "Downsize to smaller SKU", "cost": monthly_cost * 0.5, "savings": monthly_cost * 0.5},
-                    {"name": "Stop VM when not in use", "cost": monthly_cost * 0.3, "savings": monthly_cost * 0.7},
-                ],
-                "priority": "high",
-            })
+            return False, 0, "none", 0.0, []
 
-        # Scenario 3: Running VM with low CPU (<30%)
+        # Scenario 3: Running VM with low CPU (5-30%) → This IS optimizable!
+        # These VMs are being used but could be downsized to save costs.
         elif power_state == "running" and cpu_util < 30.0:
             is_optimizable = True
             optimization_score = 40
