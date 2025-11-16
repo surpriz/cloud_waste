@@ -698,6 +698,231 @@ async def _scan_cloud_account_async(
                             app_service_count=len(app_service_resources),
                         )
 
+                        # Scan Redis Caches (all)
+                        redis_resources = await inventory_scanner.scan_redis_caches(region)
+                        all_inventory_resources.extend(redis_resources)
+                        logger.info(
+                            "inventory.redis_scanned",
+                            region=region,
+                            redis_count=len(redis_resources),
+                        )
+
+                        # Scan Event Hubs (all)
+                        event_hub_resources = await inventory_scanner.scan_event_hubs(region)
+                        all_inventory_resources.extend(event_hub_resources)
+                        logger.info(
+                            "inventory.event_hubs_scanned",
+                            region=region,
+                            event_hub_count=len(event_hub_resources),
+                        )
+
+                        # Scan NetApp Files (all)
+                        netapp_resources = await inventory_scanner.scan_netapp_files(region)
+                        all_inventory_resources.extend(netapp_resources)
+                        logger.info(
+                            "inventory.netapp_scanned",
+                            region=region,
+                            netapp_count=len(netapp_resources),
+                        )
+
+                        # Scan Cognitive Search (all)
+                        cognitive_search_resources = await inventory_scanner.scan_cognitive_search(region)
+                        all_inventory_resources.extend(cognitive_search_resources)
+                        logger.info(
+                            "inventory.cognitive_search_scanned",
+                            region=region,
+                            cognitive_search_count=len(cognitive_search_resources),
+                        )
+
+                        # Scan API Management (all)
+                        apim_resources = await inventory_scanner.scan_api_management(region)
+                        all_inventory_resources.extend(apim_resources)
+                        logger.info(
+                            "inventory.api_management_scanned",
+                            region=region,
+                            apim_count=len(apim_resources),
+                        )
+
+                        # Scan CDN (all)
+                        cdn_resources = await inventory_scanner.scan_cdn(region)
+                        all_inventory_resources.extend(cdn_resources)
+                        logger.info(
+                            "inventory.cdn_scanned",
+                            region=region,
+                            cdn_count=len(cdn_resources),
+                        )
+
+                        # Scan Container Instances (all)
+                        aci_resources = await inventory_scanner.scan_container_instances(region)
+                        all_inventory_resources.extend(aci_resources)
+                        logger.info(
+                            "inventory.container_instances_scanned",
+                            region=region,
+                            aci_count=len(aci_resources),
+                        )
+
+                        # Scan Logic Apps (all)
+                        logic_app_resources = await inventory_scanner.scan_logic_apps(region)
+                        all_inventory_resources.extend(logic_app_resources)
+                        logger.info(
+                            "inventory.logic_apps_scanned",
+                            region=region,
+                            logic_app_count=len(logic_app_resources),
+                        )
+
+                        # Scan Log Analytics Workspaces (all)
+                        log_analytics_resources = await inventory_scanner.scan_log_analytics(region)
+                        all_inventory_resources.extend(log_analytics_resources)
+                        logger.info(
+                            "inventory.log_analytics_scanned",
+                            region=region,
+                            log_analytics_count=len(log_analytics_resources),
+                        )
+
+                        # Scan Backup Vaults (all)
+                        backup_vault_resources = await inventory_scanner.scan_backup_vaults(region)
+                        all_inventory_resources.extend(backup_vault_resources)
+                        logger.info(
+                            "inventory.backup_vaults_scanned",
+                            region=region,
+                            backup_vault_count=len(backup_vault_resources),
+                        )
+
+                        # Scan Data Factory Pipelines (all)
+                        data_factory_resources = await inventory_scanner.scan_data_factory_pipelines(region)
+                        all_inventory_resources.extend(data_factory_resources)
+                        logger.info(
+                            "inventory.data_factory_scanned",
+                            region=region,
+                            data_factory_count=len(data_factory_resources),
+                        )
+
+                        # Scan Synapse Serverless SQL (all)
+                        synapse_resources = await inventory_scanner.scan_synapse_serverless_sql(region)
+                        all_inventory_resources.extend(synapse_resources)
+                        logger.info(
+                            "inventory.synapse_serverless_scanned",
+                            region=region,
+                            synapse_count=len(synapse_resources),
+                        )
+
+                        # Scan Storage SFTP (all)
+                        sftp_resources = await inventory_scanner.scan_storage_sftp(region)
+                        all_inventory_resources.extend(sftp_resources)
+                        logger.info(
+                            "inventory.storage_sftp_scanned",
+                            region=region,
+                            sftp_count=len(sftp_resources),
+                        )
+
+                        # Scan AD Domain Services (all)
+                        ad_domain_resources = await inventory_scanner.scan_ad_domain_services(region)
+                        all_inventory_resources.extend(ad_domain_resources)
+                        logger.info(
+                            "inventory.ad_domain_services_scanned",
+                            region=region,
+                            ad_domain_count=len(ad_domain_resources),
+                        )
+
+                        # Scan Service Bus Premium (all)
+                        service_bus_resources = await inventory_scanner.scan_service_bus_premium(region)
+                        all_inventory_resources.extend(service_bus_resources)
+                        logger.info(
+                            "inventory.service_bus_premium_scanned",
+                            region=region,
+                            service_bus_count=len(service_bus_resources),
+                        )
+
+                        # Scan IoT Hub (all)
+                        iot_hub_resources = await inventory_scanner.scan_iot_hub(region)
+                        all_inventory_resources.extend(iot_hub_resources)
+                        logger.info(
+                            "inventory.iot_hub_scanned",
+                            region=region,
+                            iot_hub_count=len(iot_hub_resources),
+                        )
+
+                        # Scan Stream Analytics (all)
+                        stream_analytics_resources = await inventory_scanner.scan_stream_analytics(region)
+                        all_inventory_resources.extend(stream_analytics_resources)
+                        logger.info(
+                            "inventory.stream_analytics_scanned",
+                            region=region,
+                            stream_analytics_count=len(stream_analytics_resources),
+                        )
+
+                        # Scan Document Intelligence (all)
+                        document_intelligence_resources = await inventory_scanner.scan_ai_document_intelligence(region)
+                        all_inventory_resources.extend(document_intelligence_resources)
+                        logger.info(
+                            "inventory.document_intelligence_scanned",
+                            region=region,
+                            document_intelligence_count=len(document_intelligence_resources),
+                        )
+
+                        # Scan Computer Vision (all)
+                        computer_vision_resources = await inventory_scanner.scan_computer_vision(region)
+                        all_inventory_resources.extend(computer_vision_resources)
+                        logger.info(
+                            "inventory.computer_vision_scanned",
+                            region=region,
+                            computer_vision_count=len(computer_vision_resources),
+                        )
+
+                        # Scan Face API (all)
+                        face_api_resources = await inventory_scanner.scan_face_api(region)
+                        all_inventory_resources.extend(face_api_resources)
+                        logger.info(
+                            "inventory.face_api_scanned",
+                            region=region,
+                            face_api_count=len(face_api_resources),
+                        )
+
+                        # Scan Text Analytics (all)
+                        text_analytics_resources = await inventory_scanner.scan_text_analytics(region)
+                        all_inventory_resources.extend(text_analytics_resources)
+                        logger.info(
+                            "inventory.text_analytics_scanned",
+                            region=region,
+                            text_analytics_count=len(text_analytics_resources),
+                        )
+
+                        # Scan Speech Services (all)
+                        speech_services_resources = await inventory_scanner.scan_speech_services(region)
+                        all_inventory_resources.extend(speech_services_resources)
+                        logger.info(
+                            "inventory.speech_services_scanned",
+                            region=region,
+                            speech_services_count=len(speech_services_resources),
+                        )
+
+                        # Scan Bot Service (all)
+                        bot_service_resources = await inventory_scanner.scan_bot_service(region)
+                        all_inventory_resources.extend(bot_service_resources)
+                        logger.info(
+                            "inventory.bot_service_scanned",
+                            region=region,
+                            bot_service_count=len(bot_service_resources),
+                        )
+
+                        # Scan Application Insights (all)
+                        application_insights_resources = await inventory_scanner.scan_application_insights(region)
+                        all_inventory_resources.extend(application_insights_resources)
+                        logger.info(
+                            "inventory.application_insights_scanned",
+                            region=region,
+                            application_insights_count=len(application_insights_resources),
+                        )
+
+                        # Scan Managed DevOps Pools (all)
+                        managed_devops_pools_resources = await inventory_scanner.scan_managed_devops_pools(region)
+                        all_inventory_resources.extend(managed_devops_pools_resources)
+                        logger.info(
+                            "inventory.managed_devops_pools_scanned",
+                            region=region,
+                            managed_devops_pools_count=len(managed_devops_pools_resources),
+                        )
+
                     # Save all inventory resources to database
                     for resource in all_inventory_resources:
                         all_cloud_resource = AllCloudResource(

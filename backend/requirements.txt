@@ -47,6 +47,10 @@ azure-mgmt-desktopvirtualization==1.1.0  # Azure Virtual Desktop (AVD) managemen
 azure-mgmt-hdinsight==9.0.0  # Azure HDInsight Spark cluster management
 azure-ai-ml==1.19.0  # Azure Machine Learning SDK for Compute Instances
 azure-mgmt-machinelearningservices==1.0.0  # Azure ML Services management
+azure-mgmt-cognitiveservices==13.5.0  # Azure Cognitive Services (Speech, Vision, Face, Text Analytics, etc.)
+azure-mgmt-botservice==2.0.0  # Azure Bot Service management
+azure-mgmt-applicationinsights==4.1.0  # Azure Application Insights monitoring/observability management
+azure-mgmt-devopsinfrastructure==1.0.0  # Azure Managed DevOps Pools (pipeline agents infrastructure)
 # azure-storage-fileshare>=12.0.0  # Azure Files ShareServiceClient for file shares operations (not available on ARM64)
 
 # Microsoft 365 SDK

@@ -311,7 +311,32 @@ export type ResourceType =
   | "azure_virtual_desktop"
   | "azure_hdinsight_cluster"
   | "azure_ml_compute"
-  | "azure_app_service";
+  | "azure_app_service"
+  | "azure_redis_cache"
+  | "azure_event_hub"
+  | "azure_netapp_files"
+  | "azure_cognitive_search"
+  | "azure_api_management"
+  | "azure_cdn"
+  | "azure_container_instance"
+  | "azure_logic_app"
+  | "azure_log_analytics"
+  | "azure_backup_vault"
+  | "azure_data_factory_pipeline"
+  | "azure_synapse_serverless_sql"
+  | "azure_storage_sftp"
+  | "azure_ad_domain_services"
+  | "azure_service_bus_premium"
+  | "azure_iot_hub"
+  | "azure_stream_analytics"
+  | "azure_document_intelligence"
+  | "azure_computer_vision"
+  | "azure_face_api"
+  | "azure_text_analytics"
+  | "azure_speech_services"
+  | "azure_bot_service"
+  | "azure_application_insights"
+  | "azure_managed_devops_pools";
 
 export type ConfidenceLevel = "critical" | "high" | "medium" | "low";
 
