@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import React, { useEffect, useState } from "react";
 import { useInventoryStore } from "@/stores/useInventoryStore";
 import { useAccountStore } from "@/stores/useAccountStore";
 import {
@@ -136,17 +136,19 @@ export default function CostIntelligencePage() {
     stats,
     costBreakdown,
     highCostResources,
-    optimizableResources,
+    allResources,
     isLoading,
     error,
     fetchStats,
     fetchCostBreakdown,
     fetchHighCostResources,
-    fetchOptimizableResources,
+    fetchAllResources,
   } = useInventoryStore();
 
   const [selectedAccountId, setSelectedAccountId] = useState<string>("");
   const [minCostFilter, setMinCostFilter] = useState<number>(100);
+  const [priorityFilter, setPriorityFilter] = useState<string>("all");
+  const [resourceTypeFilter, setResourceTypeFilter] = useState<string>("all");
 
   useEffect(() => {
     fetchAccounts();
@@ -163,7 +165,10 @@ export default function CostIntelligencePage() {
       fetchStats(selectedAccountId);
       fetchCostBreakdown(selectedAccountId);
       fetchHighCostResources(selectedAccountId, minCostFilter, 10);
-      fetchOptimizableResources(selectedAccountId, 20);
+      fetchAllResources({
+        cloud_account_id: selectedAccountId,
+        limit: 100,
+      });
     }
   }, [
     selectedAccountId,
@@ -171,7 +176,7 @@ export default function CostIntelligencePage() {
     fetchStats,
     fetchCostBreakdown,
     fetchHighCostResources,
-    fetchOptimizableResources,
+    fetchAllResources,
   ]);
 
   const handleRefresh = () => {
@@ -179,9 +184,65 @@ export default function CostIntelligencePage() {
       fetchStats(selectedAccountId);
       fetchCostBreakdown(selectedAccountId);
       fetchHighCostResources(selectedAccountId, minCostFilter, 10);
-      fetchOptimizableResources(selectedAccountId, 20);
+      fetchAllResources({
+        cloud_account_id: selectedAccountId,
+        limit: 100,
+      });
     }
   };
+
+  // Get resource color based on status
+  const getResourceColor = (resource: any) => {
+    if (resource.is_orphan) {
+      return {
+        bg: "from-red-50 to-rose-50",
+        border: "border-red-200",
+        badge: "bg-red-100 text-red-700",
+        label: "Orphan (Waste)",
+      };
+    } else if (resource.is_optimizable) {
+      return {
+        bg: "from-orange-50 to-amber-50",
+        border: "border-orange-200",
+        badge: "bg-orange-100 text-orange-700",
+        label: "Optimizable",
+      };
+    } else {
+      return {
+        bg: "from-green-50 to-emerald-50",
+        border: "border-green-200",
+        badge: "bg-green-100 text-green-700",
+        label: "Optimized",
+      };
+    }
+  };
+
+  // Filter resources based on priority and type
+  const filteredResources = React.useMemo(() => {
+    let filtered = allResources;
+
+    // Filter by priority
+    if (priorityFilter !== "all") {
+      filtered = filtered.filter(
+        (resource) => resource.optimization_priority === priorityFilter
+      );
+    }
+
+    // Filter by resource type
+    if (resourceTypeFilter !== "all") {
+      filtered = filtered.filter(
+        (resource) => resource.resource_type === resourceTypeFilter
+      );
+    }
+
+    return filtered;
+  }, [allResources, priorityFilter, resourceTypeFilter]);
+
+  // Get unique resource types for filter dropdown
+  const uniqueResourceTypes = React.useMemo(() => {
+    const types = new Set(allResources.map((r) => r.resource_type));
+    return Array.from(types).sort();
+  }, [allResources]);
 
   if (isLoading && !stats) {
     return (
@@ -451,28 +512,97 @@ export default function CostIntelligencePage() {
         </div>
       )}
 
-      {/* Optimization Opportunities */}
-      {optimizableResources.length > 0 && (
+      {/* All Resources with Filters */}
+      {allResources.length > 0 && (
         <div className="rounded-2xl border border-gray-200 bg-white p-8 shadow-lg">
           <div className="flex items-center justify-between mb-6">
             <h2 className="text-2xl font-bold text-gray-900">
-              Optimization Opportunities
+              All Resources
             </h2>
-            <span className="inline-flex items-center px-3 py-1 rounded-full bg-green-100 text-green-800 text-sm font-semibold">
-              {optimizableResources.length} resources
+            <span className="inline-flex items-center px-3 py-1 rounded-full bg-blue-100 text-blue-800 text-sm font-semibold">
+              {filteredResources.length} of {allResources.length} resources
             </span>
           </div>
+
+          {/* Filters */}
+          <div className="flex items-center gap-4 mb-6">
+            <div className="flex items-center gap-2">
+              <Filter className="h-4 w-4 text-gray-600" />
+              <span className="text-sm font-medium text-gray-700">Filters:</span>
+            </div>
+
+            {/* Priority Filter */}
+            <select
+              value={priorityFilter}
+              onChange={(e) => setPriorityFilter(e.target.value)}
+              className="rounded-lg border border-gray-300 px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+            >
+              <option value="all">All Priorities</option>
+              <option value="critical">Critical</option>
+              <option value="high">High</option>
+              <option value="medium">Medium</option>
+              <option value="low">Low</option>
+              <option value="none">None</option>
+            </select>
+
+            {/* Resource Type Filter */}
+            <select
+              value={resourceTypeFilter}
+              onChange={(e) => setResourceTypeFilter(e.target.value)}
+              className="rounded-lg border border-gray-300 px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+            >
+              <option value="all">All Types</option>
+              {uniqueResourceTypes.map((type) => (
+                <option key={type} value={type}>
+                  {formatResourceType(type)}
+                </option>
+              ))}
+            </select>
+
+            {/* Reset Filters */}
+            {(priorityFilter !== "all" || resourceTypeFilter !== "all") && (
+              <button
+                onClick={() => {
+                  setPriorityFilter("all");
+                  setResourceTypeFilter("all");
+                }}
+                className="text-sm text-blue-600 hover:text-blue-700 font-medium"
+              >
+                Reset Filters
+              </button>
+            )}
+          </div>
+
+          {/* Color Legend */}
+          <div className="flex items-center gap-6 mb-6 p-4 bg-gray-50 rounded-lg">
+            <span className="text-sm font-medium text-gray-700">Legend:</span>
+            <div className="flex items-center gap-2">
+              <div className="w-4 h-4 bg-gradient-to-r from-green-50 to-emerald-50 border border-green-200 rounded"></div>
+              <span className="text-sm text-gray-600">Optimized</span>
+            </div>
+            <div className="flex items-center gap-2">
+              <div className="w-4 h-4 bg-gradient-to-r from-orange-50 to-amber-50 border border-orange-200 rounded"></div>
+              <span className="text-sm text-gray-600">Optimizable</span>
+            </div>
+            <div className="flex items-center gap-2">
+              <div className="w-4 h-4 bg-gradient-to-r from-red-50 to-rose-50 border border-red-200 rounded"></div>
+              <span className="text-sm text-gray-600">Orphan (Waste)</span>
+            </div>
+          </div>
+
+          {/* Resources List */}
           <div className="space-y-4">
-            {optimizableResources.slice(0, 10).map((resource) => {
+            {filteredResources.slice(0, 20).map((resource) => {
               const Icon = resourceIcons[resource.resource_type] || Server;
-              const savingsPercentage =
-                (resource.potential_monthly_savings /
-                  resource.estimated_monthly_cost) *
-                100;
+              const colors = getResourceColor(resource);
+              const savingsPercentage = resource.potential_monthly_savings > 0
+                ? (resource.potential_monthly_savings / resource.estimated_monthly_cost) * 100
+                : 0;
+
               return (
                 <div
                   key={resource.id}
-                  className="flex items-center justify-between p-4 rounded-xl bg-gradient-to-r from-green-50 to-emerald-50 border border-green-200 hover:shadow-md transition-shadow"
+                  className={`flex items-center justify-between p-4 rounded-xl bg-gradient-to-r ${colors.bg} border-2 ${colors.border} hover:shadow-md transition-shadow`}
                 >
                   <div className="flex items-center gap-3">
                     <Icon className="h-5 w-5 text-gray-600" />
@@ -482,22 +612,33 @@ export default function CostIntelligencePage() {
                           {resource.resource_name ||
                             formatResourceType(resource.resource_type)}
                         </p>
-                        {/* Priority Badge */}
-                        <span
-                          className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-semibold ${
-                            resource.optimization_priority === "critical"
-                              ? "bg-red-100 text-red-700"
-                              : resource.optimization_priority === "high"
-                              ? "bg-orange-100 text-orange-700"
-                              : "bg-yellow-100 text-yellow-700"
-                          }`}
-                        >
-                          {resource.optimization_priority.toUpperCase()}
+
+                        {/* Status Badge */}
+                        <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-semibold ${colors.badge}`}>
+                          {colors.label}
                         </span>
+
+                        {/* Priority Badge */}
+                        {resource.optimization_priority && resource.optimization_priority !== "none" && (
+                          <span
+                            className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-semibold ${
+                              resource.optimization_priority === "critical"
+                                ? "bg-red-100 text-red-700"
+                                : resource.optimization_priority === "high"
+                                ? "bg-orange-100 text-orange-700"
+                                : resource.optimization_priority === "medium"
+                                ? "bg-yellow-100 text-yellow-700"
+                                : "bg-blue-100 text-blue-700"
+                            }`}
+                          >
+                            {resource.optimization_priority.toUpperCase()}
+                          </span>
+                        )}
                       </div>
                       <p className="text-sm text-gray-600 mt-1">
                         {resource.region}
                       </p>
+
                       {/* Optimization Recommendation */}
                       {resource.optimization_recommendations &&
                         resource.optimization_recommendations.length > 0 && (
@@ -516,17 +657,34 @@ export default function CostIntelligencePage() {
                     <p className="text-sm text-gray-600">
                       Current: ${resource.estimated_monthly_cost.toFixed(2)}/mo
                     </p>
-                    <p className="text-lg font-bold text-green-600">
-                      Save ${resource.potential_monthly_savings.toFixed(2)}/mo
-                    </p>
-                    <p className="text-xs text-gray-500">
-                      (-{savingsPercentage.toFixed(0)}%)
-                    </p>
+                    {resource.potential_monthly_savings > 0 ? (
+                      <>
+                        <p className="text-lg font-bold text-green-600">
+                          Save ${resource.potential_monthly_savings.toFixed(2)}/mo
+                        </p>
+                        <p className="text-xs text-gray-500">
+                          (-{savingsPercentage.toFixed(0)}%)
+                        </p>
+                      </>
+                    ) : (
+                      <p className="text-lg font-bold text-green-600">
+                        ✓ Optimized
+                      </p>
+                    )}
                   </div>
                 </div>
               );
             })}
           </div>
+
+          {/* Show More Button */}
+          {filteredResources.length > 20 && (
+            <div className="mt-6 text-center">
+              <p className="text-sm text-gray-600">
+                Showing 20 of {filteredResources.length} resources
+              </p>
+            </div>
+          )}
         </div>
       )}
 
