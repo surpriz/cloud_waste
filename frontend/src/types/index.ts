@@ -292,7 +292,26 @@ export type ResourceType =
   | "static_ip_unattached"
   | "nat_gateway_unused"
   | "cloud_sql_stopped"
-  | "cloud_sql_idle";
+  | "cloud_sql_idle"
+  // Azure - Cost Intelligence (Inventory mode)
+  | "azure_vm"
+  | "azure_managed_disk"
+  | "azure_public_ip"
+  | "azure_load_balancer"
+  | "azure_app_gateway"
+  | "azure_storage_account"
+  | "azure_expressroute_circuit"
+  | "azure_disk_snapshot"
+  | "azure_nat_gateway"
+  | "azure_sql_database"
+  | "azure_aks_cluster"
+  | "azure_function_app"
+  | "azure_cosmos_db"
+  | "azure_container_app"
+  | "azure_virtual_desktop"
+  | "azure_hdinsight_cluster"
+  | "azure_ml_compute"
+  | "azure_app_service";
 
 export type ConfidenceLevel = "critical" | "high" | "medium" | "low";
 

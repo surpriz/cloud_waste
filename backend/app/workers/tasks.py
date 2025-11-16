@@ -563,6 +563,141 @@ async def _scan_cloud_account_async(
                             ip_count=len(ip_resources),
                         )
 
+                        # Scan Load Balancers (all)
+                        lb_resources = await inventory_scanner.scan_load_balancers(region)
+                        all_inventory_resources.extend(lb_resources)
+                        logger.info(
+                            "inventory.lb_scanned",
+                            region=region,
+                            lb_count=len(lb_resources),
+                        )
+
+                        # Scan Application Gateways (all)
+                        ag_resources = await inventory_scanner.scan_app_gateways(region)
+                        all_inventory_resources.extend(ag_resources)
+                        logger.info(
+                            "inventory.ag_scanned",
+                            region=region,
+                            ag_count=len(ag_resources),
+                        )
+
+                        # Scan Storage Accounts (all)
+                        sa_resources = await inventory_scanner.scan_storage_accounts(region)
+                        all_inventory_resources.extend(sa_resources)
+                        logger.info(
+                            "inventory.sa_scanned",
+                            region=region,
+                            sa_count=len(sa_resources),
+                        )
+
+                        # Scan ExpressRoute Circuits (all)
+                        er_resources = await inventory_scanner.scan_expressroute_circuits(region)
+                        all_inventory_resources.extend(er_resources)
+                        logger.info(
+                            "inventory.er_scanned",
+                            region=region,
+                            er_count=len(er_resources),
+                        )
+
+                        # Scan Disk Snapshots (all)
+                        snapshot_resources = await inventory_scanner.scan_disk_snapshots(region)
+                        all_inventory_resources.extend(snapshot_resources)
+                        logger.info(
+                            "inventory.snapshot_scanned",
+                            region=region,
+                            snapshot_count=len(snapshot_resources),
+                        )
+
+                        # Scan NAT Gateways (all)
+                        nat_resources = await inventory_scanner.scan_nat_gateways(region)
+                        all_inventory_resources.extend(nat_resources)
+                        logger.info(
+                            "inventory.nat_scanned",
+                            region=region,
+                            nat_count=len(nat_resources),
+                        )
+
+                        # Scan Azure SQL Databases (all)
+                        sqldb_resources = await inventory_scanner.scan_azure_sql_databases(region)
+                        all_inventory_resources.extend(sqldb_resources)
+                        logger.info(
+                            "inventory.sqldb_scanned",
+                            region=region,
+                            sqldb_count=len(sqldb_resources),
+                        )
+
+                        # Scan AKS Clusters (all)
+                        aks_resources = await inventory_scanner.scan_aks_clusters(region)
+                        all_inventory_resources.extend(aks_resources)
+                        logger.info(
+                            "inventory.aks_scanned",
+                            region=region,
+                            aks_count=len(aks_resources),
+                        )
+
+                        # Scan Function Apps (all)
+                        function_resources = await inventory_scanner.scan_function_apps(region)
+                        all_inventory_resources.extend(function_resources)
+                        logger.info(
+                            "inventory.functions_scanned",
+                            region=region,
+                            function_count=len(function_resources),
+                        )
+
+                        # Scan Cosmos DB accounts (all)
+                        cosmos_resources = await inventory_scanner.scan_cosmos_dbs(region)
+                        all_inventory_resources.extend(cosmos_resources)
+                        logger.info(
+                            "inventory.cosmos_scanned",
+                            region=region,
+                            cosmos_count=len(cosmos_resources),
+                        )
+
+                        # Scan Container Apps (all)
+                        container_app_resources = await inventory_scanner.scan_container_apps(region)
+                        all_inventory_resources.extend(container_app_resources)
+                        logger.info(
+                            "inventory.container_apps_scanned",
+                            region=region,
+                            container_app_count=len(container_app_resources),
+                        )
+
+                        # Scan Virtual Desktop host pools (all)
+                        vd_resources = await inventory_scanner.scan_virtual_desktops(region)
+                        all_inventory_resources.extend(vd_resources)
+                        logger.info(
+                            "inventory.virtual_desktops_scanned",
+                            region=region,
+                            vd_count=len(vd_resources),
+                        )
+
+                        # Scan HDInsight clusters (all)
+                        hdinsight_resources = await inventory_scanner.scan_hdinsight_clusters(region)
+                        all_inventory_resources.extend(hdinsight_resources)
+                        logger.info(
+                            "inventory.hdinsight_scanned",
+                            region=region,
+                            hdinsight_count=len(hdinsight_resources),
+                        )
+
+                        # Scan ML Compute Instances (all)
+                        ml_resources = await inventory_scanner.scan_ml_compute_instances(region)
+                        all_inventory_resources.extend(ml_resources)
+                        logger.info(
+                            "inventory.ml_compute_scanned",
+                            region=region,
+                            ml_count=len(ml_resources),
+                        )
+
+                        # Scan App Services (all, excluding Function Apps)
+                        app_service_resources = await inventory_scanner.scan_app_services(region)
+                        all_inventory_resources.extend(app_service_resources)
+                        logger.info(
+                            "inventory.app_services_scanned",
+                            region=region,
+                            app_service_count=len(app_service_resources),
+                        )
+
                     # Save all inventory resources to database
                     for resource in all_inventory_resources:
                         all_cloud_resource = AllCloudResource(

@@ -20,6 +20,8 @@ import {
   Database,
   Network,
   Zap,
+  Monitor,
+  Globe,
 } from "lucide-react";
 import {
   PieChart as RechartsPie,
@@ -48,6 +50,25 @@ const resourceIcons: Record<ResourceType, any> = {
   s3_bucket: HardDrive,
   lambda_function: Zap,
   dynamodb_table: Database,
+  // Azure - Cost Intelligence (Inventory mode)
+  azure_vm: Server,
+  azure_managed_disk: HardDrive,
+  azure_public_ip: Network,
+  azure_load_balancer: Network,
+  azure_app_gateway: Network,
+  azure_storage_account: HardDrive,
+  azure_expressroute_circuit: Network,
+  azure_disk_snapshot: HardDrive,
+  azure_nat_gateway: Network,
+  azure_sql_database: Database,
+  azure_aks_cluster: Server,
+  azure_function_app: Zap,
+  azure_cosmos_db: Database,
+  azure_container_app: Server,
+  azure_virtual_desktop: Monitor,
+  azure_hdinsight_cluster: BarChart3,
+  azure_ml_compute: Sparkles,
+  azure_app_service: Globe,
   // Add more as needed (truncated for brevity)
 } as any;
 
