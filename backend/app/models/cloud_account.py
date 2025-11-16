@@ -120,6 +120,11 @@ class CloudAccount(Base):
         back_populates="cloud_account",
         cascade="all, delete-orphan",
     )
+    all_resources: Mapped[list["AllCloudResource"]] = relationship(  # type: ignore
+        "AllCloudResource",
+        back_populates="cloud_account",
+        cascade="all, delete-orphan",
+    )
 
     def __repr__(self) -> str:
         """String representation."""

@@ -59,13 +59,17 @@ async def list_orphan_resources(
         from app.models.scan import Scan
         from sqlalchemy import select, and_, func
 
-        # Subquery to get the latest scan ID per cloud account
+        # Subquery to get the latest ORPHAN scan ID per cloud account
+        # Filter out INVENTORY scans to avoid interference
         latest_scan_subquery = (
             select(
                 Scan.cloud_account_id,
                 func.max(Scan.created_at).label("max_created_at")
             )
-            .where(Scan.status == "completed")
+            .where(
+                Scan.status == "completed",
+                Scan.scan_type != "inventory"
+            )
             .group_by(Scan.cloud_account_id)
             .subquery()
         )

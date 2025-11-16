@@ -26,6 +26,7 @@ class ScanType(str, Enum):
 
     MANUAL = "manual"
     SCHEDULED = "scheduled"
+    INVENTORY = "inventory"
 
 
 class Scan(Base):
@@ -98,6 +99,11 @@ class Scan(Base):
     )
     orphan_resources: Mapped[list["OrphanResource"]] = relationship(  # type: ignore
         "OrphanResource",
+        back_populates="scan",
+        cascade="all, delete-orphan",
+    )
+    all_resources: Mapped[list["AllCloudResource"]] = relationship(  # type: ignore
+        "AllCloudResource",
         back_populates="scan",
         cascade="all, delete-orphan",
     )

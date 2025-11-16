@@ -100,12 +100,14 @@ async def get_orphan_resources_by_account(
     """
     from app.models.scan import Scan
 
-    # Get the latest completed scan for this account
+    # Get the latest completed ORPHAN scan for this account
+    # Filter out INVENTORY scans to avoid interference
     latest_scan_result = await db.execute(
         select(Scan)
         .where(
             Scan.cloud_account_id == cloud_account_id,
-            Scan.status == "completed"
+            Scan.status == "completed",
+            Scan.scan_type != "inventory"
         )
         .order_by(Scan.created_at.desc())
         .limit(1)
@@ -214,14 +216,18 @@ async def get_orphan_resource_statistics(
     from app.models.cloud_account import CloudAccount
     from sqlalchemy import and_, func
 
-    # Get latest scan IDs per cloud account
+    # Get latest ORPHAN scan IDs per cloud account
     # SECURITY: Filter by user_id to prevent cross-user data leakage
+    # Filter out INVENTORY scans to avoid interference
     latest_scan_subquery_query = (
         select(
             Scan.cloud_account_id,
             func.max(Scan.created_at).label("max_created_at")
         )
-        .where(Scan.status == "completed")
+        .where(
+            Scan.status == "completed",
+            Scan.scan_type != "inventory"
+        )
     )
 
     # Add user_id filter if provided (CRITICAL for multi-tenant security)
@@ -314,14 +320,18 @@ async def get_top_cost_resources(
     from app.models.cloud_account import CloudAccount
     from sqlalchemy import and_, func
 
-    # Get latest scan IDs per cloud account
+    # Get latest ORPHAN scan IDs per cloud account
     # SECURITY: Filter by user_id to prevent cross-user data leakage
+    # Filter out INVENTORY scans to avoid interference
     latest_scan_subquery_query = (
         select(
             Scan.cloud_account_id,
             func.max(Scan.created_at).label("max_created_at")
         )
-        .where(Scan.status == "completed")
+        .where(
+            Scan.status == "completed",
+            Scan.scan_type != "inventory"
+        )
     )
 
     # Add user_id filter if provided (CRITICAL for multi-tenant security)

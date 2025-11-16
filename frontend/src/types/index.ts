@@ -499,3 +499,120 @@ export interface SESIdentityMetrics {
   complaint_rate: number;
   last_checked: string;
 }
+
+// Cost Intelligence / Inventory types
+export type UtilizationStatus = "idle" | "low" | "medium" | "high" | "unknown";
+export type OptimizationPriority = "critical" | "high" | "medium" | "low" | "none";
+
+export interface AllCloudResource {
+  id: string;
+  scan_id: string;
+  cloud_account_id: string;
+  resource_type: ResourceType;
+  resource_id: string;
+  resource_name: string | null;
+  region: string;
+  estimated_monthly_cost: number;
+  currency: string;
+  utilization_status: UtilizationStatus;
+  cpu_utilization_percent: number | null;
+  memory_utilization_percent: number | null;
+  storage_utilization_percent: number | null;
+  network_utilization_mbps: number | null;
+  is_optimizable: boolean;
+  optimization_priority: OptimizationPriority;
+  optimization_score: number;
+  potential_monthly_savings: number;
+  optimization_recommendations: OptimizationRecommendationItem[] | null;
+  resource_metadata: Record<string, any> | null;
+  tags: Record<string, string> | null;
+  resource_status: string | null;
+  is_orphan: boolean;
+  created_at_cloud: string | null;
+  last_used_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface InventoryStats {
+  total_resources: number;
+  total_monthly_cost: number;
+  total_annual_cost: number;
+  by_type: Record<string, number>;
+  by_region: Record<string, number>;
+  by_provider: Record<string, number>;
+  by_utilization: Record<string, number>;
+  optimizable_resources: number;
+  potential_monthly_savings: number;
+  potential_annual_savings: number;
+  high_cost_resources: number;
+}
+
+export interface CostBreakdown {
+  by_type: CostBreakdownItem[];
+  by_region: CostBreakdownItem[];
+  by_provider: CostBreakdownItem[];
+  by_tag?: CostBreakdownItem[];
+}
+
+export interface CostBreakdownItem {
+  name: string;
+  count: number;
+  total_monthly_cost: number;
+  percentage?: number;
+}
+
+export interface HighCostResource {
+  id: string;
+  resource_type: ResourceType;
+  resource_name: string | null;
+  region: string;
+  estimated_monthly_cost: number;
+  utilization_status: UtilizationStatus;
+  is_optimizable: boolean;
+  potential_monthly_savings: number;
+  optimization_recommendations: OptimizationRecommendationItem[] | null;
+  tags: Record<string, string> | null;
+}
+
+export interface OptimizationRecommendationItem {
+  resource_id: string;
+  resource_type: ResourceType;
+  resource_name: string | null;
+  current_monthly_cost: number;
+  recommended_action: string;
+  potential_monthly_savings: number;
+  priority: OptimizationPriority;
+  details: string;
+  alternatives?: Array<{
+    name: string;
+    cost: number;
+    savings: number;
+  }>;
+}
+
+export interface CostTrend {
+  date: string;
+  total_cost: number;
+  by_provider: Record<string, number>;
+  by_type: Record<string, number>;
+}
+
+export interface BudgetStatus {
+  monthly_budget: number | null;
+  current_spend: number;
+  projected_monthly_spend: number;
+  remaining_budget: number | null;
+  budget_utilization_percent: number | null;
+  is_over_budget: boolean;
+  days_remaining_in_month: number;
+}
+
+export interface InventoryFilters {
+  cloud_account_id?: string;
+  resource_type?: ResourceType;
+  is_optimizable?: boolean;
+  min_cost?: number;
+  skip?: number;
+  limit?: number;
+}

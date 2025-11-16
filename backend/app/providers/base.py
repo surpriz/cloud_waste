@@ -35,6 +35,85 @@ class OrphanResourceData:
         self.resource_metadata = resource_metadata
 
 
+class AllCloudResourceData:
+    """Data class for complete cloud resource information (inventory mode)."""
+
+    def __init__(
+        self,
+        resource_type: str,
+        resource_id: str,
+        resource_name: str | None,
+        region: str,
+        estimated_monthly_cost: float,
+        resource_metadata: dict[str, Any],
+        currency: str = "USD",
+        utilization_status: str = "unknown",
+        cpu_utilization_percent: float | None = None,
+        memory_utilization_percent: float | None = None,
+        storage_utilization_percent: float | None = None,
+        network_utilization_mbps: float | None = None,
+        is_optimizable: bool = False,
+        optimization_priority: str = "none",
+        optimization_score: int = 0,
+        potential_monthly_savings: float = 0.0,
+        optimization_recommendations: list[dict[str, Any]] | None = None,
+        tags: dict[str, str] | None = None,
+        resource_status: str | None = None,
+        is_orphan: bool = False,
+        created_at_cloud: Any | None = None,
+        last_used_at: Any | None = None,
+    ) -> None:
+        """
+        Initialize all cloud resource data.
+
+        Args:
+            resource_type: Type of resource (e.g., 'ec2_instance', 'rds_instance')
+            resource_id: Unique identifier of the resource
+            resource_name: Human-readable name (if available)
+            region: Cloud region where resource exists
+            estimated_monthly_cost: Estimated monthly cost in USD
+            resource_metadata: Additional metadata about the resource
+            currency: Currency code (default: USD)
+            utilization_status: Utilization level (idle, low, medium, high, unknown)
+            cpu_utilization_percent: CPU utilization percentage
+            memory_utilization_percent: Memory utilization percentage
+            storage_utilization_percent: Storage utilization percentage
+            network_utilization_mbps: Network utilization in Mbps
+            is_optimizable: Whether resource can be optimized
+            optimization_priority: Priority level (critical, high, medium, low, none)
+            optimization_score: Optimization score 0-100 (0=optimized, 100=wasteful)
+            potential_monthly_savings: Potential monthly savings in USD
+            optimization_recommendations: List of optimization suggestions
+            tags: Resource tags from cloud provider
+            resource_status: Cloud provider status (running, stopped, etc.)
+            is_orphan: Whether resource is also detected as orphan
+            created_at_cloud: When resource was created in cloud
+            last_used_at: Last time resource was actively used
+        """
+        self.resource_type = resource_type
+        self.resource_id = resource_id
+        self.resource_name = resource_name
+        self.region = region
+        self.estimated_monthly_cost = estimated_monthly_cost
+        self.resource_metadata = resource_metadata
+        self.currency = currency
+        self.utilization_status = utilization_status
+        self.cpu_utilization_percent = cpu_utilization_percent
+        self.memory_utilization_percent = memory_utilization_percent
+        self.storage_utilization_percent = storage_utilization_percent
+        self.network_utilization_mbps = network_utilization_mbps
+        self.is_optimizable = is_optimizable
+        self.optimization_priority = optimization_priority
+        self.optimization_score = optimization_score
+        self.potential_monthly_savings = potential_monthly_savings
+        self.optimization_recommendations = optimization_recommendations or []
+        self.tags = tags or {}
+        self.resource_status = resource_status
+        self.is_orphan = is_orphan
+        self.created_at_cloud = created_at_cloud
+        self.last_used_at = last_used_at
+
+
 class CloudProviderBase(ABC):
     """
     Abstract base class for cloud provider implementations.

@@ -192,7 +192,7 @@ export default function ScansPage() {
       <div>
         <h1 className="text-2xl md:text-3xl font-bold text-gray-900">Scans</h1>
         <p className="mt-1 md:mt-2 text-sm md:text-base text-gray-600">
-          Manage and monitor your cloud resource scans
+          Scan your cloud accounts to detect orphaned resources and analyze all resources for cost optimization
         </p>
       </div>
 

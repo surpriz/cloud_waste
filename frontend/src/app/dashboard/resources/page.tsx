@@ -310,7 +310,7 @@ export default function ResourcesPage() {
         <div>
           <h1 className="text-2xl md:text-3xl font-bold text-gray-900">Orphan Resources</h1>
           <p className="mt-1 md:mt-2 text-sm md:text-base text-gray-600">
-            Review and manage detected orphaned cloud resources
+            View orphaned resources that are wasting money
           </p>
         </div>
         <button

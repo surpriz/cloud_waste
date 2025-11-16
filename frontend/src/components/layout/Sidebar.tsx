@@ -13,7 +13,8 @@ import {
   X,
   TrendingUp,
   MessageSquare,
-  Shield
+  Shield,
+  DollarSign,
 } from "lucide-react";
 import { useAuthStore } from "@/stores/useAuthStore";
 
@@ -22,6 +23,7 @@ const navigation = [
   { name: "Cloud Accounts", href: "/dashboard/accounts", icon: Cloud },
   { name: "Scans", href: "/dashboard/scans", icon: Search },
   { name: "Resources", href: "/dashboard/resources", icon: FolderOpen },
+  { name: "💡 Cost Intelligence", href: "/dashboard/cost-intelligence", icon: DollarSign },
   { name: "🤖 AI Assistant", href: "/dashboard/assistant", icon: MessageSquare },
   { name: "💰 Impact & Savings", href: "/dashboard/impact", icon: TrendingUp },
   { name: "Settings", href: "/dashboard/settings", icon: Settings },

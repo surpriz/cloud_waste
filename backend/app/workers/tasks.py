@@ -26,7 +26,10 @@ from app.services.ml_data_collector import (
     collect_ml_training_data,
 )
 from app.services.pricing_service import PricingService
+from app.services.inventory_scanner import AWSInventoryScanner, AzureInventoryScanner
 from app.workers.celery_app import celery_app
+from app.models.all_cloud_resource import AllCloudResource
+from app.schemas.all_cloud_resource import AllCloudResourceCreate
 
 # Create async engine for database operations
 engine = create_async_engine(str(settings.DATABASE_URL), echo=False, pool_pre_ping=True)
@@ -271,6 +274,105 @@ async def _scan_cloud_account_async(
                         # Log but don't fail the scan
                         print(f"⚠️ ML data collection failed for scan {scan.id}: {e}")
 
+                # ===================================================================
+                # INVENTORY SCAN: Scan ALL AWS resources for cost intelligence
+                # This runs in addition to orphan scanning to provide complete
+                # resource visibility and optimization recommendations
+                # ===================================================================
+                import structlog
+                logger = structlog.get_logger()
+
+                try:
+                    logger.info(
+                        "inventory.scan_start",
+                        account=account.account_name,
+                        regions=regions_to_scan,
+                    )
+
+                    # Create inventory scanner
+                    inventory_scanner = AWSInventoryScanner(provider)
+                    all_inventory_resources = []
+
+                    # Scan all regions for complete inventory
+                    for i, region in enumerate(regions_to_scan):
+                        logger.info(
+                            "inventory.scan_region_start",
+                            region=region,
+                            progress=f"{i+1}/{len(regions_to_scan)}",
+                        )
+
+                        # Scan EC2 instances (all)
+                        ec2_resources = await inventory_scanner.scan_ec2_instances(region)
+                        all_inventory_resources.extend(ec2_resources)
+                        logger.info(
+                            "inventory.ec2_scanned",
+                            region=region,
+                            ec2_count=len(ec2_resources),
+                        )
+
+                        # Scan RDS instances (all)
+                        rds_resources = await inventory_scanner.scan_rds_instances(region)
+                        all_inventory_resources.extend(rds_resources)
+                        logger.info(
+                            "inventory.rds_scanned",
+                            region=region,
+                            rds_count=len(rds_resources),
+                        )
+
+                    # Scan S3 buckets (global, only once)
+                    if regions_to_scan:
+                        s3_resources = await inventory_scanner.scan_s3_buckets()
+                        all_inventory_resources.extend(s3_resources)
+                        logger.info(
+                            "inventory.s3_scanned",
+                            s3_count=len(s3_resources),
+                        )
+
+                    # Save all inventory resources to database
+                    for resource in all_inventory_resources:
+                        all_cloud_resource = AllCloudResource(
+                            scan_id=scan.id,  # Same scan_id as orphan resources
+                            cloud_account_id=account.id,
+                            resource_type=resource.resource_type,
+                            resource_id=resource.resource_id,
+                            resource_name=resource.resource_name,
+                            region=resource.region,
+                            estimated_monthly_cost=resource.estimated_monthly_cost,
+                            currency=resource.currency,
+                            utilization_status=resource.utilization_status,
+                            cpu_utilization_percent=resource.cpu_utilization_percent,
+                            memory_utilization_percent=resource.memory_utilization_percent,
+                            storage_utilization_percent=resource.storage_utilization_percent,
+                            network_utilization_mbps=resource.network_utilization_mbps,
+                            is_optimizable=resource.is_optimizable,
+                            optimization_priority=resource.optimization_priority,
+                            optimization_score=resource.optimization_score,
+                            potential_monthly_savings=resource.potential_monthly_savings,
+                            optimization_recommendations=resource.optimization_recommendations,
+                            resource_metadata=resource.resource_metadata,
+                            tags=resource.tags,
+                            resource_status=resource.resource_status,
+                            created_at_cloud=resource.created_at_cloud,
+                        )
+                        db.add(all_cloud_resource)
+
+                    await db.commit()
+
+                    logger.info(
+                        "inventory.scan_complete",
+                        total_resources=len(all_inventory_resources),
+                        optimizable=sum(1 for r in all_inventory_resources if r.is_optimizable),
+                        total_cost=sum(r.estimated_monthly_cost for r in all_inventory_resources),
+                        potential_savings=sum(r.potential_monthly_savings or 0 for r in all_inventory_resources),
+                    )
+
+                    print(f"✅ Inventory scan complete: {len(all_inventory_resources)} resources scanned")
+
+                except Exception as e:
+                    # Log but don't fail the main scan
+                    logger.error("inventory.scan_failed", error=str(e))
+                    print(f"⚠️ Inventory scan failed for scan {scan.id}: {e}")
+
                 # Send email notification if user has enabled notifications
                 if user and user.email_scan_notifications:
                     send_scan_summary_email(
@@ -406,6 +508,105 @@ async def _scan_cloud_account_async(
                     except Exception as e:
                         # Log but don't fail the scan
                         print(f"⚠️ ML data collection failed for scan {scan.id}: {e}")
+
+                # ===================================================================
+                # INVENTORY SCAN: Scan ALL Azure resources for cost intelligence
+                # This runs in addition to orphan scanning to provide complete
+                # resource visibility and optimization recommendations
+                # ===================================================================
+                import structlog
+                logger = structlog.get_logger()
+
+                try:
+                    logger.info(
+                        "inventory.scan_start",
+                        account=account.account_name,
+                        regions=regions_to_scan,
+                    )
+
+                    # Create inventory scanner
+                    inventory_scanner = AzureInventoryScanner(provider)
+                    all_inventory_resources = []
+
+                    # Scan all regions for complete inventory
+                    for i, region in enumerate(regions_to_scan):
+                        logger.info(
+                            "inventory.scan_region_start",
+                            region=region,
+                            progress=f"{i+1}/{len(regions_to_scan)}",
+                        )
+
+                        # Scan Virtual Machines (all)
+                        vm_resources = await inventory_scanner.scan_virtual_machines(region)
+                        all_inventory_resources.extend(vm_resources)
+                        logger.info(
+                            "inventory.vm_scanned",
+                            region=region,
+                            vm_count=len(vm_resources),
+                        )
+
+                        # Scan Managed Disks (all)
+                        disk_resources = await inventory_scanner.scan_managed_disks(region)
+                        all_inventory_resources.extend(disk_resources)
+                        logger.info(
+                            "inventory.disk_scanned",
+                            region=region,
+                            disk_count=len(disk_resources),
+                        )
+
+                        # Scan Public IPs (all)
+                        ip_resources = await inventory_scanner.scan_public_ips(region)
+                        all_inventory_resources.extend(ip_resources)
+                        logger.info(
+                            "inventory.ip_scanned",
+                            region=region,
+                            ip_count=len(ip_resources),
+                        )
+
+                    # Save all inventory resources to database
+                    for resource in all_inventory_resources:
+                        all_cloud_resource = AllCloudResource(
+                            scan_id=scan.id,  # Same scan_id as orphan resources
+                            cloud_account_id=account.id,
+                            resource_type=resource.resource_type,
+                            resource_id=resource.resource_id,
+                            resource_name=resource.resource_name,
+                            region=resource.region,
+                            estimated_monthly_cost=resource.estimated_monthly_cost,
+                            currency=resource.currency,
+                            utilization_status=resource.utilization_status,
+                            cpu_utilization_percent=resource.cpu_utilization_percent,
+                            memory_utilization_percent=resource.memory_utilization_percent,
+                            storage_utilization_percent=resource.storage_utilization_percent,
+                            network_utilization_mbps=resource.network_utilization_mbps,
+                            is_optimizable=resource.is_optimizable,
+                            optimization_priority=resource.optimization_priority,
+                            optimization_score=resource.optimization_score,
+                            potential_monthly_savings=resource.potential_monthly_savings,
+                            optimization_recommendations=resource.optimization_recommendations,
+                            resource_metadata=resource.resource_metadata,
+                            tags=resource.tags,
+                            resource_status=resource.resource_status,
+                            created_at_cloud=resource.created_at_cloud,
+                        )
+                        db.add(all_cloud_resource)
+
+                    await db.commit()
+
+                    logger.info(
+                        "inventory.scan_complete",
+                        total_resources=len(all_inventory_resources),
+                        optimizable=sum(1 for r in all_inventory_resources if r.is_optimizable),
+                        total_cost=sum(r.estimated_monthly_cost for r in all_inventory_resources),
+                        potential_savings=sum(r.potential_monthly_savings or 0 for r in all_inventory_resources),
+                    )
+
+                    print(f"✅ Inventory scan complete: {len(all_inventory_resources)} resources scanned")
+
+                except Exception as e:
+                    # Log but don't fail the main scan
+                    logger.error("inventory.scan_failed", error=str(e))
+                    print(f"⚠️ Inventory scan failed for scan {scan.id}: {e}")
 
                 # Send email notification if user has enabled notifications
                 if user and user.email_scan_notifications:

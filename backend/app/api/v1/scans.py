@@ -11,6 +11,7 @@ from app.api.deps import get_current_active_user, get_db
 from app.core.rate_limit import scan_limit
 from app.crud import cloud_account as cloud_account_crud
 from app.crud import scan as scan_crud
+from app.models.scan import ScanType
 from app.models.user import User
 from app.schemas.scan import Scan, ScanCreate, ScanProgress, ScanSummary, ScanWithResources
 from app.workers.celery_app import celery_app
@@ -316,3 +317,4 @@ async def delete_scan(
 
     # Delete scan (cascade will delete orphan resources)
     await scan_crud.delete_scan(db, scan_id)
+

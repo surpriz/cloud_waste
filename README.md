@@ -750,7 +750,7 @@ scp deployment/setup-vps.sh administrator@YOUR_VPS_IP:~/
 # Note: Replace 'administrator' with your admin user (root, ubuntu, admin, etc.)
 
 # 2. Run initialization script (installs Docker, Nginx, SSL, monitoring)
-ssh administrator@YOUR_VPS_IP
+ssh administrator@155.117.43.17
 sudo bash ~/setup-vps.sh
 
 # 3. Clone and deploy

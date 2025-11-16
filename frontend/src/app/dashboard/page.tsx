@@ -5,6 +5,7 @@ import { useAccountStore } from "@/stores/useAccountStore";
 import { useScanStore } from "@/stores/useScanStore";
 import { useResourceStore } from "@/stores/useResourceStore";
 import { useAuthStore } from "@/stores/useAuthStore";
+import { useInventoryStore } from "@/stores/useInventoryStore";
 import {
   Cloud,
   Search,
@@ -90,6 +91,7 @@ export default function DashboardPage() {
   const { accounts, fetchAccounts } = useAccountStore();
   const { summary, fetchSummary, scans, fetchScans } = useScanStore();
   const { stats, fetchStats, resources, fetchResources } = useResourceStore();
+  const { highCostResources, fetchHighCostResources } = useInventoryStore();
   const { user } = useAuthStore();
   const [showWelcome, setShowWelcome] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
@@ -111,9 +113,14 @@ export default function DashboardPage() {
       if (accounts.length === 0) {
         setShowWelcome(true);
       }
+
+      // Fetch high-cost resources if accounts exist
+      if (accounts.length > 0) {
+        fetchHighCostResources(accounts[0].id, 50, 5);
+      }
     };
     loadData();
-  }, [user, fetchAccounts, fetchSummary, fetchStats, fetchScans, fetchResources]);
+  }, [user, fetchAccounts, fetchSummary, fetchStats, fetchScans, fetchResources, fetchHighCostResources, accounts.length]);
 
   // Mock trend data for sparklines (would come from API in production)
   const generateSparklineData = (trend: "up" | "down" | "stable") => {
@@ -299,14 +306,70 @@ export default function DashboardPage() {
         })}
       </div>
 
-      {/* Top row: Top Offenders + Provider Breakdown */}
+      {/* Top row: High-Cost Resources (if available) + Top Offenders + Provider Breakdown */}
+      {highCostResources.length > 0 && (
+        <div className="rounded-2xl border-2 border-purple-300 bg-gradient-to-br from-purple-50 to-indigo-50 p-6 shadow-lg">
+          <div className="flex items-center justify-between mb-4">
+            <h2 className="text-xl font-bold text-gray-900 flex items-center gap-2">
+              <DollarSign className="h-5 w-5 text-purple-600" />
+              💡 Expensive Resources Alert
+            </h2>
+            <a
+              href="/dashboard/cost-intelligence"
+              className="text-sm font-semibold text-purple-600 hover:text-purple-700 flex items-center gap-1"
+            >
+              View All <ArrowRight className="h-4 w-4" />
+            </a>
+          </div>
+          <p className="text-sm text-gray-600 mb-4">
+            Resources costing more than $50/month - Review for optimization opportunities
+          </p>
+          <div className="space-y-3">
+            {highCostResources.slice(0, 5).map((resource, idx) => {
+              const Icon = resourceIcons[resource.resource_type] || HardDrive;
+              return (
+                <div
+                  key={resource.id}
+                  className="flex items-center gap-3 p-3 rounded-xl bg-white shadow-sm hover:shadow-md transition-all"
+                >
+                  <div className="flex-shrink-0 flex items-center justify-center w-8 h-8 rounded-full bg-purple-100 text-purple-700 font-bold text-sm">
+                    {idx + 1}
+                  </div>
+                  <Icon className="h-5 w-5 text-gray-600 flex-shrink-0" />
+                  <div className="flex-1 min-w-0">
+                    <p className="font-semibold text-sm text-gray-900 truncate">
+                      {formatResourceType(resource.resource_type)}
+                    </p>
+                    <p className="text-xs text-gray-600">
+                      {resource.region}
+                      {resource.is_optimizable && (
+                        <span className="ml-2 text-orange-600 font-medium">
+                          • Can save ${resource.potential_monthly_savings.toFixed(2)}/mo
+                        </span>
+                      )}
+                    </p>
+                  </div>
+                  <div className="text-right flex-shrink-0">
+                    <p className="font-bold text-gray-900">
+                      ${resource.estimated_monthly_cost.toFixed(2)}
+                    </p>
+                    <p className="text-xs text-gray-500">/month</p>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* Top Offenders + Provider Breakdown */}
       {stats && stats.total_resources > 0 && (
         <div className="grid gap-6 lg:grid-cols-2">
           {/* Top Offenders */}
           <div className="rounded-2xl border border-gray-200 bg-white p-6 shadow-lg">
             <h2 className="text-xl font-bold text-gray-900 mb-4 flex items-center gap-2">
               <AlertTriangle className="h-5 w-5 text-orange-600" />
-              Top Offenders
+              Top Offenders (Orphans)
             </h2>
             <div className="space-y-3">
               {topOffenders.length > 0 ? (

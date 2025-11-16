@@ -63,7 +63,9 @@ async def get_scans_by_account(
     limit: int = 100,
 ) -> list[Scan]:
     """
-    Get scans for a specific cloud account.
+    Get orphan scans for a specific cloud account.
+
+    Excludes inventory scans (cost intelligence) to avoid confusion.
 
     Args:
         db: Database session
@@ -72,11 +74,14 @@ async def get_scans_by_account(
         limit: Maximum number of records to return
 
     Returns:
-        List of scan objects
+        List of orphan scan objects
     """
     result = await db.execute(
         select(Scan)
-        .where(Scan.cloud_account_id == cloud_account_id)
+        .where(
+            Scan.cloud_account_id == cloud_account_id,
+            Scan.scan_type != "inventory"
+        )
         .order_by(desc(Scan.created_at))
         .offset(skip)
         .limit(limit)
@@ -91,7 +96,9 @@ async def get_scans_by_user(
     limit: int = 100,
 ) -> list[Scan]:
     """
-    Get all scans for a user's cloud accounts.
+    Get all orphan scans for a user's cloud accounts.
+
+    Excludes inventory scans (cost intelligence) to avoid confusion.
 
     Args:
         db: Database session
@@ -100,14 +107,17 @@ async def get_scans_by_user(
         limit: Maximum number of records to return
 
     Returns:
-        List of scan objects
+        List of orphan scan objects
     """
     from app.models.cloud_account import CloudAccount
 
     result = await db.execute(
         select(Scan)
         .join(CloudAccount)
-        .where(CloudAccount.user_id == user_id)
+        .where(
+            CloudAccount.user_id == user_id,
+            Scan.scan_type != "inventory"
+        )
         .order_by(desc(Scan.created_at))
         .offset(skip)
         .limit(limit)
@@ -162,7 +172,8 @@ async def get_scan_statistics(
     """
     from app.models.cloud_account import CloudAccount
 
-    query = select(Scan)
+    # Filter out INVENTORY scans from statistics (only count orphan scans)
+    query = select(Scan).where(Scan.scan_type != "inventory")
 
     # SECURITY: Filter by user_id to prevent cross-user data leakage
     if user_id:
