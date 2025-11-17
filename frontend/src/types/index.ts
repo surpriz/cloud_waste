@@ -354,7 +354,10 @@ export type ResourceType =
   | "azure_app_configuration"
   | "azure_api_management"
   | "azure_logic_app"
-  | "azure_data_factory";
+  | "azure_data_factory"
+  | "azure_static_web_app"
+  | "azure_dedicated_hsm"
+  | "azure_iot_hub_routing";
 
 export type ConfidenceLevel = "critical" | "high" | "medium" | "low";
 

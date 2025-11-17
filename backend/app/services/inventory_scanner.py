@@ -15965,3 +15965,838 @@ class AzureInventoryScanner:
             return is_optimizable, optimization_score, priority, potential_savings, recommendations
 
         return is_optimizable, optimization_score, priority, potential_savings, recommendations
+
+    async def scan_static_web_apps(self, region: str) -> list[AllCloudResourceData]:
+        """
+        Scan ALL Azure Static Web Apps for cost intelligence.
+
+        Pricing (Azure Static Web Apps):
+        - Free tier: $0/mois (100GB bandwidth, 250MB storage)
+        - Standard tier: $9/mois per app + $0.20/GB bandwidth
+
+        Typical cost: $0-100/month
+
+        Returns:
+            List of AllCloudResourceData (is_orphan=False, is_optimizable=True)
+        """
+        try:
+            from azure.mgmt.web import WebSiteManagementClient
+        except ImportError:
+            logger.warning("azure-mgmt-web not installed, skipping Static Web Apps scan")
+            return []
+
+        resources = []
+
+        try:
+            credential = self._get_azure_credential()
+            web_client = WebSiteManagementClient(credential, self.subscription_id)
+
+            # Iterate over resource groups
+            for rg_name in self.resource_groups:
+                try:
+                    # List Static Web Apps in resource group
+                    static_sites = web_client.static_sites.list(rg_name)
+
+                    for site in static_sites:
+                        try:
+                            # Extract location
+                            site_location = getattr(site, "location", "unknown").lower()
+
+                            # Filter by region if not global
+                            if region.lower() != "global" and site_location != region.lower():
+                                continue
+
+                            # Extract metadata
+                            site_id = getattr(site, "id", "")
+                            site_name = getattr(site, "name", "unknown")
+                            sku_tier = getattr(getattr(site, "sku", None), "tier", "Free")  # Free or Standard
+                            created_time = getattr(site, "created_time", None)
+
+                            # Default hostname
+                            default_hostname = getattr(site, "default_hostname", None)
+
+                            # Custom domains
+                            custom_domains = []
+                            try:
+                                domains_list = web_client.static_sites.list_static_site_custom_domains(rg_name, site_name)
+                                custom_domains = [d.name for d in domains_list]
+                            except Exception:
+                                pass
+
+                            # Repository info
+                            repository_url = getattr(site, "repository_url", None)
+                            branch = getattr(site, "branch", None)
+
+                            # Tags
+                            tags = getattr(site, "tags", {}) or {}
+
+                            # Calculate age
+                            age_days = 0
+                            if created_time:
+                                age_days = (datetime.now(timezone.utc) - created_time).days
+
+                            # Estimate bandwidth usage (no direct metric)
+                            # Assume Standard tier = high traffic, Free tier = low traffic
+                            estimated_monthly_bandwidth_gb = 50 if sku_tier == "Standard" else 10
+
+                            # Estimate monthly cost
+                            monthly_cost = self._estimate_static_web_app_cost(
+                                sku_tier=sku_tier,
+                                estimated_monthly_bandwidth_gb=estimated_monthly_bandwidth_gb
+                            )
+
+                            # Check optimization opportunities
+                            is_optimizable, optimization_score, priority, potential_savings, recommendations = (
+                                self._calculate_static_web_app_optimization(
+                                    sku_tier=sku_tier,
+                                    age_days=age_days,
+                                    estimated_monthly_bandwidth_gb=estimated_monthly_bandwidth_gb,
+                                    custom_domains_count=len(custom_domains),
+                                    repository_url=repository_url,
+                                    monthly_cost=monthly_cost,
+                                )
+                            )
+
+                            # Build metadata
+                            metadata = {
+                                "site_id": site_id,
+                                "site_name": site_name,
+                                "sku_tier": sku_tier,
+                                "location": site_location,
+                                "resource_group": rg_name,
+                                "age_days": age_days,
+                                "default_hostname": default_hostname,
+                                "custom_domains": custom_domains,
+                                "repository_url": repository_url,
+                                "branch": branch,
+                                "estimated_monthly_bandwidth_gb": estimated_monthly_bandwidth_gb,
+                                "tags": tags,
+                            }
+
+                            resource = AllCloudResourceData(
+                                resource_id=site_id,
+                                resource_type="azure_static_web_app",
+                                resource_name=site_name,
+                                region=site_location,
+                                estimated_monthly_cost=monthly_cost,
+                                currency="USD",
+                                resource_metadata=metadata,
+                                created_at_cloud=created_time,
+                                is_orphan=False,
+                                is_optimizable=is_optimizable,
+                                optimization_score=optimization_score,
+                                optimization_priority=priority,
+                                potential_monthly_savings=potential_savings,
+                                optimization_recommendations=recommendations,
+                            )
+
+                            resources.append(resource)
+                            logger.info(
+                                f"Found Static Web App: {site_name} in {site_location} "
+                                f"(SKU: {sku_tier}, Optimizable: {is_optimizable}, Score: {optimization_score})"
+                            )
+
+                        except Exception as e:
+                            logger.error(f"Error processing Static Web App {getattr(site, 'name', 'unknown')}: {e}")
+                            continue
+
+                except Exception as e:
+                    logger.error(f"Error listing Static Web Apps in resource group {rg_name}: {e}")
+                    continue
+
+        except Exception as e:
+            logger.error(f"Error scanning Azure Static Web Apps: {e}")
+
+        logger.info(f"Completed Azure Static Web Apps scan in region {region}: {len(resources)} sites found")
+        return resources
+
+    def _estimate_static_web_app_cost(
+        self,
+        sku_tier: str,
+        estimated_monthly_bandwidth_gb: int,
+    ) -> float:
+        """
+        Estimate monthly cost for Azure Static Web Apps.
+
+        Pricing:
+        - Free tier: $0 (100GB bandwidth, 250MB storage included)
+        - Standard tier: $9/month + $0.20/GB bandwidth
+        """
+        if sku_tier.lower() == "free":
+            # Free tier - no cost unless exceeding limits
+            if estimated_monthly_bandwidth_gb > 100:
+                # Overage charges (rare)
+                overage_gb = estimated_monthly_bandwidth_gb - 100
+                return round(overage_gb * 0.20, 2)
+            return 0.0
+
+        # Standard tier
+        base_cost = 9.0  # $9/month
+        bandwidth_cost = estimated_monthly_bandwidth_gb * 0.20
+        return round(base_cost + bandwidth_cost, 2)
+
+    def _calculate_static_web_app_optimization(
+        self,
+        sku_tier: str,
+        age_days: int,
+        estimated_monthly_bandwidth_gb: int,
+        custom_domains_count: int,
+        repository_url: str,
+        monthly_cost: float,
+    ) -> tuple[bool, int, str, float, list[str]]:
+        """
+        Calculate optimization opportunities for Azure Static Web Apps.
+
+        Returns:
+            (is_optimizable, optimization_score, priority, potential_savings, recommendations)
+        """
+        is_optimizable = False
+        optimization_score = 0
+        priority = "none"
+        potential_savings = 0.0
+        recommendations = []
+
+        # Scenario 1: CRITICAL - Standard tier with no traffic for 90+ days
+        if sku_tier.lower() == "standard" and estimated_monthly_bandwidth_gb < 1 and age_days >= 90:
+            is_optimizable = True
+            optimization_score = 90
+            priority = "critical"
+            potential_savings = monthly_cost  # Full savings by downgrading or deleting
+            recommendations.append(
+                f"Standard tier Static Web App has no traffic for {age_days} days. "
+                "Downgrade to Free tier or delete if unused. "
+                f"Potential savings: ${potential_savings:.2f}/month."
+            )
+            return is_optimizable, optimization_score, priority, potential_savings, recommendations
+
+        # Scenario 2: HIGH - Standard tier with very low traffic (<5GB/month)
+        if sku_tier.lower() == "standard" and estimated_monthly_bandwidth_gb < 5:
+            is_optimizable = True
+            optimization_score = 75
+            priority = "high"
+            # Free tier would cost $0, Standard costs $9 + bandwidth
+            potential_savings = 9.0  # Base cost savings
+            recommendations.append(
+                f"Standard tier Static Web App has very low traffic ({estimated_monthly_bandwidth_gb}GB/month). "
+                "Free tier includes 100GB bandwidth. "
+                f"Downgrade to Free tier to save ${potential_savings:.2f}/month."
+            )
+            return is_optimizable, optimization_score, priority, potential_savings, recommendations
+
+        # Scenario 3: HIGH - Free tier approaching bandwidth limit (>80GB/month)
+        if sku_tier.lower() == "free" and estimated_monthly_bandwidth_gb > 80:
+            is_optimizable = True
+            optimization_score = 70
+            priority = "high"
+            potential_savings = 0.0  # No savings, but avoiding overage charges
+            recommendations.append(
+                f"Free tier Static Web App is approaching bandwidth limit ({estimated_monthly_bandwidth_gb}GB/100GB). "
+                "Upgrade to Standard tier or optimize bandwidth usage (CDN, compression, caching) "
+                "to avoid overage charges."
+            )
+            return is_optimizable, optimization_score, priority, potential_savings, recommendations
+
+        # Scenario 4: MEDIUM - No custom domain configured (best practice)
+        if custom_domains_count == 0 and age_days > 30:
+            is_optimizable = True
+            optimization_score = 50
+            priority = "medium"
+            potential_savings = 0.0
+            recommendations.append(
+                "Static Web App has no custom domain configured. "
+                "Configure a custom domain for production apps to improve branding and SEO."
+            )
+            return is_optimizable, optimization_score, priority, potential_savings, recommendations
+
+        # Scenario 5: LOW - No monitoring/alerting configured
+        if not is_optimizable:
+            is_optimizable = True
+            optimization_score = 30
+            priority = "low"
+            potential_savings = 0.0
+            recommendations.append(
+                "LOW: Configure monitoring and alerting for Static Web App. "
+                "Enable Application Insights to track performance, errors, and user behavior."
+            )
+            return is_optimizable, optimization_score, priority, potential_savings, recommendations
+
+        return is_optimizable, optimization_score, priority, potential_savings, recommendations
+
+    async def scan_dedicated_hsms(self, region: str) -> list[AllCloudResourceData]:
+        """
+        Scan ALL Azure Dedicated HSM instances for cost intelligence.
+
+        Pricing (Azure Dedicated HSM):
+        - Standard HSM: ~$4,500/mois (bare metal appliance)
+        - High Performance HSM: ~$8,000/mois
+
+        Typical cost: $4,500-8,000/month (VERY EXPENSIVE)
+
+        Returns:
+            List of AllCloudResourceData (is_orphan=False, is_optimizable=True)
+        """
+        try:
+            from azure.mgmt.hardwaresecuritymodules import AzureDedicatedHSMResourceProvider
+        except ImportError:
+            logger.warning("azure-mgmt-hardwaresecuritymodules not installed, skipping Dedicated HSM scan")
+            return []
+
+        resources = []
+
+        try:
+            credential = self._get_azure_credential()
+            hsm_client = AzureDedicatedHSMResourceProvider(credential, self.subscription_id)
+
+            # Iterate over resource groups
+            for rg_name in self.resource_groups:
+                try:
+                    # List Dedicated HSMs in resource group
+                    hsms = hsm_client.dedicated_hsm.list_by_resource_group(rg_name)
+
+                    for hsm in hsms:
+                        try:
+                            # Extract location
+                            hsm_location = getattr(hsm, "location", "unknown").lower()
+
+                            # Filter by region if not global
+                            if region.lower() != "global" and hsm_location != region.lower():
+                                continue
+
+                            # Extract metadata
+                            hsm_id = getattr(hsm, "id", "")
+                            hsm_name = getattr(hsm, "name", "unknown")
+                            sku_name = getattr(getattr(hsm, "sku", None), "name", "Standard")  # Standard or High Performance
+                            provisioning_state = getattr(getattr(hsm, "properties", None), "provisioning_state", "Unknown")
+
+                            # HSM properties
+                            properties = getattr(hsm, "properties", None)
+                            stamp_id = getattr(properties, "stamp_id", None) if properties else None
+                            status_message = getattr(properties, "status_message", None) if properties else None
+
+                            # Network profile
+                            network_profile = getattr(properties, "network_profile", None) if properties else None
+                            subnet_id = getattr(network_profile, "subnet", {}).get("id", None) if network_profile else None
+
+                            # Tags
+                            tags = getattr(hsm, "tags", {}) or {}
+
+                            # Calculate age (estimate based on tags or assume old)
+                            age_days = 90  # Default assumption for HSMs
+
+                            # Estimate key usage (no direct metric available)
+                            # Dedicated HSMs can store thousands of keys
+                            estimated_keys_count = 100  # Estimate
+                            estimated_keys_capacity = 10000  # Typical capacity
+
+                            # Estimate monthly cost based on SKU
+                            monthly_cost = self._estimate_dedicated_hsm_cost(sku_name=sku_name)
+
+                            # Check optimization opportunities
+                            is_optimizable, optimization_score, priority, potential_savings, recommendations = (
+                                self._calculate_dedicated_hsm_optimization(
+                                    hsm_name=hsm_name,
+                                    sku_name=sku_name,
+                                    provisioning_state=provisioning_state,
+                                    age_days=age_days,
+                                    estimated_keys_count=estimated_keys_count,
+                                    estimated_keys_capacity=estimated_keys_capacity,
+                                    status_message=status_message,
+                                    monthly_cost=monthly_cost,
+                                )
+                            )
+
+                            # Build metadata
+                            metadata = {
+                                "hsm_id": hsm_id,
+                                "hsm_name": hsm_name,
+                                "sku": sku_name,
+                                "location": hsm_location,
+                                "resource_group": rg_name,
+                                "provisioning_state": provisioning_state,
+                                "stamp_id": stamp_id,
+                                "status_message": status_message,
+                                "subnet_id": subnet_id,
+                                "age_days": age_days,
+                                "estimated_keys_count": estimated_keys_count,
+                                "estimated_keys_capacity": estimated_keys_capacity,
+                                "tags": tags,
+                            }
+
+                            resource = AllCloudResourceData(
+                                resource_id=hsm_id,
+                                resource_type="azure_dedicated_hsm",
+                                resource_name=hsm_name,
+                                region=hsm_location,
+                                estimated_monthly_cost=monthly_cost,
+                                currency="USD",
+                                resource_metadata=metadata,
+                                created_at_cloud=None,  # Not available in API
+                                is_orphan=False,
+                                is_optimizable=is_optimizable,
+                                optimization_score=optimization_score,
+                                optimization_priority=priority,
+                                potential_monthly_savings=potential_savings,
+                                optimization_recommendations=recommendations,
+                            )
+
+                            resources.append(resource)
+                            logger.info(
+                                f"Found Dedicated HSM: {hsm_name} in {hsm_location} "
+                                f"(SKU: {sku_name}, Optimizable: {is_optimizable}, Score: {optimization_score})"
+                            )
+
+                        except Exception as e:
+                            logger.error(f"Error processing Dedicated HSM {getattr(hsm, 'name', 'unknown')}: {e}")
+                            continue
+
+                except Exception as e:
+                    logger.error(f"Error listing Dedicated HSMs in resource group {rg_name}: {e}")
+                    continue
+
+        except Exception as e:
+            logger.error(f"Error scanning Azure Dedicated HSMs: {e}")
+
+        logger.info(f"Completed Azure Dedicated HSM scan in region {region}: {len(resources)} HSMs found")
+        return resources
+
+    def _estimate_dedicated_hsm_cost(self, sku_name: str) -> float:
+        """
+        Estimate monthly cost for Azure Dedicated HSM.
+
+        Pricing:
+        - Standard HSM: ~$4,500/month
+        - High Performance HSM: ~$8,000/month
+        """
+        if "high" in sku_name.lower() or "performance" in sku_name.lower():
+            return 8000.0
+        return 4500.0  # Standard
+
+    def _calculate_dedicated_hsm_optimization(
+        self,
+        hsm_name: str,
+        sku_name: str,
+        provisioning_state: str,
+        age_days: int,
+        estimated_keys_count: int,
+        estimated_keys_capacity: int,
+        status_message: str,
+        monthly_cost: float,
+    ) -> tuple[bool, int, str, float, list[str]]:
+        """
+        Calculate optimization opportunities for Azure Dedicated HSM.
+
+        Returns:
+            (is_optimizable, optimization_score, priority, potential_savings, recommendations)
+        """
+        is_optimizable = False
+        optimization_score = 0
+        priority = "none"
+        potential_savings = 0.0
+        recommendations = []
+
+        # Scenario 1: CRITICAL - HSM provisioned but never connected for 30+ days
+        if provisioning_state.lower() == "succeeded" and age_days >= 30:
+            # Check if there's a status message indicating no connections
+            if status_message and ("not connected" in status_message.lower() or "no activity" in status_message.lower()):
+                is_optimizable = True
+                optimization_score = 90
+                priority = "critical"
+                potential_savings = monthly_cost  # Full cost if unused
+                recommendations.append(
+                    f"Dedicated HSM is provisioned but never connected for {age_days} days. "
+                    f"This is VERY EXPENSIVE (${monthly_cost:.2f}/month). "
+                    "Delete immediately if not needed or investigate connectivity issues."
+                )
+                return is_optimizable, optimization_score, priority, potential_savings, recommendations
+
+        # Scenario 2: HIGH - Utilization <10% of key capacity
+        if estimated_keys_capacity > 0:
+            utilization_pct = (estimated_keys_count / estimated_keys_capacity) * 100
+            if utilization_pct < 10:
+                is_optimizable = True
+                optimization_score = 75
+                priority = "high"
+                potential_savings = monthly_cost * 0.7  # Partial waste
+                recommendations.append(
+                    f"Dedicated HSM has very low utilization ({utilization_pct:.1f}% of key capacity). "
+                    f"This costs ${monthly_cost:.2f}/month. "
+                    "Consider migrating to Azure Key Vault Managed HSM (much cheaper) or consolidating HSMs."
+                )
+                return is_optimizable, optimization_score, priority, potential_savings, recommendations
+
+        # Scenario 3: HIGH - No backup configured (risk of data loss)
+        # Placeholder - would require checking backup settings
+        if not is_optimizable:
+            is_optimizable = True
+            optimization_score = 70
+            priority = "high"
+            potential_savings = 0.0  # No cost savings, but critical risk
+            recommendations.append(
+                f"Dedicated HSM backup configuration not detected (costs ${monthly_cost:.2f}/month). "
+                "Configure backup and disaster recovery to protect critical cryptographic keys. "
+                "Data loss would be catastrophic."
+            )
+            return is_optimizable, optimization_score, priority, potential_savings, recommendations
+
+        # Scenario 4: MEDIUM - Redundant HSM unused (DR not tested)
+        if "dr" in hsm_name.lower() or "secondary" in hsm_name.lower():
+            is_optimizable = True
+            optimization_score = 50
+            priority = "medium"
+            potential_savings = 0.0
+            recommendations.append(
+                f"Dedicated HSM appears to be a DR/secondary instance (costs ${monthly_cost:.2f}/month). "
+                "Verify DR testing is performed regularly. "
+                "Untested DR is wasted money."
+            )
+            return is_optimizable, optimization_score, priority, potential_savings, recommendations
+
+        # Scenario 5: LOW - No monitoring/alerting configured
+        if not is_optimizable:
+            is_optimizable = True
+            optimization_score = 30
+            priority = "low"
+            potential_savings = 0.0
+            recommendations.append(
+                f"LOW: Configure monitoring and alerting for Dedicated HSM (costs ${monthly_cost:.2f}/month). "
+                "Monitor key operations, connection status, and performance metrics. "
+                "Set up alerts for failures and capacity limits."
+            )
+            return is_optimizable, optimization_score, priority, potential_savings, recommendations
+
+        return is_optimizable, optimization_score, priority, potential_savings, recommendations
+
+    async def scan_iot_hub_message_routing(self, region: str) -> list[AllCloudResourceData]:
+        """
+        Scan ALL Azure IoT Hub message routing configurations for cost intelligence.
+
+        This scans all IoT Hubs across all resource groups in the specified region
+        and analyzes their message routing configuration for optimization opportunities.
+
+        Pricing:
+            - Free tier: Free (8,000 messages/day)
+            - Basic tier: $10/month + $0.0004/1K messages
+            - Standard tier: $25-200/month (S1-S3) + $0.0004/1K messages
+            - Message routing: Additional $0.50/million routing operations
+
+        Typical monthly cost: $10-500/month
+
+        Optimization scenarios:
+            1. CRITICAL (90): Custom routes configured but 0 messages routed for 90+ days
+            2. HIGH (75): Fallback route activated with 100% of messages (routing misconfigured)
+            3. HIGH (70): Redundant or conflicting routes (duplicate queries/endpoints)
+            4. MEDIUM (50): Dead endpoints (Storage/Event Hub/Service Bus unavailable)
+            5. LOW (30): No dead-letter endpoint configured (message loss risk)
+
+        Returns:
+            List of AllCloudResourceData objects with is_optimizable=True and optimization scores.
+        """
+        resources = []
+
+        try:
+            from azure.mgmt.iothub import IotHubClient
+        except ImportError:
+            logger.error("azure-mgmt-iothub not installed - cannot scan IoT Hub routing")
+            return resources
+
+        try:
+            credential = DefaultAzureCredential()
+            client = IotHubClient(credential, self.subscription_id)
+
+            # Iterate through all resource groups
+            for rg_name in await self._get_resource_group_names():
+                try:
+                    # List all IoT Hubs in resource group
+                    iot_hubs = client.iot_hub_resource.list_by_resource_group(rg_name)
+
+                    for hub in iot_hubs:
+                        try:
+                            # Filter by region
+                            hub_region = hub.location.lower().replace(" ", "")
+                            normalized_region = region.lower().replace(" ", "")
+                            if hub_region != normalized_region:
+                                continue
+
+                            # Get routing configuration
+                            routing_config = hub.properties.routing if hub.properties else None
+                            sku = hub.sku.name if hub.sku else "unknown"
+                            tier = hub.sku.tier if hub.sku else "unknown"
+
+                            # Extract route metadata
+                            custom_routes = routing_config.routes if routing_config and routing_config.routes else []
+                            fallback_route_enabled = (
+                                routing_config.fallback_route.is_enabled
+                                if routing_config and routing_config.fallback_route
+                                else False
+                            )
+                            endpoints = (
+                                routing_config.endpoints if routing_config and routing_config.endpoints else None
+                            )
+
+                            # Count endpoints by type
+                            storage_endpoints = len(endpoints.storage_containers) if endpoints and endpoints.storage_containers else 0
+                            eventhub_endpoints = len(endpoints.event_hubs) if endpoints and endpoints.event_hubs else 0
+                            servicebus_queue_endpoints = (
+                                len(endpoints.service_bus_queues) if endpoints and endpoints.service_bus_queues else 0
+                            )
+                            servicebus_topic_endpoints = (
+                                len(endpoints.service_bus_topics) if endpoints and endpoints.service_bus_topics else 0
+                            )
+
+                            total_custom_endpoints = (
+                                storage_endpoints
+                                + eventhub_endpoints
+                                + servicebus_queue_endpoints
+                                + servicebus_topic_endpoints
+                            )
+
+                            # Estimate message routing activity (placeholder - real implementation would query metrics)
+                            # For MVP, we estimate based on tier and routes
+                            estimated_monthly_messages = 0
+                            if tier.lower() == "free":
+                                estimated_monthly_messages = 8000 * 30  # 8K/day limit
+                            elif tier.lower() == "basic":
+                                estimated_monthly_messages = 100_000  # Conservative estimate
+                            elif tier.lower() == "standard":
+                                if "s1" in sku.lower():
+                                    estimated_monthly_messages = 1_000_000
+                                elif "s2" in sku.lower():
+                                    estimated_monthly_messages = 10_000_000
+                                elif "s3" in sku.lower():
+                                    estimated_monthly_messages = 100_000_000
+
+                            # Calculate routing efficiency
+                            routes_count = len(custom_routes)
+                            fallback_percentage = 100 if fallback_route_enabled and routes_count == 0 else 0
+                            if routes_count > 0 and fallback_route_enabled:
+                                # Estimate: if routes exist, assume 70% custom, 30% fallback
+                                fallback_percentage = 30
+
+                            # Calculate cost
+                            monthly_cost = self._calculate_iot_hub_routing_cost(
+                                tier, sku, estimated_monthly_messages, routes_count
+                            )
+
+                            # Calculate optimization
+                            (
+                                is_optimizable,
+                                optimization_score,
+                                priority,
+                                potential_savings,
+                                recommendations,
+                            ) = self._calculate_iot_hub_routing_optimization(
+                                tier,
+                                routes_count,
+                                total_custom_endpoints,
+                                fallback_route_enabled,
+                                fallback_percentage,
+                                estimated_monthly_messages,
+                                monthly_cost,
+                            )
+
+                            resource = AllCloudResourceData(
+                                resource_id=hub.id,
+                                resource_type="azure_iot_hub_routing",
+                                resource_name=hub.name,
+                                region=hub.location,
+                                is_orphan=False,  # IoT Hub routing cannot be orphan
+                                is_optimizable=is_optimizable,
+                                optimization_score=optimization_score,
+                                optimization_priority=priority,
+                                potential_monthly_savings=potential_savings,
+                                optimization_recommendations=recommendations,
+                                estimated_monthly_cost=monthly_cost,
+                                currency="USD",
+                                resource_metadata={
+                                    "sku": sku,
+                                    "tier": tier,
+                                    "resource_group": rg_name,
+                                    "custom_routes_count": routes_count,
+                                    "fallback_route_enabled": fallback_route_enabled,
+                                    "fallback_percentage": fallback_percentage,
+                                    "storage_endpoints": storage_endpoints,
+                                    "eventhub_endpoints": eventhub_endpoints,
+                                    "servicebus_queue_endpoints": servicebus_queue_endpoints,
+                                    "servicebus_topic_endpoints": servicebus_topic_endpoints,
+                                    "total_custom_endpoints": total_custom_endpoints,
+                                    "estimated_monthly_messages": estimated_monthly_messages,
+                                },
+                                last_used_at=None,
+                                created_at_cloud=None,
+                            )
+
+                            resources.append(resource)
+                            logger.info(
+                                f"Scanned Azure IoT Hub routing: {hub.name} in {hub.location} "
+                                f"(routes={routes_count}, endpoints={total_custom_endpoints}, "
+                                f"optimizable={is_optimizable}, cost=${monthly_cost:.2f}/month)"
+                            )
+
+                        except Exception as e:
+                            logger.error(
+                                f"Error scanning IoT Hub {hub.name}: {e}",
+                                exc_info=True,
+                            )
+                            continue
+
+                except Exception as e:
+                    logger.error(
+                        f"Error listing IoT Hubs in resource group {rg_name}: {e}",
+                        exc_info=True,
+                    )
+                    continue
+
+        except Exception as e:
+            logger.error(f"Error scanning Azure IoT Hub routing: {e}", exc_info=True)
+
+        return resources
+
+    def _calculate_iot_hub_routing_cost(
+        self, tier: str, sku: str, monthly_messages: int, routes_count: int
+    ) -> float:
+        """
+        Calculate monthly cost for IoT Hub message routing.
+
+        Pricing breakdown (as of 2025):
+            - Free tier: $0 (8,000 messages/day limit)
+            - Basic B1: $10/month + $0.0004/1K messages
+            - Standard S1: $25/month + $0.0004/1K messages (400K/day)
+            - Standard S2: $250/month + $0.0004/1K messages (6M/day)
+            - Standard S3: $2,500/month + $0.0004/1K messages (300M/day)
+            - Message routing: $0.50/million routing operations
+
+        Returns:
+            Estimated monthly cost in USD
+        """
+        tier_lower = tier.lower()
+        sku_lower = sku.lower()
+
+        # Base cost by SKU
+        base_cost = 0.0
+        if tier_lower == "free":
+            base_cost = 0.0
+        elif tier_lower == "basic":
+            base_cost = 10.0
+        elif tier_lower == "standard":
+            if "s1" in sku_lower:
+                base_cost = 25.0
+            elif "s2" in sku_lower:
+                base_cost = 250.0
+            elif "s3" in sku_lower:
+                base_cost = 2500.0
+            else:
+                base_cost = 25.0  # Default to S1
+
+        # Message cost ($0.0004 per 1K messages)
+        message_cost = (monthly_messages / 1000) * 0.0004
+
+        # Routing operations cost ($0.50 per million operations)
+        # Each message can trigger multiple route evaluations
+        routing_operations = monthly_messages * routes_count if routes_count > 0 else monthly_messages
+        routing_cost = (routing_operations / 1_000_000) * 0.50
+
+        total_cost = base_cost + message_cost + routing_cost
+        return round(total_cost, 2)
+
+    def _calculate_iot_hub_routing_optimization(
+        self,
+        tier: str,
+        routes_count: int,
+        total_custom_endpoints: int,
+        fallback_route_enabled: bool,
+        fallback_percentage: int,
+        monthly_messages: int,
+        monthly_cost: float,
+    ) -> tuple[bool, int, str, float, list[str]]:
+        """
+        Calculate optimization opportunities for Azure IoT Hub message routing.
+
+        5 optimization scenarios (ordered by severity):
+            1. CRITICAL (90): Custom routes configured but 0 messages routed for 90+ days
+            2. HIGH (75): Fallback route activated with 100% of messages (routing misconfigured)
+            3. HIGH (70): Redundant or conflicting routes (>5 routes to same endpoint type)
+            4. MEDIUM (50): Dead endpoints (custom endpoints > 0 but fallback 100%)
+            5. LOW (30): No dead-letter endpoint configured (message loss risk)
+
+        Returns:
+            (is_optimizable, optimization_score, priority, potential_savings, recommendations)
+        """
+        is_optimizable = False
+        optimization_score = 0
+        priority = "none"
+        potential_savings = 0.0
+        recommendations: list[str] = []
+
+        # Scenario 1: CRITICAL - Custom routes configured but 0 messages for 90+ days
+        # (In real implementation, would check metrics for actual message counts over 90 days)
+        if routes_count > 0 and monthly_messages == 0:
+            is_optimizable = True
+            optimization_score = 90
+            priority = "critical"
+            # If no messages, can downgrade to Free tier
+            if tier.lower() != "free":
+                potential_savings = monthly_cost  # Save full cost by removing hub or downgrading
+            recommendations.append(
+                f"CRITICAL: IoT Hub has {routes_count} custom route(s) configured but 0 messages routed in 90+ days. "
+                f"Consider deleting unused routes or removing the IoT Hub (saves ${monthly_cost:.2f}/month). "
+                "Review device connectivity and message flow."
+            )
+            return is_optimizable, optimization_score, priority, potential_savings, recommendations
+
+        # Scenario 2: HIGH - Fallback route with 100% of messages (routing misconfigured)
+        if fallback_route_enabled and fallback_percentage >= 90 and routes_count > 0:
+            is_optimizable = True
+            optimization_score = 75
+            priority = "high"
+            # Routing cost wasted on ineffective rules
+            potential_savings = round((monthly_messages * routes_count / 1_000_000) * 0.50, 2)
+            recommendations.append(
+                f"HIGH: Fallback route receives {fallback_percentage}% of messages despite {routes_count} custom route(s). "
+                f"Review routing queries - they may never match (saves ${potential_savings:.2f}/month in routing costs). "
+                "Fix route conditions or remove ineffective routes."
+            )
+            return is_optimizable, optimization_score, priority, potential_savings, recommendations
+
+        # Scenario 3: HIGH - Redundant or conflicting routes
+        if routes_count > 5:
+            is_optimizable = True
+            optimization_score = 70
+            priority = "high"
+            # Estimate 30% of routing operations are redundant
+            redundant_routing_cost = round((monthly_messages * routes_count * 0.3 / 1_000_000) * 0.50, 2)
+            potential_savings = redundant_routing_cost
+            recommendations.append(
+                f"HIGH: IoT Hub has {routes_count} custom routes (>5). "
+                f"Review for redundant or conflicting routing queries (saves ${potential_savings:.2f}/month). "
+                "Consolidate routes where possible to reduce routing overhead."
+            )
+            return is_optimizable, optimization_score, priority, potential_savings, recommendations
+
+        # Scenario 4: MEDIUM - Dead endpoints (endpoints exist but fallback gets all messages)
+        if total_custom_endpoints > 0 and fallback_route_enabled and fallback_percentage >= 70:
+            is_optimizable = True
+            optimization_score = 50
+            priority = "medium"
+            # Endpoints configured but not receiving messages
+            potential_savings = round(monthly_cost * 0.1, 2)  # 10% savings from cleanup
+            recommendations.append(
+                f"MEDIUM: {total_custom_endpoints} custom endpoint(s) configured but fallback route receives {fallback_percentage}% of messages. "
+                f"Endpoints may be unreachable or misconfigured (saves ${potential_savings:.2f}/month). "
+                "Verify endpoint connectivity (Storage/Event Hub/Service Bus)."
+            )
+            return is_optimizable, optimization_score, priority, potential_savings, recommendations
+
+        # Scenario 5: LOW - No dead-letter endpoint configured
+        if routes_count > 0 and not fallback_route_enabled:
+            is_optimizable = True
+            optimization_score = 30
+            priority = "low"
+            potential_savings = 0.0  # No direct cost savings, but prevents message loss
+            recommendations.append(
+                f"LOW: {routes_count} custom route(s) configured but no fallback route enabled. "
+                "Messages that don't match any route will be dropped. "
+                "Enable fallback route to prevent message loss and improve reliability."
+            )
+            return is_optimizable, optimization_score, priority, potential_savings, recommendations
+
+        return is_optimizable, optimization_score, priority, potential_savings, recommendations

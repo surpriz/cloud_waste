@@ -1058,6 +1058,33 @@ async def _scan_cloud_account_async(
                             data_factory_count=len(data_factory_resources),
                         )
 
+                        # Scan Static Web Apps (all)
+                        static_web_app_resources = await inventory_scanner.scan_static_web_apps(region)
+                        all_inventory_resources.extend(static_web_app_resources)
+                        logger.info(
+                            "inventory.static_web_apps_scanned",
+                            region=region,
+                            static_web_app_count=len(static_web_app_resources),
+                        )
+
+                        # Scan Dedicated HSMs (all)
+                        dedicated_hsm_resources = await inventory_scanner.scan_dedicated_hsms(region)
+                        all_inventory_resources.extend(dedicated_hsm_resources)
+                        logger.info(
+                            "inventory.dedicated_hsms_scanned",
+                            region=region,
+                            dedicated_hsm_count=len(dedicated_hsm_resources),
+                        )
+
+                        # Scan IoT Hub Message Routing (all)
+                        iot_hub_routing_resources = await inventory_scanner.scan_iot_hub_message_routing(region)
+                        all_inventory_resources.extend(iot_hub_routing_resources)
+                        logger.info(
+                            "inventory.iot_hub_routing_scanned",
+                            region=region,
+                            iot_hub_routing_count=len(iot_hub_routing_resources),
+                        )
+
                     # Save all inventory resources to database
                     for resource in all_inventory_resources:
                         all_cloud_resource = AllCloudResource(

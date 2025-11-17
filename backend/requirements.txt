@@ -43,6 +43,8 @@ azure-mgmt-appconfiguration==3.1.0  # Azure App Configuration management
 azure-mgmt-apimanagement==5.0.0  # Azure API Management (GraphQL/REST APIs)
 azure-mgmt-logic==10.0.0  # Azure Logic Apps (serverless workflows)
 azure-mgmt-datafactory==9.2.0  # Azure Data Factory (ETL/ELT pipelines)
+azure-mgmt-hardwaresecuritymodules==1.0.0b2  # Azure Dedicated HSM management
+azure-mgmt-iothub  # Azure IoT Hub management (message routing)
 kubernetes==28.1.0  # Kubernetes Python client for AKS pod/PV detection
 pyyaml==6.0.1  # YAML parsing for kubeconfig
 azure-mgmt-sql==3.0.1  # Azure SQL Database management
