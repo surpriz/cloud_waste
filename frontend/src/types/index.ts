@@ -339,7 +339,10 @@ export type ResourceType =
   | "azure_managed_devops_pools"
   | "azure_private_endpoint"
   | "azure_cosmos_db_gremlin"
-  | "azure_hdinsight_kafka";
+  | "azure_hdinsight_kafka"
+  | "azure_ml_endpoint"
+  | "azure_synapse_sql_pool"
+  | "azure_vpn_gateway";
 
 export type ConfidenceLevel = "critical" | "high" | "medium" | "low";
 

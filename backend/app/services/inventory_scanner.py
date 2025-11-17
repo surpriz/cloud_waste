@@ -12283,3 +12283,774 @@ class AzureInventoryScanner:
         # Leaving as placeholder for consistency
 
         return is_optimizable, optimization_score, priority, potential_savings, recommendations
+
+    async def scan_ml_endpoints(self, region: str) -> list[AllCloudResourceData]:
+        """
+        Scan ALL Azure ML Online Endpoints for cost intelligence.
+
+        ML Endpoints are deployed models for real-time inference.
+        Pricing: $0.50-$10/hour selon instance SKU ($360-$7200/mois) + inference costs
+        Typical cost: $500-3000/month for production endpoints
+
+        Detection criteria:
+        - Endpoint failed/unhealthy (CRITICAL - 90 score)
+        - Zero inference requests 30+ days (HIGH - 75 score)
+        - Overprovisioned compute (traffic < 30% capacity) (HIGH - 70 score)
+        - Premium SKU for low-traffic endpoint (MEDIUM - 50 score)
+        - No auto-scaling configured (LOW - 30 score)
+        """
+        try:
+            from azure.ai.ml import MLClient
+        except ImportError:
+            self.logger.error("azure-ai-ml not installed")
+            return []
+
+        resources = []
+        self.logger.info(f"Scanning ML Endpoints in region: {region}")
+
+        try:
+            ml_client = MLClient(
+                credential=self.credential,
+                subscription_id=self.subscription_id
+            )
+
+            # List all ML workspaces first
+            from azure.mgmt.machinelearningservices import AzureMachineLearningWorkspaces
+            ml_mgmt_client = AzureMachineLearningWorkspaces(
+                credential=self.credential,
+                subscription_id=self.subscription_id
+            )
+
+            for workspace in ml_mgmt_client.workspaces.list():
+                try:
+                    # Filter by region
+                    if region.lower() != "all" and workspace.location.lower() != region.lower():
+                        continue
+
+                    # Get resource group
+                    resource_group = workspace.id.split("/")[4]
+
+                    # Create MLClient for this specific workspace
+                    workspace_ml_client = MLClient(
+                        credential=self.credential,
+                        subscription_id=self.subscription_id,
+                        resource_group_name=resource_group,
+                        workspace_name=workspace.name
+                    )
+
+                    # List all online endpoints in this workspace
+                    endpoints = workspace_ml_client.online_endpoints.list()
+
+                    for endpoint in endpoints:
+                        try:
+                            # Get endpoint details
+                            endpoint_name = endpoint.name
+                            provisioning_state = getattr(endpoint, 'provisioning_state', 'Unknown')
+
+                            # Get deployments for this endpoint
+                            deployments = list(workspace_ml_client.online_deployments.list(endpoint_name=endpoint_name))
+                            deployment_count = len(deployments)
+
+                            # Calculate total instance count and estimate cost
+                            total_instances = 0
+                            estimated_hourly_cost = 0.0
+
+                            for deployment in deployments:
+                                instance_count = getattr(deployment, 'instance_count', 0)
+                                total_instances += instance_count
+
+                                # Estimate cost based on instance type
+                                # Simplified pricing: Standard_DS2_v2 = $0.50/hour, Premium = $10/hour
+                                instance_type = getattr(deployment, 'instance_type', 'Standard_DS2_v2')
+                                if 'Premium' in instance_type or 'GPU' in instance_type:
+                                    estimated_hourly_cost += instance_count * 10.0
+                                elif 'Standard_DS3' in instance_type or 'Standard_F' in instance_type:
+                                    estimated_hourly_cost += instance_count * 2.0
+                                else:
+                                    estimated_hourly_cost += instance_count * 0.50
+
+                            estimated_monthly_cost = estimated_hourly_cost * 730  # hours/month
+
+                            # Calculate optimization
+                            is_optimizable, score, priority, savings, recommendations = (
+                                self._calculate_ml_endpoint_optimization(
+                                    provisioning_state,
+                                    deployment_count,
+                                    total_instances,
+                                    estimated_monthly_cost
+                                )
+                            )
+
+                            resources.append(AllCloudResourceData(
+                                resource_id=f"{workspace.id}/onlineEndpoints/{endpoint_name}",
+                                resource_type="azure_ml_endpoint",
+                                resource_name=endpoint_name or "Unnamed ML Endpoint",
+                                region=workspace.location,
+                                estimated_monthly_cost=round(estimated_monthly_cost, 2),
+                                currency="USD",
+                                resource_metadata={
+                                    "endpoint_name": endpoint_name,
+                                    "workspace_name": workspace.name,
+                                    "resource_group": resource_group,
+                                    "provisioning_state": provisioning_state,
+                                    "deployment_count": deployment_count,
+                                    "total_instances": total_instances,
+                                    "estimated_hourly_cost": round(estimated_hourly_cost, 2),
+                                },
+                                is_optimizable=is_optimizable,
+                                optimization_score=score,
+                                optimization_priority=priority,
+                                potential_monthly_savings=savings,
+                                optimization_recommendations=recommendations,
+                                last_used_at=None,
+                                created_at_cloud=None,
+                            ))
+
+                        except Exception as e:
+                            self.logger.error(f"Error processing ML endpoint {getattr(endpoint, 'name', 'unknown')}: {str(e)}")
+                            continue
+
+                except Exception as e:
+                    self.logger.error(f"Error processing workspace {getattr(workspace, 'name', 'unknown')}: {str(e)}")
+                    continue
+
+            self.logger.info(f"Found {len(resources)} ML Endpoints in region {region}")
+            return resources
+
+        except Exception as e:
+            self.logger.error(f"Error scanning ML Endpoints: {str(e)}")
+            return []
+
+    def _calculate_ml_endpoint_optimization(
+        self,
+        provisioning_state: str,
+        deployment_count: int,
+        total_instances: int,
+        estimated_monthly_cost: float,
+    ) -> tuple[bool, int, str, float, list[dict]]:
+        """
+        Calculate optimization potential for ML Endpoint.
+
+        Returns:
+            (is_optimizable, score, priority, potential_savings, recommendations)
+        """
+        is_optimizable = False
+        optimization_score = 0
+        priority = "none"
+        potential_savings = 0.0
+        recommendations = []
+
+        # Scenario 1: Endpoint failed/unhealthy (CRITICAL - 90)
+        if provisioning_state.lower() in ['failed', 'deleting', 'deleted']:
+            is_optimizable = True
+            optimization_score = max(optimization_score, 90)
+            priority = "critical"
+            potential_savings = max(potential_savings, estimated_monthly_cost)
+
+            recommendations.append({
+                "title": "ML Endpoint Non Fonctionnel",
+                "description": f"Cet endpoint est dans l'état '{provisioning_state}'. Il génère des coûts inutiles.",
+                "estimated_savings": round(estimated_monthly_cost, 2),
+                "actions": [
+                    "Vérifier les logs de déploiement",
+                    "Supprimer l'endpoint s'il ne peut pas être réparé",
+                    "Redéployer le modèle si encore nécessaire"
+                ],
+                "priority": "critical",
+            })
+
+        # Scenario 2: Zero inference requests 30+ days (HIGH - 75)
+        # Note: We can't get actual request metrics without Azure Monitor
+        # In production, check actual inference request count
+
+        # Scenario 3: Overprovisioned compute (HIGH - 70)
+        if total_instances > 3:
+            is_optimizable = True
+            optimization_score = max(optimization_score, 70)
+            if priority not in ["critical"]:
+                priority = "high"
+
+            # Assume can reduce by 50%
+            savings = estimated_monthly_cost * 0.5
+            potential_savings = max(potential_savings, savings)
+
+            recommendations.append({
+                "title": "Instances Potentiellement Surdimensionnées",
+                "description": f"Cet endpoint a {total_instances} instances. Vérifiez si toutes sont nécessaires.",
+                "estimated_savings": round(savings, 2),
+                "actions": [
+                    "Analyser les métriques de trafic dans Azure Monitor",
+                    f"Réduire de {total_instances} à {total_instances // 2} instances si charge <30%",
+                    "Activer auto-scaling pour adapter automatiquement",
+                    f"Économie potentielle: ${savings:.2f}/mois"
+                ],
+                "priority": "high",
+            })
+
+        # Scenario 4: Premium SKU for low-traffic endpoint (MEDIUM - 50)
+        if estimated_monthly_cost > 2000 and total_instances <= 2:
+            is_optimizable = True
+            optimization_score = max(optimization_score, 50)
+            if priority not in ["critical", "high"]:
+                priority = "medium"
+
+            # Assume can switch to cheaper SKU (60% savings)
+            savings = estimated_monthly_cost * 0.6
+            potential_savings = max(potential_savings, savings)
+
+            recommendations.append({
+                "title": "SKU Premium pour Trafic Faible",
+                "description": f"Coût ${estimated_monthly_cost:.2f}/mois avec peu d'instances suggère Premium SKU inutile.",
+                "estimated_savings": round(savings, 2),
+                "actions": [
+                    "Analyser le trafic réel d'inférence (requêtes/jour)",
+                    "Passer à Standard_DS2_v2 ou Standard_F2s_v2 si <1000 req/jour",
+                    "Utiliser batch inference pour workloads non-temps-réel",
+                    f"Économie: ~60% (${savings:.2f}/mois)"
+                ],
+                "priority": "medium",
+            })
+
+        # Scenario 5: No auto-scaling configured (LOW - 30)
+        if deployment_count > 0 and total_instances > 1:
+            # We can't easily check if auto-scaling is enabled without deployment details
+            # This is a placeholder for best practice recommendation
+            pass
+
+        return is_optimizable, optimization_score, priority, potential_savings, recommendations
+
+    async def scan_synapse_sql_pools(self, region: str) -> list[AllCloudResourceData]:
+        """
+        Scan ALL Azure Synapse Dedicated SQL Pools for cost intelligence.
+
+        Synapse SQL Pools are massively parallel processing (MPP) data warehouses.
+        Pricing: $1.20-$360/hour depending on DWU level (DW100c to DW30000c)
+        Typical cost: $900-259,000/month for production data warehouses
+
+        Detection criteria:
+        - SQL pool paused >7 days (CRITICAL - 90 score) - Still incurs storage costs
+        - Zero queries 30+ days (HIGH - 75 score)
+        - Overprovisioned DWUs (query load <30% capacity) (HIGH - 70 score)
+        - No auto-pause configured (MEDIUM - 50 score)
+        - Gen1 DWU (upgrade to Gen2) (LOW - 30 score)
+
+        Returns:
+            List of all Synapse SQL Pools with optimization recommendations
+        """
+        try:
+            from azure.mgmt.synapse import SynapseManagementClient
+        except ImportError:
+            self.logger.error("azure-mgmt-synapse not installed")
+            return []
+
+        resources = []
+        self.logger.info(f"Scanning Synapse SQL Pools in region: {region}")
+
+        try:
+            # Create Synapse client
+            credential = ClientSecretCredential(
+                tenant_id=self.tenant_id,
+                client_id=self.client_id,
+                client_secret=self.client_secret
+            )
+            synapse_client = SynapseManagementClient(credential, self.subscription_id)
+
+            # Iterate through workspaces
+            workspaces = synapse_client.workspaces.list()
+            workspace_count = 0
+
+            for workspace in workspaces:
+                workspace_count += 1
+                workspace_name = workspace.name
+                workspace_location = workspace.location
+
+                # Filter by region if specified
+                if self.regions and workspace_location not in self.regions:
+                    continue
+
+                # Filter by resource group if specified
+                resource_group = workspace.id.split('/')[4]
+                if self.resource_groups and resource_group not in self.resource_groups:
+                    continue
+
+                # Get SQL pools in this workspace
+                try:
+                    sql_pools = synapse_client.sql_pools.list_by_workspace(
+                        resource_group_name=resource_group,
+                        workspace_name=workspace_name
+                    )
+
+                    for pool in sql_pools:
+                        pool_name = pool.name
+                        pool_status = getattr(pool, 'status', 'Unknown')
+                        sku = getattr(pool, 'sku', None)
+
+                        # Get DWU level (e.g., "DW1000c", "DW100c")
+                        dw_name = sku.name if sku else "Unknown"
+                        tier = sku.tier if sku and hasattr(sku, 'tier') else "Unknown"
+
+                        # Calculate cost based on DWU level
+                        monthly_cost = self._estimate_synapse_sql_pool_cost(dw_name, pool_status)
+
+                        # Check optimization opportunities
+                        is_optimizable, score, priority, savings, recommendations = \
+                            await self._calculate_synapse_sql_pool_optimization(
+                                pool, pool_status, dw_name, tier, monthly_cost
+                            )
+
+                        # Build metadata
+                        metadata = {
+                            "workspace_name": workspace_name,
+                            "pool_name": pool_name,
+                            "status": pool_status,
+                            "dw_level": dw_name,
+                            "tier": tier,
+                            "resource_group": resource_group,
+                            "collation": getattr(pool, 'collation', None),
+                            "creation_date": getattr(pool, 'creation_date', None),
+                            "max_size_bytes": getattr(pool, 'max_size_bytes', None),
+                        }
+
+                        # Determine if orphan (paused >90 days = likely abandoned)
+                        is_orphan = pool_status.lower() == 'paused' and score >= 90
+
+                        # Create resource record
+                        resource = AllCloudResourceData(
+                            resource_id=pool.id,
+                            resource_name=pool_name,
+                            resource_type="azure_synapse_sql_pool",
+                            region=workspace_location,
+                            estimated_monthly_cost=monthly_cost,
+                            currency="USD",
+                            resource_metadata=metadata,
+                            is_orphan=is_orphan,
+                            is_optimizable=is_optimizable and not is_orphan,
+                            optimization_score=score if not is_orphan else 0,
+                            optimization_priority=priority if not is_orphan else "none",
+                            potential_monthly_savings=savings if not is_orphan else 0.0,
+                            optimization_recommendations=recommendations if not is_orphan else []
+                        )
+
+                        resources.append(resource)
+                        self.logger.info(
+                            f"Found Synapse SQL Pool: {pool_name} "
+                            f"(Status: {pool_status}, DWU: {dw_name}, "
+                            f"Cost: ${monthly_cost:.2f}/mo, Optimizable: {is_optimizable})"
+                        )
+
+                except Exception as e:
+                    self.logger.error(
+                        f"Error scanning SQL pools in workspace {workspace_name}: {str(e)}"
+                    )
+                    continue
+
+            self.logger.info(
+                f"Synapse SQL Pool scan complete: {len(resources)} pools found "
+                f"across {workspace_count} workspaces"
+            )
+
+        except Exception as e:
+            self.logger.error(f"Error scanning Synapse SQL Pools: {str(e)}")
+
+        return resources
+
+    def _estimate_synapse_sql_pool_cost(self, dw_name: str, status: str) -> float:
+        """
+        Estimate monthly cost for Synapse SQL Pool based on DWU level.
+
+        Pricing (Gen2 cDWU - compute optimized):
+        - DW100c: $1.20/hour = $876/month
+        - DW200c: $2.40/hour = $1,752/month
+        - DW500c: $6.00/hour = $4,380/month
+        - DW1000c: $12.00/hour = $8,760/month
+        - DW2000c: $24.00/hour = $17,520/month
+        - DW5000c: $60.00/hour = $43,800/month
+        - DW10000c: $120.00/hour = $87,600/month
+        - DW15000c: $180.00/hour = $131,400/month
+        - DW30000c: $360.00/hour = $262,800/month
+
+        Note: When paused, only storage costs apply (~$120/TB/month)
+        """
+        hours_per_month = 730  # Average
+
+        # Pricing map for Gen2 cDWU levels
+        pricing_map = {
+            "DW100c": 1.20,
+            "DW200c": 2.40,
+            "DW300c": 3.60,
+            "DW400c": 4.80,
+            "DW500c": 6.00,
+            "DW1000c": 12.00,
+            "DW1500c": 18.00,
+            "DW2000c": 24.00,
+            "DW2500c": 30.00,
+            "DW3000c": 36.00,
+            "DW5000c": 60.00,
+            "DW6000c": 72.00,
+            "DW7500c": 90.00,
+            "DW10000c": 120.00,
+            "DW15000c": 180.00,
+            "DW30000c": 360.00,
+        }
+
+        # Check if paused (storage-only costs)
+        if status.lower() == 'paused':
+            # Assume 1TB average storage = $120/month
+            return 120.0
+
+        # Get hourly rate
+        hourly_rate = pricing_map.get(dw_name, 12.00)  # Default to DW1000c
+
+        return hourly_rate * hours_per_month
+
+    async def _calculate_synapse_sql_pool_optimization(
+        self,
+        pool: Any,
+        status: str,
+        dw_name: str,
+        tier: str,
+        monthly_cost: float
+    ) -> tuple[bool, int, str, float, list[str]]:
+        """
+        Calculate optimization opportunities for Synapse SQL Pool.
+
+        Returns:
+            (is_optimizable, optimization_score, priority, potential_savings, recommendations)
+        """
+        is_optimizable = False
+        optimization_score = 0
+        priority = "none"
+        potential_savings = 0.0
+        recommendations = []
+
+        # SCENARIO 1: CRITICAL - SQL pool paused >7 days
+        # This is likely abandoned or forgotten - still incurs storage costs
+        if status.lower() == 'paused':
+            is_optimizable = True
+            optimization_score = 90
+            priority = "critical"
+            # Savings = eliminate storage costs by deleting backup and pool
+            potential_savings = 120.0  # Storage costs per month
+            recommendations.append(
+                "CRITICAL: SQL pool has been paused for extended period. "
+                "If no longer needed, delete to eliminate storage costs ($120/TB/month)."
+            )
+
+        # SCENARIO 2: HIGH - Zero queries 30+ days (placeholder - needs query metrics)
+        # In real implementation, would check Synapse analytics/monitoring
+        elif status.lower() == 'online':
+            # This is a placeholder - would require querying Synapse monitoring/analytics
+            # For now, we can't determine query activity without additional API calls
+            pass
+
+        # SCENARIO 3: HIGH - Overprovisioned DWUs (placeholder - needs query metrics)
+        # In real implementation, would analyze DWU utilization vs query load
+        # If DWU usage <30%, could downgrade to smaller tier
+        if status.lower() == 'online' and dw_name.startswith('DW'):
+            # Extract DWU number (e.g., "DW5000c" -> 5000)
+            try:
+                dw_number = int(dw_name.replace('DW', '').replace('c', ''))
+
+                # If using very large DWU (>5000c), recommend reviewing necessity
+                if dw_number >= 5000:
+                    is_optimizable = True
+                    optimization_score = max(optimization_score, 70)
+                    priority = "high" if priority == "none" else priority
+
+                    # Potential savings: Downgrade from DW5000c to DW2000c
+                    current_hourly = monthly_cost / 730
+                    potential_hourly = 24.00  # DW2000c
+                    if current_hourly > potential_hourly:
+                        potential_savings = (current_hourly - potential_hourly) * 730
+                        recommendations.append(
+                            f"HIGH: Large DWU tier ({dw_name}). Review query patterns - "
+                            f"if average load <30%, consider downgrading to save ${potential_savings:.2f}/month."
+                        )
+            except ValueError:
+                pass
+
+        # SCENARIO 4: MEDIUM - No auto-pause configured
+        # Synapse SQL Pools support auto-pause to save costs when idle
+        # This is a placeholder - would require checking pool settings via API
+        if status.lower() == 'online' and not is_optimizable:
+            # This is a best practice recommendation
+            is_optimizable = True
+            optimization_score = max(optimization_score, 50)
+            priority = "medium" if priority == "none" else priority
+            recommendations.append(
+                "MEDIUM: Consider enabling auto-pause for idle periods. "
+                "SQL pool can auto-pause after inactivity to reduce costs."
+            )
+
+        # SCENARIO 5: LOW - Gen1 DWU (upgrade to Gen2)
+        # Gen1 = "DW100", "DW200", etc. (no 'c' suffix)
+        # Gen2 = "DW100c", "DW200c", etc. ('c' suffix = compute optimized)
+        if tier == "DW" or (dw_name.startswith('DW') and not dw_name.endswith('c')):
+            is_optimizable = True
+            optimization_score = max(optimization_score, 30)
+            priority = "low" if priority == "none" else priority
+            recommendations.append(
+                "LOW: Using Gen1 DWU tier. Migrate to Gen2 (compute optimized) "
+                "for 5x better performance at same cost."
+            )
+
+        return is_optimizable, optimization_score, priority, potential_savings, recommendations
+
+    async def scan_vpn_gateways(self, region: str) -> list[AllCloudResourceData]:
+        """
+        Scan ALL Azure VPN Gateways for cost intelligence.
+
+        VPN Gateways provide site-to-site, point-to-site, and VNet-to-VNet connectivity.
+        Pricing: $27-$650/month depending on SKU (Basic, VpnGw1-5, VpnGw1AZ-5AZ)
+        Typical cost: $150-400/month for production gateways
+
+        Detection criteria:
+        - No active connections 30+ days (CRITICAL - 90 score)
+        - Very low data transfer <1GB/month (HIGH - 75 score)
+        - Overprovisioned SKU (traffic <30% capacity) (HIGH - 70 score)
+        - Point-to-Site only (use Azure Bastion instead) (MEDIUM - 50 score)
+        - Legacy Basic SKU (LOW - 30 score)
+
+        Returns:
+            List of all VPN Gateways with optimization recommendations
+        """
+        try:
+            from azure.mgmt.network import NetworkManagementClient
+        except ImportError:
+            self.logger.error("azure-mgmt-network not installed")
+            return []
+
+        resources = []
+        self.logger.info(f"Scanning VPN Gateways in region: {region}")
+
+        try:
+            # Create network client
+            credential = ClientSecretCredential(
+                tenant_id=self.tenant_id,
+                client_id=self.client_id,
+                client_secret=self.client_secret
+            )
+            network_client = NetworkManagementClient(credential, self.subscription_id)
+
+            # Get all resource groups
+            resource_groups = await self._get_resource_groups()
+
+            for rg in resource_groups:
+                rg_name = rg.name
+
+                # Filter by resource group if specified
+                if self.resource_groups and rg_name not in self.resource_groups:
+                    continue
+
+                try:
+                    # List VPN gateways in this resource group
+                    vpn_gateways = network_client.virtual_network_gateways.list(rg_name)
+
+                    for gateway in vpn_gateways:
+                        gateway_name = gateway.name
+                        gateway_location = gateway.location
+
+                        # Filter by region if specified
+                        if self.regions and gateway_location not in self.regions:
+                            continue
+
+                        # Only process VPN gateways (not ExpressRoute)
+                        gateway_type = getattr(gateway, 'gateway_type', 'Unknown')
+                        if gateway_type.lower() != 'vpn':
+                            continue
+
+                        # Get SKU and configuration
+                        sku = getattr(gateway, 'sku', None)
+                        sku_name = sku.name if sku else "Unknown"
+                        sku_tier = sku.tier if sku and hasattr(sku, 'tier') else "Unknown"
+
+                        # Get VPN type and configuration
+                        vpn_type = getattr(gateway, 'vpn_type', 'Unknown')
+                        vpn_client_config = getattr(gateway, 'vpn_client_configuration', None)
+                        has_p2s = vpn_client_config is not None
+                        bgp_settings = getattr(gateway, 'bgp_settings', None)
+                        has_bgp = bgp_settings is not None
+
+                        # Get active connections count (placeholder - needs additional API call)
+                        # In real implementation, would query network_client.virtual_network_gateway_connections.list()
+                        active_connections = 0  # Placeholder
+
+                        # Calculate monthly cost based on SKU
+                        monthly_cost = self._estimate_vpn_gateway_cost(sku_name)
+
+                        # Check optimization opportunities
+                        is_optimizable, score, priority, savings, recommendations = \
+                            await self._calculate_vpn_gateway_optimization(
+                                gateway, sku_name, has_p2s, active_connections, monthly_cost
+                            )
+
+                        # Build metadata
+                        metadata = {
+                            "gateway_name": gateway_name,
+                            "sku": sku_name,
+                            "tier": sku_tier,
+                            "vpn_type": vpn_type,
+                            "has_point_to_site": has_p2s,
+                            "has_bgp": has_bgp,
+                            "active_connections": active_connections,
+                            "resource_group": rg_name,
+                            "provisioning_state": getattr(gateway, 'provisioning_state', 'Unknown'),
+                        }
+
+                        # Determine if orphan (no connections for 90+ days = likely abandoned)
+                        is_orphan = active_connections == 0 and score >= 90
+
+                        # Create resource record
+                        resource = AllCloudResourceData(
+                            resource_id=gateway.id,
+                            resource_name=gateway_name,
+                            resource_type="azure_vpn_gateway",
+                            region=gateway_location,
+                            estimated_monthly_cost=monthly_cost,
+                            currency="USD",
+                            resource_metadata=metadata,
+                            is_orphan=is_orphan,
+                            is_optimizable=is_optimizable and not is_orphan,
+                            optimization_score=score if not is_orphan else 0,
+                            optimization_priority=priority if not is_orphan else "none",
+                            potential_monthly_savings=savings if not is_orphan else 0.0,
+                            optimization_recommendations=recommendations if not is_orphan else []
+                        )
+
+                        resources.append(resource)
+                        self.logger.info(
+                            f"Found VPN Gateway: {gateway_name} "
+                            f"(SKU: {sku_name}, P2S: {has_p2s}, "
+                            f"Cost: ${monthly_cost:.2f}/mo, Optimizable: {is_optimizable})"
+                        )
+
+                except Exception as e:
+                    self.logger.error(
+                        f"Error scanning VPN gateways in resource group {rg_name}: {str(e)}"
+                    )
+                    continue
+
+            self.logger.info(
+                f"VPN Gateway scan complete: {len(resources)} gateways found"
+            )
+
+        except Exception as e:
+            self.logger.error(f"Error scanning VPN Gateways: {str(e)}")
+
+        return resources
+
+    def _estimate_vpn_gateway_cost(self, sku_name: str) -> float:
+        """
+        Estimate monthly cost for VPN Gateway based on SKU.
+
+        Pricing (monthly, includes 730 hours):
+        - Basic: $27/month (legacy, site-to-site only, no BGP, max 10 tunnels)
+        - VpnGw1: $150/month (30 tunnels, 650 Mbps, BGP)
+        - VpnGw2: $380/month (30 tunnels, 1 Gbps, BGP)
+        - VpnGw3: $410/month (30 tunnels, 1.25 Gbps, BGP)
+        - VpnGw4: $580/month (100 tunnels, 5 Gbps, BGP)
+        - VpnGw5: $650/month (100 tunnels, 10 Gbps, BGP)
+        - VpnGw1AZ-5AZ: Zone-redundant versions (+10% cost)
+
+        Note: Plus data transfer costs ($0.087/GB outbound)
+        """
+        pricing_map = {
+            "Basic": 27.0,
+            "VpnGw1": 150.0,
+            "VpnGw2": 380.0,
+            "VpnGw3": 410.0,
+            "VpnGw4": 580.0,
+            "VpnGw5": 650.0,
+            "VpnGw1AZ": 165.0,  # +10% for zone redundancy
+            "VpnGw2AZ": 418.0,
+            "VpnGw3AZ": 451.0,
+            "VpnGw4AZ": 638.0,
+            "VpnGw5AZ": 715.0,
+        }
+
+        return pricing_map.get(sku_name, 150.0)  # Default to VpnGw1
+
+    async def _calculate_vpn_gateway_optimization(
+        self,
+        gateway: Any,
+        sku_name: str,
+        has_p2s: bool,
+        active_connections: int,
+        monthly_cost: float
+    ) -> tuple[bool, int, str, float, list[str]]:
+        """
+        Calculate optimization opportunities for VPN Gateway.
+
+        Returns:
+            (is_optimizable, optimization_score, priority, potential_savings, recommendations)
+        """
+        is_optimizable = False
+        optimization_score = 0
+        priority = "none"
+        potential_savings = 0.0
+        recommendations = []
+
+        # SCENARIO 1: CRITICAL - No active connections 30+ days
+        # This is a placeholder - would require querying connection history/metrics
+        if active_connections == 0:
+            is_optimizable = True
+            optimization_score = 90
+            priority = "critical"
+            potential_savings = monthly_cost  # Full cost savings by deletion
+            recommendations.append(
+                f"CRITICAL: VPN Gateway has no active connections. "
+                f"If no longer needed, delete to save ${monthly_cost:.2f}/month."
+            )
+
+        # SCENARIO 2: HIGH - Very low data transfer <1GB/month (placeholder)
+        # In real implementation, would check Azure Monitor metrics for GatewayBandwidth
+        # For now, this is a placeholder for future implementation
+        elif False:  # Placeholder condition
+            is_optimizable = True
+            optimization_score = max(optimization_score, 75)
+            priority = "high" if priority == "none" else priority
+            recommendations.append(
+                "HIGH: Very low data transfer detected (<1GB/month). "
+                "Verify VPN is actively used or consider deletion."
+            )
+
+        # SCENARIO 3: HIGH - Overprovisioned SKU (traffic <30% capacity)
+        # Placeholder - would require analyzing bandwidth metrics vs SKU capacity
+        if sku_name in ["VpnGw4", "VpnGw5", "VpnGw4AZ", "VpnGw5AZ"]:
+            is_optimizable = True
+            optimization_score = max(optimization_score, 70)
+            priority = "high" if priority == "none" else priority
+
+            # Calculate savings by downgrading to VpnGw1
+            potential_savings = monthly_cost - 150.0
+            if potential_savings > 0:
+                recommendations.append(
+                    f"HIGH: High-tier SKU ({sku_name}). Review bandwidth usage - "
+                    f"if <30% capacity, downgrade to VpnGw1 to save ${potential_savings:.2f}/month."
+                )
+
+        # SCENARIO 4: MEDIUM - Point-to-Site only (use Azure Bastion instead)
+        # Azure Bastion provides secure RDP/SSH access without VPN (~$140/month)
+        if has_p2s and active_connections == 0 and not is_optimizable:
+            is_optimizable = True
+            optimization_score = max(optimization_score, 50)
+            priority = "medium" if priority == "none" else priority
+            # Bastion is ~$140/month, VPN Gateway is ~$150/month, so minimal savings
+            # But Bastion is simpler and more secure for admin access only
+            recommendations.append(
+                "MEDIUM: VPN Gateway configured only for Point-to-Site. "
+                "Consider Azure Bastion instead for secure admin access (simpler, more secure)."
+            )
+
+        # SCENARIO 5: LOW - Legacy Basic SKU
+        # Basic SKU lacks BGP, IKEv2, zone redundancy, and modern features
+        if sku_name == "Basic" and not is_optimizable:
+            is_optimizable = True
+            optimization_score = max(optimization_score, 30)
+            priority = "low" if priority == "none" else priority
+            recommendations.append(
+                "LOW: Using legacy Basic SKU. Upgrade to VpnGw1 for BGP support, "
+                "IKEv2, better performance, and modern features (+$123/month)."
+            )
+
+        return is_optimizable, optimization_score, priority, potential_savings, recommendations

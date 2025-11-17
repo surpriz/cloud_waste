@@ -932,6 +932,33 @@ async def _scan_cloud_account_async(
                             private_endpoint_count=len(private_endpoint_resources),
                         )
 
+                        # Scan ML Endpoints (all)
+                        ml_endpoint_resources = await inventory_scanner.scan_ml_endpoints(region)
+                        all_inventory_resources.extend(ml_endpoint_resources)
+                        logger.info(
+                            "inventory.ml_endpoints_scanned",
+                            region=region,
+                            ml_endpoint_count=len(ml_endpoint_resources),
+                        )
+
+                        # Scan Synapse SQL Pools (all)
+                        synapse_sql_pool_resources = await inventory_scanner.scan_synapse_sql_pools(region)
+                        all_inventory_resources.extend(synapse_sql_pool_resources)
+                        logger.info(
+                            "inventory.synapse_sql_pools_scanned",
+                            region=region,
+                            synapse_sql_pool_count=len(synapse_sql_pool_resources),
+                        )
+
+                        # Scan VPN Gateways (all)
+                        vpn_gateway_resources = await inventory_scanner.scan_vpn_gateways(region)
+                        all_inventory_resources.extend(vpn_gateway_resources)
+                        logger.info(
+                            "inventory.vpn_gateways_scanned",
+                            region=region,
+                            vpn_gateway_count=len(vpn_gateway_resources),
+                        )
+
                     # Save all inventory resources to database
                     for resource in all_inventory_resources:
                         all_cloud_resource = AllCloudResource(

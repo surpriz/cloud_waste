@@ -40,6 +40,7 @@ import {
   FileType,
   Mic,
   Bot,
+  Brain,
 } from "lucide-react";
 import {
   PieChart as RechartsPie,
@@ -115,6 +116,9 @@ const resourceIcons: Record<ResourceType, any> = {
   azure_private_endpoint: Network,
   azure_cosmos_db_gremlin: Database,
   azure_hdinsight_kafka: Server,
+  azure_ml_endpoint: Brain,
+  azure_synapse_sql_pool: BarChart3,
+  azure_vpn_gateway: Shield,
   // Add more as needed (truncated for brevity)
 } as any;
 
