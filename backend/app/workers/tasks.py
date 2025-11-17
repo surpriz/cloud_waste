@@ -1112,6 +1112,33 @@ async def _scan_cloud_account_async(
                             automation_account_count=len(automation_account_resources),
                         )
 
+                        # Scan Azure Advisor Recommendations (all)
+                        advisor_recommendation_resources = await inventory_scanner.scan_advisor_recommendations(region)
+                        all_inventory_resources.extend(advisor_recommendation_resources)
+                        logger.info(
+                            "inventory.advisor_recommendations_scanned",
+                            region=region,
+                            advisor_recommendation_count=len(advisor_recommendation_resources),
+                        )
+
+                        # Scan ARM Template Deployments (all)
+                        arm_deployment_resources = await inventory_scanner.scan_arm_deployments(region)
+                        all_inventory_resources.extend(arm_deployment_resources)
+                        logger.info(
+                            "inventory.arm_deployments_scanned",
+                            region=region,
+                            arm_deployment_count=len(arm_deployment_resources),
+                        )
+
+                        # Scan Container Instances (all)
+                        container_instance_resources = await inventory_scanner.scan_container_instances(region)
+                        all_inventory_resources.extend(container_instance_resources)
+                        logger.info(
+                            "inventory.container_instances_scanned",
+                            region=region,
+                            container_instance_count=len(container_instance_resources),
+                        )
+
                     # Save all inventory resources to database
                     for resource in all_inventory_resources:
                         all_cloud_resource = AllCloudResource(

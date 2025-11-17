@@ -360,7 +360,10 @@ export type ResourceType =
   | "azure_iot_hub_routing"
   | "azure_ml_online_endpoint"
   | "azure_ml_batch_endpoint"
-  | "azure_automation_account";
+  | "azure_automation_account"
+  | "azure_advisor_recommendation"
+  | "azure_arm_deployment"
+  | "azure_container_instance";
 
 export type ConfidenceLevel = "critical" | "high" | "medium" | "low";
 

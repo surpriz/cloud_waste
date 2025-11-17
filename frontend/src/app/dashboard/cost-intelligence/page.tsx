@@ -138,6 +138,9 @@ const resourceIcons: Record<ResourceType, any> = {
   azure_ml_online_endpoint: Brain,
   azure_ml_batch_endpoint: BarChart3,
   azure_automation_account: Workflow,
+  azure_advisor_recommendation: Sparkles,
+  azure_arm_deployment: FileText,
+  azure_container_instance: Box,
   // Add more as needed (truncated for brevity)
 } as any;
 
