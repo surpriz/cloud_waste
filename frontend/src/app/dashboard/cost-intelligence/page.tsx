@@ -180,6 +180,7 @@ export default function CostIntelligencePage() {
   const [minCostFilter, setMinCostFilter] = useState<number>(100);
   const [priorityFilter, setPriorityFilter] = useState<string>("all");
   const [resourceTypeFilter, setResourceTypeFilter] = useState<string>("all");
+  const [showFilters, setShowFilters] = useState(false);
 
   useEffect(() => {
     fetchAccounts();
@@ -187,7 +188,18 @@ export default function CostIntelligencePage() {
 
   useEffect(() => {
     if (accounts.length > 0 && !selectedAccountId) {
-      setSelectedAccountId(accounts[0].id);
+      // Prioritize accounts with better inventory support
+      // Azure has the most comprehensive scanning (60+ resource types)
+      const providerPriority: Record<string, number> = {
+        azure: 1,
+        aws: 2,
+        gcp: 3,
+        microsoft365: 4
+      };
+      const sortedAccounts = [...accounts].sort((a, b) =>
+        (providerPriority[a.provider] || 5) - (providerPriority[b.provider] || 5)
+      );
+      setSelectedAccountId(sortedAccounts[0].id);
     }
   }, [accounts, selectedAccountId]);
 
@@ -319,6 +331,13 @@ export default function CostIntelligencePage() {
             ))}
           </select>
           <button
+            onClick={() => setShowFilters(!showFilters)}
+            className="flex items-center gap-2 rounded-lg border border-gray-300 px-4 py-2 font-medium text-gray-700 hover:bg-gray-50"
+          >
+            <Filter className="h-5 w-5" />
+            Filters
+          </button>
+          <button
             onClick={handleRefresh}
             disabled={isLoading}
             className="flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-white hover:bg-blue-700 disabled:opacity-50"
@@ -332,6 +351,51 @@ export default function CostIntelligencePage() {
       {error && (
         <div className="rounded-lg bg-red-50 border border-red-200 p-4 text-red-700">
           {error}
+        </div>
+      )}
+
+      {/* Filters Panel */}
+      {showFilters && (
+        <div className="rounded-lg border bg-white p-6 shadow-sm">
+          <h3 className="font-semibold text-gray-900">Filters</h3>
+          <div className="mt-4 grid gap-4 sm:grid-cols-2">
+            {/* Priority Filter */}
+            <div>
+              <label className="block text-sm font-medium text-gray-700">
+                Priority
+              </label>
+              <select
+                value={priorityFilter}
+                onChange={(e) => setPriorityFilter(e.target.value)}
+                className="mt-1 block w-full rounded-lg border border-gray-300 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
+              >
+                <option value="all">All Priorities</option>
+                <option value="critical">Critical</option>
+                <option value="high">High</option>
+                <option value="medium">Medium</option>
+                <option value="low">Low</option>
+              </select>
+            </div>
+
+            {/* Resource Type Filter */}
+            <div>
+              <label className="block text-sm font-medium text-gray-700">
+                Resource Type
+              </label>
+              <select
+                value={resourceTypeFilter}
+                onChange={(e) => setResourceTypeFilter(e.target.value)}
+                className="mt-1 block w-full rounded-lg border border-gray-300 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
+              >
+                <option value="all">All Types</option>
+                {uniqueResourceTypes.map((type) => (
+                  <option key={type} value={type}>
+                    {formatResourceType(type)}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </div>
         </div>
       )}
 
@@ -729,7 +793,17 @@ export default function CostIntelligencePage() {
             No Resources Found
           </h3>
           <p className="text-gray-600 mb-6">
-            Run a scan to discover your cloud resources and costs.
+            No resources found for this account.
+            {accounts.length > 1 && (
+              <span className="block mt-2">
+                Try selecting a different account above, or run a scan to discover resources.
+              </span>
+            )}
+            {accounts.length === 1 && (
+              <span className="block mt-2">
+                Run a scan to discover your cloud resources and costs.
+              </span>
+            )}
           </p>
           <a
             href="/dashboard/scans"

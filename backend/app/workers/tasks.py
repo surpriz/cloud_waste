@@ -969,7 +969,7 @@ async def _scan_cloud_account_async(
                         )
 
                         # Scan Front Doors (global - only once, not per region)
-                        if region == regions[0]:  # Only scan once (Front Door is global)
+                        if region == regions_to_scan[0]:  # Only scan once (Front Door is global)
                             front_door_resources = await inventory_scanner.scan_front_doors(region)
                             all_inventory_resources.extend(front_door_resources)
                             logger.info(

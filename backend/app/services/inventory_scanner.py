@@ -13,6 +13,33 @@ from app.providers.base import AllCloudResourceData
 logger = structlog.get_logger()
 
 
+def safe_get_value(obj: Any, default: Any = None) -> Any:
+    """
+    Safely extract .value from Azure SDK Enum objects.
+
+    Azure SDK inconsistently returns Enum objects (with .value property) or
+    strings directly depending on API version and region. This helper handles both cases.
+
+    Args:
+        obj: Azure SDK object (Enum or string)
+        default: Default value if obj is None
+
+    Returns:
+        The actual value (obj.value if Enum, obj if string, default if None)
+
+    Example:
+        >>> safe_get_value(OperatingSystemTypes.LINUX)  # Enum
+        'Linux'
+        >>> safe_get_value("Linux")  # String
+        'Linux'
+        >>> safe_get_value(None, "Unknown")
+        'Unknown'
+    """
+    if obj is None:
+        return default
+    return obj.value if hasattr(obj, 'value') else obj
+
+
 class AWSInventoryScanner:
     """AWS-specific inventory scanner for cost intelligence."""
 
@@ -1162,8 +1189,8 @@ class AzureInventoryScanner:
                         "ip_address": ip.ip_address,
                         "ip_state": ip_state,
                         "sku_name": sku_name,
-                        "allocation_method": ip.public_ip_allocation_method.value if ip.public_ip_allocation_method else None,
-                        "ip_version": ip.public_ip_address_version.value if ip.public_ip_address_version else None,
+                        "allocation_method": safe_get_value(ip.public_ip_allocation_method),
+                        "ip_version": safe_get_value(ip.public_ip_address_version),
                         "idle_timeout_minutes": ip.idle_timeout_in_minutes,
                     },
                     currency="USD",
@@ -8622,14 +8649,14 @@ class AzureInventoryScanner:
                     account_id = account.id or "unknown"
                     account_name = account.name or "unknown"
                     account_location = account.location or region
-                    provisioning_state = account.provisioning_state.value if account.provisioning_state else "Unknown"
+                    provisioning_state = safe_get_value(account.provisioning_state, "Unknown")
 
                     # Get resource group from account ID
                     resource_group = account_id.split("/")[4] if "/" in account_id else ""
 
                     # Get account properties
-                    sku_name = account.sku.name.value if account.sku else "Unknown"
-                    account_kind = account.kind.value if account.kind else "Unknown"
+                    sku_name = safe_get_value(account.sku.name if account.sku else None, "Unknown")
+                    account_kind = safe_get_value(account.kind, "Unknown")
 
                     # Estimate storage usage (would need actual metrics)
                     storage_used_gb = 0.0  # Would need Azure Monitor metrics
@@ -17993,7 +18020,7 @@ class AzureInventoryScanner:
                             deployment_state = deployment.properties.provisioning_state if deployment.properties else "Unknown"
                             timestamp = deployment.properties.timestamp if deployment.properties else None
                             duration = deployment.properties.duration if deployment.properties else None
-                            mode = deployment.properties.mode.value if deployment.properties and deployment.properties.mode else "Unknown"
+                            mode = safe_get_value(deployment.properties.mode if deployment.properties else None, "Unknown")
 
                             # Calculate age of deployment
                             if timestamp:
@@ -18282,7 +18309,7 @@ class AzureInventoryScanner:
                                     restart_count = first_container.instance_view.restart_count if hasattr(first_container.instance_view, 'restart_count') else 0
 
                             # OS type and resources
-                            os_type = cg.os_type.value if cg.os_type else "Linux"
+                            os_type = safe_get_value(cg.os_type, "Linux")
                             cpu_count = 0.0
                             memory_gb = 0.0
                             if cg.containers and len(cg.containers) > 0:
@@ -18847,7 +18874,7 @@ class AzureInventoryScanner:
                     account_name = account.name or "unknown"
                     account_id = account.id or "unknown"
                     resource_group = account.id.split('/')[4] if account.id else "unknown"
-                    sku_tier = account.sku.tier.value if account.sku and account.sku.tier else "Standard"
+                    sku_tier = safe_get_value(account.sku.tier if account.sku else None, "Standard")
 
                     # Try to get management policy (name is always 'default')
                     policy = None
