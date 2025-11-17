@@ -40,6 +40,10 @@ ENV NEXT_PUBLIC_APP_NAME=${NEXT_PUBLIC_APP_NAME}
 ENV NEXT_PUBLIC_SENTRY_DSN=${NEXT_PUBLIC_SENTRY_DSN}
 ENV NEXT_PUBLIC_SENTRY_ENVIRONMENT=${NEXT_PUBLIC_SENTRY_ENVIRONMENT}
 
+# Limit Node.js memory usage to prevent OOM during build
+# 2048MB is a safe limit for most VPS configurations
+ENV NODE_OPTIONS="--max-old-space-size=2048"
+
 # Build Next.js application
 RUN npm run build
 

@@ -21,6 +21,14 @@ jobs:
           echo "${{ secrets.VPS_SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
           chmod 600 ~/.ssh/id_rsa
           ssh-keyscan -H ${{ secrets.VPS_HOST }} >> ~/.ssh/known_hosts
+          # Configure SSH keep-alive to prevent timeout during long builds
+          cat >> ~/.ssh/config <<EOF
+          Host *
+            ServerAliveInterval 60
+            ServerAliveCountMax 30
+            TCPKeepAlive yes
+          EOF
+          chmod 600 ~/.ssh/config
 
       - name: 🔄 Pre-Deploy - Check Disk Space and Sync Sentry
         env:

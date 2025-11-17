@@ -137,8 +137,9 @@ echo ""
 print_step "Construction des nouvelles images Docker..."
 print_warning "Les conteneurs actuels restent actifs pendant le build"
 
-# Set Docker build timeout to 10 minutes (600s)
-export DOCKER_BUILDKIT_TIMEOUT=600
+# Set Docker build timeout to 20 minutes (1200s)
+# Increased from 600s to handle heavy Next.js builds on limited VPS resources
+export DOCKER_BUILDKIT_TIMEOUT=1200
 
 # Build with cache for faster builds (only use --no-cache if explicitly needed)
 # Retry up to 3 times in case of network timeouts
