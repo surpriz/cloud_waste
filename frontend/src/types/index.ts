@@ -363,7 +363,9 @@ export type ResourceType =
   | "azure_automation_account"
   | "azure_advisor_recommendation"
   | "azure_arm_deployment"
-  | "azure_container_instance";
+  | "azure_container_instance"
+  | "azure_batch_job"
+  | "azure_storage_lifecycle_policy";
 
 export type ConfidenceLevel = "critical" | "high" | "medium" | "low";
 

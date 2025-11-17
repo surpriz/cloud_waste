@@ -141,6 +141,8 @@ const resourceIcons: Record<ResourceType, any> = {
   azure_advisor_recommendation: Sparkles,
   azure_arm_deployment: FileText,
   azure_container_instance: Box,
+  azure_batch_job: Zap,
+  azure_storage_lifecycle_policy: Database,
   // Add more as needed (truncated for brevity)
 } as any;
 

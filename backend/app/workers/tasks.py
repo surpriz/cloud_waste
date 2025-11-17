@@ -1139,6 +1139,24 @@ async def _scan_cloud_account_async(
                             container_instance_count=len(container_instance_resources),
                         )
 
+                        # Scan Batch Jobs (all)
+                        batch_job_resources = await inventory_scanner.scan_batch_jobs(region)
+                        all_inventory_resources.extend(batch_job_resources)
+                        logger.info(
+                            "inventory.batch_jobs_scanned",
+                            region=region,
+                            batch_job_count=len(batch_job_resources),
+                        )
+
+                        # Scan Storage Lifecycle Policies (all)
+                        storage_lifecycle_policy_resources = await inventory_scanner.scan_storage_lifecycle_policies(region)
+                        all_inventory_resources.extend(storage_lifecycle_policy_resources)
+                        logger.info(
+                            "inventory.storage_lifecycle_policies_scanned",
+                            region=region,
+                            storage_lifecycle_policy_count=len(storage_lifecycle_policy_resources),
+                        )
+
                     # Save all inventory resources to database
                     for resource in all_inventory_resources:
                         all_cloud_resource = AllCloudResource(
