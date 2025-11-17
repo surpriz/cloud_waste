@@ -45,6 +45,7 @@ azure-mgmt-logic==10.0.0  # Azure Logic Apps (serverless workflows)
 azure-mgmt-datafactory==9.2.0  # Azure Data Factory (ETL/ELT pipelines)
 azure-mgmt-hardwaresecuritymodules==1.0.0b2  # Azure Dedicated HSM management
 azure-mgmt-iothub  # Azure IoT Hub management (message routing)
+azure-mgmt-automation==1.0.0  # Azure Automation Account management (runbooks, jobs)
 kubernetes==28.1.0  # Kubernetes Python client for AKS pod/PV detection
 pyyaml==6.0.1  # YAML parsing for kubeconfig
 azure-mgmt-sql==3.0.1  # Azure SQL Database management

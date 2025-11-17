@@ -1085,6 +1085,33 @@ async def _scan_cloud_account_async(
                             iot_hub_routing_count=len(iot_hub_routing_resources),
                         )
 
+                        # Scan ML Online Endpoints (all)
+                        ml_online_endpoint_resources = await inventory_scanner.scan_ml_online_endpoints(region)
+                        all_inventory_resources.extend(ml_online_endpoint_resources)
+                        logger.info(
+                            "inventory.ml_online_endpoints_scanned",
+                            region=region,
+                            ml_online_endpoint_count=len(ml_online_endpoint_resources),
+                        )
+
+                        # Scan ML Batch Endpoints (all)
+                        ml_batch_endpoint_resources = await inventory_scanner.scan_ml_batch_endpoints(region)
+                        all_inventory_resources.extend(ml_batch_endpoint_resources)
+                        logger.info(
+                            "inventory.ml_batch_endpoints_scanned",
+                            region=region,
+                            ml_batch_endpoint_count=len(ml_batch_endpoint_resources),
+                        )
+
+                        # Scan Automation Accounts (all)
+                        automation_account_resources = await inventory_scanner.scan_automation_accounts(region)
+                        all_inventory_resources.extend(automation_account_resources)
+                        logger.info(
+                            "inventory.automation_accounts_scanned",
+                            region=region,
+                            automation_account_count=len(automation_account_resources),
+                        )
+
                     # Save all inventory resources to database
                     for resource in all_inventory_resources:
                         all_cloud_resource = AllCloudResource(

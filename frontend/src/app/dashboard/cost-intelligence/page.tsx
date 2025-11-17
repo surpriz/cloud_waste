@@ -135,6 +135,9 @@ const resourceIcons: Record<ResourceType, any> = {
   azure_static_web_app: Globe,
   azure_dedicated_hsm: Shield,
   azure_iot_hub_routing: Radio,
+  azure_ml_online_endpoint: Brain,
+  azure_ml_batch_endpoint: BarChart3,
+  azure_automation_account: Workflow,
   // Add more as needed (truncated for brevity)
 } as any;
 
