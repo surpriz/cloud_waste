@@ -177,6 +177,288 @@ class AWSInventoryScanner:
 
         return all_instances
 
+    async def scan_ebs_volumes(self, region: str) -> list[AllCloudResourceData]:
+        """
+        Scan ALL EBS volumes (attached + unattached) for cost intelligence.
+
+        Unlike orphan detection, this returns ALL volumes with I/O metrics
+        and optimization recommendations.
+
+        Args:
+            region: AWS region to scan
+
+        Returns:
+            List of all EBS volume resources
+        """
+        logger.info("inventory.scan_ebs_start", region=region)
+        all_volumes: list[AllCloudResourceData] = []
+
+        try:
+            async with self.session.client("ec2", region_name=region) as ec2:
+                # Describe ALL volumes (no filters)
+                response = await ec2.describe_volumes()
+
+                for volume in response.get("Volumes", []):
+                    volume_id = volume["VolumeId"]
+                    volume_type = volume.get("VolumeType", "gp3")
+                    state = volume["State"]
+                    size_gb = volume["Size"]
+                    iops = volume.get("Iops")
+                    throughput = volume.get("Throughput")
+
+                    # Extract volume name from tags
+                    volume_name = None
+                    tags = {}
+                    for tag in volume.get("Tags", []):
+                        tags[tag["Key"]] = tag["Value"]
+                        if tag["Key"] == "Name":
+                            volume_name = tag["Value"]
+
+                    # Get CloudWatch metrics (last 14 days)
+                    read_ops = await self._get_volume_read_ops(volume_id, region)
+                    write_ops = await self._get_volume_write_ops(volume_id, region)
+
+                    # Calculate monthly cost
+                    monthly_cost = self._calculate_ebs_monthly_cost(
+                        volume_type, size_gb, iops, throughput, region
+                    )
+
+                    # Determine utilization status
+                    if state == "available":
+                        utilization_status = "idle"
+                    elif read_ops + write_ops == 0:
+                        utilization_status = "idle"
+                    elif read_ops + write_ops < 1000:  # < 1000 ops/day
+                        utilization_status = "low"
+                    elif read_ops + write_ops < 10000:  # < 10K ops/day
+                        utilization_status = "medium"
+                    else:
+                        utilization_status = "high"
+
+                    # Calculate optimization score and recommendations
+                    (
+                        is_optimizable,
+                        optimization_score,
+                        optimization_priority,
+                        potential_savings,
+                        recommendations,
+                    ) = self._calculate_ebs_optimization(
+                        volume,
+                        read_ops,
+                        write_ops,
+                        monthly_cost,
+                        state,
+                    )
+
+                    # Check if volume is also detected as orphan
+                    is_orphan = state == "available" or (
+                        len(volume.get("Attachments", [])) > 0 and read_ops + write_ops == 0
+                    )
+
+                    # Get attachment info
+                    attachments = volume.get("Attachments", [])
+                    attached_to = None
+                    if attachments:
+                        attached_to = attachments[0].get("InstanceId")
+
+                    # Create resource data
+                    resource = AllCloudResourceData(
+                        resource_type="ebs_volume",
+                        resource_id=volume_id,
+                        resource_name=volume_name,
+                        region=region,
+                        estimated_monthly_cost=monthly_cost,
+                        resource_metadata={
+                            "volume_type": volume_type,
+                            "state": state,
+                            "size_gb": size_gb,
+                            "iops": iops,
+                            "throughput": throughput,
+                            "availability_zone": volume.get("AvailabilityZone"),
+                            "encrypted": volume.get("Encrypted", False),
+                            "multi_attach_enabled": volume.get("MultiAttachEnabled", False),
+                            "attached_to": attached_to,
+                            "attachment_count": len(attachments),
+                        },
+                        currency="USD",
+                        utilization_status=utilization_status,
+                        cpu_utilization_percent=None,
+                        memory_utilization_percent=None,
+                        storage_utilization_percent=None,
+                        network_utilization_mbps=None,
+                        is_optimizable=is_optimizable,
+                        optimization_priority=optimization_priority,
+                        optimization_score=optimization_score,
+                        potential_monthly_savings=potential_savings,
+                        optimization_recommendations=recommendations,
+                        tags=tags,
+                        resource_status=state,
+                        is_orphan=is_orphan,
+                        created_at_cloud=volume.get("CreateTime"),
+                        last_used_at=None,  # TODO: Estimate from CloudWatch metrics
+                    )
+
+                    all_volumes.append(resource)
+
+                logger.info(
+                    "inventory.scan_ebs_complete",
+                    region=region,
+                    total_volumes=len(all_volumes),
+                )
+
+        except Exception as e:
+            logger.error(
+                "inventory.scan_ebs_error",
+                region=region,
+                error=str(e),
+                exc_info=True,
+            )
+            raise
+
+        return all_volumes
+
+    async def scan_elastic_ips(self, region: str) -> list[AllCloudResourceData]:
+        """
+        Scan ALL Elastic IPs (associated + unassociated) for cost intelligence.
+
+        Unlike orphan detection, this returns ALL Elastic IPs with
+        utilization status and optimization recommendations.
+
+        Args:
+            region: AWS region to scan
+
+        Returns:
+            List of all Elastic IP resources
+        """
+        logger.info("inventory.scan_elastic_ips_start", region=region)
+        all_eips: list[AllCloudResourceData] = []
+
+        try:
+            async with self.session.client("ec2", region_name=region) as ec2:
+                # Describe ALL Elastic IPs (no filters)
+                response = await ec2.describe_addresses()
+
+                for eip in response.get("Addresses", []):
+                    allocation_id = eip.get("AllocationId", "N/A")
+                    public_ip = eip.get("PublicIp", "N/A")
+                    association_id = eip.get("AssociationId")
+                    instance_id = eip.get("InstanceId")
+                    network_interface_id = eip.get("NetworkInterfaceId")
+
+                    # Extract EIP name from tags
+                    eip_name = None
+                    tags = {}
+                    for tag in eip.get("Tags", []):
+                        tags[tag["Key"]] = tag["Value"]
+                        if tag["Key"] == "Name":
+                            eip_name = tag["Value"]
+
+                    # Determine if EIP is associated (attached to resource)
+                    is_associated = bool(association_id or instance_id or network_interface_id)
+
+                    # Calculate monthly cost
+                    # Unassociated EIPs cost $3.60/month, associated are free
+                    if is_associated:
+                        monthly_cost = 0.0
+                        utilization_status = "active"
+                        state = "associated"
+                    else:
+                        # Use dynamic pricing service with fallback
+                        try:
+                            eip_price = await self.pricing_service.get_aws_price("elastic_ip", region)
+                            monthly_cost = eip_price if eip_price else 3.60
+                        except Exception:
+                            monthly_cost = 3.60
+                        utilization_status = "idle"
+                        state = "unassociated"
+
+                    # Calculate optimization score and recommendations
+                    recommendations = []
+                    is_optimizable = False
+                    optimization_score = 0
+                    potential_savings = 0.0
+                    priority = "none"
+
+                    if not is_associated:
+                        # Unassociated EIP - critical priority
+                        is_optimizable = True
+                        optimization_score = 95
+                        priority = "critical"
+                        potential_savings = monthly_cost
+                        recommendations.append({
+                            "action": "Release unassociated Elastic IP",
+                            "details": f"EIP is not associated with any resource. Release to save ${potential_savings:.2f}/month",
+                            "priority": "critical",
+                        })
+                    elif network_interface_id and not instance_id:
+                        # Associated with ENI but not instance - might be detached
+                        is_optimizable = True
+                        optimization_score = 70
+                        priority = "high"
+                        potential_savings = monthly_cost
+                        recommendations.append({
+                            "action": "Review EIP on detached ENI",
+                            "details": "EIP is attached to ENI but not directly to instance. Verify if ENI is in use",
+                            "priority": "high",
+                        })
+
+                    # Check if EIP is also detected as orphan
+                    is_orphan = not is_associated
+
+                    # Create resource data
+                    resource = AllCloudResourceData(
+                        resource_type="elastic_ip",
+                        resource_id=allocation_id,
+                        resource_name=eip_name,
+                        region=region,
+                        estimated_monthly_cost=monthly_cost,
+                        resource_metadata={
+                            "public_ip": public_ip,
+                            "allocation_id": allocation_id,
+                            "association_id": association_id,
+                            "instance_id": instance_id,
+                            "network_interface_id": network_interface_id,
+                            "domain": eip.get("Domain", "vpc"),
+                            "private_ip_address": eip.get("PrivateIpAddress"),
+                            "is_associated": is_associated,
+                        },
+                        currency="USD",
+                        utilization_status=utilization_status,
+                        cpu_utilization_percent=None,
+                        memory_utilization_percent=None,
+                        storage_utilization_percent=None,
+                        network_utilization_mbps=None,
+                        is_optimizable=is_optimizable,
+                        optimization_priority=priority,
+                        optimization_score=optimization_score,
+                        potential_monthly_savings=potential_savings,
+                        optimization_recommendations=recommendations,
+                        tags=tags,
+                        resource_status=state,
+                        is_orphan=is_orphan,
+                        created_at_cloud=None,  # EIPs don't have creation time in API
+                        last_used_at=None,
+                    )
+
+                    all_eips.append(resource)
+
+                logger.info(
+                    "inventory.scan_elastic_ips_complete",
+                    region=region,
+                    total_eips=len(all_eips),
+                )
+
+        except Exception as e:
+            logger.error(
+                "inventory.scan_elastic_ips_error",
+                region=region,
+                error=str(e),
+                exc_info=True,
+            )
+            raise
+
+        return all_eips
+
     async def scan_rds_instances(self, region: str) -> list[AllCloudResourceData]:
         """
         Scan ALL RDS instances for cost intelligence.
@@ -733,6 +1015,246 @@ class AWSInventoryScanner:
                 "details": f"Migrate {instance_type} → {new_type} for better price/performance",
                 "priority": "medium",
             })
+
+        return is_optimizable, optimization_score, priority, potential_savings, recommendations
+
+    async def _get_volume_read_ops(
+        self, volume_id: str, region: str
+    ) -> float:
+        """Get average volume read operations from CloudWatch (last 14 days)."""
+        try:
+            async with self.session.client("cloudwatch", region_name=region) as cw:
+                end_time = datetime.utcnow()
+                start_time = end_time - timedelta(days=14)
+
+                response = await cw.get_metric_statistics(
+                    Namespace="AWS/EBS",
+                    MetricName="VolumeReadOps",
+                    Dimensions=[{"Name": "VolumeId", "Value": volume_id}],
+                    StartTime=start_time,
+                    EndTime=end_time,
+                    Period=86400,  # 1 day
+                    Statistics=["Sum"],
+                )
+
+                datapoints = response.get("Datapoints", [])
+                if not datapoints:
+                    return 0.0
+
+                # Calculate average daily operations
+                total_ops = sum(dp["Sum"] for dp in datapoints)
+                avg_daily_ops = total_ops / len(datapoints) if datapoints else 0.0
+                return round(avg_daily_ops, 2)
+
+        except Exception as e:
+            logger.warning(
+                "cloudwatch.volume_read_ops_error",
+                volume_id=volume_id,
+                error=str(e),
+            )
+            return 0.0
+
+    async def _get_volume_write_ops(
+        self, volume_id: str, region: str
+    ) -> float:
+        """Get average volume write operations from CloudWatch (last 14 days)."""
+        try:
+            async with self.session.client("cloudwatch", region_name=region) as cw:
+                end_time = datetime.utcnow()
+                start_time = end_time - timedelta(days=14)
+
+                response = await cw.get_metric_statistics(
+                    Namespace="AWS/EBS",
+                    MetricName="VolumeWriteOps",
+                    Dimensions=[{"Name": "VolumeId", "Value": volume_id}],
+                    StartTime=start_time,
+                    EndTime=end_time,
+                    Period=86400,  # 1 day
+                    Statistics=["Sum"],
+                )
+
+                datapoints = response.get("Datapoints", [])
+                if not datapoints:
+                    return 0.0
+
+                # Calculate average daily operations
+                total_ops = sum(dp["Sum"] for dp in datapoints)
+                avg_daily_ops = total_ops / len(datapoints) if datapoints else 0.0
+                return round(avg_daily_ops, 2)
+
+        except Exception as e:
+            logger.warning(
+                "cloudwatch.volume_write_ops_error",
+                volume_id=volume_id,
+                error=str(e),
+            )
+            return 0.0
+
+    def _calculate_ebs_monthly_cost(
+        self,
+        volume_type: str,
+        size_gb: int,
+        iops: int | None,
+        throughput: int | None,
+        region: str,
+    ) -> float:
+        """
+        Calculate estimated monthly cost for EBS volume.
+
+        Uses dynamic pricing from pricing service with hardcoded fallback.
+        Includes storage, IOPS, and throughput costs.
+
+        Args:
+            volume_type: Volume type (gp3, gp2, io2, io1, st1, sc1)
+            size_gb: Volume size in GB
+            iops: Provisioned IOPS (for io1/io2/gp3)
+            throughput: Provisioned throughput in MBps (for gp3/st1)
+            region: AWS region
+
+        Returns:
+            Estimated monthly cost in USD
+        """
+        # Base storage cost per GB/month (fallback prices)
+        STORAGE_PRICES = {
+            "gp3": 0.08,
+            "gp2": 0.10,
+            "io2": 0.125,
+            "io1": 0.125,
+            "st1": 0.045,
+            "sc1": 0.015,
+        }
+
+        storage_price = STORAGE_PRICES.get(volume_type, 0.08)
+        storage_cost = size_gb * storage_price
+
+        # Additional IOPS cost (above baseline)
+        iops_cost = 0.0
+        if volume_type == "gp3" and iops and iops > 3000:
+            # gp3: $0.005/IOPS/month above 3,000 baseline
+            extra_iops = iops - 3000
+            iops_cost = extra_iops * 0.005
+        elif volume_type in ["io1", "io2"] and iops:
+            # io1/io2: $0.065/IOPS/month
+            iops_cost = iops * 0.065
+
+        # Additional throughput cost (above baseline)
+        throughput_cost = 0.0
+        if volume_type == "gp3" and throughput and throughput > 125:
+            # gp3: $0.04/MBps/month above 125 MBps baseline
+            extra_throughput = throughput - 125
+            throughput_cost = extra_throughput * 0.04
+
+        total_cost = storage_cost + iops_cost + throughput_cost
+        return round(total_cost, 2)
+
+    def _calculate_ebs_optimization(
+        self,
+        volume: dict[str, Any],
+        read_ops: float,
+        write_ops: float,
+        monthly_cost: float,
+        state: str,
+    ) -> tuple[bool, int, str, float, list[dict[str, Any]]]:
+        """
+        Calculate EBS volume optimization metrics.
+
+        Returns:
+            (is_optimizable, optimization_score, priority, potential_savings, recommendations)
+        """
+        recommendations = []
+        is_optimizable = False
+        optimization_score = 0
+        potential_savings = 0.0
+        priority = "none"
+
+        volume_type = volume.get("VolumeType", "gp3")
+        size_gb = volume.get("Size", 0)
+        iops = volume.get("Iops")
+        attachments = volume.get("Attachments", [])
+
+        # Scenario 1: Unattached volume (critical)
+        if state == "available":
+            is_optimizable = True
+            optimization_score = 90
+            priority = "critical"
+            potential_savings = monthly_cost  # 100% savings
+            recommendations.append({
+                "action": "Delete unattached volume",
+                "details": f"Volume is unattached. Create snapshot if needed, then delete to save ${potential_savings:.2f}/month",
+                "priority": "critical",
+            })
+
+        # Scenario 2: Attached to stopped instance (high)
+        elif attachments and read_ops == 0 and write_ops == 0:
+            is_optimizable = True
+            optimization_score = 75
+            priority = "high"
+            potential_savings = monthly_cost * 0.9  # Assume snapshot cost is 10%
+            recommendations.append({
+                "action": "Snapshot and delete",
+                "details": f"Volume has no I/O activity. Consider snapshot (${monthly_cost * 0.1:.2f}/month) and delete",
+                "priority": "high",
+            })
+
+        # Scenario 3: gp2 → gp3 migration opportunity (medium)
+        elif volume_type == "gp2":
+            is_optimizable = True
+            optimization_score = 50
+            priority = "medium"
+            # gp3 is ~20% cheaper than gp2
+            gp3_cost = size_gb * 0.08
+            potential_savings = monthly_cost - gp3_cost
+            recommendations.append({
+                "action": "Migrate gp2 → gp3",
+                "details": f"Migrate to gp3 for better price/performance. Save ~${potential_savings:.2f}/month",
+                "alternatives": [
+                    {
+                        "name": "gp3",
+                        "cost": gp3_cost,
+                        "savings": potential_savings,
+                        "performance": "Better (20% more baseline throughput)"
+                    }
+                ],
+                "priority": "medium",
+            })
+
+        # Scenario 4: Overprovisioned IOPS (medium)
+        elif volume_type in ["io1", "io2", "gp3"] and iops:
+            # If total daily ops < 10% of provisioned IOPS, it's overprovisioned
+            daily_ops = read_ops + write_ops
+            if iops > 3000 and daily_ops < (iops * 0.1 * 86400):  # 86400 seconds/day
+                is_optimizable = True
+                optimization_score = 60
+                priority = "medium"
+
+                # Suggest reducing to 3000 IOPS (gp3 baseline)
+                if volume_type == "gp3":
+                    reduced_iops = 3000
+                    iops_savings = (iops - reduced_iops) * 0.005
+                else:  # io1/io2
+                    reduced_iops = max(3000, int(iops * 0.5))
+                    iops_savings = (iops - reduced_iops) * 0.065
+
+                potential_savings = iops_savings
+                recommendations.append({
+                    "action": "Reduce provisioned IOPS",
+                    "details": f"IOPS utilization <10%. Reduce {iops} → {reduced_iops} IOPS to save ${potential_savings:.2f}/month",
+                    "priority": "medium",
+                })
+
+        # Scenario 5: io2 → gp3 downgrade opportunity (low)
+        elif volume_type in ["io1", "io2"] and daily_ops < 16000 * 86400:  # 16K IOPS baseline for gp3
+            is_optimizable = True
+            optimization_score = 40
+            priority = "low"
+            gp3_cost = size_gb * 0.08
+            potential_savings = monthly_cost - gp3_cost
+            if potential_savings > 0:
+                recommendations.append({
+                    "action": "Downgrade to gp3",
+                    "details": f"Low IOPS usage. Consider gp3 (3K-16K IOPS) to save ${potential_savings:.2f}/month",
+                    "priority": "low",
+                })
 
         return is_optimizable, optimization_score, priority, potential_savings, recommendations
 

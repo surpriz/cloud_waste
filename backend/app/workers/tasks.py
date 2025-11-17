@@ -310,6 +310,24 @@ async def _scan_cloud_account_async(
                             ec2_count=len(ec2_resources),
                         )
 
+                        # Scan EBS volumes (all)
+                        ebs_resources = await inventory_scanner.scan_ebs_volumes(region)
+                        all_inventory_resources.extend(ebs_resources)
+                        logger.info(
+                            "inventory.ebs_scanned",
+                            region=region,
+                            ebs_count=len(ebs_resources),
+                        )
+
+                        # Scan Elastic IPs (all)
+                        eip_resources = await inventory_scanner.scan_elastic_ips(region)
+                        all_inventory_resources.extend(eip_resources)
+                        logger.info(
+                            "inventory.eip_scanned",
+                            region=region,
+                            eip_count=len(eip_resources),
+                        )
+
                         # Scan RDS instances (all)
                         rds_resources = await inventory_scanner.scan_rds_instances(region)
                         all_inventory_resources.extend(rds_resources)
