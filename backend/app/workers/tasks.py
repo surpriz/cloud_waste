@@ -977,6 +977,33 @@ async def _scan_cloud_account_async(
                                 front_door_count=len(front_door_resources),
                             )
 
+                        # Scan Container Registries (all)
+                        container_registry_resources = await inventory_scanner.scan_container_registries(region)
+                        all_inventory_resources.extend(container_registry_resources)
+                        logger.info(
+                            "inventory.container_registries_scanned",
+                            region=region,
+                            container_registry_count=len(container_registry_resources),
+                        )
+
+                        # Scan Service Bus Topics (all)
+                        service_bus_topic_resources = await inventory_scanner.scan_service_bus_topics(region)
+                        all_inventory_resources.extend(service_bus_topic_resources)
+                        logger.info(
+                            "inventory.service_bus_topics_scanned",
+                            region=region,
+                            service_bus_topic_count=len(service_bus_topic_resources),
+                        )
+
+                        # Scan Service Bus Queues (all)
+                        service_bus_queue_resources = await inventory_scanner.scan_service_bus_queues(region)
+                        all_inventory_resources.extend(service_bus_queue_resources)
+                        logger.info(
+                            "inventory.service_bus_queues_scanned",
+                            region=region,
+                            service_bus_queue_count=len(service_bus_queue_resources),
+                        )
+
                     # Save all inventory resources to database
                     for resource in all_inventory_resources:
                         all_cloud_resource = AllCloudResource(

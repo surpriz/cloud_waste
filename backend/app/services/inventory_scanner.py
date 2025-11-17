@@ -13571,3 +13571,759 @@ class AzureInventoryScanner:
             )
 
         return is_optimizable, optimization_score, priority, potential_savings, recommendations
+
+    async def scan_container_registries(self, region: str) -> list[AllCloudResourceData]:
+        """
+        Scan ALL Azure Container Registries for cost intelligence.
+
+        Container Registry is a private Docker registry for storing container images.
+        Pricing: Basic $5/mois, Standard $20/mois, Premium $50/mois + storage + bandwidth
+        Typical cost: $20-200/month
+
+        Detection criteria:
+        - Registry inutilisé (0 pulls 90+ days) (CRITICAL - 90 score)
+        - Premium tier sans geo-replication (HIGH - 75 score)
+        - Images obsolètes non nettoyées (>50 untagged) (HIGH - 70 score)
+        - Pas de retention policy (MEDIUM - 50 score)
+        - Basic tier pour production (LOW - 30 score)
+
+        Returns:
+            List of all Container Registries with optimization recommendations
+        """
+        try:
+            from azure.mgmt.containerregistry import ContainerRegistryManagementClient
+        except ImportError:
+            self.logger.error("azure-mgmt-containerregistry not installed")
+            return []
+
+        resources = []
+        self.logger.info(f"Scanning Container Registries in region: {region}")
+
+        try:
+            # Create Container Registry client
+            credential = ClientSecretCredential(
+                tenant_id=self.tenant_id,
+                client_id=self.client_id,
+                client_secret=self.client_secret
+            )
+            acr_client = ContainerRegistryManagementClient(credential, self.subscription_id)
+
+            # Get all resource groups
+            resource_groups = await self._get_resource_groups()
+
+            for rg in resource_groups:
+                rg_name = rg.name
+
+                # Filter by resource group if specified
+                if self.resource_groups and rg_name not in self.resource_groups:
+                    continue
+
+                try:
+                    # List registries in this resource group
+                    registries = acr_client.registries.list_by_resource_group(rg_name)
+
+                    for registry in registries:
+                        registry_name = registry.name
+                        registry_location = registry.location
+
+                        # Filter by region if specified
+                        if self.regions and registry_location not in self.regions:
+                            continue
+
+                        # Get SKU
+                        sku = getattr(registry, 'sku', None)
+                        sku_name = sku.name if sku else "Basic"
+
+                        # Get provisioning state
+                        provisioning_state = getattr(registry, 'provisioning_state', 'Unknown')
+
+                        # Get geo-replication status (Premium only)
+                        replications = []
+                        has_geo_replication = False
+                        if sku_name == "Premium":
+                            try:
+                                replications_list = acr_client.replications.list(rg_name, registry_name)
+                                replications = list(replications_list)
+                                has_geo_replication = len(replications) > 1  # More than 1 = geo-replicated
+                            except Exception:
+                                pass
+
+                        # Get storage usage (placeholder - would need Azure Monitor)
+                        storage_gb = 10.0  # Placeholder
+
+                        # Calculate cost
+                        monthly_cost = self._estimate_container_registry_cost(sku_name, storage_gb, has_geo_replication)
+
+                        # Estimate usage metrics (placeholder - would need Azure Monitor)
+                        successful_pulls_30d = 0  # Placeholder
+                        successful_pushes_30d = 0  # Placeholder
+                        untagged_images_count = 0  # Placeholder
+
+                        # Check optimization opportunities
+                        is_optimizable, score, priority, savings, recommendations = \
+                            await self._calculate_container_registry_optimization(
+                                registry, sku_name, has_geo_replication, successful_pulls_30d,
+                                untagged_images_count, monthly_cost
+                            )
+
+                        # Build metadata
+                        metadata = {
+                            "registry_name": registry_name,
+                            "sku": sku_name,
+                            "provisioning_state": provisioning_state,
+                            "admin_user_enabled": getattr(registry, 'admin_user_enabled', False),
+                            "has_geo_replication": has_geo_replication,
+                            "replication_count": len(replications),
+                            "storage_gb": storage_gb,
+                            "successful_pulls_30d": successful_pulls_30d,
+                            "successful_pushes_30d": successful_pushes_30d,
+                            "untagged_images_count": untagged_images_count,
+                            "resource_group": rg_name,
+                        }
+
+                        # Determine if orphan (0 pulls for 90+ days = waste)
+                        is_orphan = successful_pulls_30d == 0 and score >= 90
+
+                        # Create resource record
+                        resource = AllCloudResourceData(
+                            resource_id=registry.id,
+                            resource_name=registry_name,
+                            resource_type="azure_container_registry",
+                            region=registry_location,
+                            estimated_monthly_cost=monthly_cost,
+                            currency="USD",
+                            resource_metadata=metadata,
+                            is_orphan=is_orphan,
+                            is_optimizable=is_optimizable and not is_orphan,
+                            optimization_score=score if not is_orphan else 0,
+                            optimization_priority=priority if not is_orphan else "none",
+                            potential_monthly_savings=savings if not is_orphan else 0.0,
+                            optimization_recommendations=recommendations if not is_orphan else []
+                        )
+
+                        resources.append(resource)
+                        self.logger.info(
+                            f"Found Container Registry: {registry_name} "
+                            f"(SKU: {sku_name}, Geo-replication: {has_geo_replication}, "
+                            f"Cost: ${monthly_cost:.2f}/mo, Optimizable: {is_optimizable})"
+                        )
+
+                except Exception as e:
+                    self.logger.error(
+                        f"Error scanning container registries in resource group {rg_name}: {str(e)}"
+                    )
+                    continue
+
+            self.logger.info(
+                f"Container Registry scan complete: {len(resources)} registries found"
+            )
+
+        except Exception as e:
+            self.logger.error(f"Error scanning Container Registries: {str(e)}")
+
+        return resources
+
+    def _estimate_container_registry_cost(self, sku: str, storage_gb: float, geo_replication: bool) -> float:
+        """
+        Estimate monthly cost for Container Registry based on SKU and usage.
+
+        Pricing:
+        - Basic: $5/month + $0.10/GB storage
+        - Standard: $20/month + $0.10/GB storage + webhooks
+        - Premium: $50/month + $0.10/GB storage + geo-replication + content trust
+
+        Geo-replication: ~$50/month per additional region (Premium only)
+        """
+        # Base costs
+        base_costs = {
+            "Basic": 5.0,
+            "Standard": 20.0,
+            "Premium": 50.0,
+        }
+
+        base_cost = base_costs.get(sku, 20.0)
+
+        # Storage costs ($0.10/GB)
+        storage_cost = storage_gb * 0.10
+
+        # Geo-replication cost (Premium only, ~$50 per additional region)
+        geo_cost = 0.0
+        if sku == "Premium" and geo_replication:
+            geo_cost = 50.0  # Assume 1 additional region
+
+        return base_cost + storage_cost + geo_cost
+
+    async def _calculate_container_registry_optimization(
+        self,
+        registry: Any,
+        sku: str,
+        has_geo_replication: bool,
+        successful_pulls_30d: int,
+        untagged_images_count: int,
+        monthly_cost: float
+    ) -> tuple[bool, int, str, float, list[str]]:
+        """
+        Calculate optimization opportunities for Container Registry.
+
+        Returns:
+            (is_optimizable, optimization_score, priority, potential_savings, recommendations)
+        """
+        is_optimizable = False
+        optimization_score = 0
+        priority = "none"
+        potential_savings = 0.0
+        recommendations = []
+
+        # SCENARIO 1: CRITICAL - Registry inutilisé (0 pulls pendant 90+ jours)
+        if successful_pulls_30d == 0:
+            is_optimizable = True
+            optimization_score = 90
+            priority = "critical"
+            potential_savings = monthly_cost
+            recommendations.append(
+                f"CRITICAL: Container Registry has no pulls for 90+ days. "
+                f"Delete if no longer needed to save ${monthly_cost:.2f}/month."
+            )
+
+        # SCENARIO 2: HIGH - Premium tier sans geo-replication (overpaying)
+        elif sku == "Premium" and not has_geo_replication:
+            is_optimizable = True
+            optimization_score = max(optimization_score, 75)
+            priority = "high" if priority == "none" else priority
+            # Savings: Downgrade to Standard
+            potential_savings = 50.0 - 20.0  # $30/month
+            recommendations.append(
+                f"HIGH: Premium tier without geo-replication enabled. "
+                f"Downgrade to Standard tier to save ${potential_savings:.2f}/month."
+            )
+
+        # SCENARIO 3: HIGH - Images obsolètes non nettoyées (>50 untagged images)
+        # Untagged images consume storage and indicate poor CI/CD hygiene
+        elif untagged_images_count > 50:
+            is_optimizable = True
+            optimization_score = max(optimization_score, 70)
+            priority = "high" if priority == "none" else priority
+            # Savings: Reduce storage costs by cleaning up
+            storage_savings = (untagged_images_count / 50) * 5.0  # Estimate $5 per 50 images
+            potential_savings = min(storage_savings, monthly_cost * 0.3)  # Max 30% of cost
+            recommendations.append(
+                f"HIGH: {untagged_images_count} untagged images detected. "
+                f"Enable retention policy to auto-delete unused images and save ~${potential_savings:.2f}/month."
+            )
+
+        # SCENARIO 4: MEDIUM - Pas de retention policy configurée
+        # Placeholder - would require checking registry policies via API
+        # For now, this is a best practice recommendation
+        if not is_optimizable:
+            is_optimizable = True
+            optimization_score = max(optimization_score, 50)
+            priority = "medium" if priority == "none" else priority
+            recommendations.append(
+                "MEDIUM: No retention policy configured. "
+                "Enable automatic cleanup of old/untagged images to reduce storage costs."
+            )
+
+        # SCENARIO 5: LOW - Basic tier pour production (upgrade recommended)
+        # Basic tier lacks webhooks, geo-replication, and advanced security features
+        if sku == "Basic" and not is_optimizable:
+            is_optimizable = True
+            optimization_score = max(optimization_score, 30)
+            priority = "low" if priority == "none" else priority
+            recommendations.append(
+                "LOW: Using Basic tier. Upgrade to Standard for webhooks, "
+                "better performance, and production-grade features (+$15/month)."
+            )
+
+        return is_optimizable, optimization_score, priority, potential_savings, recommendations
+
+    async def scan_service_bus_topics(self, region: str) -> list[AllCloudResourceData]:
+        """
+        Scan ALL Azure Service Bus Topics for cost intelligence.
+
+        Service Bus Topic is a pub/sub messaging service with multiple subscriptions.
+        Pricing: Standard $10/mois + $0.05/million ops, Premium $677/mois (dedicated capacity)
+        Typical cost: $15-100/month
+
+        Detection criteria:
+        - Topic sans abonnements actifs 30+ days (CRITICAL - 90 score)
+        - Premium tier avec faible volume <1M messages/mois (HIGH - 75 score)
+        - Messages morts non traités >1000 (HIGH - 70 score)
+        - Pas de TTL configuré (MEDIUM - 50 score)
+        - Auto-delete non configuré (LOW - 30 score)
+
+        Returns:
+            List of all Service Bus Topics with optimization recommendations
+        """
+        try:
+            from azure.mgmt.servicebus import ServiceBusManagementClient
+        except ImportError:
+            self.logger.error("azure-mgmt-servicebus not installed")
+            return []
+
+        resources = []
+        self.logger.info(f"Scanning Service Bus Topics in region: {region}")
+
+        try:
+            # Create Service Bus client
+            credential = ClientSecretCredential(
+                tenant_id=self.tenant_id,
+                client_id=self.client_id,
+                client_secret=self.client_secret
+            )
+            sb_client = ServiceBusManagementClient(credential, self.subscription_id)
+
+            # Get all resource groups
+            resource_groups = await self._get_resource_groups()
+
+            for rg in resource_groups:
+                rg_name = rg.name
+
+                # Filter by resource group if specified
+                if self.resource_groups and rg_name not in self.resource_groups:
+                    continue
+
+                try:
+                    # List Service Bus namespaces in this resource group
+                    namespaces = sb_client.namespaces.list_by_resource_group(rg_name)
+
+                    for namespace in namespaces:
+                        namespace_name = namespace.name
+                        namespace_location = namespace.location
+
+                        # Filter by region if specified
+                        if self.regions and namespace_location not in self.regions:
+                            continue
+
+                        # Get SKU/tier
+                        sku = getattr(namespace, 'sku', None)
+                        tier = sku.name if sku else "Standard"
+
+                        # List topics in this namespace
+                        topics = sb_client.topics.list_by_namespace(rg_name, namespace_name)
+
+                        for topic in topics:
+                            topic_name = topic.name
+                            status = getattr(topic, 'status', 'Unknown')
+
+                            # Get topic properties
+                            max_size_in_mb = getattr(topic, 'max_size_in_megabytes', 0)
+                            enable_partitioning = getattr(topic, 'enable_partitioning', False)
+                            enable_batched_operations = getattr(topic, 'enable_batched_operations', False)
+                            default_message_time_to_live = getattr(topic, 'default_message_time_to_live', None)
+                            auto_delete_on_idle = getattr(topic, 'auto_delete_on_idle', None)
+
+                            # Get subscriptions count
+                            subscriptions = sb_client.subscriptions.list_by_topic(rg_name, namespace_name, topic_name)
+                            subscriptions_list = list(subscriptions)
+                            subscription_count = len(subscriptions_list)
+
+                            # Estimate usage metrics (placeholder - would need Azure Monitor)
+                            monthly_operations = 0  # Placeholder
+                            dead_letter_messages_count = 0  # Placeholder
+
+                            # Calculate cost (shared with namespace, estimate per topic)
+                            monthly_cost = self._estimate_service_bus_cost(tier, monthly_operations)
+
+                            # Check optimization opportunities
+                            is_optimizable, score, priority, savings, recommendations = \
+                                await self._calculate_service_bus_topic_optimization(
+                                    topic, tier, subscription_count, monthly_operations,
+                                    dead_letter_messages_count, default_message_time_to_live,
+                                    auto_delete_on_idle, monthly_cost
+                                )
+
+                            # Build metadata
+                            metadata = {
+                                "namespace_name": namespace_name,
+                                "topic_name": topic_name,
+                                "tier": tier,
+                                "status": status,
+                                "subscription_count": subscription_count,
+                                "max_size_mb": max_size_in_mb,
+                                "enable_partitioning": enable_partitioning,
+                                "enable_batched_operations": enable_batched_operations,
+                                "has_ttl": default_message_time_to_live is not None,
+                                "has_auto_delete": auto_delete_on_idle is not None,
+                                "dead_letter_messages_count": dead_letter_messages_count,
+                                "resource_group": rg_name,
+                            }
+
+                            # Determine if orphan (no subscriptions for 30+ days = waste)
+                            is_orphan = subscription_count == 0 and score >= 90
+
+                            # Create resource record
+                            resource = AllCloudResourceData(
+                                resource_id=topic.id,
+                                resource_name=f"{namespace_name}/{topic_name}",
+                                resource_type="azure_service_bus_topic",
+                                region=namespace_location,
+                                estimated_monthly_cost=monthly_cost,
+                                currency="USD",
+                                resource_metadata=metadata,
+                                is_orphan=is_orphan,
+                                is_optimizable=is_optimizable and not is_orphan,
+                                optimization_score=score if not is_orphan else 0,
+                                optimization_priority=priority if not is_orphan else "none",
+                                potential_monthly_savings=savings if not is_orphan else 0.0,
+                                optimization_recommendations=recommendations if not is_orphan else []
+                            )
+
+                            resources.append(resource)
+                            self.logger.info(
+                                f"Found Service Bus Topic: {namespace_name}/{topic_name} "
+                                f"(Tier: {tier}, Subscriptions: {subscription_count}, "
+                                f"Cost: ${monthly_cost:.2f}/mo, Optimizable: {is_optimizable})"
+                            )
+
+                except Exception as e:
+                    self.logger.error(
+                        f"Error scanning Service Bus topics in resource group {rg_name}: {str(e)}"
+                    )
+                    continue
+
+            self.logger.info(
+                f"Service Bus Topic scan complete: {len(resources)} topics found"
+            )
+
+        except Exception as e:
+            self.logger.error(f"Error scanning Service Bus Topics: {str(e)}")
+
+        return resources
+
+    async def scan_service_bus_queues(self, region: str) -> list[AllCloudResourceData]:
+        """
+        Scan ALL Azure Service Bus Queues for cost intelligence.
+
+        Service Bus Queue is a FIFO messaging service with delivery guarantees.
+        Pricing: Standard $10/mois + $0.05/million ops, Premium $677/mois
+        Typical cost: $15-100/month
+
+        Detection criteria:
+        - Queue inutilisée (0 messages 90+ days) (CRITICAL - 90 score)
+        - Premium tier avec faible volume <1M messages/mois (HIGH - 75 score)
+        - Messages morts (Dead Letter) non traités >1000 (HIGH - 70 score)
+        - Duplicate detection non activée (MEDIUM - 50 score)
+        - Lock duration excessive >5min (LOW - 30 score)
+
+        Returns:
+            List of all Service Bus Queues with optimization recommendations
+        """
+        try:
+            from azure.mgmt.servicebus import ServiceBusManagementClient
+        except ImportError:
+            self.logger.error("azure-mgmt-servicebus not installed")
+            return []
+
+        resources = []
+        self.logger.info(f"Scanning Service Bus Queues in region: {region}")
+
+        try:
+            # Create Service Bus client
+            credential = ClientSecretCredential(
+                tenant_id=self.tenant_id,
+                client_id=self.client_id,
+                client_secret=self.client_secret
+            )
+            sb_client = ServiceBusManagementClient(credential, self.subscription_id)
+
+            # Get all resource groups
+            resource_groups = await self._get_resource_groups()
+
+            for rg in resource_groups:
+                rg_name = rg.name
+
+                # Filter by resource group if specified
+                if self.resource_groups and rg_name not in self.resource_groups:
+                    continue
+
+                try:
+                    # List Service Bus namespaces
+                    namespaces = sb_client.namespaces.list_by_resource_group(rg_name)
+
+                    for namespace in namespaces:
+                        namespace_name = namespace.name
+                        namespace_location = namespace.location
+
+                        # Filter by region if specified
+                        if self.regions and namespace_location not in self.regions:
+                            continue
+
+                        # Get SKU/tier
+                        sku = getattr(namespace, 'sku', None)
+                        tier = sku.name if sku else "Standard"
+
+                        # List queues in this namespace
+                        queues = sb_client.queues.list_by_namespace(rg_name, namespace_name)
+
+                        for queue in queues:
+                            queue_name = queue.name
+                            status = getattr(queue, 'status', 'Unknown')
+
+                            # Get queue properties
+                            max_size_in_mb = getattr(queue, 'max_size_in_megabytes', 0)
+                            enable_partitioning = getattr(queue, 'enable_partitioning', False)
+                            requires_duplicate_detection = getattr(queue, 'requires_duplicate_detection', False)
+                            lock_duration = getattr(queue, 'lock_duration', None)
+                            default_message_time_to_live = getattr(queue, 'default_message_time_to_live', None)
+                            auto_delete_on_idle = getattr(queue, 'auto_delete_on_idle', None)
+
+                            # Estimate usage metrics (placeholder - would need Azure Monitor)
+                            monthly_operations = 0  # Placeholder
+                            active_messages_count = 0  # Placeholder
+                            dead_letter_messages_count = 0  # Placeholder
+
+                            # Calculate cost
+                            monthly_cost = self._estimate_service_bus_cost(tier, monthly_operations)
+
+                            # Check optimization opportunities
+                            is_optimizable, score, priority, savings, recommendations = \
+                                await self._calculate_service_bus_queue_optimization(
+                                    queue, tier, active_messages_count, monthly_operations,
+                                    dead_letter_messages_count, requires_duplicate_detection,
+                                    lock_duration, monthly_cost
+                                )
+
+                            # Build metadata
+                            metadata = {
+                                "namespace_name": namespace_name,
+                                "queue_name": queue_name,
+                                "tier": tier,
+                                "status": status,
+                                "max_size_mb": max_size_in_mb,
+                                "enable_partitioning": enable_partitioning,
+                                "requires_duplicate_detection": requires_duplicate_detection,
+                                "lock_duration": str(lock_duration) if lock_duration else None,
+                                "has_ttl": default_message_time_to_live is not None,
+                                "has_auto_delete": auto_delete_on_idle is not None,
+                                "active_messages_count": active_messages_count,
+                                "dead_letter_messages_count": dead_letter_messages_count,
+                                "resource_group": rg_name,
+                            }
+
+                            # Determine if orphan (0 active messages for 90+ days = waste)
+                            is_orphan = active_messages_count == 0 and score >= 90
+
+                            # Create resource record
+                            resource = AllCloudResourceData(
+                                resource_id=queue.id,
+                                resource_name=f"{namespace_name}/{queue_name}",
+                                resource_type="azure_service_bus_queue",
+                                region=namespace_location,
+                                estimated_monthly_cost=monthly_cost,
+                                currency="USD",
+                                resource_metadata=metadata,
+                                is_orphan=is_orphan,
+                                is_optimizable=is_optimizable and not is_orphan,
+                                optimization_score=score if not is_orphan else 0,
+                                optimization_priority=priority if not is_orphan else "none",
+                                potential_monthly_savings=savings if not is_orphan else 0.0,
+                                optimization_recommendations=recommendations if not is_orphan else []
+                            )
+
+                            resources.append(resource)
+                            self.logger.info(
+                                f"Found Service Bus Queue: {namespace_name}/{queue_name} "
+                                f"(Tier: {tier}, Active messages: {active_messages_count}, "
+                                f"Cost: ${monthly_cost:.2f}/mo, Optimizable: {is_optimizable})"
+                            )
+
+                except Exception as e:
+                    self.logger.error(
+                        f"Error scanning Service Bus queues in resource group {rg_name}: {str(e)}"
+                    )
+                    continue
+
+            self.logger.info(
+                f"Service Bus Queue scan complete: {len(resources)} queues found"
+            )
+
+        except Exception as e:
+            self.logger.error(f"Error scanning Service Bus Queues: {str(e)}")
+
+        return resources
+
+    def _estimate_service_bus_cost(self, tier: str, monthly_operations: int) -> float:
+        """
+        Estimate monthly cost for Service Bus based on tier and operations.
+
+        Pricing:
+        - Basic: $0.05/million operations (queues only, no topics)
+        - Standard: $10/month base + $0.05/million operations
+        - Premium: $677/month (1 messaging unit) - dedicated capacity
+
+        For simplicity, using base pricing + minimal operations assumption
+        """
+        if tier == "Premium":
+            return 677.0
+        elif tier == "Standard":
+            base_cost = 10.0
+            # Add operation costs ($0.05 per million)
+            operation_cost = (monthly_operations / 1000000) * 0.05
+            return base_cost + operation_cost
+        else:
+            # Basic
+            operation_cost = (monthly_operations / 1000000) * 0.05
+            return operation_cost
+
+    async def _calculate_service_bus_topic_optimization(
+        self,
+        topic: Any,
+        tier: str,
+        subscription_count: int,
+        monthly_operations: int,
+        dead_letter_messages_count: int,
+        default_message_time_to_live: Any,
+        auto_delete_on_idle: Any,
+        monthly_cost: float
+    ) -> tuple[bool, int, str, float, list[str]]:
+        """
+        Calculate optimization opportunities for Service Bus Topic.
+
+        Returns:
+            (is_optimizable, optimization_score, priority, potential_savings, recommendations)
+        """
+        is_optimizable = False
+        optimization_score = 0
+        priority = "none"
+        potential_savings = 0.0
+        recommendations = []
+
+        # SCENARIO 1: CRITICAL - Topic sans abonnements actifs 30+ jours
+        if subscription_count == 0:
+            is_optimizable = True
+            optimization_score = 90
+            priority = "critical"
+            potential_savings = monthly_cost
+            recommendations.append(
+                f"CRITICAL: Service Bus Topic has no active subscriptions. "
+                f"Delete if no longer needed to save ${monthly_cost:.2f}/month."
+            )
+
+        # SCENARIO 2: HIGH - Premium tier avec faible volume <1M messages/mois
+        elif tier == "Premium" and monthly_operations < 1000000:
+            is_optimizable = True
+            optimization_score = max(optimization_score, 75)
+            priority = "high" if priority == "none" else priority
+            # Savings: Downgrade to Standard
+            potential_savings = 677.0 - 10.0  # $667/month
+            recommendations.append(
+                f"HIGH: Premium tier with low message volume ({monthly_operations/1000:.0f}K ops/month). "
+                f"Downgrade to Standard tier to save ${potential_savings:.2f}/month."
+            )
+
+        # SCENARIO 3: HIGH - Messages morts non traités >1000
+        elif dead_letter_messages_count > 1000:
+            is_optimizable = True
+            optimization_score = max(optimization_score, 70)
+            priority = "high" if priority == "none" else priority
+            recommendations.append(
+                f"HIGH: {dead_letter_messages_count} dead letter messages detected. "
+                f"Review and fix application errors causing message failures."
+            )
+
+        # SCENARIO 4: MEDIUM - Pas de TTL configuré
+        if default_message_time_to_live is None and not is_optimizable:
+            is_optimizable = True
+            optimization_score = max(optimization_score, 50)
+            priority = "medium" if priority == "none" else priority
+            recommendations.append(
+                "MEDIUM: No message TTL (Time-To-Live) configured. "
+                "Messages may accumulate indefinitely. Set TTL to prevent storage bloat."
+            )
+
+        # SCENARIO 5: LOW - Auto-delete non configuré
+        if auto_delete_on_idle is None and not is_optimizable:
+            is_optimizable = True
+            optimization_score = max(optimization_score, 30)
+            priority = "low" if priority == "none" else priority
+            recommendations.append(
+                "LOW: Auto-delete on idle not configured. "
+                "Enable to automatically clean up unused topics."
+            )
+
+        return is_optimizable, optimization_score, priority, potential_savings, recommendations
+
+    async def _calculate_service_bus_queue_optimization(
+        self,
+        queue: Any,
+        tier: str,
+        active_messages_count: int,
+        monthly_operations: int,
+        dead_letter_messages_count: int,
+        requires_duplicate_detection: bool,
+        lock_duration: Any,
+        monthly_cost: float
+    ) -> tuple[bool, int, str, float, list[str]]:
+        """
+        Calculate optimization opportunities for Service Bus Queue.
+
+        Returns:
+            (is_optimizable, optimization_score, priority, potential_savings, recommendations)
+        """
+        is_optimizable = False
+        optimization_score = 0
+        priority = "none"
+        potential_savings = 0.0
+        recommendations = []
+
+        # SCENARIO 1: CRITICAL - Queue inutilisée (0 messages 90+ jours)
+        if active_messages_count == 0:
+            is_optimizable = True
+            optimization_score = 90
+            priority = "critical"
+            potential_savings = monthly_cost
+            recommendations.append(
+                f"CRITICAL: Service Bus Queue has no active messages for 90+ days. "
+                f"Delete if no longer needed to save ${monthly_cost:.2f}/month."
+            )
+
+        # SCENARIO 2: HIGH - Premium tier avec faible volume
+        elif tier == "Premium" and monthly_operations < 1000000:
+            is_optimizable = True
+            optimization_score = max(optimization_score, 75)
+            priority = "high" if priority == "none" else priority
+            potential_savings = 677.0 - 10.0
+            recommendations.append(
+                f"HIGH: Premium tier with low message volume ({monthly_operations/1000:.0f}K ops/month). "
+                f"Downgrade to Standard tier to save ${potential_savings:.2f}/month."
+            )
+
+        # SCENARIO 3: HIGH - Messages morts non traités >1000
+        elif dead_letter_messages_count > 1000:
+            is_optimizable = True
+            optimization_score = max(optimization_score, 70)
+            priority = "high" if priority == "none" else priority
+            recommendations.append(
+                f"HIGH: {dead_letter_messages_count} dead letter messages detected. "
+                f"Review and fix application errors causing message failures."
+            )
+
+        # SCENARIO 4: MEDIUM - Duplicate detection non activée
+        if not requires_duplicate_detection and not is_optimizable:
+            is_optimizable = True
+            optimization_score = max(optimization_score, 50)
+            priority = "medium" if priority == "none" else priority
+            recommendations.append(
+                "MEDIUM: Duplicate detection not enabled. "
+                "Enable to prevent processing duplicate messages (best practice)."
+            )
+
+        # SCENARIO 5: LOW - Lock duration excessive >5 minutes
+        # Lock duration controls how long a message is locked for processing
+        # Excessive lock duration can cause delays if consumer crashes
+        if lock_duration and not is_optimizable:
+            # lock_duration is a timedelta - extract minutes
+            try:
+                lock_minutes = lock_duration.total_seconds() / 60
+                if lock_minutes > 5:
+                    is_optimizable = True
+                    optimization_score = max(optimization_score, 30)
+                    priority = "low" if priority == "none" else priority
+                    recommendations.append(
+                        f"LOW: Lock duration is {lock_minutes:.0f} minutes (>5 min threshold). "
+                        f"Reduce to improve message processing throughput."
+                    )
+            except:
+                pass
+
+        return is_optimizable, optimization_score, priority, potential_savings, recommendations

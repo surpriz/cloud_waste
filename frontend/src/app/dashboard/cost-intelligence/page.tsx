@@ -124,6 +124,9 @@ const resourceIcons: Record<ResourceType, any> = {
   azure_vnet_peering: GitBranch,
   azure_front_door: Globe,
   azure_cosmos_db_mongodb: Inbox,
+  azure_container_registry: Box,
+  azure_service_bus_topic: Radio,
+  azure_service_bus_queue: MessageSquare,
   // Add more as needed (truncated for brevity)
 } as any;
 

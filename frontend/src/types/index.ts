@@ -345,7 +345,10 @@ export type ResourceType =
   | "azure_vpn_gateway"
   | "azure_vnet_peering"
   | "azure_front_door"
-  | "azure_cosmos_db_mongodb";
+  | "azure_cosmos_db_mongodb"
+  | "azure_container_registry"
+  | "azure_service_bus_topic"
+  | "azure_service_bus_queue";
 
 export type ConfidenceLevel = "critical" | "high" | "medium" | "low";
 
