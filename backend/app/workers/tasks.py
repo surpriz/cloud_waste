@@ -923,6 +923,15 @@ async def _scan_cloud_account_async(
                             managed_devops_pools_count=len(managed_devops_pools_resources),
                         )
 
+                        # Scan Private Endpoints (all)
+                        private_endpoint_resources = await inventory_scanner.scan_private_endpoints(region)
+                        all_inventory_resources.extend(private_endpoint_resources)
+                        logger.info(
+                            "inventory.private_endpoints_scanned",
+                            region=region,
+                            private_endpoint_count=len(private_endpoint_resources),
+                        )
+
                     # Save all inventory resources to database
                     for resource in all_inventory_resources:
                         all_cloud_resource = AllCloudResource(

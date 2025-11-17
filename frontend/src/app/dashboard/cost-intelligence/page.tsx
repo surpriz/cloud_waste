@@ -112,6 +112,9 @@ const resourceIcons: Record<ResourceType, any> = {
   azure_bot_service: Bot,
   azure_application_insights: Activity,
   azure_managed_devops_pools: Workflow,
+  azure_private_endpoint: Network,
+  azure_cosmos_db_gremlin: Database,
+  azure_hdinsight_kafka: Server,
   // Add more as needed (truncated for brevity)
 } as any;
 

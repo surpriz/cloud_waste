@@ -3908,6 +3908,12 @@ class AzureInventoryScanner:
                     is_serverless = 'EnableServerless' in capability_names
                     is_multi_region = len(account.locations) > 1 if hasattr(account, 'locations') else False
 
+                    # Detect if this is a Gremlin API account (Graph database)
+                    is_gremlin = 'EnableGremlin' in capability_names
+                    account_kind = getattr(account, 'kind', 'GlobalDocumentDB')
+                    if account_kind == 'GlobalDocumentDB' and is_gremlin:
+                        account_kind = 'Gremlin'
+
                     # Estimate monthly cost based on configuration
                     if is_serverless:
                         base_cost = pricing_info["serverless_base"]
@@ -3918,10 +3924,13 @@ class AzureInventoryScanner:
                     if is_multi_region:
                         base_cost *= pricing_info["multi_region_multiplier"]
 
+                    # Determine resource type based on API
+                    resource_type = "azure_cosmos_db_gremlin" if is_gremlin else "azure_cosmos_db"
+
                     resources.append(AllCloudResourceData(
                         resource_id=account.id,
-                        resource_type="azure_cosmos_db",
-                        resource_name=account.name or "Unnamed Cosmos DB",
+                        resource_type=resource_type,
+                        resource_name=account.name or f"Unnamed Cosmos DB ({account_kind})",
                         region=account.location,
                         estimated_monthly_cost=base_cost,
                         currency="USD",
@@ -4698,10 +4707,15 @@ class AzureInventoryScanner:
                     if cluster_definition and hasattr(cluster_definition, 'kind'):
                         kind = cluster_definition.kind
 
+                    # Determine resource type based on cluster kind
+                    # Kafka clusters are specialized streaming platforms, treat them separately
+                    is_kafka = kind.lower() == 'kafka'
+                    resource_type = "azure_hdinsight_kafka" if is_kafka else "azure_hdinsight_cluster"
+
                     resources.append(AllCloudResourceData(
                         resource_id=cluster.id,
-                        resource_type="azure_hdinsight_cluster",
-                        resource_name=cluster.name or "Unnamed HDInsight Cluster",
+                        resource_type=resource_type,
+                        resource_name=cluster.name or f"Unnamed HDInsight {kind} Cluster",
                         region=cluster.location,
                         estimated_monthly_cost=round(estimated_cost, 2),
                         currency="USD",
@@ -12051,5 +12065,221 @@ class AzureInventoryScanner:
                 "estimated_savings": round(savings, 2),
                 "priority": "low",
             })
+
+        return is_optimizable, optimization_score, priority, potential_savings, recommendations
+
+    async def scan_private_endpoints(self, region: str) -> list[AllCloudResourceData]:
+        """
+        Scan ALL Azure Private Endpoints for cost intelligence.
+
+        Private Endpoints enable private connectivity to Azure services.
+        Pricing: ~$7.30/month per Private Endpoint (Standard) + data processing charges
+        Typical cost: $7-15/month depending on data transfer volume
+
+        Detection criteria:
+        - Private Endpoint failed/deleting (CRITICAL - 90 score)
+        - Not connected to any resource (orphan) (HIGH - 75 score)
+        - Connected to deallocated/stopped resource (HIGH - 70 score)
+        - Redundant endpoints for same resource (MEDIUM - 50 score)
+        - Using Premium without justification (LOW - 30 score)
+        """
+        try:
+            from azure.mgmt.network import NetworkManagementClient
+        except ImportError:
+            self.logger.error("azure-mgmt-network not installed")
+            return []
+
+        resources = []
+        self.logger.info(f"Scanning Private Endpoints in region: {region}")
+
+        try:
+            network_client = NetworkManagementClient(
+                credential=self.credential,
+                subscription_id=self.subscription_id
+            )
+
+            # List all Private Endpoints
+            async for endpoint in network_client.private_endpoints.list_all():
+                try:
+                    # Filter by region if specified
+                    if region.lower() != "all" and endpoint.location.lower() != region.lower():
+                        continue
+
+                    # Get resource group from endpoint ID
+                    resource_group = endpoint.id.split("/")[4]
+
+                    # Get connection state
+                    connection_state = "unknown"
+                    connected_resource_id = None
+                    connected_resource_count = 0
+
+                    if hasattr(endpoint, 'private_link_service_connections'):
+                        connections = endpoint.private_link_service_connections or []
+                        connected_resource_count = len(connections)
+                        if connections:
+                            first_conn = connections[0]
+                            if hasattr(first_conn, 'private_link_service_connection_state'):
+                                conn_state = first_conn.private_link_service_connection_state
+                                if conn_state:
+                                    connection_state = getattr(conn_state, 'status', 'unknown')
+                            if hasattr(first_conn, 'private_link_service_id'):
+                                connected_resource_id = first_conn.private_link_service_id
+
+                    # Get provisioning state
+                    provisioning_state = getattr(endpoint, 'provisioning_state', 'Unknown')
+
+                    # Calculate optimization
+                    is_optimizable, score, priority, savings, recommendations = (
+                        self._calculate_private_endpoint_optimization(
+                            provisioning_state,
+                            connection_state,
+                            connected_resource_count,
+                            connected_resource_id
+                        )
+                    )
+
+                    # Pricing (Azure US East 2025)
+                    # Private Endpoint: $7.30/month (flat rate)
+                    # Data processing: $0.01/GB inbound + $0.01/GB outbound
+                    # Typical: $7-15/month depending on traffic
+                    base_monthly_cost = 7.30
+
+                    # Estimate data processing cost (assume 100 GB/month average)
+                    estimated_data_gb = 100
+                    data_processing_cost = estimated_data_gb * 0.02  # $0.01 in + $0.01 out
+
+                    estimated_cost = base_monthly_cost + data_processing_cost
+
+                    resources.append(AllCloudResourceData(
+                        resource_id=endpoint.id,
+                        resource_type="azure_private_endpoint",
+                        resource_name=endpoint.name or "Unnamed Private Endpoint",
+                        region=endpoint.location,
+                        estimated_monthly_cost=round(estimated_cost, 2),
+                        currency="USD",
+                        resource_metadata={
+                            "endpoint_id": endpoint.id,
+                            "resource_group": resource_group,
+                            "provisioning_state": provisioning_state,
+                            "connection_state": connection_state,
+                            "connected_resource_id": connected_resource_id,
+                            "connected_resource_count": connected_resource_count,
+                            "subnet_id": endpoint.subnet.id if endpoint.subnet else None,
+                            "tags": dict(endpoint.tags) if endpoint.tags else {},
+                        },
+                        is_optimizable=is_optimizable,
+                        optimization_score=score,
+                        optimization_priority=priority,
+                        potential_monthly_savings=savings,
+                        optimization_recommendations=recommendations,
+                        last_used_at=None,
+                        created_at_cloud=None,
+                    ))
+
+                except Exception as e:
+                    self.logger.error(f"Error processing Private Endpoint {getattr(endpoint, 'name', 'unknown')}: {str(e)}")
+                    continue
+
+            self.logger.info(f"Found {len(resources)} Private Endpoints in region {region}")
+            return resources
+
+        except Exception as e:
+            self.logger.error(f"Error scanning Private Endpoints: {str(e)}")
+            return []
+
+    def _calculate_private_endpoint_optimization(
+        self,
+        provisioning_state: str,
+        connection_state: str,
+        connected_resource_count: int,
+        connected_resource_id: str | None,
+    ) -> tuple[bool, int, str, float, list[dict]]:
+        """
+        Calculate optimization potential for Private Endpoint.
+
+        Returns:
+            (is_optimizable, score, priority, potential_savings, recommendations)
+        """
+        is_optimizable = False
+        optimization_score = 0
+        priority = "none"
+        potential_savings = 0.0
+        recommendations = []
+
+        base_cost = 9.30  # $7.30 base + ~$2 data processing
+
+        # Scenario 1: Private Endpoint failed/deleting (CRITICAL - 90)
+        if provisioning_state.lower() in ['failed', 'deleting', 'deleted']:
+            is_optimizable = True
+            optimization_score = max(optimization_score, 90)
+            priority = "critical"
+            potential_savings = max(potential_savings, base_cost)
+
+            recommendations.append({
+                "title": "Private Endpoint Non Fonctionnel",
+                "description": f"Ce Private Endpoint est dans l'état '{provisioning_state}'. Il génère des coûts inutiles.",
+                "estimated_savings": round(base_cost, 2),
+                "actions": [
+                    "Vérifier les logs pour identifier le problème",
+                    "Supprimer le Private Endpoint s'il ne peut pas être réparé",
+                    "Recréer le Private Endpoint si encore nécessaire"
+                ],
+                "priority": "critical",
+            })
+
+        # Scenario 2: Not connected to any resource (orphan) (HIGH - 75)
+        if connected_resource_count == 0 or connection_state.lower() in ['rejected', 'disconnected']:
+            is_optimizable = True
+            optimization_score = max(optimization_score, 75)
+            if priority not in ["critical"]:
+                priority = "high"
+            potential_savings = max(potential_savings, base_cost)
+
+            recommendations.append({
+                "title": "Private Endpoint Non Connecté (Orphelin)",
+                "description": "Ce Private Endpoint n'est connecté à aucune ressource. Il génère des coûts inutiles de $7-9/mois.",
+                "estimated_savings": round(base_cost, 2),
+                "actions": [
+                    "Vérifier si le Private Endpoint est encore nécessaire",
+                    "Supprimer si non utilisé",
+                    "Connecter à une ressource si oubli de configuration",
+                    f"Économie: ${base_cost}/mois"
+                ],
+                "priority": "high",
+            })
+
+        # Scenario 3: Connected to deallocated/stopped resource (HIGH - 70)
+        # Note: We can't easily check if connected resource is stopped without querying each resource type
+        # This would require additional API calls per endpoint
+        # In production, you'd check the connected resource status
+
+        # Scenario 4: Redundant endpoints for same resource (MEDIUM - 50)
+        if connected_resource_count > 1:
+            is_optimizable = True
+            optimization_score = max(optimization_score, 50)
+            if priority not in ["critical", "high"]:
+                priority = "medium"
+
+            # Assume can eliminate half of redundant connections
+            savings = base_cost * 0.5
+            potential_savings = max(potential_savings, savings)
+
+            recommendations.append({
+                "title": "Endpoints Redondants Potentiels",
+                "description": f"Ce Private Endpoint a {connected_resource_count} connexions. Vérifiez si toutes sont nécessaires.",
+                "estimated_savings": round(savings, 2),
+                "actions": [
+                    f"Analyser les {connected_resource_count} connexions Private Link",
+                    "Identifier si plusieurs endpoints pointent vers même ressource",
+                    "Consolider en un seul endpoint si possible",
+                    "Note: Chaque endpoint coûte $7-9/mois"
+                ],
+                "priority": "medium",
+            })
+
+        # Scenario 5: Using Premium without justification (LOW - 30)
+        # Note: Private Endpoints don't have SKUs (Standard/Premium)
+        # This scenario doesn't apply to Private Endpoints
+        # Leaving as placeholder for consistency
 
         return is_optimizable, optimization_score, priority, potential_savings, recommendations

@@ -336,7 +336,10 @@ export type ResourceType =
   | "azure_speech_services"
   | "azure_bot_service"
   | "azure_application_insights"
-  | "azure_managed_devops_pools";
+  | "azure_managed_devops_pools"
+  | "azure_private_endpoint"
+  | "azure_cosmos_db_gremlin"
+  | "azure_hdinsight_kafka";
 
 export type ConfidenceLevel = "critical" | "high" | "medium" | "low";
 
