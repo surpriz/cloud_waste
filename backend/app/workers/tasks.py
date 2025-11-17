@@ -418,6 +418,24 @@ async def _scan_cloud_account_async(
                             fsx_count=len(fsx_resources),
                         )
 
+                        # Scan OpenSearch Domains (all)
+                        opensearch_resources = await inventory_scanner.scan_opensearch_domains(region)
+                        all_inventory_resources.extend(opensearch_resources)
+                        logger.info(
+                            "inventory.opensearch_scanned",
+                            region=region,
+                            opensearch_count=len(opensearch_resources),
+                        )
+
+                        # Scan API Gateways (all)
+                        apigateway_resources = await inventory_scanner.scan_api_gateways(region)
+                        all_inventory_resources.extend(apigateway_resources)
+                        logger.info(
+                            "inventory.apigateway_scanned",
+                            region=region,
+                            apigateway_count=len(apigateway_resources),
+                        )
+
                         # Scan RDS instances (all)
                         rds_resources = await inventory_scanner.scan_rds_instances(region)
                         all_inventory_resources.extend(rds_resources)
@@ -434,6 +452,15 @@ async def _scan_cloud_account_async(
                         logger.info(
                             "inventory.s3_scanned",
                             s3_count=len(s3_resources),
+                        )
+
+                    # Scan CloudFront Distributions (global service, only once)
+                    if regions_to_scan:
+                        cloudfront_resources = await inventory_scanner.scan_cloudfront_distributions()
+                        all_inventory_resources.extend(cloudfront_resources)
+                        logger.info(
+                            "inventory.cloudfront_scanned",
+                            cloudfront_count=len(cloudfront_resources),
                         )
 
                     # Save all inventory resources to database

@@ -75,6 +75,9 @@ const resourceIcons: Record<ResourceType, any> = {
   elasticache_cluster: Database,
   kinesis_stream: Zap,
   fsx_file_system: HardDrive,
+  opensearch_domain: Search,
+  api_gateway: Globe,
+  cloudfront_distribution: Globe,
   // Azure - Cost Intelligence (Inventory mode)
   azure_vm: Server,
   azure_managed_disk: HardDrive,

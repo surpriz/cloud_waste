@@ -158,6 +158,8 @@ export type ResourceType =
   | "s3_bucket"
   | "lambda_function"
   | "dynamodb_table"
+  | "api_gateway"
+  | "cloudfront_distribution"
   // Azure Resources
   | "managed_disk_unattached"
   | "public_ip_unassociated"

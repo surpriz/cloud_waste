@@ -100,6 +100,21 @@ class AWSProvider(CloudProviderBase):
         "transit_gateway_attachment": 36.00,  # Transit Gateway Attachment (per month)
         "opensearch_m5_large": 0.161,  # OpenSearch m5.large.search (per hour) = ~$116/month
         "opensearch_r5_large": 0.228,  # OpenSearch r5.large.search = ~$164/month
+        "opensearch_t3_small": 0.036,  # OpenSearch t3.small.search (per hour) = ~$26/month (dev/test)
+        "opensearch_storage_per_gb": 0.10,  # OpenSearch EBS storage (GP2 SSD per GB/month)
+        # API Gateway pricing (per million requests)
+        "apigateway_rest_per_million": 3.50,  # REST API ($3.50 per million requests)
+        "apigateway_http_per_million": 1.00,  # HTTP API ($1.00 per million, 70% cheaper)
+        "apigateway_websocket_per_million": 1.00,  # WebSocket API messages
+        "apigateway_websocket_connection_per_million_minutes": 0.25,  # WebSocket connection minutes
+        "apigateway_data_transfer_per_gb": 0.09,  # Data transfer out per GB
+        # CloudFront pricing
+        "cloudfront_data_transfer_us_europe_per_gb": 0.085,  # Data transfer US/Europe (first 10TB)
+        "cloudfront_data_transfer_asia_per_gb": 0.140,  # Data transfer Asia Pacific
+        "cloudfront_data_transfer_other_per_gb": 0.170,  # Data transfer Other regions
+        "cloudfront_http_requests_per_10k": 0.0075,  # HTTP requests per 10,000
+        "cloudfront_https_requests_per_10k": 0.010,  # HTTPS requests per 10,000
+        "cloudfront_invalidation_per_path": 0.005,  # Invalidation per path (after first 1000 free)
         "global_accelerator": 18.00,  # Global Accelerator (base cost)
         "kinesis_shard": 10.80,  # Kinesis shard ($0.015/hour * 730 hours)
         "kinesis_retention_extended_per_gb": 0.020,  # Extended retention (25-168h)

@@ -55,6 +55,8 @@ const resourceIcons: Record<ResourceType, any> = {
   s3_bucket: HardDrive,
   lambda_function: Zap,
   dynamodb_table: Database,
+  api_gateway: Network,
+  cloudfront_distribution: Network,
   // Azure Resources
   managed_disk_unattached: HardDrive,
   public_ip_unassociated: Wifi,

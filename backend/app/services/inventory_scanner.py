@@ -23355,3 +23355,1496 @@ class AzureInventoryScanner:
             )
 
         return resources
+
+    # =========================================================================
+    # AWS OpenSearch Domain - Cost Optimization Scanning
+    # =========================================================================
+
+    def _calculate_opensearch_monthly_cost(
+        self,
+        instance_type: str,
+        instance_count: int,
+        storage_size_gb: int,
+        region: str,
+    ) -> float:
+        """
+        Calculate estimated monthly cost for AWS OpenSearch Domain.
+
+        Pricing model:
+        - Instance cost: t3.small ($0.036/h) to r5.large ($0.228/h) × instance count
+        - Storage cost: $0.10/GB/month (EBS GP2 SSD)
+
+        Args:
+            instance_type: Instance type (e.g., t3.small.search, m5.large.search)
+            instance_count: Number of data nodes
+            storage_size_gb: EBS storage size in GB
+            region: AWS region
+
+        Returns:
+            Estimated monthly cost in USD
+        """
+        # Map instance type to pricing key
+        # instance_type format: "t3.small.search" → pricing key: "opensearch_t3_small"
+        pricing_key = f"opensearch_{instance_type.replace('.search', '').replace('.', '_')}"
+        hourly_cost = self.PRICING.get(pricing_key, 0.161)  # Fallback to m5.large
+        instance_monthly_cost = hourly_cost * 730 * instance_count
+
+        # Storage cost
+        storage_rate = self.PRICING.get("opensearch_storage_per_gb", 0.10)
+        storage_monthly_cost = storage_size_gb * storage_rate
+
+        total_cost = instance_monthly_cost + storage_monthly_cost
+        return total_cost
+
+    def _calculate_opensearch_optimization(
+        self,
+        domain: dict[str, Any],
+        search_rate: float,
+        indexing_rate: float,
+        cpu_utilization: float,
+        jvm_memory_pressure: float,
+        free_storage_gb: float,
+        total_storage_gb: int,
+        instance_type: str,
+        instance_count: int,
+        monthly_cost: float,
+    ) -> tuple[bool, int, str, float, list[dict[str, Any]]]:
+        """
+        Analyze AWS OpenSearch Domain for cost optimization opportunities.
+
+        Optimization scenarios (5):
+        1. Completely idle - No search/indexing activity (critical)
+        2. Very low usage - <100 requests/day (high)
+        3. Over-provisioned instance - Low CPU/JVM (high)
+        4. Over-provisioned storage - >50% free (medium)
+        5. Wrong instance family - Memory vs compute optimized (medium)
+
+        Returns:
+            (is_optimizable, optimization_score, priority, potential_savings, recommendations)
+        """
+        is_optimizable = False
+        optimization_score = 0
+        priority = "low"
+        potential_savings = 0.0
+        recommendations = []
+
+        # Scenario 1: CRITICAL - Completely idle (no activity)
+        if search_rate == 0.0 and indexing_rate == 0.0:
+            is_optimizable = True
+            optimization_score = 95
+            priority = "critical"
+            potential_savings = monthly_cost  # Full savings
+            recommendations.append(
+                {
+                    "type": "delete_domain",
+                    "title": "Delete Completely Idle OpenSearch Domain",
+                    "description": f"Domain '{domain.get('DomainName', '')}' has had NO search or indexing "
+                    f"activity in the last 7 days. This domain is completely unused and costs ${monthly_cost:.2f}/month.",
+                    "impact": "high",
+                    "estimated_savings": f"${monthly_cost:.2f}/month",
+                    "action": "Delete this unused OpenSearch domain after verifying no critical data",
+                    "risk": "low",
+                }
+            )
+            return (is_optimizable, optimization_score, priority, potential_savings, recommendations)
+
+        # Scenario 2: HIGH - Very low usage (<100 requests/day)
+        total_requests_7d = search_rate + indexing_rate
+        requests_per_day = total_requests_7d / 7
+
+        if requests_per_day > 0 and requests_per_day < 100:
+            is_optimizable = True
+            optimization_score = max(optimization_score, 80)
+            priority = "high" if priority != "critical" else priority
+
+            # Recommend downsizing to t3.small (dev/test tier)
+            if "t3.small" not in instance_type:
+                t3_hourly = self.PRICING.get("opensearch_t3_small", 0.036)
+                t3_monthly_cost = t3_hourly * 730 * instance_count
+                storage_cost = total_storage_gb * self.PRICING.get("opensearch_storage_per_gb", 0.10)
+                new_total_cost = t3_monthly_cost + storage_cost
+                savings = monthly_cost - new_total_cost
+                potential_savings = max(potential_savings, savings)
+
+                recommendations.append(
+                    {
+                        "type": "downsize_to_dev_tier",
+                        "title": f"Very Low Usage ({requests_per_day:.0f} Requests/Day)",
+                        "description": f"Domain '{domain.get('DomainName', '')}' has only {requests_per_day:.0f} requests/day. "
+                        f"Consider downsizing from {instance_type} to t3.small.search (dev/test tier).",
+                        "impact": "medium",
+                        "estimated_savings": f"${savings:.2f}/month",
+                        "action": f"Downsize instance type to t3.small.search ({instance_count} node(s))",
+                        "risk": "low",
+                    }
+                )
+
+        # Scenario 3: HIGH - Over-provisioned instance (low CPU + low JVM)
+        if cpu_utilization > 0 and cpu_utilization < 20.0 and jvm_memory_pressure < 30.0:
+            is_optimizable = True
+            optimization_score = max(optimization_score, 75)
+            priority = "high" if priority != "critical" else priority
+
+            # Estimate 40% cost reduction by downsizing
+            instance_savings = monthly_cost * 0.40
+            potential_savings = max(potential_savings, instance_savings)
+
+            recommendations.append(
+                {
+                    "type": "downsize_instance",
+                    "title": f"Over-Provisioned Instance (CPU {cpu_utilization:.1f}%, JVM {jvm_memory_pressure:.1f}%)",
+                    "description": f"Domain '{domain.get('DomainName', '')}' uses only {cpu_utilization:.1f}% CPU "
+                    f"and {jvm_memory_pressure:.1f}% JVM memory. Recommend downsizing instance type.",
+                    "impact": "medium",
+                    "estimated_savings": f"${instance_savings:.2f}/month",
+                    "action": f"Downsize from {instance_type} ({instance_count} nodes) to smaller instance",
+                    "risk": "low",
+                }
+            )
+
+        # Scenario 4: MEDIUM - Over-provisioned storage (>50% free)
+        if total_storage_gb > 0 and free_storage_gb > 0:
+            storage_utilization_percent = ((total_storage_gb - free_storage_gb) / total_storage_gb) * 100
+
+            if storage_utilization_percent < 50.0:
+                is_optimizable = True
+                optimization_score = max(optimization_score, 60)
+                priority = "medium" if priority == "low" else priority
+
+                # Recommend reducing storage by 30%
+                recommended_storage_gb = int(total_storage_gb * 0.7)
+                storage_rate = self.PRICING.get("opensearch_storage_per_gb", 0.10)
+                storage_savings = (total_storage_gb - recommended_storage_gb) * storage_rate
+                potential_savings = max(potential_savings, storage_savings)
+
+                recommendations.append(
+                    {
+                        "type": "reduce_storage",
+                        "title": f"Over-Provisioned Storage ({storage_utilization_percent:.1f}% Used)",
+                        "description": f"Domain '{domain.get('DomainName', '')}' uses only {storage_utilization_percent:.1f}% "
+                        f"of its {total_storage_gb} GB storage. {free_storage_gb:.0f} GB is free.",
+                        "impact": "low",
+                        "estimated_savings": f"${storage_savings:.2f}/month",
+                        "action": f"Reduce storage from {total_storage_gb} GB to {recommended_storage_gb} GB",
+                        "risk": "low",
+                    }
+                )
+
+        # Scenario 5: MEDIUM - Wrong instance family (r5 vs m5)
+        # If JVM memory pressure is low (<50%), don't need memory-optimized (r5)
+        # If JVM memory pressure is high (>75%), need memory-optimized (r5)
+        if jvm_memory_pressure > 0:
+            if "r5" in instance_type and jvm_memory_pressure < 50.0:
+                # Using r5 (memory-optimized) but low memory usage → switch to m5 (general purpose)
+                is_optimizable = True
+                optimization_score = max(optimization_score, 65)
+                priority = "medium" if priority == "low" else priority
+
+                # Estimate 30% savings by switching r5 → m5
+                family_savings = monthly_cost * 0.30
+                potential_savings = max(potential_savings, family_savings)
+
+                recommendations.append(
+                    {
+                        "type": "switch_instance_family",
+                        "title": f"Memory-Optimized Instance Unnecessary (JVM {jvm_memory_pressure:.1f}%)",
+                        "description": f"Domain '{domain.get('DomainName', '')}' uses r5 (memory-optimized) instance "
+                        f"but only {jvm_memory_pressure:.1f}% JVM memory. Switch to m5 (general purpose) to save 30%.",
+                        "impact": "low",
+                        "estimated_savings": f"${family_savings:.2f}/month",
+                        "action": f"Switch from {instance_type} to m5 equivalent",
+                        "risk": "low",
+                    }
+                )
+            elif "m5" in instance_type and jvm_memory_pressure > 75.0:
+                # Using m5 (general purpose) but high memory usage → recommend r5 (memory-optimized)
+                # This is not a cost optimization, but a performance recommendation
+                # We don't add it to potential_savings
+                recommendations.append(
+                    {
+                        "type": "upgrade_instance_family_performance",
+                        "title": f"Consider Memory-Optimized Instance (JVM {jvm_memory_pressure:.1f}%)",
+                        "description": f"Domain '{domain.get('DomainName', '')}' uses m5 (general purpose) but has "
+                        f"{jvm_memory_pressure:.1f}% JVM memory pressure. Consider r5 for better performance.",
+                        "impact": "low",
+                        "estimated_savings": "$0.00/month (performance recommendation, not cost savings)",
+                        "action": f"Evaluate switching to r5 instance for better performance",
+                        "risk": "low",
+                    }
+                )
+
+        return (is_optimizable, optimization_score, priority, potential_savings, recommendations)
+
+    async def scan_opensearch_domains(self, region: str) -> list[AllCloudResourceData]:
+        """
+        Scan ALL AWS OpenSearch Domains in a region for cost intelligence.
+
+        For each domain:
+        - Calculate monthly cost (instance + storage)
+        - Fetch CloudWatch metrics (SearchRate, IndexingRate, CPU, JVM, Storage)
+        - Analyze optimization opportunities (5 scenarios)
+
+        Returns:
+            List of AllCloudResourceData entries for all OpenSearch Domains
+        """
+        resources: list[AllCloudResourceData] = []
+
+        try:
+            async with self.session.client("opensearch", region_name=region) as opensearch:
+                async with self.session.client("cloudwatch", region_name=region) as cloudwatch:
+                    # List all domains
+                    response = await opensearch.list_domain_names()
+                    domain_names = [d["DomainName"] for d in response.get("DomainNames", [])]
+
+                    logger.info(
+                        "inventory.opensearch.domains_found",
+                        region=region,
+                        count=len(domain_names),
+                    )
+
+                    # Process each domain
+                    for domain_name in domain_names:
+                        try:
+                            # Get domain details
+                            domain_response = await opensearch.describe_domain(DomainName=domain_name)
+                            domain = domain_response.get("DomainStatus", {})
+
+                            domain_arn = domain.get("ARN", "")
+                            domain_status = domain.get("Processing", False)  # Processing = updating
+                            created_at = domain.get("Created")
+
+                            # Get cluster config
+                            cluster_config = domain.get("ClusterConfig", {})
+                            instance_type = cluster_config.get("InstanceType", "m5.large.search")
+                            instance_count = cluster_config.get("InstanceCount", 1)
+
+                            # Get EBS storage
+                            ebs_options = domain.get("EBSOptions", {})
+                            ebs_enabled = ebs_options.get("EBSEnabled", False)
+                            storage_size_gb = ebs_options.get("VolumeSize", 0) if ebs_enabled else 0
+
+                            # Get CloudWatch metrics (7 days)
+                            end_time = datetime.utcnow()
+                            start_time = end_time - timedelta(days=7)
+
+                            # Metric 1: SearchRate (sum over 7 days)
+                            search_rate_response = await cloudwatch.get_metric_statistics(
+                                Namespace="AWS/ES",
+                                MetricName="SearchRate",
+                                Dimensions=[
+                                    {"Name": "DomainName", "Value": domain_name},
+                                    {"Name": "ClientId", "Value": domain_arn.split(":")[4]},
+                                ],
+                                StartTime=start_time,
+                                EndTime=end_time,
+                                Period=604800,  # 7 days
+                                Statistics=["Sum"],
+                            )
+                            search_rate = (
+                                search_rate_response["Datapoints"][0]["Sum"]
+                                if search_rate_response.get("Datapoints")
+                                else 0.0
+                            )
+
+                            # Metric 2: IndexingRate (sum over 7 days)
+                            indexing_rate_response = await cloudwatch.get_metric_statistics(
+                                Namespace="AWS/ES",
+                                MetricName="IndexingRate",
+                                Dimensions=[
+                                    {"Name": "DomainName", "Value": domain_name},
+                                    {"Name": "ClientId", "Value": domain_arn.split(":")[4]},
+                                ],
+                                StartTime=start_time,
+                                EndTime=end_time,
+                                Period=604800,
+                                Statistics=["Sum"],
+                            )
+                            indexing_rate = (
+                                indexing_rate_response["Datapoints"][0]["Sum"]
+                                if indexing_rate_response.get("Datapoints")
+                                else 0.0
+                            )
+
+                            # Metric 3: CPUUtilization (average over 7 days)
+                            cpu_response = await cloudwatch.get_metric_statistics(
+                                Namespace="AWS/ES",
+                                MetricName="CPUUtilization",
+                                Dimensions=[
+                                    {"Name": "DomainName", "Value": domain_name},
+                                    {"Name": "ClientId", "Value": domain_arn.split(":")[4]},
+                                ],
+                                StartTime=start_time,
+                                EndTime=end_time,
+                                Period=604800,
+                                Statistics=["Average"],
+                            )
+                            cpu_utilization = (
+                                cpu_response["Datapoints"][0]["Average"]
+                                if cpu_response.get("Datapoints")
+                                else 0.0
+                            )
+
+                            # Metric 4: JVMMemoryPressure (average)
+                            jvm_response = await cloudwatch.get_metric_statistics(
+                                Namespace="AWS/ES",
+                                MetricName="JVMMemoryPressure",
+                                Dimensions=[
+                                    {"Name": "DomainName", "Value": domain_name},
+                                    {"Name": "ClientId", "Value": domain_arn.split(":")[4]},
+                                ],
+                                StartTime=start_time,
+                                EndTime=end_time,
+                                Period=604800,
+                                Statistics=["Average"],
+                            )
+                            jvm_memory_pressure = (
+                                jvm_response["Datapoints"][0]["Average"]
+                                if jvm_response.get("Datapoints")
+                                else 0.0
+                            )
+
+                            # Metric 5: FreeStorageSpace (minimum, to detect low storage)
+                            storage_response = await cloudwatch.get_metric_statistics(
+                                Namespace="AWS/ES",
+                                MetricName="FreeStorageSpace",
+                                Dimensions=[
+                                    {"Name": "DomainName", "Value": domain_name},
+                                    {"Name": "ClientId", "Value": domain_arn.split(":")[4]},
+                                ],
+                                StartTime=start_time,
+                                EndTime=end_time,
+                                Period=604800,
+                                Statistics=["Average"],
+                            )
+                            free_storage_mb = (
+                                storage_response["Datapoints"][0]["Average"]
+                                if storage_response.get("Datapoints")
+                                else 0.0
+                            )
+                            free_storage_gb = free_storage_mb / 1024  # Convert MB to GB
+
+                            # Calculate cost
+                            monthly_cost = self._calculate_opensearch_monthly_cost(
+                                instance_type=instance_type,
+                                instance_count=instance_count,
+                                storage_size_gb=storage_size_gb,
+                                region=region,
+                            )
+
+                            # Calculate optimization
+                            (
+                                is_optimizable,
+                                optimization_score,
+                                priority,
+                                potential_savings,
+                                recommendations,
+                            ) = self._calculate_opensearch_optimization(
+                                domain=domain,
+                                search_rate=search_rate,
+                                indexing_rate=indexing_rate,
+                                cpu_utilization=cpu_utilization,
+                                jvm_memory_pressure=jvm_memory_pressure,
+                                free_storage_gb=free_storage_gb,
+                                total_storage_gb=storage_size_gb,
+                                instance_type=instance_type,
+                                instance_count=instance_count,
+                                monthly_cost=monthly_cost,
+                            )
+
+                            # Build metadata
+                            resource_metadata = {
+                                "domain_name": domain_name,
+                                "domain_arn": domain_arn,
+                                "instance_type": instance_type,
+                                "instance_count": instance_count,
+                                "storage_size_gb": storage_size_gb,
+                                "engine_version": domain.get("EngineVersion", "Unknown"),
+                                "processing": domain_status,
+                                "created_at": created_at.isoformat() if created_at else None,
+                                "metrics": {
+                                    "search_rate_7d": search_rate,
+                                    "indexing_rate_7d": indexing_rate,
+                                    "cpu_utilization_avg": cpu_utilization,
+                                    "jvm_memory_pressure_avg": jvm_memory_pressure,
+                                    "free_storage_gb": free_storage_gb,
+                                },
+                            }
+
+                            # Create resource entry
+                            resource = AllCloudResourceData(
+                                resource_id=domain_arn,
+                                resource_type="opensearch_domain",
+                                resource_name=domain_name,
+                                region=region,
+                                estimated_monthly_cost=monthly_cost,
+                                currency="USD",
+                                resource_metadata=resource_metadata,
+                                is_optimizable=is_optimizable,
+                                optimization_score=optimization_score,
+                                optimization_priority=priority,
+                                potential_monthly_savings=potential_savings,
+                                optimization_recommendations=recommendations,
+                            )
+
+                            resources.append(resource)
+
+                            logger.info(
+                                "inventory.opensearch.domain_scanned",
+                                domain_name=domain_name,
+                                region=region,
+                                instance_type=instance_type,
+                                instance_count=instance_count,
+                                monthly_cost=monthly_cost,
+                                is_optimizable=is_optimizable,
+                                optimization_score=optimization_score,
+                            )
+
+                        except Exception as e:
+                            logger.error(
+                                "inventory.opensearch.domain_scan_error",
+                                domain_name=domain_name,
+                                region=region,
+                                error=str(e),
+                            )
+                            continue
+
+        except Exception as e:
+            logger.error(
+                "opensearch.scan_failed",
+                region=region,
+                error=str(e),
+            )
+
+        return resources
+
+    # =========================================================================
+    # AWS API Gateway - Cost Optimization Scanning
+    # =========================================================================
+
+    def _calculate_apigateway_monthly_cost(
+        self,
+        api_type: str,
+        request_count_per_month: float,
+        data_transfer_gb_per_month: float,
+        cache_enabled: bool,
+        region: str,
+    ) -> float:
+        """
+        Calculate estimated monthly cost for AWS API Gateway.
+
+        Pricing model (3 API types):
+        - REST API: $3.50 per million requests + $0.09/GB data transfer
+        - HTTP API: $1.00 per million requests (70% cheaper, no caching)
+        - WebSocket API: $1.00 per million messages + $0.25 per million connection minutes
+
+        Args:
+            api_type: API type (REST, HTTP, WEBSOCKET)
+            request_count_per_month: Monthly request count (estimated from 7d)
+            data_transfer_gb_per_month: Monthly data transfer in GB
+            cache_enabled: Whether API cache is enabled (REST only)
+            region: AWS region
+
+        Returns:
+            Estimated monthly cost in USD
+        """
+        # Request cost
+        request_cost = 0.0
+        if api_type == "REST":
+            request_rate = self.PRICING.get("apigateway_rest_per_million", 3.50)
+            request_cost = (request_count_per_month / 1_000_000) * request_rate
+        elif api_type == "HTTP":
+            request_rate = self.PRICING.get("apigateway_http_per_million", 1.00)
+            request_cost = (request_count_per_month / 1_000_000) * request_rate
+        elif api_type == "WEBSOCKET":
+            message_rate = self.PRICING.get("apigateway_websocket_per_million", 1.00)
+            request_cost = (request_count_per_month / 1_000_000) * message_rate
+            # WebSocket also charges for connection minutes (not included here, would need additional metric)
+
+        # Data transfer cost
+        data_transfer_rate = self.PRICING.get("apigateway_data_transfer_per_gb", 0.09)
+        data_transfer_cost = data_transfer_gb_per_month * data_transfer_rate
+
+        # Cache cost (REST API only, if enabled)
+        # Not included in basic pricing (would need cache size info)
+        cache_cost = 0.0
+
+        total_cost = request_cost + data_transfer_cost + cache_cost
+        return total_cost
+
+    def _calculate_apigateway_optimization(
+        self,
+        api: dict[str, Any],
+        api_type: str,
+        request_count: float,
+        error_4xx_count: float,
+        error_5xx_count: float,
+        cache_hit_count: float,
+        cache_miss_count: float,
+        cache_enabled: bool,
+        monthly_cost: float,
+    ) -> tuple[bool, int, str, float, list[dict[str, Any]]]:
+        """
+        Analyze AWS API Gateway for cost optimization opportunities.
+
+        Optimization scenarios (6):
+        1. Completely inactive - No requests (critical)
+        2. Very low usage - <1000 req/day (high)
+        3. High error rate - >10% 4XX/5XX (high)
+        4. REST API when HTTP API sufficient - 70% savings (medium)
+        5. Cache enabled but low hit rate - <50% (medium)
+        6. WebSocket API with no active connections - Delete if unused (low)
+
+        Returns:
+            (is_optimizable, optimization_score, priority, potential_savings, recommendations)
+        """
+        is_optimizable = False
+        optimization_score = 0
+        priority = "low"
+        potential_savings = 0.0
+        recommendations = []
+
+        # Scenario 1: CRITICAL - Completely inactive (no requests)
+        if request_count == 0.0:
+            is_optimizable = True
+            optimization_score = 95
+            priority = "critical"
+            potential_savings = monthly_cost  # Full savings
+            recommendations.append(
+                {
+                    "type": "delete_api",
+                    "title": "Delete Completely Inactive API Gateway",
+                    "description": f"API '{api.get('Name', api.get('name', ''))}' has received NO requests "
+                    f"in the last 7 days. This API is completely unused and costs ${monthly_cost:.2f}/month.",
+                    "impact": "high",
+                    "estimated_savings": f"${monthly_cost:.2f}/month",
+                    "action": "Delete this unused API Gateway after verifying no dependencies",
+                    "risk": "low",
+                }
+            )
+            return (is_optimizable, optimization_score, priority, potential_savings, recommendations)
+
+        # Scenario 2: HIGH - Very low usage (<1000 requests/day)
+        requests_per_day = request_count / 7
+
+        if requests_per_day > 0 and requests_per_day < 1000:
+            is_optimizable = True
+            optimization_score = max(optimization_score, 80)
+            priority = "high" if priority != "critical" else priority
+
+            recommendations.append(
+                {
+                    "type": "low_usage",
+                    "title": f"Very Low Usage ({requests_per_day:.0f} Requests/Day)",
+                    "description": f"API '{api.get('Name', api.get('name', ''))}' receives only {requests_per_day:.0f} requests/day. "
+                    f"Consider consolidating with other APIs or using serverless alternatives (AWS Lambda URL).",
+                    "impact": "medium",
+                    "estimated_savings": f"${monthly_cost * 0.50:.2f}/month (if consolidated)",
+                    "action": "Review if this API can be consolidated or replaced with simpler alternatives",
+                    "risk": "medium",
+                }
+            )
+            potential_savings = max(potential_savings, monthly_cost * 0.50)
+
+        # Scenario 3: HIGH - High error rate (>10% 4XX/5XX)
+        total_errors = error_4xx_count + error_5xx_count
+        if request_count > 0:
+            error_rate = (total_errors / request_count) * 100
+
+            if error_rate > 10.0:
+                is_optimizable = True
+                optimization_score = max(optimization_score, 85)
+                priority = "high" if priority != "critical" else priority
+
+                recommendations.append(
+                    {
+                        "type": "high_error_rate",
+                        "title": f"High Error Rate ({error_rate:.1f}% Errors)",
+                        "description": f"API '{api.get('Name', api.get('name', ''))}' has {error_rate:.1f}% error rate "
+                        f"({error_4xx_count:.0f} 4XX + {error_5xx_count:.0f} 5XX errors). "
+                        f"This indicates integration issues or broken endpoints.",
+                        "impact": "high",
+                        "estimated_savings": f"${monthly_cost * 0.30:.2f}/month (if errors indicate unused endpoints)",
+                        "action": "Review and fix integration errors, or delete broken API if no longer needed",
+                        "risk": "medium",
+                    }
+                )
+                potential_savings = max(potential_savings, monthly_cost * 0.30)
+
+        # Scenario 4: MEDIUM - REST API when HTTP API sufficient (70% savings)
+        if api_type == "REST":
+            is_optimizable = True
+            optimization_score = max(optimization_score, 70)
+            priority = "medium" if priority == "low" else priority
+
+            # Calculate savings by migrating REST → HTTP API
+            rest_rate = self.PRICING.get("apigateway_rest_per_million", 3.50)
+            http_rate = self.PRICING.get("apigateway_http_per_million", 1.00)
+            request_count_monthly = request_count * 4.33  # 7d → 30d
+            current_request_cost = (request_count_monthly / 1_000_000) * rest_rate
+            new_request_cost = (request_count_monthly / 1_000_000) * http_rate
+            migration_savings = current_request_cost - new_request_cost
+
+            if migration_savings > 0:
+                potential_savings = max(potential_savings, migration_savings)
+
+                recommendations.append(
+                    {
+                        "type": "migrate_to_http_api",
+                        "title": f"Migrate REST API to HTTP API (Save 70%)",
+                        "description": f"API '{api.get('Name', '')}' uses REST API ($3.50/M requests). "
+                        f"If you don't need API caching, request/response transformations, or usage plans, "
+                        f"migrate to HTTP API ($1.00/M requests) to save 70%.",
+                        "impact": "low",
+                        "estimated_savings": f"${migration_savings:.2f}/month",
+                        "action": "Evaluate migrating from REST API to HTTP API if features not needed",
+                        "risk": "low",
+                    }
+                )
+
+        # Scenario 5: MEDIUM - Cache enabled but low hit rate (<50%)
+        if cache_enabled and (cache_hit_count + cache_miss_count) > 0:
+            cache_total = cache_hit_count + cache_miss_count
+            cache_hit_rate = (cache_hit_count / cache_total) * 100
+
+            if cache_hit_rate < 50.0:
+                is_optimizable = True
+                optimization_score = max(optimization_score, 65)
+                priority = "medium" if priority == "low" else priority
+
+                # Estimate cache cost (varies by cache size, assume 0.5 GB = $0.020/hour = ~$14/month)
+                estimated_cache_cost = 14.00
+                potential_savings = max(potential_savings, estimated_cache_cost)
+
+                recommendations.append(
+                    {
+                        "type": "disable_cache",
+                        "title": f"Low Cache Hit Rate ({cache_hit_rate:.1f}%)",
+                        "description": f"API '{api.get('Name', '')}' has caching enabled but only {cache_hit_rate:.1f}% hit rate. "
+                        f"Cache is ineffective and costs ~$14/month. Consider disabling cache to save money.",
+                        "impact": "low",
+                        "estimated_savings": f"${estimated_cache_cost:.2f}/month",
+                        "action": "Disable API Gateway cache if hit rate remains below 50%",
+                        "risk": "low",
+                    }
+                )
+
+        # Scenario 6: LOW - WebSocket API with no active connections
+        # This would require additional metrics (WebSocket connection count)
+        # For now, we detect via request_count = 0 (covered in Scenario 1)
+
+        return (is_optimizable, optimization_score, priority, potential_savings, recommendations)
+
+    async def scan_api_gateways(self, region: str) -> list[AllCloudResourceData]:
+        """
+        Scan ALL AWS API Gateways in a region for cost intelligence.
+
+        Scans 3 API types:
+        1. REST API (apigateway client)
+        2. HTTP API (apigatewayv2 client)
+        3. WebSocket API (apigatewayv2 client)
+
+        For each API:
+        - Calculate monthly cost (requests + data transfer)
+        - Fetch CloudWatch metrics (Count, 4XXError, 5XXError, Cache)
+        - Analyze optimization opportunities (6 scenarios)
+
+        Returns:
+            List of AllCloudResourceData entries for all API Gateways
+        """
+        resources: list[AllCloudResourceData] = []
+
+        try:
+            # Scan REST APIs (apigateway client)
+            async with self.session.client("apigateway", region_name=region) as apigw:
+                async with self.session.client("cloudwatch", region_name=region) as cloudwatch:
+                    # List REST APIs
+                    rest_response = await apigw.get_rest_apis()
+                    rest_apis = rest_response.get("items", [])
+
+                    logger.info(
+                        "inventory.apigateway.rest_apis_found",
+                        region=region,
+                        count=len(rest_apis),
+                    )
+
+                    for api in rest_apis:
+                        try:
+                            api_id = api.get("id", "")
+                            api_name = api.get("name", "")
+                            created_date = api.get("createdDate")
+
+                            # Get CloudWatch metrics (7 days)
+                            end_time = datetime.utcnow()
+                            start_time = end_time - timedelta(days=7)
+
+                            # Metric 1: Count (total requests)
+                            count_response = await cloudwatch.get_metric_statistics(
+                                Namespace="AWS/ApiGateway",
+                                MetricName="Count",
+                                Dimensions=[{"Name": "ApiName", "Value": api_name}],
+                                StartTime=start_time,
+                                EndTime=end_time,
+                                Period=604800,
+                                Statistics=["Sum"],
+                            )
+                            request_count = (
+                                count_response["Datapoints"][0]["Sum"]
+                                if count_response.get("Datapoints")
+                                else 0.0
+                            )
+
+                            # Metric 2: 4XXError
+                            error_4xx_response = await cloudwatch.get_metric_statistics(
+                                Namespace="AWS/ApiGateway",
+                                MetricName="4XXError",
+                                Dimensions=[{"Name": "ApiName", "Value": api_name}],
+                                StartTime=start_time,
+                                EndTime=end_time,
+                                Period=604800,
+                                Statistics=["Sum"],
+                            )
+                            error_4xx_count = (
+                                error_4xx_response["Datapoints"][0]["Sum"]
+                                if error_4xx_response.get("Datapoints")
+                                else 0.0
+                            )
+
+                            # Metric 3: 5XXError
+                            error_5xx_response = await cloudwatch.get_metric_statistics(
+                                Namespace="AWS/ApiGateway",
+                                MetricName="5XXError",
+                                Dimensions=[{"Name": "ApiName", "Value": api_name}],
+                                StartTime=start_time,
+                                EndTime=end_time,
+                                Period=604800,
+                                Statistics=["Sum"],
+                            )
+                            error_5xx_count = (
+                                error_5xx_response["Datapoints"][0]["Sum"]
+                                if error_5xx_response.get("Datapoints")
+                                else 0.0
+                            )
+
+                            # Metric 4: CacheHitCount (if caching enabled)
+                            cache_hit_response = await cloudwatch.get_metric_statistics(
+                                Namespace="AWS/ApiGateway",
+                                MetricName="CacheHitCount",
+                                Dimensions=[{"Name": "ApiName", "Value": api_name}],
+                                StartTime=start_time,
+                                EndTime=end_time,
+                                Period=604800,
+                                Statistics=["Sum"],
+                            )
+                            cache_hit_count = (
+                                cache_hit_response["Datapoints"][0]["Sum"]
+                                if cache_hit_response.get("Datapoints")
+                                else 0.0
+                            )
+
+                            # Metric 5: CacheMissCount
+                            cache_miss_response = await cloudwatch.get_metric_statistics(
+                                Namespace="AWS/ApiGateway",
+                                MetricName="CacheMissCount",
+                                Dimensions=[{"Name": "ApiName", "Value": api_name}],
+                                StartTime=start_time,
+                                EndTime=end_time,
+                                Period=604800,
+                                Statistics=["Sum"],
+                            )
+                            cache_miss_count = (
+                                cache_miss_response["Datapoints"][0]["Sum"]
+                                if cache_miss_response.get("Datapoints")
+                                else 0.0
+                            )
+
+                            cache_enabled = (cache_hit_count + cache_miss_count) > 0
+
+                            # Estimate monthly metrics from 7-day data
+                            request_count_monthly = request_count * 4.33
+                            data_transfer_gb_monthly = (request_count * 5) / (1024 ** 3)  # Assume 5KB avg response
+
+                            # Calculate cost
+                            monthly_cost = self._calculate_apigateway_monthly_cost(
+                                api_type="REST",
+                                request_count_per_month=request_count_monthly,
+                                data_transfer_gb_per_month=data_transfer_gb_monthly,
+                                cache_enabled=cache_enabled,
+                                region=region,
+                            )
+
+                            # Calculate optimization
+                            (
+                                is_optimizable,
+                                optimization_score,
+                                priority,
+                                potential_savings,
+                                recommendations,
+                            ) = self._calculate_apigateway_optimization(
+                                api=api,
+                                api_type="REST",
+                                request_count=request_count,
+                                error_4xx_count=error_4xx_count,
+                                error_5xx_count=error_5xx_count,
+                                cache_hit_count=cache_hit_count,
+                                cache_miss_count=cache_miss_count,
+                                cache_enabled=cache_enabled,
+                                monthly_cost=monthly_cost,
+                            )
+
+                            # Build metadata
+                            resource_metadata = {
+                                "api_id": api_id,
+                                "api_name": api_name,
+                                "api_type": "REST",
+                                "endpoint_type": api.get("endpointConfiguration", {}).get("types", ["REGIONAL"])[0],
+                                "cache_enabled": cache_enabled,
+                                "created_date": created_date.isoformat() if created_date else None,
+                                "metrics": {
+                                    "request_count_7d": request_count,
+                                    "error_4xx_count_7d": error_4xx_count,
+                                    "error_5xx_count_7d": error_5xx_count,
+                                    "cache_hit_count_7d": cache_hit_count,
+                                    "cache_miss_count_7d": cache_miss_count,
+                                },
+                            }
+
+                            # Create resource entry
+                            resource = AllCloudResourceData(
+                                resource_id=api_id,
+                                resource_type="api_gateway",
+                                resource_name=api_name,
+                                region=region,
+                                estimated_monthly_cost=monthly_cost,
+                                currency="USD",
+                                resource_metadata=resource_metadata,
+                                is_optimizable=is_optimizable,
+                                optimization_score=optimization_score,
+                                optimization_priority=priority,
+                                potential_monthly_savings=potential_savings,
+                                optimization_recommendations=recommendations,
+                            )
+
+                            resources.append(resource)
+
+                            logger.info(
+                                "inventory.apigateway.rest_api_scanned",
+                                api_name=api_name,
+                                region=region,
+                                request_count=request_count,
+                                monthly_cost=monthly_cost,
+                                is_optimizable=is_optimizable,
+                            )
+
+                        except Exception as e:
+                            logger.error(
+                                "inventory.apigateway.rest_api_scan_error",
+                                api_id=api.get("id", "unknown"),
+                                region=region,
+                                error=str(e),
+                            )
+                            continue
+
+            # Scan HTTP + WebSocket APIs (apigatewayv2 client)
+            async with self.session.client("apigatewayv2", region_name=region) as apigw2:
+                async with self.session.client("cloudwatch", region_name=region) as cloudwatch:
+                    # List HTTP + WebSocket APIs
+                    v2_response = await apigw2.get_apis()
+                    v2_apis = v2_response.get("Items", [])
+
+                    logger.info(
+                        "inventory.apigateway.v2_apis_found",
+                        region=region,
+                        count=len(v2_apis),
+                    )
+
+                    for api in v2_apis:
+                        try:
+                            api_id = api.get("ApiId", "")
+                            api_name = api.get("Name", "")
+                            api_protocol = api.get("ProtocolType", "HTTP")  # HTTP or WEBSOCKET
+                            created_date = api.get("CreatedDate")
+
+                            # CloudWatch metrics (note: different namespace for v2)
+                            end_time = datetime.utcnow()
+                            start_time = end_time - timedelta(days=7)
+
+                            # For HTTP/WebSocket APIs, metrics use ApiId dimension
+                            count_response = await cloudwatch.get_metric_statistics(
+                                Namespace="AWS/ApiGateway",
+                                MetricName="Count",
+                                Dimensions=[{"Name": "ApiId", "Value": api_id}],
+                                StartTime=start_time,
+                                EndTime=end_time,
+                                Period=604800,
+                                Statistics=["Sum"],
+                            )
+                            request_count = (
+                                count_response["Datapoints"][0]["Sum"]
+                                if count_response.get("Datapoints")
+                                else 0.0
+                            )
+
+                            # Errors
+                            error_4xx_response = await cloudwatch.get_metric_statistics(
+                                Namespace="AWS/ApiGateway",
+                                MetricName="4XXError",
+                                Dimensions=[{"Name": "ApiId", "Value": api_id}],
+                                StartTime=start_time,
+                                EndTime=end_time,
+                                Period=604800,
+                                Statistics=["Sum"],
+                            )
+                            error_4xx_count = (
+                                error_4xx_response["Datapoints"][0]["Sum"]
+                                if error_4xx_response.get("Datapoints")
+                                else 0.0
+                            )
+
+                            error_5xx_response = await cloudwatch.get_metric_statistics(
+                                Namespace="AWS/ApiGateway",
+                                MetricName="5XXError",
+                                Dimensions=[{"Name": "ApiId", "Value": api_id}],
+                                StartTime=start_time,
+                                EndTime=end_time,
+                                Period=604800,
+                                Statistics=["Sum"],
+                            )
+                            error_5xx_count = (
+                                error_5xx_response["Datapoints"][0]["Sum"]
+                                if error_5xx_response.get("Datapoints")
+                                else 0.0
+                            )
+
+                            # HTTP/WebSocket APIs don't support caching
+                            cache_hit_count = 0.0
+                            cache_miss_count = 0.0
+                            cache_enabled = False
+
+                            # Estimate monthly metrics
+                            request_count_monthly = request_count * 4.33
+                            data_transfer_gb_monthly = (request_count * 5) / (1024 ** 3)
+
+                            # Calculate cost
+                            monthly_cost = self._calculate_apigateway_monthly_cost(
+                                api_type=api_protocol,
+                                request_count_per_month=request_count_monthly,
+                                data_transfer_gb_per_month=data_transfer_gb_monthly,
+                                cache_enabled=False,
+                                region=region,
+                            )
+
+                            # Calculate optimization
+                            (
+                                is_optimizable,
+                                optimization_score,
+                                priority,
+                                potential_savings,
+                                recommendations,
+                            ) = self._calculate_apigateway_optimization(
+                                api=api,
+                                api_type=api_protocol,
+                                request_count=request_count,
+                                error_4xx_count=error_4xx_count,
+                                error_5xx_count=error_5xx_count,
+                                cache_hit_count=cache_hit_count,
+                                cache_miss_count=cache_miss_count,
+                                cache_enabled=cache_enabled,
+                                monthly_cost=monthly_cost,
+                            )
+
+                            # Build metadata
+                            resource_metadata = {
+                                "api_id": api_id,
+                                "api_name": api_name,
+                                "api_type": api_protocol,
+                                "api_endpoint": api.get("ApiEndpoint", ""),
+                                "created_date": created_date.isoformat() if created_date else None,
+                                "metrics": {
+                                    "request_count_7d": request_count,
+                                    "error_4xx_count_7d": error_4xx_count,
+                                    "error_5xx_count_7d": error_5xx_count,
+                                },
+                            }
+
+                            # Create resource entry
+                            resource = AllCloudResourceData(
+                                resource_id=api_id,
+                                resource_type="api_gateway",
+                                resource_name=api_name,
+                                region=region,
+                                estimated_monthly_cost=monthly_cost,
+                                currency="USD",
+                                resource_metadata=resource_metadata,
+                                is_optimizable=is_optimizable,
+                                optimization_score=optimization_score,
+                                optimization_priority=priority,
+                                potential_monthly_savings=potential_savings,
+                                optimization_recommendations=recommendations,
+                            )
+
+                            resources.append(resource)
+
+                            logger.info(
+                                "inventory.apigateway.v2_api_scanned",
+                                api_name=api_name,
+                                api_type=api_protocol,
+                                region=region,
+                                request_count=request_count,
+                                monthly_cost=monthly_cost,
+                                is_optimizable=is_optimizable,
+                            )
+
+                        except Exception as e:
+                            logger.error(
+                                "inventory.apigateway.v2_api_scan_error",
+                                api_id=api.get("ApiId", "unknown"),
+                                region=region,
+                                error=str(e),
+                            )
+                            continue
+
+        except Exception as e:
+            logger.error(
+                "apigateway.scan_failed",
+                region=region,
+                error=str(e),
+            )
+
+        return resources
+
+    # =========================================================================
+    # AWS CloudFront Distribution - Cost Optimization Scanning (GLOBAL SERVICE)
+    # =========================================================================
+
+    def _calculate_cloudfront_monthly_cost(
+        self,
+        requests_per_month: float,
+        data_transfer_gb_per_month: float,
+        invalidations_per_month: int,
+        price_class: str,
+    ) -> float:
+        """
+        Calculate estimated monthly cost for AWS CloudFront Distribution.
+
+        Pricing model (varies by region/price class):
+        - Data transfer out: $0.085/GB (US/Europe), $0.140/GB (Asia), $0.170/GB (Other)
+        - HTTP requests: $0.0075 per 10,000 requests
+        - HTTPS requests: $0.010 per 10,000 requests (assume 100% HTTPS)
+        - Invalidations: First 1,000 paths free, $0.005 per path after
+
+        Args:
+            requests_per_month: Monthly request count (estimated from 7d)
+            data_transfer_gb_per_month: Monthly data transfer out in GB
+            invalidations_per_month: Monthly invalidation requests
+            price_class: Price class (PriceClass_All, PriceClass_200, PriceClass_100)
+
+        Returns:
+            Estimated monthly cost in USD
+        """
+        # Data transfer cost (varies by price class)
+        if price_class == "PriceClass_100":  # US, Canada, Europe
+            data_transfer_rate = self.PRICING.get("cloudfront_data_transfer_us_europe_per_gb", 0.085)
+        elif price_class == "PriceClass_200":  # US, Canada, Europe, Asia, Middle East, Africa
+            data_transfer_rate = self.PRICING.get("cloudfront_data_transfer_asia_per_gb", 0.140)
+        else:  # PriceClass_All (all edge locations)
+            data_transfer_rate = self.PRICING.get("cloudfront_data_transfer_other_per_gb", 0.170)
+
+        data_transfer_cost = data_transfer_gb_per_month * data_transfer_rate
+
+        # Request cost (assume 100% HTTPS)
+        https_rate = self.PRICING.get("cloudfront_https_requests_per_10k", 0.010)
+        request_cost = (requests_per_month / 10_000) * https_rate
+
+        # Invalidation cost (first 1000 free)
+        invalidation_rate = self.PRICING.get("cloudfront_invalidation_per_path", 0.005)
+        invalidation_cost = max(0, invalidations_per_month - 1000) * invalidation_rate
+
+        total_cost = data_transfer_cost + request_cost + invalidation_cost
+        return total_cost
+
+    def _calculate_cloudfront_optimization(
+        self,
+        distribution: dict[str, Any],
+        requests_per_month: float,
+        data_transfer_gb: float,
+        error_rate_4xx: float,
+        error_rate_5xx: float,
+        origin_latency_ms: float,
+        price_class: str,
+        invalidations_per_month: int,
+        monthly_cost: float,
+    ) -> tuple[bool, int, str, float, list[dict[str, Any]]]:
+        """
+        Analyze AWS CloudFront Distribution for cost optimization opportunities.
+
+        Optimization scenarios (5):
+        1. Completely inactive - No requests (critical)
+        2. Very low usage - <10K requests/month (high)
+        3. High origin latency - >500ms avg, poor caching (high)
+        4. Price class optimization - All Edges when NA/EU sufficient (medium)
+        5. Excessive invalidations - >1000/month, use versioning (medium)
+
+        Returns:
+            (is_optimizable, optimization_score, priority, potential_savings, recommendations)
+        """
+        is_optimizable = False
+        optimization_score = 0
+        priority = "low"
+        potential_savings = 0.0
+        recommendations = []
+
+        # Scenario 1: CRITICAL - Completely inactive (no requests)
+        if requests_per_month == 0.0:
+            is_optimizable = True
+            optimization_score = 95
+            priority = "critical"
+            potential_savings = monthly_cost  # Full savings
+            recommendations.append(
+                {
+                    "type": "delete_distribution",
+                    "title": "Delete Completely Inactive CloudFront Distribution",
+                    "description": f"Distribution '{distribution.get('Id', '')}' has received NO requests "
+                    f"in the last 7 days. This distribution is completely unused and costs ${monthly_cost:.2f}/month.",
+                    "impact": "high",
+                    "estimated_savings": f"${monthly_cost:.2f}/month",
+                    "action": "Delete this unused CloudFront distribution",
+                    "risk": "low",
+                }
+            )
+            return (is_optimizable, optimization_score, priority, potential_savings, recommendations)
+
+        # Scenario 2: HIGH - Very low usage (<10K requests/month)
+        if requests_per_month > 0 and requests_per_month < 10_000:
+            is_optimizable = True
+            optimization_score = max(optimization_score, 85)
+            priority = "high" if priority != "critical" else priority
+
+            # For very low traffic, direct S3 access may be cheaper
+            recommendations.append(
+                {
+                    "type": "low_usage_consolidate",
+                    "title": f"Very Low Usage ({requests_per_month:.0f} Requests/Month)",
+                    "description": f"Distribution '{distribution.get('Id', '')}' receives only {requests_per_month:.0f} requests/month. "
+                    f"For such low traffic, consider direct S3 access or consolidating with another distribution.",
+                    "impact": "medium",
+                    "estimated_savings": f"${monthly_cost * 0.70:.2f}/month (if using direct S3 access)",
+                    "action": "Review if CloudFront is necessary for this low traffic volume",
+                    "risk": "medium",
+                }
+            )
+            potential_savings = max(potential_savings, monthly_cost * 0.70)
+
+        # Scenario 3: HIGH - High origin latency (>500ms avg) indicates poor caching
+        if origin_latency_ms > 500.0:
+            is_optimizable = True
+            optimization_score = max(optimization_score, 80)
+            priority = "high" if priority != "critical" else priority
+
+            # High latency = going to origin too often = cache not effective
+            recommendations.append(
+                {
+                    "type": "optimize_caching",
+                    "title": f"High Origin Latency ({origin_latency_ms:.0f}ms Average)",
+                    "description": f"Distribution '{distribution.get('Id', '')}' has high origin latency ({origin_latency_ms:.0f}ms avg), "
+                    f"indicating poor cache hit rate. Optimize Cache-Control headers or use Lambda@Edge for better caching.",
+                    "impact": "high",
+                    "estimated_savings": f"${monthly_cost * 0.30:.2f}/month (by improving cache hit rate)",
+                    "action": "Review and optimize caching strategy (TTL, Cache-Control headers)",
+                    "risk": "low",
+                }
+            )
+            potential_savings = max(potential_savings, monthly_cost * 0.30)
+
+        # Scenario 4: MEDIUM - Price class optimization
+        # PriceClass_All = most expensive, PriceClass_100 = cheapest (US/Europe only)
+        if price_class == "PriceClass_All":
+            is_optimizable = True
+            optimization_score = max(optimization_score, 65)
+            priority = "medium" if priority == "low" else priority
+
+            # Estimate savings by switching from All Edges to US/Europe only
+            all_edges_rate = self.PRICING.get("cloudfront_data_transfer_other_per_gb", 0.170)
+            us_europe_rate = self.PRICING.get("cloudfront_data_transfer_us_europe_per_gb", 0.085)
+            data_transfer_savings = data_transfer_gb * (all_edges_rate - us_europe_rate)
+            potential_savings = max(potential_savings, data_transfer_savings)
+
+            recommendations.append(
+                {
+                    "type": "optimize_price_class",
+                    "title": f"Price Class 'All Edges' May Be Overkill",
+                    "description": f"Distribution '{distribution.get('Id', '')}' uses 'All Edges' price class. "
+                    f"If most users are in North America/Europe, switch to 'Use Only US, Canada and Europe' to save 50% on data transfer.",
+                    "impact": "low",
+                    "estimated_savings": f"${data_transfer_savings:.2f}/month",
+                    "action": "Change price class from 'All' to 'US/Europe' if traffic is mostly NA/EU",
+                    "risk": "low",
+                }
+            )
+
+        # Scenario 5: MEDIUM - Excessive invalidations (>1000/month)
+        if invalidations_per_month > 1000:
+            is_optimizable = True
+            optimization_score = max(optimization_score, 60)
+            priority = "medium" if priority == "low" else priority
+
+            # Calculate invalidation cost savings
+            invalidation_rate = self.PRICING.get("cloudfront_invalidation_per_path", 0.005)
+            invalidation_cost = (invalidations_per_month - 1000) * invalidation_rate
+            potential_savings = max(potential_savings, invalidation_cost)
+
+            recommendations.append(
+                {
+                    "type": "reduce_invalidations",
+                    "title": f"Excessive Invalidations ({invalidations_per_month} Paths/Month)",
+                    "description": f"Distribution '{distribution.get('Id', '')}' has {invalidations_per_month} invalidation "
+                    f"requests/month. After first 1,000 free, you're charged ${invalidation_cost:.2f}/month. "
+                    f"Use versioned file names (e.g., app.v2.js) instead of invalidations.",
+                    "impact": "low",
+                    "estimated_savings": f"${invalidation_cost:.2f}/month",
+                    "action": "Implement versioning strategy (file names with versions) to avoid invalidations",
+                    "risk": "low",
+                }
+            )
+
+        return (is_optimizable, optimization_score, priority, potential_savings, recommendations)
+
+    async def scan_cloudfront_distributions(self) -> list[AllCloudResourceData]:
+        """
+        Scan ALL AWS CloudFront Distributions for cost intelligence.
+
+        ⚠️ IMPORTANT: CloudFront is a GLOBAL service (not regional).
+        This method scans all distributions regardless of region.
+
+        For each distribution:
+        - Calculate monthly cost (requests + data transfer + invalidations)
+        - Fetch CloudWatch metrics (Requests, BytesDownloaded, ErrorRate, OriginLatency)
+        - Analyze optimization opportunities (5 scenarios)
+
+        Returns:
+            List of AllCloudResourceData entries for all CloudFront Distributions
+        """
+        resources: list[AllCloudResourceData] = []
+
+        try:
+            # CloudFront is a global service, client doesn't take region parameter
+            async with self.session.client("cloudfront") as cloudfront:
+                async with self.session.client("cloudwatch", region_name="us-east-1") as cloudwatch:
+                    # CloudWatch metrics for CloudFront are ONLY in us-east-1
+
+                    # List all distributions
+                    paginator = cloudfront.get_paginator("list_distributions")
+                    distributions = []
+
+                    async for page in paginator.paginate():
+                        dist_list = page.get("DistributionList", {})
+                        distributions.extend(dist_list.get("Items", []))
+
+                    logger.info(
+                        "inventory.cloudfront.distributions_found",
+                        count=len(distributions),
+                    )
+
+                    # Process each distribution
+                    for dist in distributions:
+                        try:
+                            dist_id = dist.get("Id", "")
+                            dist_domain_name = dist.get("DomainName", "")
+                            dist_status = dist.get("Status", "")
+                            dist_enabled = dist.get("Enabled", False)
+                            price_class = dist.get("PriceClass", "PriceClass_All")
+
+                            # Get CloudWatch metrics (7 days)
+                            # NOTE: CloudFront metrics are in us-east-1 regardless of distribution location
+                            end_time = datetime.utcnow()
+                            start_time = end_time - timedelta(days=7)
+
+                            # Metric 1: Requests (sum over 7 days)
+                            requests_response = await cloudwatch.get_metric_statistics(
+                                Namespace="AWS/CloudFront",
+                                MetricName="Requests",
+                                Dimensions=[
+                                    {"Name": "DistributionId", "Value": dist_id},
+                                    {"Name": "Region", "Value": "Global"},
+                                ],
+                                StartTime=start_time,
+                                EndTime=end_time,
+                                Period=604800,  # 7 days
+                                Statistics=["Sum"],
+                            )
+                            requests_7d = (
+                                requests_response["Datapoints"][0]["Sum"]
+                                if requests_response.get("Datapoints")
+                                else 0.0
+                            )
+
+                            # Metric 2: BytesDownloaded (sum)
+                            bytes_downloaded_response = await cloudwatch.get_metric_statistics(
+                                Namespace="AWS/CloudFront",
+                                MetricName="BytesDownloaded",
+                                Dimensions=[
+                                    {"Name": "DistributionId", "Value": dist_id},
+                                    {"Name": "Region", "Value": "Global"},
+                                ],
+                                StartTime=start_time,
+                                EndTime=end_time,
+                                Period=604800,
+                                Statistics=["Sum"],
+                            )
+                            bytes_downloaded = (
+                                bytes_downloaded_response["Datapoints"][0]["Sum"]
+                                if bytes_downloaded_response.get("Datapoints")
+                                else 0.0
+                            )
+                            data_transfer_gb_7d = bytes_downloaded / (1024 ** 3)  # Convert to GB
+
+                            # Metric 3: 4xxErrorRate (average)
+                            error_4xx_response = await cloudwatch.get_metric_statistics(
+                                Namespace="AWS/CloudFront",
+                                MetricName="4xxErrorRate",
+                                Dimensions=[
+                                    {"Name": "DistributionId", "Value": dist_id},
+                                    {"Name": "Region", "Value": "Global"},
+                                ],
+                                StartTime=start_time,
+                                EndTime=end_time,
+                                Period=604800,
+                                Statistics=["Average"],
+                            )
+                            error_rate_4xx = (
+                                error_4xx_response["Datapoints"][0]["Average"]
+                                if error_4xx_response.get("Datapoints")
+                                else 0.0
+                            )
+
+                            # Metric 4: 5xxErrorRate (average)
+                            error_5xx_response = await cloudwatch.get_metric_statistics(
+                                Namespace="AWS/CloudFront",
+                                MetricName="5xxErrorRate",
+                                Dimensions=[
+                                    {"Name": "DistributionId", "Value": dist_id},
+                                    {"Name": "Region", "Value": "Global"},
+                                ],
+                                StartTime=start_time,
+                                EndTime=end_time,
+                                Period=604800,
+                                Statistics=["Average"],
+                            )
+                            error_rate_5xx = (
+                                error_5xx_response["Datapoints"][0]["Average"]
+                                if error_5xx_response.get("Datapoints")
+                                else 0.0
+                            )
+
+                            # Metric 5: OriginLatency (average)
+                            origin_latency_response = await cloudwatch.get_metric_statistics(
+                                Namespace="AWS/CloudFront",
+                                MetricName="OriginLatency",
+                                Dimensions=[
+                                    {"Name": "DistributionId", "Value": dist_id},
+                                    {"Name": "Region", "Value": "Global"},
+                                ],
+                                StartTime=start_time,
+                                EndTime=end_time,
+                                Period=604800,
+                                Statistics=["Average"],
+                            )
+                            origin_latency_ms = (
+                                origin_latency_response["Datapoints"][0]["Average"]
+                                if origin_latency_response.get("Datapoints")
+                                else 0.0
+                            )
+
+                            # Estimate monthly metrics from 7-day data
+                            requests_per_month = requests_7d * 4.33
+                            data_transfer_gb_per_month = data_transfer_gb_7d * 4.33
+
+                            # Estimate invalidations (not available via CloudWatch, use placeholder)
+                            # In real scenario, would need to track via CloudFront API or logs
+                            invalidations_per_month = 0
+
+                            # Calculate cost
+                            monthly_cost = self._calculate_cloudfront_monthly_cost(
+                                requests_per_month=requests_per_month,
+                                data_transfer_gb_per_month=data_transfer_gb_per_month,
+                                invalidations_per_month=invalidations_per_month,
+                                price_class=price_class,
+                            )
+
+                            # Calculate optimization
+                            (
+                                is_optimizable,
+                                optimization_score,
+                                priority,
+                                potential_savings,
+                                recommendations,
+                            ) = self._calculate_cloudfront_optimization(
+                                distribution=dist,
+                                requests_per_month=requests_per_month,
+                                data_transfer_gb=data_transfer_gb_7d,
+                                error_rate_4xx=error_rate_4xx,
+                                error_rate_5xx=error_rate_5xx,
+                                origin_latency_ms=origin_latency_ms,
+                                price_class=price_class,
+                                invalidations_per_month=invalidations_per_month,
+                                monthly_cost=monthly_cost,
+                            )
+
+                            # Build metadata
+                            resource_metadata = {
+                                "distribution_id": dist_id,
+                                "domain_name": dist_domain_name,
+                                "status": dist_status,
+                                "enabled": dist_enabled,
+                                "price_class": price_class,
+                                "metrics": {
+                                    "requests_7d": requests_7d,
+                                    "data_transfer_gb_7d": data_transfer_gb_7d,
+                                    "error_rate_4xx_avg": error_rate_4xx,
+                                    "error_rate_5xx_avg": error_rate_5xx,
+                                    "origin_latency_ms_avg": origin_latency_ms,
+                                },
+                            }
+
+                            # Create resource entry (region = "global" for CloudFront)
+                            resource = AllCloudResourceData(
+                                resource_id=dist_id,
+                                resource_type="cloudfront_distribution",
+                                resource_name=dist_domain_name,
+                                region="global",  # CloudFront is global
+                                estimated_monthly_cost=monthly_cost,
+                                currency="USD",
+                                resource_metadata=resource_metadata,
+                                is_optimizable=is_optimizable,
+                                optimization_score=optimization_score,
+                                optimization_priority=priority,
+                                potential_monthly_savings=potential_savings,
+                                optimization_recommendations=recommendations,
+                            )
+
+                            resources.append(resource)
+
+                            logger.info(
+                                "inventory.cloudfront.distribution_scanned",
+                                distribution_id=dist_id,
+                                domain_name=dist_domain_name,
+                                requests_7d=requests_7d,
+                                monthly_cost=monthly_cost,
+                                is_optimizable=is_optimizable,
+                                optimization_score=optimization_score,
+                            )
+
+                        except Exception as e:
+                            logger.error(
+                                "inventory.cloudfront.distribution_scan_error",
+                                distribution_id=dist.get("Id", "unknown"),
+                                error=str(e),
+                            )
+                            continue
+
+        except Exception as e:
+            logger.error(
+                "cloudfront.scan_failed",
+                error=str(e),
+            )
+
+        return resources
