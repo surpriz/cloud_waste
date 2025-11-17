@@ -22078,3 +22078,1280 @@ class AzureInventoryScanner:
             )
 
         return resources
+
+    # ============================================================================
+    # AWS - ELASTICACHE CLUSTER (Cost Intelligence / Inventory Mode)
+    # ============================================================================
+
+    def _calculate_elasticache_monthly_cost(
+        self,
+        node_type: str,
+        num_nodes: int,
+        engine: str,
+        region: str,
+    ) -> float:
+        """
+        Calculate estimated monthly cost for AWS ElastiCache Cluster.
+
+        Cost structure (us-east-1 pricing):
+        - Node cost varies by type (t3.micro to r6g.xlarge)
+        - Charged per node per hour
+        - Redis and Memcached same pricing
+
+        Args:
+            node_type: Node type (e.g., cache.t3.micro, cache.m5.large)
+            num_nodes: Number of cache nodes
+            engine: redis or memcached
+            region: AWS region
+
+        Returns:
+            Total estimated monthly cost
+        """
+        # Map node_type to pricing key
+        # cache.t3.micro -> elasticache_t3_micro
+        pricing_key = f"elasticache_{node_type.replace('cache.', '').replace('.', '_')}"
+
+        # Get hourly cost from pricing dict, fallback to m5.large if not found
+        hourly_cost = self.PRICING.get(pricing_key, 0.126)
+
+        # Calculate monthly cost (730 hours/month)
+        monthly_cost = hourly_cost * 730 * num_nodes
+
+        return monthly_cost
+
+    def _calculate_elasticache_optimization(
+        self,
+        cluster: dict[str, Any],
+        cache_hits: float,
+        cache_misses: float,
+        curr_connections: float,
+        memory_usage_percent: float,
+        monthly_cost: float,
+    ) -> tuple[bool, int, str, float, list[dict[str, Any]]]:
+        """
+        Calculate AWS ElastiCache Cluster optimization metrics.
+
+        Optimization scenarios (4):
+        1. Zero cache hits - No activity (critical)
+        2. Low hit rate - <50% hits, cache inefficient (high)
+        3. No connections - Nobody connects (high)
+        4. Over-provisioned memory - <20% memory used (medium)
+
+        Args:
+            cluster: ElastiCache cluster details
+            cache_hits: Total cache hits in period
+            cache_misses: Total cache misses in period
+            curr_connections: Current connections count
+            memory_usage_percent: Memory usage percentage
+            monthly_cost: Total monthly cost
+
+        Returns:
+            Tuple of (is_optimizable, optimization_score, priority, potential_savings, recommendations)
+        """
+        is_optimizable = False
+        optimization_score = 0
+        priority = "none"
+        potential_savings = 0.0
+        recommendations: list[dict[str, Any]] = []
+
+        cluster_id = cluster.get("CacheClusterId", "Unknown")
+
+        # Scenario 1: CRITICAL - Zero cache hits (no activity)
+        if cache_hits == 0.0 and cache_misses == 0.0:
+            is_optimizable = True
+            optimization_score = 95
+            priority = "critical"
+            potential_savings = monthly_cost  # All cost is waste
+            recommendations.append({
+                "type": "zero_cache_hits",
+                "severity": "critical",
+                "message": (
+                    f"CRITICAL: ElastiCache cluster '{cluster_id}' has ZERO cache activity (costs ${monthly_cost:.2f}/month). "
+                    "0 cache hits and 0 cache misses detected. "
+                    "This cluster is not being used by any application. Delete cluster or integrate if needed."
+                ),
+                "impact": "Paying for a cache that is never accessed",
+                "action": "Delete cluster or integrate into application",
+            })
+            return is_optimizable, optimization_score, priority, potential_savings, recommendations
+
+        # Scenario 2: HIGH - Low hit rate (<50% hits, cache inefficient)
+        total_requests = cache_hits + cache_misses
+        if total_requests > 0:
+            hit_rate = (cache_hits / total_requests) * 100
+            if hit_rate < 50.0:
+                is_optimizable = True
+                optimization_score = 85
+                priority = "high"
+                # Low hit rate means cache is not effective, consider alternative solutions
+                potential_savings = monthly_cost * 0.50  # 50% of cost could be saved
+                recommendations.append({
+                    "type": "low_hit_rate",
+                    "severity": "high",
+                    "message": (
+                        f"HIGH: ElastiCache cluster '{cluster_id}' has LOW cache hit rate (costs ${monthly_cost:.2f}/month). "
+                        f"Hit rate: {hit_rate:.1f}% (Hits: {cache_hits:.0f}, Misses: {cache_misses:.0f}). "
+                        "Cache hit rate below 50% indicates ineffective caching. "
+                        f"Review cache key design or consider deleting cluster to save ${potential_savings:.2f}/month (50% of cost)."
+                    ),
+                    "impact": "Cache is ineffective with less than 50% hit rate",
+                    "action": "Optimize cache key design or delete cluster",
+                })
+                return is_optimizable, optimization_score, priority, potential_savings, recommendations
+
+        # Scenario 3: HIGH - No connections (nobody connects)
+        if curr_connections == 0.0 and total_requests > 0:
+            is_optimizable = True
+            optimization_score = 90
+            priority = "high"
+            potential_savings = monthly_cost  # Cluster not actively used
+            recommendations.append({
+                "type": "no_connections",
+                "severity": "high",
+                "message": (
+                    f"HIGH: ElastiCache cluster '{cluster_id}' has NO active connections (costs ${monthly_cost:.2f}/month). "
+                    "0 current connections detected. "
+                    "No applications are actively connected to this cluster. Delete or verify integration."
+                ),
+                "impact": "Paying for a cluster with no active connections",
+                "action": "Delete cluster or verify application integration",
+            })
+            return is_optimizable, optimization_score, priority, potential_savings, recommendations
+
+        # Scenario 4: MEDIUM - Over-provisioned memory (<20% memory used)
+        if memory_usage_percent > 0 and memory_usage_percent < 20.0:
+            is_optimizable = True
+            optimization_score = 65
+            priority = "medium"
+            # Assume 40% savings from right-sizing to smaller node type
+            potential_savings = monthly_cost * 0.40
+            recommendations.append({
+                "type": "over_provisioned_memory",
+                "severity": "medium",
+                "message": (
+                    f"MEDIUM: ElastiCache cluster '{cluster_id}' has LOW memory usage (costs ${monthly_cost:.2f}/month). "
+                    f"Memory usage: {memory_usage_percent:.1f}%. "
+                    f"Cluster is using only {memory_usage_percent:.1f}% of allocated memory. "
+                    f"Downgrade to smaller node type to save ${potential_savings:.2f}/month (40% reduction)."
+                ),
+                "impact": f"Wasting {100 - memory_usage_percent:.1f}% of memory capacity",
+                "action": "Downgrade to smaller node type (e.g., t3.small → t3.micro)",
+            })
+            return is_optimizable, optimization_score, priority, potential_savings, recommendations
+
+        # No optimization opportunities found
+        return is_optimizable, optimization_score, priority, potential_savings, recommendations
+
+    async def scan_elasticache_clusters(self, region: str) -> list[AllCloudResourceData]:
+        """
+        Scan ALL AWS ElastiCache Clusters for cost intelligence.
+
+        This method scans ElastiCache clusters (Redis + Memcached) to provide cost
+        visibility and optimization recommendations. Unlike orphan detection, this
+        scans ALL clusters regardless of usage patterns.
+
+        Args:
+            region: AWS region to scan
+
+        Returns:
+            List of AllCloudResourceData objects for all ElastiCache clusters
+        """
+        resources: list[AllCloudResourceData] = []
+
+        try:
+            async with self.session.client("elasticache", region_name=region) as elasticache:
+                async with self.session.client("cloudwatch", region_name=region) as cloudwatch:
+                    # List all ElastiCache clusters (Redis + Memcached)
+                    response = await elasticache.describe_cache_clusters()
+                    clusters = response.get("CacheClusters", [])
+
+                    for cluster in clusters:
+                        try:
+                            cluster_id = cluster.get("CacheClusterId", "")
+                            cluster_status = cluster.get("CacheClusterStatus", "unknown")
+
+                            # Skip non-available clusters
+                            if cluster_status != "available":
+                                continue
+
+                            cluster_arn = cluster.get("ARN", "")
+                            created_at = cluster.get("CacheClusterCreateTime")
+
+                            # Extract cluster metadata
+                            node_type = cluster.get("CacheNodeType", "cache.m5.large")
+                            num_nodes = cluster.get("NumCacheNodes", 1)
+                            engine = cluster.get("Engine", "redis")
+                            engine_version = cluster.get("EngineVersion", "unknown")
+
+                            # Get CloudWatch metrics (last 7 days)
+                            end_time = datetime.utcnow()
+                            start_time = end_time - timedelta(days=7)
+
+                            # Get cache hits
+                            cache_hits = 0.0
+                            try:
+                                hits_response = await cloudwatch.get_metric_statistics(
+                                    Namespace="AWS/ElastiCache",
+                                    MetricName="CacheHits",
+                                    Dimensions=[
+                                        {"Name": "CacheClusterId", "Value": cluster_id},
+                                    ],
+                                    StartTime=start_time,
+                                    EndTime=end_time,
+                                    Period=604800,  # 7 days
+                                    Statistics=["Sum"],
+                                )
+                                datapoints = hits_response.get("Datapoints", [])
+                                if datapoints:
+                                    cache_hits = datapoints[0].get("Sum", 0.0)
+                            except Exception:
+                                pass
+
+                            # Get cache misses
+                            cache_misses = 0.0
+                            try:
+                                misses_response = await cloudwatch.get_metric_statistics(
+                                    Namespace="AWS/ElastiCache",
+                                    MetricName="CacheMisses",
+                                    Dimensions=[
+                                        {"Name": "CacheClusterId", "Value": cluster_id},
+                                    ],
+                                    StartTime=start_time,
+                                    EndTime=end_time,
+                                    Period=604800,  # 7 days
+                                    Statistics=["Sum"],
+                                )
+                                datapoints = misses_response.get("Datapoints", [])
+                                if datapoints:
+                                    cache_misses = datapoints[0].get("Sum", 0.0)
+                            except Exception:
+                                pass
+
+                            # Get current connections
+                            curr_connections = 0.0
+                            try:
+                                conn_response = await cloudwatch.get_metric_statistics(
+                                    Namespace="AWS/ElastiCache",
+                                    MetricName="CurrConnections",
+                                    Dimensions=[
+                                        {"Name": "CacheClusterId", "Value": cluster_id},
+                                    ],
+                                    StartTime=start_time,
+                                    EndTime=end_time,
+                                    Period=604800,  # 7 days
+                                    Statistics=["Average"],
+                                )
+                                datapoints = conn_response.get("Datapoints", [])
+                                if datapoints:
+                                    curr_connections = datapoints[0].get("Average", 0.0)
+                            except Exception:
+                                pass
+
+                            # Get memory usage
+                            memory_usage_percent = 0.0
+                            try:
+                                memory_response = await cloudwatch.get_metric_statistics(
+                                    Namespace="AWS/ElastiCache",
+                                    MetricName="DatabaseMemoryUsagePercentage",
+                                    Dimensions=[
+                                        {"Name": "CacheClusterId", "Value": cluster_id},
+                                    ],
+                                    StartTime=start_time,
+                                    EndTime=end_time,
+                                    Period=604800,  # 7 days
+                                    Statistics=["Average"],
+                                )
+                                datapoints = memory_response.get("Datapoints", [])
+                                if datapoints:
+                                    memory_usage_percent = datapoints[0].get("Average", 0.0)
+                            except Exception:
+                                pass
+
+                            # Calculate monthly cost
+                            monthly_cost = self._calculate_elasticache_monthly_cost(
+                                node_type=node_type,
+                                num_nodes=num_nodes,
+                                engine=engine,
+                                region=region,
+                            )
+
+                            # Calculate optimization metrics
+                            (
+                                is_optimizable,
+                                optimization_score,
+                                optimization_priority,
+                                potential_savings,
+                                optimization_recommendations,
+                            ) = self._calculate_elasticache_optimization(
+                                cluster=cluster,
+                                cache_hits=cache_hits,
+                                cache_misses=cache_misses,
+                                curr_connections=curr_connections,
+                                memory_usage_percent=memory_usage_percent,
+                                monthly_cost=monthly_cost,
+                            )
+
+                            # Calculate cache hit rate
+                            total_requests = cache_hits + cache_misses
+                            hit_rate = (cache_hits / total_requests * 100) if total_requests > 0 else 0.0
+
+                            # Build metadata
+                            metadata = {
+                                "cluster_id": cluster_id,
+                                "cluster_arn": cluster_arn,
+                                "cluster_status": cluster_status,
+                                "node_type": node_type,
+                                "num_nodes": num_nodes,
+                                "engine": engine,
+                                "engine_version": engine_version,
+                                "cache_hits": round(cache_hits, 2),
+                                "cache_misses": round(cache_misses, 2),
+                                "hit_rate_percent": round(hit_rate, 2),
+                                "curr_connections": round(curr_connections, 2),
+                                "memory_usage_percent": round(memory_usage_percent, 2),
+                            }
+
+                            # Create resource entry
+                            resource = AllCloudResourceData(
+                                resource_id=cluster_arn,
+                                resource_type="elasticache_cluster",
+                                resource_name=cluster_id,
+                                region=region,
+                                estimated_monthly_cost=monthly_cost,
+                                currency="USD",
+                                resource_metadata=metadata,
+                                created_at_cloud=created_at,
+                                is_optimizable=is_optimizable,
+                                optimization_score=optimization_score,
+                                optimization_priority=optimization_priority,
+                                potential_monthly_savings=potential_savings,
+                                optimization_recommendations=optimization_recommendations,
+                            )
+
+                            resources.append(resource)
+
+                        except Exception as e:
+                            logger.error(
+                                "elasticache.cluster_scan_failed",
+                                cluster_id=cluster.get("CacheClusterId", "Unknown"),
+                                region=region,
+                                error=str(e),
+                            )
+                            continue
+
+        except Exception as e:
+            logger.error(
+                "elasticache.scan_failed",
+                region=region,
+                error=str(e),
+            )
+
+        return resources
+
+    # =========================================================================
+    # AWS Kinesis Stream - Cost Optimization Scanning
+    # =========================================================================
+
+    def _calculate_kinesis_monthly_cost(
+        self,
+        shard_count: int,
+        retention_hours: int,
+        enhanced_fanout_consumers: int,
+        incoming_bytes_per_month: float,
+        region: str,
+    ) -> float:
+        """
+        Calculate estimated monthly cost for AWS Kinesis Stream.
+
+        Pricing model:
+        - Shard cost: $0.015/hour = $10.80/month per shard
+        - Data retention (3 tiers):
+          * Free: First 24 hours (default)
+          * Extended: 25-168 hours ($0.020/GB/month)
+          * Long-term: >168 hours ($0.026/GB/month)
+        - Enhanced fan-out: $0.015/hour = $10.95/month per consumer
+
+        Args:
+            shard_count: Number of shards
+            retention_hours: Retention period (24-8760 hours)
+            enhanced_fanout_consumers: Number of enhanced fan-out consumers
+            incoming_bytes_per_month: Monthly incoming data volume (bytes)
+            region: AWS region
+
+        Returns:
+            Estimated monthly cost in USD
+        """
+        # Shard cost
+        shard_monthly_cost = self.PRICING.get("kinesis_shard", 10.80)
+        total_shard_cost = shard_monthly_cost * shard_count
+
+        # Retention cost (beyond free 24h)
+        retention_cost = 0.0
+        if retention_hours > 24:
+            # Convert bytes to GB
+            data_gb = incoming_bytes_per_month / (1024**3)
+
+            if retention_hours <= 168:  # 25-168 hours (Extended)
+                retention_rate = self.PRICING.get("kinesis_retention_extended_per_gb", 0.020)
+                retention_cost = data_gb * retention_rate
+            else:  # >168 hours (Long-term)
+                retention_rate = self.PRICING.get("kinesis_retention_long_per_gb", 0.026)
+                retention_cost = data_gb * retention_rate
+
+        # Enhanced fan-out cost
+        fanout_monthly_cost = self.PRICING.get("kinesis_enhanced_fanout_per_consumer", 10.95)
+        total_fanout_cost = fanout_monthly_cost * enhanced_fanout_consumers
+
+        total_cost = total_shard_cost + retention_cost + total_fanout_cost
+        return total_cost
+
+    def _calculate_kinesis_optimization(
+        self,
+        stream: dict[str, Any],
+        incoming_records: float,
+        incoming_bytes: float,
+        get_records_count: float,
+        iterator_age_ms: float,
+        shard_count: int,
+        retention_hours: int,
+        enhanced_fanout_consumers: int,
+        monthly_cost: float,
+    ) -> tuple[bool, int, str, float, list[dict[str, Any]]]:
+        """
+        Analyze AWS Kinesis Stream for cost optimization opportunities.
+
+        Optimization scenarios (5):
+        1. Completely inactive - No incoming records (critical)
+        2. Written but never read - Data written, never consumed (high)
+        3. Under-utilized - <1% throughput used (high)
+        4. Excessive retention - >24h when not needed (medium)
+        5. Unused enhanced fan-out - Consumers not reading data (medium)
+
+        Returns:
+            (is_optimizable, optimization_score, priority, potential_savings, recommendations)
+        """
+        is_optimizable = False
+        optimization_score = 0
+        priority = "low"
+        potential_savings = 0.0
+        recommendations = []
+
+        # Scenario 1: CRITICAL - Completely inactive (no incoming records)
+        if incoming_records == 0.0:
+            is_optimizable = True
+            optimization_score = 95
+            priority = "critical"
+            potential_savings = monthly_cost  # Full savings
+            recommendations.append(
+                {
+                    "type": "delete_stream",
+                    "title": "Delete Completely Inactive Kinesis Stream",
+                    "description": f"Stream '{stream.get('StreamName', '')}' has received NO records in the last 7 days. "
+                    f"This stream is not being used and costs ${monthly_cost:.2f}/month.",
+                    "impact": "high",
+                    "estimated_savings": f"${monthly_cost:.2f}/month",
+                    "action": "Delete this unused Kinesis Stream",
+                    "risk": "low",
+                }
+            )
+            return (is_optimizable, optimization_score, priority, potential_savings, recommendations)
+
+        # Scenario 2: HIGH - Written but never read (waste of shards)
+        if incoming_records > 0 and get_records_count == 0.0:
+            is_optimizable = True
+            optimization_score = 85
+            priority = "high"
+            potential_savings = monthly_cost * 0.80  # 80% savings
+            recommendations.append(
+                {
+                    "type": "unused_stream",
+                    "title": "Stream Receives Data But Never Consumed",
+                    "description": f"Stream '{stream.get('StreamName', '')}' receives {incoming_records:.0f} records/week "
+                    f"but has ZERO GetRecords API calls. Data is written but never read.",
+                    "impact": "high",
+                    "estimated_savings": f"${potential_savings:.2f}/month",
+                    "action": "Review if this stream is still needed, or implement consumers",
+                    "risk": "medium",
+                }
+            )
+
+        # Scenario 3: HIGH - Under-utilized (<1% throughput)
+        # Kinesis shard capacity: 1 MB/s incoming, 2 MB/s outgoing, 1000 records/s
+        # For 7 days, max capacity = 1 MB/s * 604800s = ~575 GB incoming
+        max_incoming_bytes_7d = shard_count * 1_000_000 * 604800  # bytes
+        utilization_percent = (incoming_bytes / max_incoming_bytes_7d) * 100 if max_incoming_bytes_7d > 0 else 0
+
+        if utilization_percent < 1.0 and incoming_records > 0:
+            is_optimizable = True
+            optimization_score = max(optimization_score, 75)
+            priority = "high" if priority != "critical" else priority
+
+            # Estimate right-sized shard count
+            recommended_shards = max(1, int(shard_count * utilization_percent / 100))
+            shard_savings = (shard_count - recommended_shards) * self.PRICING.get("kinesis_shard", 10.80)
+            potential_savings = max(potential_savings, shard_savings)
+
+            recommendations.append(
+                {
+                    "type": "reduce_shards",
+                    "title": f"Kinesis Stream Under-Utilized ({utilization_percent:.2f}% Capacity)",
+                    "description": f"Stream '{stream.get('StreamName', '')}' uses only {utilization_percent:.2f}% "
+                    f"of its {shard_count} shard(s) capacity. Recommend reducing to {recommended_shards} shard(s).",
+                    "impact": "medium",
+                    "estimated_savings": f"${shard_savings:.2f}/month",
+                    "action": f"Reduce shard count from {shard_count} to {recommended_shards}",
+                    "risk": "low",
+                }
+            )
+
+        # Scenario 4: MEDIUM - Excessive retention (>24h when not needed)
+        # If iterator age is low (<1h), consumers are reading data quickly
+        # Extended retention (>24h) may be unnecessary
+        if retention_hours > 24 and iterator_age_ms < 3_600_000:  # <1 hour lag
+            is_optimizable = True
+            optimization_score = max(optimization_score, 60)
+            priority = "medium" if priority == "low" else priority
+
+            # Calculate retention cost savings
+            incoming_bytes_monthly = incoming_bytes * 4.33  # 7d → 30d estimate
+            data_gb = incoming_bytes_monthly / (1024**3)
+            retention_rate = self.PRICING.get("kinesis_retention_extended_per_gb", 0.020)
+            retention_savings = data_gb * retention_rate
+            potential_savings = max(potential_savings, retention_savings)
+
+            recommendations.append(
+                {
+                    "type": "reduce_retention",
+                    "title": f"Excessive Data Retention ({retention_hours} Hours)",
+                    "description": f"Stream '{stream.get('StreamName', '')}' retains data for {retention_hours} hours "
+                    f"but consumers process data within 1 hour. Default 24h retention is sufficient.",
+                    "impact": "low",
+                    "estimated_savings": f"${retention_savings:.2f}/month",
+                    "action": f"Reduce retention period from {retention_hours}h to 24h",
+                    "risk": "low",
+                }
+            )
+
+        # Scenario 5: MEDIUM - Unused enhanced fan-out (paying for consumers not reading)
+        if enhanced_fanout_consumers > 0 and get_records_count == 0.0:
+            is_optimizable = True
+            optimization_score = max(optimization_score, 65)
+            priority = "medium" if priority == "low" else priority
+
+            fanout_cost = enhanced_fanout_consumers * self.PRICING.get("kinesis_enhanced_fanout_per_consumer", 10.95)
+            potential_savings = max(potential_savings, fanout_cost)
+
+            recommendations.append(
+                {
+                    "type": "remove_fanout",
+                    "title": f"Unused Enhanced Fan-Out Consumers ({enhanced_fanout_consumers})",
+                    "description": f"Stream '{stream.get('StreamName', '')}' has {enhanced_fanout_consumers} "
+                    f"enhanced fan-out consumer(s) but zero GetRecords calls. These consumers are not reading data.",
+                    "impact": "medium",
+                    "estimated_savings": f"${fanout_cost:.2f}/month",
+                    "action": "Remove unused enhanced fan-out consumers",
+                    "risk": "low",
+                }
+            )
+
+        return (is_optimizable, optimization_score, priority, potential_savings, recommendations)
+
+    async def scan_kinesis_streams(self, region: str) -> list[AllCloudResourceData]:
+        """
+        Scan ALL AWS Kinesis Streams in a region for cost intelligence.
+
+        For each stream:
+        - Calculate monthly cost (shards + retention + enhanced fan-out)
+        - Fetch CloudWatch metrics (IncomingRecords, IncomingBytes, GetRecords, IteratorAge)
+        - Analyze optimization opportunities (5 scenarios)
+
+        Returns:
+            List of AllCloudResourceData entries for all Kinesis Streams
+        """
+        resources: list[AllCloudResourceData] = []
+
+        try:
+            async with self.session.client("kinesis", region_name=region) as kinesis:
+                async with self.session.client("cloudwatch", region_name=region) as cloudwatch:
+                    # List all streams
+                    paginator = kinesis.get_paginator("list_streams")
+                    stream_names = []
+
+                    async for page in paginator.paginate():
+                        stream_names.extend(page.get("StreamNames", []))
+
+                    logger.info(
+                        "inventory.kinesis.streams_found",
+                        region=region,
+                        count=len(stream_names),
+                    )
+
+                    # Process each stream
+                    for stream_name in stream_names:
+                        try:
+                            # Get stream details
+                            stream_response = await kinesis.describe_stream(StreamName=stream_name)
+                            stream_desc = stream_response.get("StreamDescription", {})
+
+                            stream_arn = stream_desc.get("StreamARN", "")
+                            stream_status = stream_desc.get("StreamStatus", "UNKNOWN")
+                            shard_count = len(stream_desc.get("Shards", []))
+                            retention_hours = stream_desc.get("RetentionPeriodHours", 24)
+                            encryption_type = stream_desc.get("EncryptionType", "NONE")
+                            created_timestamp = stream_desc.get("StreamCreationTimestamp")
+
+                            # Get enhanced fan-out consumers
+                            consumers_response = await kinesis.list_stream_consumers(StreamARN=stream_arn)
+                            consumers = consumers_response.get("Consumers", [])
+                            enhanced_fanout_consumers = len(consumers)
+
+                            # Get CloudWatch metrics (7 days)
+                            end_time = datetime.utcnow()
+                            start_time = end_time - timedelta(days=7)
+
+                            # Metric 1: IncomingRecords (sum)
+                            incoming_records_response = await cloudwatch.get_metric_statistics(
+                                Namespace="AWS/Kinesis",
+                                MetricName="IncomingRecords",
+                                Dimensions=[{"Name": "StreamName", "Value": stream_name}],
+                                StartTime=start_time,
+                                EndTime=end_time,
+                                Period=604800,  # 7 days
+                                Statistics=["Sum"],
+                            )
+                            incoming_records = (
+                                incoming_records_response["Datapoints"][0]["Sum"]
+                                if incoming_records_response.get("Datapoints")
+                                else 0.0
+                            )
+
+                            # Metric 2: IncomingBytes (sum)
+                            incoming_bytes_response = await cloudwatch.get_metric_statistics(
+                                Namespace="AWS/Kinesis",
+                                MetricName="IncomingBytes",
+                                Dimensions=[{"Name": "StreamName", "Value": stream_name}],
+                                StartTime=start_time,
+                                EndTime=end_time,
+                                Period=604800,
+                                Statistics=["Sum"],
+                            )
+                            incoming_bytes = (
+                                incoming_bytes_response["Datapoints"][0]["Sum"]
+                                if incoming_bytes_response.get("Datapoints")
+                                else 0.0
+                            )
+
+                            # Metric 3: GetRecords.Records (sum) - Consumption activity
+                            get_records_response = await cloudwatch.get_metric_statistics(
+                                Namespace="AWS/Kinesis",
+                                MetricName="GetRecords.Records",
+                                Dimensions=[{"Name": "StreamName", "Value": stream_name}],
+                                StartTime=start_time,
+                                EndTime=end_time,
+                                Period=604800,
+                                Statistics=["Sum"],
+                            )
+                            get_records_count = (
+                                get_records_response["Datapoints"][0]["Sum"]
+                                if get_records_response.get("Datapoints")
+                                else 0.0
+                            )
+
+                            # Metric 4: GetRecords.IteratorAgeMilliseconds (avg) - Consumer lag
+                            iterator_age_response = await cloudwatch.get_metric_statistics(
+                                Namespace="AWS/Kinesis",
+                                MetricName="GetRecords.IteratorAgeMilliseconds",
+                                Dimensions=[{"Name": "StreamName", "Value": stream_name}],
+                                StartTime=start_time,
+                                EndTime=end_time,
+                                Period=604800,
+                                Statistics=["Average"],
+                            )
+                            iterator_age_ms = (
+                                iterator_age_response["Datapoints"][0]["Average"]
+                                if iterator_age_response.get("Datapoints")
+                                else 0.0
+                            )
+
+                            # Calculate cost
+                            incoming_bytes_monthly = incoming_bytes * 4.33  # 7d → 30d estimate
+                            monthly_cost = self._calculate_kinesis_monthly_cost(
+                                shard_count=shard_count,
+                                retention_hours=retention_hours,
+                                enhanced_fanout_consumers=enhanced_fanout_consumers,
+                                incoming_bytes_per_month=incoming_bytes_monthly,
+                                region=region,
+                            )
+
+                            # Calculate optimization
+                            (
+                                is_optimizable,
+                                optimization_score,
+                                priority,
+                                potential_savings,
+                                recommendations,
+                            ) = self._calculate_kinesis_optimization(
+                                stream=stream_desc,
+                                incoming_records=incoming_records,
+                                incoming_bytes=incoming_bytes,
+                                get_records_count=get_records_count,
+                                iterator_age_ms=iterator_age_ms,
+                                shard_count=shard_count,
+                                retention_hours=retention_hours,
+                                enhanced_fanout_consumers=enhanced_fanout_consumers,
+                                monthly_cost=monthly_cost,
+                            )
+
+                            # Build metadata
+                            resource_metadata = {
+                                "stream_name": stream_name,
+                                "stream_arn": stream_arn,
+                                "stream_status": stream_status,
+                                "shard_count": shard_count,
+                                "retention_hours": retention_hours,
+                                "encryption_type": encryption_type,
+                                "enhanced_fanout_consumers": enhanced_fanout_consumers,
+                                "created_timestamp": created_timestamp.isoformat() if created_timestamp else None,
+                                "metrics": {
+                                    "incoming_records_7d": incoming_records,
+                                    "incoming_bytes_7d": incoming_bytes,
+                                    "get_records_count_7d": get_records_count,
+                                    "iterator_age_ms_avg": iterator_age_ms,
+                                },
+                            }
+
+                            # Create resource entry
+                            resource = AllCloudResourceData(
+                                resource_id=stream_arn,
+                                resource_type="kinesis_stream",
+                                resource_name=stream_name,
+                                region=region,
+                                estimated_monthly_cost=monthly_cost,
+                                currency="USD",
+                                resource_metadata=resource_metadata,
+                                is_optimizable=is_optimizable,
+                                optimization_score=optimization_score,
+                                optimization_priority=priority,
+                                potential_monthly_savings=potential_savings,
+                                optimization_recommendations=recommendations,
+                            )
+
+                            resources.append(resource)
+
+                            logger.info(
+                                "inventory.kinesis.stream_scanned",
+                                stream_name=stream_name,
+                                region=region,
+                                shard_count=shard_count,
+                                monthly_cost=monthly_cost,
+                                is_optimizable=is_optimizable,
+                                optimization_score=optimization_score,
+                            )
+
+                        except Exception as e:
+                            logger.error(
+                                "inventory.kinesis.stream_scan_error",
+                                stream_name=stream_name,
+                                region=region,
+                                error=str(e),
+                            )
+                            continue
+
+        except Exception as e:
+            logger.error(
+                "kinesis.scan_failed",
+                region=region,
+                error=str(e),
+            )
+
+        return resources
+
+    # =========================================================================
+    # AWS FSx File System - Cost Optimization Scanning
+    # =========================================================================
+
+    def _calculate_fsx_monthly_cost(
+        self,
+        file_system_type: str,
+        storage_capacity_gb: int,
+        throughput_capacity_mbps: int,
+        backup_storage_gb: float,
+        deployment_type: str,
+        region: str,
+    ) -> float:
+        """
+        Calculate estimated monthly cost for AWS FSx File System.
+
+        Pricing model (4 file system types):
+        1. FSx for Lustre: $0.145/GB/month + $2.20/MB/s throughput
+        2. FSx for Windows (SSD): $0.13/GB/month + $2.20/MB/s throughput
+        3. FSx for Windows (HDD): $0.013/GB/month + $2.20/MB/s throughput
+        4. FSx for ONTAP: $0.144/GB/month + $2.20/MB/s throughput
+        5. FSx for OpenZFS: $0.0996/GB/month + $2.20/MB/s throughput
+        6. Backup: $0.05/GB/month
+
+        Args:
+            file_system_type: Type (LUSTRE, WINDOWS, ONTAP, OPENZFS)
+            storage_capacity_gb: Storage size in GB
+            throughput_capacity_mbps: Throughput capacity in MB/s
+            backup_storage_gb: Backup storage size in GB
+            deployment_type: SINGLE_AZ_1, SINGLE_AZ_2, MULTI_AZ_1
+            region: AWS region
+
+        Returns:
+            Estimated monthly cost in USD
+        """
+        # Storage cost
+        storage_cost = 0.0
+        if file_system_type == "LUSTRE":
+            storage_rate = self.PRICING.get("fsx_lustre_per_gb", 0.145)
+            storage_cost = storage_capacity_gb * storage_rate
+        elif file_system_type == "WINDOWS":
+            # Detect HDD vs SSD based on deployment_type or assume SSD
+            storage_rate = self.PRICING.get("fsx_windows_per_gb", 0.13)
+            storage_cost = storage_capacity_gb * storage_rate
+        elif file_system_type == "ONTAP":
+            storage_rate = self.PRICING.get("fsx_ontap_per_gb", 0.144)
+            storage_cost = storage_capacity_gb * storage_rate
+        elif file_system_type == "OPENZFS":
+            storage_rate = self.PRICING.get("fsx_openzfs_per_gb", 0.0996)
+            storage_cost = storage_capacity_gb * storage_rate
+        else:
+            # Fallback
+            storage_cost = storage_capacity_gb * 0.13
+
+        # Throughput cost (if applicable)
+        throughput_cost = 0.0
+        if throughput_capacity_mbps > 0:
+            throughput_rate = self.PRICING.get("fsx_throughput_per_mbps", 2.20)
+            throughput_cost = throughput_capacity_mbps * throughput_rate
+
+        # Backup cost
+        backup_rate = self.PRICING.get("fsx_backup_per_gb", 0.05)
+        backup_cost = backup_storage_gb * backup_rate
+
+        total_cost = storage_cost + throughput_cost + backup_cost
+        return total_cost
+
+    def _calculate_fsx_optimization(
+        self,
+        file_system: dict[str, Any],
+        data_read_ops: float,
+        data_write_ops: float,
+        data_read_bytes: float,
+        data_write_bytes: float,
+        storage_capacity_gb: int,
+        throughput_capacity_mbps: int,
+        file_system_type: str,
+        deployment_type: str,
+        backup_storage_gb: float,
+        monthly_cost: float,
+    ) -> tuple[bool, int, str, float, list[dict[str, Any]]]:
+        """
+        Analyze AWS FSx File System for cost optimization opportunities.
+
+        Optimization scenarios (5):
+        1. Completely inactive - No read/write operations (critical)
+        2. Over-provisioned storage - >50% unused (high)
+        3. Over-provisioned throughput - <20% utilization (high)
+        4. Wrong storage type - Expensive SSD when HDD works (medium)
+        5. Excessive backup retention - >90 days backup (medium)
+
+        Returns:
+            (is_optimizable, optimization_score, priority, potential_savings, recommendations)
+        """
+        is_optimizable = False
+        optimization_score = 0
+        priority = "low"
+        potential_savings = 0.0
+        recommendations = []
+
+        # Scenario 1: CRITICAL - Completely inactive (no operations)
+        if data_read_ops == 0.0 and data_write_ops == 0.0:
+            is_optimizable = True
+            optimization_score = 95
+            priority = "critical"
+            potential_savings = monthly_cost  # Full savings
+            recommendations.append(
+                {
+                    "type": "delete_filesystem",
+                    "title": "Delete Completely Inactive FSx File System",
+                    "description": f"File system '{file_system.get('FileSystemId', '')}' has had NO read or write "
+                    f"operations in the last 7 days. This file system is completely unused and costs ${monthly_cost:.2f}/month.",
+                    "impact": "high",
+                    "estimated_savings": f"${monthly_cost:.2f}/month",
+                    "action": "Delete this unused FSx file system after verifying no critical data",
+                    "risk": "low",
+                }
+            )
+            return (is_optimizable, optimization_score, priority, potential_savings, recommendations)
+
+        # Scenario 2: HIGH - Over-provisioned storage (>50% unused)
+        # Estimate storage usage based on write operations
+        total_ops = data_read_ops + data_write_ops
+        if total_ops > 0:
+            # Rough estimate: If very few write operations, storage likely under-utilized
+            # This is a simplification - real storage usage requires detailed analysis
+            write_ratio = data_write_ops / total_ops if total_ops > 0 else 0
+            if write_ratio < 0.1 and storage_capacity_gb > 1024:  # <10% writes, >1TB storage
+                is_optimizable = True
+                optimization_score = max(optimization_score, 75)
+                priority = "high" if priority != "critical" else priority
+
+                # Estimate 40% reduction in storage
+                recommended_storage_gb = int(storage_capacity_gb * 0.6)
+                storage_rate = 0.13  # Default
+                if file_system_type == "LUSTRE":
+                    storage_rate = self.PRICING.get("fsx_lustre_per_gb", 0.145)
+                elif file_system_type == "ONTAP":
+                    storage_rate = self.PRICING.get("fsx_ontap_per_gb", 0.144)
+                elif file_system_type == "OPENZFS":
+                    storage_rate = self.PRICING.get("fsx_openzfs_per_gb", 0.0996)
+
+                storage_savings = (storage_capacity_gb - recommended_storage_gb) * storage_rate
+                potential_savings = max(potential_savings, storage_savings)
+
+                recommendations.append(
+                    {
+                        "type": "reduce_storage",
+                        "title": f"FSx File System Over-Provisioned (Low Write Activity)",
+                        "description": f"File system '{file_system.get('FileSystemId', '')}' has only {write_ratio*100:.1f}% "
+                        f"write operations, indicating potential over-provisioning of {storage_capacity_gb} GB storage.",
+                        "impact": "medium",
+                        "estimated_savings": f"${storage_savings:.2f}/month",
+                        "action": f"Consider reducing storage capacity from {storage_capacity_gb} GB to {recommended_storage_gb} GB",
+                        "risk": "medium",
+                    }
+                )
+
+        # Scenario 3: HIGH - Over-provisioned throughput (<20% utilization)
+        # Estimate throughput usage based on read/write bytes
+        # FSx throughput capacity measured in MB/s, convert 7-day bytes to avg MB/s
+        if throughput_capacity_mbps > 0:
+            seven_days_seconds = 604800
+            total_bytes_7d = data_read_bytes + data_write_bytes
+            avg_throughput_mbps = (total_bytes_7d / seven_days_seconds) / (1024 * 1024)  # Bytes/s to MB/s
+            utilization_percent = (avg_throughput_mbps / throughput_capacity_mbps) * 100
+
+            if utilization_percent < 20.0 and throughput_capacity_mbps > 8:  # <20% utilization, >8 MB/s capacity
+                is_optimizable = True
+                optimization_score = max(optimization_score, 80)
+                priority = "high" if priority != "critical" else priority
+
+                # Estimate right-sized throughput
+                recommended_throughput = max(8, int(throughput_capacity_mbps * 0.5))  # Min 8 MB/s
+                throughput_rate = self.PRICING.get("fsx_throughput_per_mbps", 2.20)
+                throughput_savings = (throughput_capacity_mbps - recommended_throughput) * throughput_rate
+                potential_savings = max(potential_savings, throughput_savings)
+
+                recommendations.append(
+                    {
+                        "type": "reduce_throughput",
+                        "title": f"FSx Throughput Under-Utilized ({utilization_percent:.1f}% Used)",
+                        "description": f"File system '{file_system.get('FileSystemId', '')}' uses only {utilization_percent:.1f}% "
+                        f"of its {throughput_capacity_mbps} MB/s throughput capacity. Recommend reducing to {recommended_throughput} MB/s.",
+                        "impact": "medium",
+                        "estimated_savings": f"${throughput_savings:.2f}/month",
+                        "action": f"Reduce throughput capacity from {throughput_capacity_mbps} to {recommended_throughput} MB/s",
+                        "risk": "low",
+                    }
+                )
+
+        # Scenario 4: MEDIUM - Wrong storage type (SSD when HDD works)
+        # Windows File Server supports both SSD and HDD
+        # If low IOPS requirements, HDD is 10x cheaper
+        if file_system_type == "WINDOWS" and total_ops > 0:
+            # If total operations per second < 100 IOPS, HDD is sufficient
+            seven_days_seconds = 604800
+            avg_iops = total_ops / seven_days_seconds
+
+            if avg_iops < 100:  # Low IOPS workload
+                is_optimizable = True
+                optimization_score = max(optimization_score, 65)
+                priority = "medium" if priority == "low" else priority
+
+                # Calculate savings by switching SSD to HDD
+                ssd_rate = self.PRICING.get("fsx_windows_per_gb", 0.13)
+                hdd_rate = self.PRICING.get("fsx_windows_hdd_per_gb", 0.013)
+                storage_savings = storage_capacity_gb * (ssd_rate - hdd_rate)
+                potential_savings = max(potential_savings, storage_savings)
+
+                recommendations.append(
+                    {
+                        "type": "switch_to_hdd",
+                        "title": f"FSx Windows File Server - Switch SSD to HDD (Low IOPS)",
+                        "description": f"File system '{file_system.get('FileSystemId', '')}' has only {avg_iops:.1f} IOPS "
+                        f"on average. For low-IOPS workloads, HDD storage is 10x cheaper than SSD.",
+                        "impact": "low",
+                        "estimated_savings": f"${storage_savings:.2f}/month (90% cost reduction)",
+                        "action": f"Migrate from SSD to HDD storage for {storage_capacity_gb} GB",
+                        "risk": "low",
+                    }
+                )
+
+        # Scenario 5: MEDIUM - Excessive backup retention (>90 days)
+        # High backup storage relative to primary storage indicates long retention
+        if backup_storage_gb > 0:
+            backup_ratio = backup_storage_gb / storage_capacity_gb if storage_capacity_gb > 0 else 0
+
+            if backup_ratio > 3.0:  # >3x primary storage (suggests 90+ days retention)
+                is_optimizable = True
+                optimization_score = max(optimization_score, 55)
+                priority = "medium" if priority == "low" else priority
+
+                # Estimate 50% reduction in backup storage
+                recommended_backup_gb = backup_storage_gb * 0.5
+                backup_rate = self.PRICING.get("fsx_backup_per_gb", 0.05)
+                backup_savings = (backup_storage_gb - recommended_backup_gb) * backup_rate
+                potential_savings = max(potential_savings, backup_savings)
+
+                recommendations.append(
+                    {
+                        "type": "reduce_backup_retention",
+                        "title": f"Excessive Backup Retention ({backup_ratio:.1f}x Primary Storage)",
+                        "description": f"File system '{file_system.get('FileSystemId', '')}' has {backup_storage_gb:.0f} GB "
+                        f"of backups, which is {backup_ratio:.1f}x the primary storage. Consider shorter retention period.",
+                        "impact": "low",
+                        "estimated_savings": f"${backup_savings:.2f}/month",
+                        "action": f"Reduce backup retention to free up {backup_storage_gb - recommended_backup_gb:.0f} GB",
+                        "risk": "low",
+                    }
+                )
+
+        return (is_optimizable, optimization_score, priority, potential_savings, recommendations)
+
+    async def scan_fsx_file_systems(self, region: str) -> list[AllCloudResourceData]:
+        """
+        Scan ALL AWS FSx File Systems in a region for cost intelligence.
+
+        Supports 4 FSx types:
+        - FSx for Lustre (HPC, machine learning)
+        - FSx for Windows File Server (SSD/HDD)
+        - FSx for NetApp ONTAP (enterprise NAS)
+        - FSx for OpenZFS (Linux workloads)
+
+        For each file system:
+        - Calculate monthly cost (storage + throughput + backup)
+        - Fetch CloudWatch metrics (DataReadOperations, DataWriteOperations, DataReadBytes, DataWriteBytes)
+        - Analyze optimization opportunities (5 scenarios)
+
+        Returns:
+            List of AllCloudResourceData entries for all FSx File Systems
+        """
+        resources: list[AllCloudResourceData] = []
+
+        try:
+            async with self.session.client("fsx", region_name=region) as fsx:
+                async with self.session.client("cloudwatch", region_name=region) as cloudwatch:
+                    # List all file systems
+                    paginator = fsx.get_paginator("describe_file_systems")
+                    file_systems = []
+
+                    async for page in paginator.paginate():
+                        file_systems.extend(page.get("FileSystems", []))
+
+                    logger.info(
+                        "inventory.fsx.file_systems_found",
+                        region=region,
+                        count=len(file_systems),
+                    )
+
+                    # Process each file system
+                    for fs in file_systems:
+                        try:
+                            filesystem_id = fs.get("FileSystemId", "")
+                            filesystem_type = fs.get("FileSystemType", "UNKNOWN")  # LUSTRE, WINDOWS, ONTAP, OPENZFS
+                            lifecycle = fs.get("Lifecycle", "UNKNOWN")
+                            storage_capacity_gb = fs.get("StorageCapacity", 0)
+                            created_time = fs.get("CreationTime")
+
+                            # Get type-specific details
+                            deployment_type = "SINGLE_AZ_1"  # Default
+                            throughput_capacity_mbps = 0
+
+                            if filesystem_type == "WINDOWS":
+                                windows_config = fs.get("WindowsConfiguration", {})
+                                deployment_type = windows_config.get("DeploymentType", "SINGLE_AZ_1")
+                                throughput_capacity_mbps = windows_config.get("ThroughputCapacity", 0)
+                            elif filesystem_type == "LUSTRE":
+                                lustre_config = fs.get("LustreConfiguration", {})
+                                deployment_type = lustre_config.get("DeploymentType", "SCRATCH_1")
+                                throughput_capacity_mbps = lustre_config.get("PerUnitStorageThroughput", 0) * storage_capacity_gb
+                            elif filesystem_type == "ONTAP":
+                                ontap_config = fs.get("OntapConfiguration", {})
+                                deployment_type = ontap_config.get("DeploymentType", "SINGLE_AZ_1")
+                                throughput_capacity_mbps = ontap_config.get("ThroughputCapacity", 0)
+                            elif filesystem_type == "OPENZFS":
+                                openzfs_config = fs.get("OpenZFSConfiguration", {})
+                                deployment_type = openzfs_config.get("DeploymentType", "SINGLE_AZ_1")
+                                throughput_capacity_mbps = openzfs_config.get("ThroughputCapacity", 0)
+
+                            # Get backup information
+                            # Note: BackupStorage is not directly available in describe_file_systems
+                            # Would need to call describe_backups to get exact backup storage
+                            # For now, estimate as 0 (can be enhanced later)
+                            backup_storage_gb = 0.0
+
+                            # Get CloudWatch metrics (7 days)
+                            end_time = datetime.utcnow()
+                            start_time = end_time - timedelta(days=7)
+
+                            # Metric 1: DataReadOperations (sum)
+                            data_read_ops_response = await cloudwatch.get_metric_statistics(
+                                Namespace="AWS/FSx",
+                                MetricName="DataReadOperations",
+                                Dimensions=[{"Name": "FileSystemId", "Value": filesystem_id}],
+                                StartTime=start_time,
+                                EndTime=end_time,
+                                Period=604800,  # 7 days
+                                Statistics=["Sum"],
+                            )
+                            data_read_ops = (
+                                data_read_ops_response["Datapoints"][0]["Sum"]
+                                if data_read_ops_response.get("Datapoints")
+                                else 0.0
+                            )
+
+                            # Metric 2: DataWriteOperations (sum)
+                            data_write_ops_response = await cloudwatch.get_metric_statistics(
+                                Namespace="AWS/FSx",
+                                MetricName="DataWriteOperations",
+                                Dimensions=[{"Name": "FileSystemId", "Value": filesystem_id}],
+                                StartTime=start_time,
+                                EndTime=end_time,
+                                Period=604800,
+                                Statistics=["Sum"],
+                            )
+                            data_write_ops = (
+                                data_write_ops_response["Datapoints"][0]["Sum"]
+                                if data_write_ops_response.get("Datapoints")
+                                else 0.0
+                            )
+
+                            # Metric 3: DataReadBytes (sum)
+                            data_read_bytes_response = await cloudwatch.get_metric_statistics(
+                                Namespace="AWS/FSx",
+                                MetricName="DataReadBytes",
+                                Dimensions=[{"Name": "FileSystemId", "Value": filesystem_id}],
+                                StartTime=start_time,
+                                EndTime=end_time,
+                                Period=604800,
+                                Statistics=["Sum"],
+                            )
+                            data_read_bytes = (
+                                data_read_bytes_response["Datapoints"][0]["Sum"]
+                                if data_read_bytes_response.get("Datapoints")
+                                else 0.0
+                            )
+
+                            # Metric 4: DataWriteBytes (sum)
+                            data_write_bytes_response = await cloudwatch.get_metric_statistics(
+                                Namespace="AWS/FSx",
+                                MetricName="DataWriteBytes",
+                                Dimensions=[{"Name": "FileSystemId", "Value": filesystem_id}],
+                                StartTime=start_time,
+                                EndTime=end_time,
+                                Period=604800,
+                                Statistics=["Sum"],
+                            )
+                            data_write_bytes = (
+                                data_write_bytes_response["Datapoints"][0]["Sum"]
+                                if data_write_bytes_response.get("Datapoints")
+                                else 0.0
+                            )
+
+                            # Calculate cost
+                            monthly_cost = self._calculate_fsx_monthly_cost(
+                                file_system_type=filesystem_type,
+                                storage_capacity_gb=storage_capacity_gb,
+                                throughput_capacity_mbps=throughput_capacity_mbps,
+                                backup_storage_gb=backup_storage_gb,
+                                deployment_type=deployment_type,
+                                region=region,
+                            )
+
+                            # Calculate optimization
+                            (
+                                is_optimizable,
+                                optimization_score,
+                                priority,
+                                potential_savings,
+                                recommendations,
+                            ) = self._calculate_fsx_optimization(
+                                file_system=fs,
+                                data_read_ops=data_read_ops,
+                                data_write_ops=data_write_ops,
+                                data_read_bytes=data_read_bytes,
+                                data_write_bytes=data_write_bytes,
+                                storage_capacity_gb=storage_capacity_gb,
+                                throughput_capacity_mbps=throughput_capacity_mbps,
+                                file_system_type=filesystem_type,
+                                deployment_type=deployment_type,
+                                backup_storage_gb=backup_storage_gb,
+                                monthly_cost=monthly_cost,
+                            )
+
+                            # Build metadata
+                            resource_metadata = {
+                                "filesystem_id": filesystem_id,
+                                "filesystem_type": filesystem_type,
+                                "lifecycle": lifecycle,
+                                "storage_capacity_gb": storage_capacity_gb,
+                                "throughput_capacity_mbps": throughput_capacity_mbps,
+                                "deployment_type": deployment_type,
+                                "backup_storage_gb": backup_storage_gb,
+                                "created_time": created_time.isoformat() if created_time else None,
+                                "metrics": {
+                                    "data_read_ops_7d": data_read_ops,
+                                    "data_write_ops_7d": data_write_ops,
+                                    "data_read_bytes_7d": data_read_bytes,
+                                    "data_write_bytes_7d": data_write_bytes,
+                                },
+                            }
+
+                            # Create resource entry
+                            resource = AllCloudResourceData(
+                                resource_id=filesystem_id,
+                                resource_type="fsx_file_system",
+                                resource_name=filesystem_id,  # FSx uses ID as name
+                                region=region,
+                                estimated_monthly_cost=monthly_cost,
+                                currency="USD",
+                                resource_metadata=resource_metadata,
+                                is_optimizable=is_optimizable,
+                                optimization_score=optimization_score,
+                                optimization_priority=priority,
+                                potential_monthly_savings=potential_savings,
+                                optimization_recommendations=recommendations,
+                            )
+
+                            resources.append(resource)
+
+                            logger.info(
+                                "inventory.fsx.filesystem_scanned",
+                                filesystem_id=filesystem_id,
+                                region=region,
+                                filesystem_type=filesystem_type,
+                                storage_capacity_gb=storage_capacity_gb,
+                                monthly_cost=monthly_cost,
+                                is_optimizable=is_optimizable,
+                                optimization_score=optimization_score,
+                            )
+
+                        except Exception as e:
+                            logger.error(
+                                "inventory.fsx.filesystem_scan_error",
+                                filesystem_id=fs.get("FileSystemId", "unknown"),
+                                region=region,
+                                error=str(e),
+                            )
+                            continue
+
+        except Exception as e:
+            logger.error(
+                "fsx.scan_failed",
+                region=region,
+                error=str(e),
+            )
+
+        return resources

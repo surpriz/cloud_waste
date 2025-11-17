@@ -391,6 +391,33 @@ async def _scan_cloud_account_async(
                             fargate_count=len(fargate_resources),
                         )
 
+                        # Scan ElastiCache Clusters (all)
+                        elasticache_resources = await inventory_scanner.scan_elasticache_clusters(region)
+                        all_inventory_resources.extend(elasticache_resources)
+                        logger.info(
+                            "inventory.elasticache_scanned",
+                            region=region,
+                            elasticache_count=len(elasticache_resources),
+                        )
+
+                        # Scan Kinesis Streams (all)
+                        kinesis_resources = await inventory_scanner.scan_kinesis_streams(region)
+                        all_inventory_resources.extend(kinesis_resources)
+                        logger.info(
+                            "inventory.kinesis_scanned",
+                            region=region,
+                            kinesis_count=len(kinesis_resources),
+                        )
+
+                        # Scan FSx File Systems (all)
+                        fsx_resources = await inventory_scanner.scan_fsx_file_systems(region)
+                        all_inventory_resources.extend(fsx_resources)
+                        logger.info(
+                            "inventory.fsx_scanned",
+                            region=region,
+                            fsx_count=len(fsx_resources),
+                        )
+
                         # Scan RDS instances (all)
                         rds_resources = await inventory_scanner.scan_rds_instances(region)
                         all_inventory_resources.extend(rds_resources)

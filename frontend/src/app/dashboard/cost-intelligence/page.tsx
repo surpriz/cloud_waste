@@ -72,6 +72,9 @@ const resourceIcons: Record<ResourceType, any> = {
   dynamodb_table: Database,
   eks_cluster: Server,
   fargate_task: Server,
+  elasticache_cluster: Database,
+  kinesis_stream: Zap,
+  fsx_file_system: HardDrive,
   // Azure - Cost Intelligence (Inventory mode)
   azure_vm: Server,
   azure_managed_disk: HardDrive,
