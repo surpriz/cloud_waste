@@ -337,6 +337,24 @@ async def _scan_cloud_account_async(
                             lb_count=len(lb_resources),
                         )
 
+                        # Scan EBS Snapshots (all)
+                        snapshot_resources = await inventory_scanner.scan_ebs_snapshots(region)
+                        all_inventory_resources.extend(snapshot_resources)
+                        logger.info(
+                            "inventory.snapshot_scanned",
+                            region=region,
+                            snapshot_count=len(snapshot_resources),
+                        )
+
+                        # Scan AWS NAT Gateways (all)
+                        nat_resources = await inventory_scanner.scan_aws_nat_gateways(region)
+                        all_inventory_resources.extend(nat_resources)
+                        logger.info(
+                            "inventory.nat_scanned",
+                            region=region,
+                            nat_count=len(nat_resources),
+                        )
+
                         # Scan RDS instances (all)
                         rds_resources = await inventory_scanner.scan_rds_instances(region)
                         all_inventory_resources.extend(rds_resources)

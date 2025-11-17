@@ -756,6 +756,332 @@ class AWSInventoryScanner:
 
         return all_lbs
 
+    async def scan_ebs_snapshots(self, region: str) -> list[AllCloudResourceData]:
+        """
+        Scan ALL EBS snapshots for cost intelligence.
+
+        Unlike orphan detection, this returns ALL snapshots owned by account
+        with optimization recommendations.
+
+        Args:
+            region: AWS region to scan
+
+        Returns:
+            List of all EBS snapshot resources
+        """
+        logger.info("inventory.scan_ebs_snapshots_start", region=region)
+        all_snapshots: list[AllCloudResourceData] = []
+
+        try:
+            async with self.session.client("ec2", region_name=region) as ec2:
+                async with self.session.client("sts", region_name=region) as sts:
+                    # Get account ID
+                    identity = await sts.get_caller_identity()
+                    account_id = identity["Account"]
+
+                # Describe all snapshots owned by this account
+                response = await ec2.describe_snapshots(OwnerIds=[account_id])
+                snapshots = response.get("Snapshots", [])
+
+                # Get all volumes to check if snapshot source still exists
+                volumes_response = await ec2.describe_volumes()
+                volume_ids = {vol["VolumeId"] for vol in volumes_response.get("Volumes", [])}
+
+                # Count snapshots per volume
+                snapshot_counts: dict[str, int] = {}
+                for snap in snapshots:
+                    vol_id = snap.get("VolumeId")
+                    if vol_id:
+                        snapshot_counts[vol_id] = snapshot_counts.get(vol_id, 0) + 1
+
+                for snapshot in snapshots:
+                    snapshot_id = snapshot["SnapshotId"]
+                    volume_id = snapshot.get("VolumeId")
+                    size_gb = snapshot["VolumeSize"]
+                    start_time = snapshot["StartTime"]
+                    description = snapshot.get("Description", "")
+                    state = snapshot["State"]
+                    encrypted = snapshot.get("Encrypted", False)
+
+                    # Calculate age
+                    age_days = (datetime.now(start_time.tzinfo) - start_time).days
+
+                    # Check if volume still exists
+                    volume_exists = volume_id in volume_ids if volume_id else False
+                    is_orphaned = not volume_exists and age_days > 90
+
+                    # Get snapshot count for this volume
+                    snapshot_count_for_volume = snapshot_counts.get(volume_id, 1) if volume_id else 1
+
+                    # Calculate monthly cost
+                    monthly_cost = self._calculate_ebs_snapshot_monthly_cost(size_gb, region)
+
+                    # Extract tags
+                    tags = {}
+                    for tag in snapshot.get("Tags", []):
+                        tags[tag["Key"]] = tag["Value"]
+
+                    # Extract name from tags
+                    snapshot_name = tags.get("Name")
+
+                    # Calculate optimization (reuse existing function)
+                    (
+                        is_optimizable,
+                        optimization_score,
+                        optimization_priority,
+                        potential_savings,
+                        recommendations,
+                    ) = self._calculate_snapshot_optimization(
+                        snapshot,
+                        age_days,
+                        size_gb,
+                        is_orphaned,
+                        snapshot_count_for_volume,
+                        True,  # AWS snapshots are incremental by default
+                        monthly_cost,
+                    )
+
+                    # Determine utilization status
+                    if age_days > 365:
+                        utilization_status = "idle"
+                    elif is_orphaned:
+                        utilization_status = "idle"
+                    elif snapshot_count_for_volume > 10:
+                        utilization_status = "low"
+                    else:
+                        utilization_status = "active"
+
+                    # Create resource data
+                    resource = AllCloudResourceData(
+                        resource_type="ebs_snapshot",
+                        resource_id=snapshot_id,
+                        resource_name=snapshot_name,
+                        region=region,
+                        estimated_monthly_cost=monthly_cost,
+                        resource_metadata={
+                            "snapshot_id": snapshot_id,
+                            "volume_id": volume_id,
+                            "volume_exists": volume_exists,
+                            "size_gb": size_gb,
+                            "start_time": start_time.isoformat(),
+                            "age_days": age_days,
+                            "description": description,
+                            "state": state,
+                            "encrypted": encrypted,
+                            "progress": snapshot.get("Progress", "100%"),
+                            "snapshot_count_for_volume": snapshot_count_for_volume,
+                        },
+                        currency="USD",
+                        utilization_status=utilization_status,
+                        cpu_utilization_percent=None,
+                        memory_utilization_percent=None,
+                        storage_utilization_percent=None,
+                        network_utilization_mbps=None,
+                        is_optimizable=is_optimizable,
+                        optimization_priority=optimization_priority,
+                        optimization_score=optimization_score,
+                        potential_monthly_savings=potential_savings,
+                        optimization_recommendations=recommendations,
+                        tags=tags,
+                        resource_status=state,
+                        is_orphan=is_orphaned,
+                        created_at_cloud=start_time,
+                        last_used_at=None,
+                    )
+
+                    all_snapshots.append(resource)
+
+                logger.info(
+                    "inventory.scan_ebs_snapshots_complete",
+                    region=region,
+                    total_snapshots=len(all_snapshots),
+                )
+
+        except Exception as e:
+            logger.error(
+                "inventory.scan_ebs_snapshots_error",
+                region=region,
+                error=str(e),
+                exc_info=True,
+            )
+            raise
+
+        return all_snapshots
+
+    async def scan_aws_nat_gateways(self, region: str) -> list[AllCloudResourceData]:
+        """
+        Scan ALL AWS NAT Gateways for cost intelligence.
+
+        Unlike orphan detection, this returns ALL NAT Gateways with
+        utilization metrics and optimization recommendations.
+
+        Args:
+            region: AWS region to scan
+
+        Returns:
+            List of all NAT Gateway resources
+        """
+        logger.info("inventory.scan_aws_nat_gateways_start", region=region)
+        all_nat_gateways: list[AllCloudResourceData] = []
+
+        try:
+            async with self.session.client("ec2", region_name=region) as ec2:
+                # Describe all NAT Gateways
+                response = await ec2.describe_nat_gateways()
+                nat_gateways = response.get("NatGateways", [])
+
+                async with self.session.client("cloudwatch", region_name=region) as cloudwatch:
+                    for nat in nat_gateways:
+                        nat_gateway_id = nat["NatGatewayId"]
+                        state = nat["State"]  # 'pending', 'available', 'deleting', 'deleted', 'failed'
+                        vpc_id = nat.get("VpcId")
+                        subnet_id = nat.get("SubnetId")
+                        created_at = nat.get("CreateTime")
+
+                        # Get Elastic IP addresses
+                        nat_gateway_addresses = nat.get("NatGatewayAddresses", [])
+                        elastic_ip_count = len(nat_gateway_addresses)
+                        public_ip = None
+                        private_ip = None
+                        if nat_gateway_addresses:
+                            public_ip = nat_gateway_addresses[0].get("PublicIp")
+                            private_ip = nat_gateway_addresses[0].get("PrivateIp")
+
+                        # Get CloudWatch metrics for bytes processed (last 30 days)
+                        bytes_processed = 0.0
+                        try:
+                            end_time = datetime.utcnow()
+                            start_time = end_time - timedelta(days=30)
+
+                            # BytesOutToDestination metric
+                            metrics_response = await cloudwatch.get_metric_statistics(
+                                Namespace="AWS/NATGateway",
+                                MetricName="BytesOutToDestination",
+                                Dimensions=[{"Name": "NatGatewayId", "Value": nat_gateway_id}],
+                                StartTime=start_time,
+                                EndTime=end_time,
+                                Period=86400 * 30,  # 30 days
+                                Statistics=["Sum"],
+                            )
+
+                            datapoints = metrics_response.get("Datapoints", [])
+                            if datapoints:
+                                bytes_processed = datapoints[0].get("Sum", 0.0)
+                        except Exception:
+                            # CloudWatch metrics may not be available, continue with 0
+                            pass
+
+                        # Calculate data processed in GB
+                        data_processed_gb = bytes_processed / (1024 ** 3)
+
+                        # Calculate monthly cost
+                        monthly_cost = self._calculate_aws_nat_monthly_cost(
+                            data_processed_gb, region
+                        )
+
+                        # Determine utilization status
+                        if state == "failed":
+                            utilization_status = "idle"
+                        elif state == "deleted" or state == "deleting":
+                            utilization_status = "idle"
+                        elif bytes_processed == 0:
+                            utilization_status = "idle"
+                        elif data_processed_gb < 10:
+                            utilization_status = "low"
+                        elif data_processed_gb < 100:
+                            utilization_status = "medium"
+                        else:
+                            utilization_status = "high"
+
+                        # Calculate optimization
+                        (
+                            is_optimizable,
+                            optimization_score,
+                            optimization_priority,
+                            potential_savings,
+                            recommendations,
+                        ) = self._calculate_aws_nat_optimization(
+                            nat,
+                            bytes_processed,
+                            monthly_cost,
+                            state,
+                        )
+
+                        # Check if NAT Gateway is orphan (failed or no traffic)
+                        is_orphan = state == "failed" or (
+                            state == "available" and bytes_processed == 0
+                        )
+
+                        # Extract tags
+                        tags = {}
+                        for tag in nat.get("Tags", []):
+                            tags[tag["Key"]] = tag["Value"]
+
+                        # Extract name from tags
+                        nat_gateway_name = tags.get("Name")
+
+                        # Calculate network utilization in Mbps (approximate)
+                        # bytes_processed is for 30 days, convert to Mbps
+                        network_mbps = None
+                        if bytes_processed > 0:
+                            bytes_per_second = bytes_processed / (30 * 24 * 3600)
+                            network_mbps = (bytes_per_second * 8) / (1024 * 1024)  # Convert to Mbps
+
+                        # Create resource data
+                        resource = AllCloudResourceData(
+                            resource_type="nat_gateway",
+                            resource_id=nat_gateway_id,
+                            resource_name=nat_gateway_name,
+                            region=region,
+                            estimated_monthly_cost=monthly_cost,
+                            resource_metadata={
+                                "nat_gateway_id": nat_gateway_id,
+                                "state": state,
+                                "vpc_id": vpc_id,
+                                "subnet_id": subnet_id,
+                                "elastic_ip_count": elastic_ip_count,
+                                "public_ip": public_ip,
+                                "private_ip": private_ip,
+                                "data_processed_gb": round(data_processed_gb, 2),
+                                "bytes_processed": int(bytes_processed),
+                            },
+                            currency="USD",
+                            utilization_status=utilization_status,
+                            cpu_utilization_percent=None,
+                            memory_utilization_percent=None,
+                            storage_utilization_percent=None,
+                            network_utilization_mbps=network_mbps,
+                            is_optimizable=is_optimizable,
+                            optimization_priority=optimization_priority,
+                            optimization_score=optimization_score,
+                            potential_monthly_savings=potential_savings,
+                            optimization_recommendations=recommendations,
+                            tags=tags,
+                            resource_status=state,
+                            is_orphan=is_orphan,
+                            created_at_cloud=created_at,
+                            last_used_at=None,
+                        )
+
+                        all_nat_gateways.append(resource)
+
+                logger.info(
+                    "inventory.scan_aws_nat_gateways_complete",
+                    region=region,
+                    total_nat_gateways=len(all_nat_gateways),
+                )
+
+        except Exception as e:
+            logger.error(
+                "inventory.scan_aws_nat_gateways_error",
+                region=region,
+                error=str(e),
+                exc_info=True,
+            )
+            raise
+
+        return all_nat_gateways
+
     async def scan_rds_instances(self, region: str) -> list[AllCloudResourceData]:
         """
         Scan ALL RDS instances for cost intelligence.
@@ -1695,6 +2021,117 @@ class AWSInventoryScanner:
         # Scenario 6: Very low utilization (Low)
         # This would require CloudWatch metrics, which we can add later
         # For now, we focus on structural issues
+
+        return is_optimizable, optimization_score, priority, potential_savings, recommendations
+
+    def _calculate_ebs_snapshot_monthly_cost(
+        self,
+        size_gb: int,
+        region: str,
+    ) -> float:
+        """
+        Calculate estimated monthly cost for EBS snapshot.
+
+        AWS EBS Snapshot pricing: $0.05/GB/month (standard snapshot storage)
+
+        Args:
+            size_gb: Snapshot size in GB
+            region: AWS region
+
+        Returns:
+            Estimated monthly cost in USD
+        """
+        # EBS snapshot pricing is simple: $0.05/GB/month
+        return size_gb * 0.05
+
+    def _calculate_aws_nat_monthly_cost(
+        self,
+        data_processed_gb: float,
+        region: str,
+    ) -> float:
+        """
+        Calculate estimated monthly cost for AWS NAT Gateway.
+
+        AWS NAT Gateway pricing:
+        - Base: $32.40/month ($0.045/hour * 720 hours)
+        - Data processing: $0.045/GB
+
+        Args:
+            data_processed_gb: Data processed per month in GB
+            region: AWS region
+
+        Returns:
+            Estimated monthly cost in USD
+        """
+        base_cost = 32.40  # Base hourly cost * 720 hours/month
+        data_cost = data_processed_gb * 0.045  # $0.045/GB
+        return base_cost + data_cost
+
+    def _calculate_aws_nat_optimization(
+        self,
+        nat_gateway: dict[str, Any],
+        bytes_processed: float,
+        monthly_cost: float,
+        state: str,
+    ) -> tuple[bool, int, str, float, list[dict[str, Any]]]:
+        """
+        Calculate AWS NAT Gateway optimization metrics.
+
+        Returns:
+            (is_optimizable, optimization_score, priority, potential_savings, recommendations)
+        """
+        recommendations = []
+        is_optimizable = False
+        optimization_score = 0
+        potential_savings = 0.0
+        priority = "none"
+
+        nat_gateway_id = nat_gateway.get("NatGatewayId", "Unknown")
+        data_processed_gb = bytes_processed / (1024 ** 3)  # Convert bytes to GB
+
+        # Scenario 1: NAT Gateway in failed state (Critical)
+        if state == "failed":
+            is_optimizable = True
+            optimization_score = 95
+            priority = "critical"
+            potential_savings = monthly_cost
+            recommendations.append({
+                "action": "Delete failed NAT Gateway",
+                "details": f"NAT Gateway is in failed state. Delete to save ${potential_savings:.2f}/month",
+                "priority": "critical",
+            })
+
+        # Scenario 2: Zero traffic for 30+ days (High)
+        elif bytes_processed == 0:
+            is_optimizable = True
+            optimization_score = 85
+            priority = "high"
+            potential_savings = monthly_cost * 0.9  # Assume 90% savings
+            recommendations.append({
+                "action": "Delete unused NAT Gateway",
+                "details": f"NAT Gateway has no traffic. Delete to save ~${potential_savings:.2f}/month",
+                "priority": "high",
+            })
+
+        # Scenario 3: Very low traffic (<10GB/month) (Medium)
+        elif data_processed_gb < 10:
+            is_optimizable = True
+            optimization_score = 50
+            priority = "medium"
+            # Suggest using instance with public IP instead
+            potential_savings = 32.40  # Save base cost only
+            recommendations.append({
+                "action": "Consider using EC2 instance with public IP",
+                "details": f"Very low traffic ({data_processed_gb:.2f}GB/month). EC2 with public IP may be more cost-effective. Save ~${potential_savings:.2f}/month",
+                "alternatives": [
+                    {
+                        "name": "EC2 with Public IP",
+                        "cost": data_processed_gb * 0.01,  # Approximate data transfer cost
+                        "savings": potential_savings,
+                    }
+                ],
+                "priority": "medium",
+            })
 
         return is_optimizable, optimization_score, priority, potential_savings, recommendations
 
