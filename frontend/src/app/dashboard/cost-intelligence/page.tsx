@@ -129,6 +129,9 @@ const resourceIcons: Record<ResourceType, any> = {
   azure_event_grid_subscription: Zap,
   azure_key_vault_secret: Key,
   azure_app_configuration: FileText,
+  azure_api_management: Globe,
+  azure_logic_app: Workflow,
+  azure_data_factory: Database,
   // Add more as needed (truncated for brevity)
 } as any;
 

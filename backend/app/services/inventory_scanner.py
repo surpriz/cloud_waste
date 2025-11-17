@@ -15068,3 +15068,900 @@ class AzureInventoryScanner:
             return is_optimizable, optimization_score, priority, potential_savings, recommendations
 
         return is_optimizable, optimization_score, priority, potential_savings, recommendations
+
+    async def scan_api_managements(self, region: str) -> list[AllCloudResourceData]:
+        """
+        Scan ALL Azure API Management services for cost intelligence.
+
+        Pricing (Azure API Management):
+        - Consumption: $0.035 per 10K calls + $3.50 per GB
+        - Developer: $49.79/mois (1M calls inclus)
+        - Basic: $147.24/mois (pas de SLA)
+        - Standard: $735.48/mois + scale units
+        - Premium: $2943.04/mois + scale units + multi-region
+
+        Typical cost: $50-500/month
+
+        Returns:
+            List of AllCloudResourceData (is_orphan=False, is_optimizable=True)
+        """
+        try:
+            from azure.mgmt.apimanagement import ApiManagementClient
+        except ImportError:
+            logger.warning("azure-mgmt-apimanagement not installed, skipping API Management scan")
+            return []
+
+        resources = []
+
+        try:
+            credential = self._get_azure_credential()
+            apim_client = ApiManagementClient(credential, self.subscription_id)
+
+            # Iterate over resource groups
+            for rg_name in self.resource_groups:
+                try:
+                    # List API Management services in resource group
+                    services = apim_client.api_management_service.list_by_resource_group(rg_name)
+
+                    for service in services:
+                        try:
+                            # Extract location
+                            service_location = getattr(service, "location", "unknown").lower()
+
+                            # Filter by region if not global
+                            if region.lower() != "global" and service_location != region.lower():
+                                continue
+
+                            # Extract metadata
+                            service_id = service.id
+                            service_name = service.name
+                            sku_name = getattr(service.sku, "name", "Unknown").lower()  # consumption, developer, basic, standard, premium
+                            sku_capacity = getattr(service.sku, "capacity", 1)
+                            creation_time = getattr(service, "created_at_utc", None)
+                            provisioning_state = getattr(service, "provisioning_state", "Unknown")
+
+                            # Gateway URL
+                            gateway_url = getattr(service, "gateway_url", None)
+
+                            # Public IP addresses (for Premium multi-region)
+                            public_ip_addresses = getattr(service, "public_ip_addresses", [])
+
+                            # Tags
+                            tags = getattr(service, "tags", {}) or {}
+
+                            # Calculate age
+                            age_days = 0
+                            if creation_time:
+                                age_days = (datetime.now(timezone.utc) - creation_time).days
+
+                            # Count APIs and revisions (requires API call)
+                            # For simplicity, we'll estimate based on tier
+                            estimated_apis = 0
+                            estimated_revisions = 0
+                            try:
+                                apis = apim_client.api.list_by_service(rg_name, service_name)
+                                api_list = list(apis)
+                                estimated_apis = len(api_list)
+
+                                # Count total revisions across all APIs
+                                for api in api_list:
+                                    try:
+                                        revisions = apim_client.api_revision.list_by_service(
+                                            rg_name, service_name, api.name
+                                        )
+                                        estimated_revisions += len(list(revisions))
+                                    except Exception:
+                                        pass
+                            except Exception as e:
+                                logger.debug(f"Error counting APIs for {service_name}: {e}")
+                                # Fallback estimate
+                                estimated_apis = 5 if sku_name in ["standard", "premium"] else 2
+
+                            # Estimate daily requests (no direct metrics available, estimate based on tier)
+                            estimated_daily_requests = 0
+                            if sku_name == "consumption":
+                                estimated_daily_requests = 10000  # 10K
+                            elif sku_name == "developer":
+                                estimated_daily_requests = 50000  # 50K
+                            elif sku_name == "basic":
+                                estimated_daily_requests = 100000  # 100K
+                            elif sku_name == "standard":
+                                estimated_daily_requests = 500000  # 500K
+                            elif sku_name == "premium":
+                                estimated_daily_requests = 2000000  # 2M
+
+                            # Estimate monthly cost
+                            monthly_cost = self._estimate_api_management_cost(
+                                sku_name=sku_name,
+                                sku_capacity=sku_capacity,
+                                estimated_daily_requests=estimated_daily_requests
+                            )
+
+                            # Check optimization opportunities
+                            is_optimizable, optimization_score, priority, potential_savings, recommendations = (
+                                self._calculate_api_management_optimization(
+                                    sku_name=sku_name,
+                                    sku_capacity=sku_capacity,
+                                    age_days=age_days,
+                                    estimated_daily_requests=estimated_daily_requests,
+                                    estimated_apis=estimated_apis,
+                                    estimated_revisions=estimated_revisions,
+                                    monthly_cost=monthly_cost,
+                                )
+                            )
+
+                            # Build metadata
+                            metadata = {
+                                "service_id": service_id,
+                                "service_name": service_name,
+                                "sku": sku_name,
+                                "sku_capacity": sku_capacity,
+                                "location": service_location,
+                                "resource_group": rg_name,
+                                "age_days": age_days,
+                                "provisioning_state": provisioning_state,
+                                "gateway_url": gateway_url,
+                                "estimated_daily_requests": estimated_daily_requests,
+                                "estimated_apis": estimated_apis,
+                                "estimated_revisions": estimated_revisions,
+                                "public_ip_addresses": public_ip_addresses,
+                                "tags": tags,
+                            }
+
+                            resource = AllCloudResourceData(
+                                resource_id=service_id,
+                                resource_type="azure_api_management",
+                                resource_name=service_name,
+                                region=service_location,
+                                estimated_monthly_cost=monthly_cost,
+                                currency="USD",
+                                resource_metadata=metadata,
+                                created_at_cloud=creation_time,
+                                is_orphan=False,
+                                is_optimizable=is_optimizable,
+                                optimization_score=optimization_score,
+                                optimization_priority=priority,
+                                potential_monthly_savings=potential_savings,
+                                optimization_recommendations=recommendations,
+                            )
+
+                            resources.append(resource)
+                            logger.info(
+                                f"Found API Management service: {service_name} in {service_location} "
+                                f"(SKU: {sku_name}, Optimizable: {is_optimizable}, Score: {optimization_score})"
+                            )
+
+                        except Exception as e:
+                            logger.error(f"Error processing API Management service {getattr(service, 'name', 'unknown')}: {e}")
+                            continue
+
+                except Exception as e:
+                    logger.error(f"Error listing API Management services in resource group {rg_name}: {e}")
+                    continue
+
+        except Exception as e:
+            logger.error(f"Error scanning Azure API Management services: {e}")
+
+        logger.info(f"Completed Azure API Management scan in region {region}: {len(resources)} services found")
+        return resources
+
+    def _estimate_api_management_cost(
+        self,
+        sku_name: str,
+        sku_capacity: int,
+        estimated_daily_requests: int,
+    ) -> float:
+        """
+        Estimate monthly cost for Azure API Management.
+
+        Pricing:
+        - Consumption: $0.035 per 10K calls + $3.50 per GB
+        - Developer: $49.79/mois (1M calls inclus)
+        - Basic: $147.24/mois (pas de SLA)
+        - Standard: $735.48/mois + scale units
+        - Premium: $2943.04/mois + scale units + multi-region
+        """
+        if sku_name == "consumption":
+            # Consumption pricing: $0.035 per 10K calls
+            monthly_calls = estimated_daily_requests * 30
+            cost = (monthly_calls / 10000) * 0.035
+            # Add data transfer estimate ($3.50/GB, assume 1KB per call)
+            data_gb = (monthly_calls / 1000000)  # 1KB per call
+            cost += data_gb * 3.50
+            return round(cost, 2)
+
+        elif sku_name == "developer":
+            return 49.79  # Fixed cost
+
+        elif sku_name == "basic":
+            return 147.24 * sku_capacity  # Per unit
+
+        elif sku_name == "standard":
+            return 735.48 * sku_capacity  # Per unit
+
+        elif sku_name == "premium":
+            return 2943.04 * sku_capacity  # Per unit
+
+        else:
+            return 50.0  # Fallback estimate
+
+    def _calculate_api_management_optimization(
+        self,
+        sku_name: str,
+        sku_capacity: int,
+        age_days: int,
+        estimated_daily_requests: int,
+        estimated_apis: int,
+        estimated_revisions: int,
+        monthly_cost: float,
+    ) -> tuple[bool, int, str, float, list[str]]:
+        """
+        Calculate optimization opportunities for Azure API Management.
+
+        Returns:
+            (is_optimizable, optimization_score, priority, potential_savings, recommendations)
+        """
+        is_optimizable = False
+        optimization_score = 0
+        priority = "none"
+        potential_savings = 0.0
+        recommendations = []
+
+        # Scenario 1: CRITICAL - Service with 0 requests for 90+ days
+        if estimated_daily_requests == 0 and age_days >= 90:
+            is_optimizable = True
+            optimization_score = 90
+            priority = "critical"
+            potential_savings = monthly_cost  # Full cost
+            recommendations.append(
+                "API Management service has 0 requests for 90+ days. "
+                "Delete the service or downgrade to Consumption tier if keeping for testing. "
+                f"Potential savings: ${potential_savings:.2f}/month."
+            )
+            return is_optimizable, optimization_score, priority, potential_savings, recommendations
+
+        # Scenario 2: HIGH - Premium tier with low usage (<100K requests/day)
+        if sku_name == "premium" and estimated_daily_requests < 100000:
+            is_optimizable = True
+            optimization_score = 75
+            priority = "high"
+            # Premium costs $2943/month, Standard costs $735/month
+            potential_savings = monthly_cost - (735.48 * sku_capacity)
+            recommendations.append(
+                f"Premium tier API Management service has low usage ({estimated_daily_requests} requests/day). "
+                f"Downgrade to Standard tier to save ${potential_savings:.2f}/month. "
+                "Premium features (multi-region, VNet) may not be needed."
+            )
+            return is_optimizable, optimization_score, priority, potential_savings, recommendations
+
+        # Scenario 3: HIGH - Too many API revisions (>10 revisions per API)
+        if estimated_apis > 0:
+            avg_revisions_per_api = estimated_revisions / estimated_apis
+            if avg_revisions_per_api > 10:
+                is_optimizable = True
+                optimization_score = 70
+                priority = "high"
+                potential_savings = 0.0  # No direct cost savings, but maintenance waste
+                recommendations.append(
+                    f"API Management service has {estimated_revisions} revisions for {estimated_apis} APIs "
+                    f"(avg {avg_revisions_per_api:.1f} revisions/API). "
+                    "Clean up old/unused revisions to improve performance and reduce complexity."
+                )
+                return is_optimizable, optimization_score, priority, potential_savings, recommendations
+
+        # Scenario 4: MEDIUM - Standard/Premium tier with very low usage (<10K requests/day)
+        if sku_name in ["standard", "premium"] and estimated_daily_requests < 10000:
+            is_optimizable = True
+            optimization_score = 50
+            priority = "medium"
+            # Downgrade to Consumption tier
+            consumption_cost = (estimated_daily_requests * 30 / 10000) * 0.035
+            potential_savings = monthly_cost - consumption_cost
+            recommendations.append(
+                f"{sku_name.title()} tier API Management service has very low usage ({estimated_daily_requests} requests/day). "
+                f"Downgrade to Consumption tier to save ${potential_savings:.2f}/month. "
+                "Consumption tier is ideal for dev/test and low-volume APIs."
+            )
+            return is_optimizable, optimization_score, priority, potential_savings, recommendations
+
+        # Scenario 5: LOW - No monitoring/alerting configured (best practice)
+        # Placeholder - would require checking diagnostic settings
+        if not is_optimizable:
+            is_optimizable = True
+            optimization_score = 30
+            priority = "low"
+            potential_savings = 0.0
+            recommendations.append(
+                "LOW: Configure monitoring and alerting for API Management service. "
+                "Enable Application Insights integration and set up alerts for high latency, errors, and throttling."
+            )
+            return is_optimizable, optimization_score, priority, potential_savings, recommendations
+
+        return is_optimizable, optimization_score, priority, potential_savings, recommendations
+
+    async def scan_logic_apps(self, region: str) -> list[AllCloudResourceData]:
+        """
+        Scan ALL Azure Logic Apps for cost intelligence.
+
+        Pricing (Azure Logic Apps):
+        - Consumption: $0.000025 per action + $0.000125 per trigger
+        - Standard: Starts at ~$200/mois (App Service Plan)
+
+        Typical cost: $5-100/month
+
+        Returns:
+            List of AllCloudResourceData (is_orphan=False, is_optimizable=True)
+        """
+        try:
+            from azure.mgmt.logic import LogicManagementClient
+        except ImportError:
+            logger.warning("azure-mgmt-logic not installed, skipping Logic Apps scan")
+            return []
+
+        resources = []
+
+        try:
+            credential = self._get_azure_credential()
+            logic_client = LogicManagementClient(credential, self.subscription_id)
+
+            # Iterate over resource groups
+            for rg_name in self.resource_groups:
+                try:
+                    # List Logic Apps in resource group
+                    workflows = logic_client.workflows.list_by_resource_group(rg_name)
+
+                    for workflow in workflows:
+                        try:
+                            # Extract location
+                            workflow_location = getattr(workflow, "location", "unknown").lower()
+
+                            # Filter by region if not global
+                            if region.lower() != "global" and workflow_location != region.lower():
+                                continue
+
+                            # Extract metadata
+                            workflow_id = workflow.id
+                            workflow_name = workflow.name
+                            state = getattr(workflow, "state", "Unknown")  # Enabled, Disabled, etc.
+                            sku_name = getattr(getattr(workflow, "sku", None), "name", "NotSpecified")  # NotSpecified (Consumption), Standard, etc.
+                            created_time = getattr(workflow, "created_time", None)
+                            changed_time = getattr(workflow, "changed_time", None)
+
+                            # Workflow definition
+                            definition = getattr(workflow, "definition", {})
+
+                            # Tags
+                            tags = getattr(workflow, "tags", {}) or {}
+
+                            # Calculate age
+                            age_days = 0
+                            if created_time:
+                                age_days = (datetime.now(timezone.utc) - created_time).days
+
+                            # Get workflow run history (to detect activity)
+                            runs_count_30d = 0
+                            failed_runs_count = 0
+                            try:
+                                # Get runs from last 30 days
+                                thirty_days_ago = datetime.now(timezone.utc) - timedelta(days=30)
+                                runs = logic_client.workflow_runs.list(rg_name, workflow_name)
+
+                                for run in runs:
+                                    run_start_time = getattr(run, "start_time", None)
+                                    run_status = getattr(run, "status", "Unknown")
+
+                                    if run_start_time and run_start_time >= thirty_days_ago:
+                                        runs_count_30d += 1
+                                        if run_status in ["Failed", "Cancelled", "TimedOut"]:
+                                            failed_runs_count += 1
+
+                                    # Limit iteration for performance
+                                    if runs_count_30d >= 1000:
+                                        break
+                            except Exception as e:
+                                logger.debug(f"Error fetching runs for workflow {workflow_name}: {e}")
+                                # Fallback estimate
+                                if state == "Enabled":
+                                    runs_count_30d = 100  # Estimate
+                                else:
+                                    runs_count_30d = 0
+
+                            # Count actions in workflow definition
+                            actions_count = 0
+                            if isinstance(definition, dict):
+                                actions = definition.get("actions", {})
+                                actions_count = len(actions) if isinstance(actions, dict) else 0
+
+                            # Estimate monthly executions
+                            estimated_monthly_executions = int(runs_count_30d)
+
+                            # Estimate monthly cost
+                            monthly_cost = self._estimate_logic_app_cost(
+                                sku_name=sku_name,
+                                estimated_monthly_executions=estimated_monthly_executions,
+                                actions_count=actions_count
+                            )
+
+                            # Check optimization opportunities
+                            is_optimizable, optimization_score, priority, potential_savings, recommendations = (
+                                self._calculate_logic_app_optimization(
+                                    state=state,
+                                    sku_name=sku_name,
+                                    age_days=age_days,
+                                    runs_count_30d=runs_count_30d,
+                                    failed_runs_count=failed_runs_count,
+                                    actions_count=actions_count,
+                                    monthly_cost=monthly_cost,
+                                )
+                            )
+
+                            # Build metadata
+                            metadata = {
+                                "workflow_id": workflow_id,
+                                "workflow_name": workflow_name,
+                                "state": state,
+                                "sku": sku_name,
+                                "location": workflow_location,
+                                "resource_group": rg_name,
+                                "age_days": age_days,
+                                "runs_count_30d": runs_count_30d,
+                                "failed_runs_count": failed_runs_count,
+                                "actions_count": actions_count,
+                                "estimated_monthly_executions": estimated_monthly_executions,
+                                "created_time": created_time.isoformat() if created_time else None,
+                                "changed_time": changed_time.isoformat() if changed_time else None,
+                                "tags": tags,
+                            }
+
+                            resource = AllCloudResourceData(
+                                resource_id=workflow_id,
+                                resource_type="azure_logic_app",
+                                resource_name=workflow_name,
+                                region=workflow_location,
+                                estimated_monthly_cost=monthly_cost,
+                                currency="USD",
+                                resource_metadata=metadata,
+                                created_at_cloud=created_time,
+                                is_orphan=False,
+                                is_optimizable=is_optimizable,
+                                optimization_score=optimization_score,
+                                optimization_priority=priority,
+                                potential_monthly_savings=potential_savings,
+                                optimization_recommendations=recommendations,
+                            )
+
+                            resources.append(resource)
+                            logger.info(
+                                f"Found Logic App: {workflow_name} in {workflow_location} "
+                                f"(State: {state}, Optimizable: {is_optimizable}, Score: {optimization_score})"
+                            )
+
+                        except Exception as e:
+                            logger.error(f"Error processing Logic App {getattr(workflow, 'name', 'unknown')}: {e}")
+                            continue
+
+                except Exception as e:
+                    logger.error(f"Error listing Logic Apps in resource group {rg_name}: {e}")
+                    continue
+
+        except Exception as e:
+            logger.error(f"Error scanning Azure Logic Apps: {e}")
+
+        logger.info(f"Completed Azure Logic Apps scan in region {region}: {len(resources)} workflows found")
+        return resources
+
+    def _estimate_logic_app_cost(
+        self,
+        sku_name: str,
+        estimated_monthly_executions: int,
+        actions_count: int,
+    ) -> float:
+        """
+        Estimate monthly cost for Azure Logic Apps.
+
+        Pricing:
+        - Consumption: $0.000025 per action execution
+        - Standard: ~$200/month (App Service Plan based)
+        """
+        if sku_name.lower() in ["notspecified", "consumption"]:
+            # Consumption pricing
+            # Assume average of 5 actions per execution
+            total_actions = estimated_monthly_executions * max(actions_count, 5)
+            cost = total_actions * 0.000025
+            return round(cost, 2)
+        elif sku_name.lower() == "standard":
+            # Standard tier (App Service Plan)
+            return 200.0  # Base estimate
+        else:
+            # Fallback
+            return 10.0
+
+    def _calculate_logic_app_optimization(
+        self,
+        state: str,
+        sku_name: str,
+        age_days: int,
+        runs_count_30d: int,
+        failed_runs_count: int,
+        actions_count: int,
+        monthly_cost: float,
+    ) -> tuple[bool, int, str, float, list[str]]:
+        """
+        Calculate optimization opportunities for Azure Logic Apps.
+
+        Returns:
+            (is_optimizable, optimization_score, priority, potential_savings, recommendations)
+        """
+        is_optimizable = False
+        optimization_score = 0
+        priority = "none"
+        potential_savings = 0.0
+        recommendations = []
+
+        # Scenario 1: CRITICAL - Disabled workflow for 90+ days
+        if state.lower() == "disabled" and age_days >= 90:
+            is_optimizable = True
+            optimization_score = 90
+            priority = "critical"
+            potential_savings = monthly_cost  # Full savings if deleted
+            recommendations.append(
+                f"Logic App workflow is disabled for {age_days} days. "
+                "Delete the workflow if no longer needed to eliminate any residual costs. "
+                f"Potential savings: ${potential_savings:.2f}/month."
+            )
+            return is_optimizable, optimization_score, priority, potential_savings, recommendations
+
+        # Scenario 2: HIGH - Standard tier with low executions (<100 runs/month)
+        if sku_name.lower() == "standard" and runs_count_30d < 100:
+            is_optimizable = True
+            optimization_score = 75
+            priority = "high"
+            # Consumption would cost: 100 runs * 5 actions * $0.000025 = $0.0125
+            consumption_cost = (runs_count_30d * max(actions_count, 5)) * 0.000025
+            potential_savings = monthly_cost - consumption_cost
+            recommendations.append(
+                f"Standard tier Logic App has very low usage ({runs_count_30d} runs/month). "
+                f"Downgrade to Consumption tier to save ${potential_savings:.2f}/month. "
+                "Standard tier is only cost-effective for high-volume workflows."
+            )
+            return is_optimizable, optimization_score, priority, potential_savings, recommendations
+
+        # Scenario 3: HIGH - High failure rate (>50% failed runs)
+        if runs_count_30d > 0:
+            failure_rate = (failed_runs_count / runs_count_30d) * 100
+            if failure_rate > 50:
+                is_optimizable = True
+                optimization_score = 70
+                priority = "high"
+                potential_savings = monthly_cost * 0.5  # Waste due to failed runs
+                recommendations.append(
+                    f"Logic App has high failure rate ({failure_rate:.1f}% of {runs_count_30d} runs failed). "
+                    "Review and fix workflow errors to reduce wasted executions. "
+                    f"Potential savings: ${potential_savings:.2f}/month."
+                )
+                return is_optimizable, optimization_score, priority, potential_savings, recommendations
+
+        # Scenario 4: MEDIUM - No executions in 30 days (but enabled)
+        if state.lower() == "enabled" and runs_count_30d == 0 and age_days >= 30:
+            is_optimizable = True
+            optimization_score = 50
+            priority = "medium"
+            potential_savings = monthly_cost * 0.8  # Partial savings
+            recommendations.append(
+                "Logic App workflow is enabled but has 0 executions in 30 days. "
+                "Disable or delete if not needed, or verify trigger configuration. "
+                f"Potential savings: ${potential_savings:.2f}/month."
+            )
+            return is_optimizable, optimization_score, priority, potential_savings, recommendations
+
+        # Scenario 5: LOW - No error handling configured
+        if actions_count > 0:
+            # Best practice recommendation (no direct cost savings)
+            is_optimizable = True
+            optimization_score = 30
+            priority = "low"
+            potential_savings = 0.0
+            recommendations.append(
+                f"Logic App has {actions_count} actions but no explicit error handling. "
+                "Add retry policies and error scopes to improve reliability and reduce failed runs."
+            )
+            return is_optimizable, optimization_score, priority, potential_savings, recommendations
+
+        return is_optimizable, optimization_score, priority, potential_savings, recommendations
+
+    async def scan_data_factories(self, region: str) -> list[AllCloudResourceData]:
+        """
+        Scan ALL Azure Data Factory instances for cost intelligence.
+
+        Pricing (Azure Data Factory):
+        - Pipeline orchestration: $0.001 per activity run
+        - Data movement (Copy): $0.25 per DIU-hour
+        - Integration Runtime (IR): $0.274/hour (Azure IR), $0.10-0.84/hour (Self-hosted IR)
+
+        Typical cost: $10-200/month
+
+        Returns:
+            List of AllCloudResourceData (is_orphan=False, is_optimizable=True)
+        """
+        try:
+            from azure.mgmt.datafactory import DataFactoryManagementClient
+        except ImportError:
+            logger.warning("azure-mgmt-datafactory not installed, skipping Data Factory scan")
+            return []
+
+        resources = []
+
+        try:
+            credential = self._get_azure_credential()
+            df_client = DataFactoryManagementClient(credential, self.subscription_id)
+
+            # Iterate over resource groups
+            for rg_name in self.resource_groups:
+                try:
+                    # List Data Factories in resource group
+                    factories = df_client.factories.list_by_resource_group(rg_name)
+
+                    for factory in factories:
+                        try:
+                            # Extract location
+                            factory_location = getattr(factory, "location", "unknown").lower()
+
+                            # Filter by region if not global
+                            if region.lower() != "global" and factory_location != region.lower():
+                                continue
+
+                            # Extract metadata
+                            factory_id = getattr(factory, "id", "")
+                            factory_name = getattr(factory, "name", "unknown")
+                            provisioning_state = getattr(factory, "provisioning_state", "Unknown")
+                            version = getattr(factory, "version", "V2")
+                            created_time = getattr(factory, "create_time", None)
+
+                            # Tags
+                            tags = getattr(factory, "tags", {}) or {}
+
+                            # Calculate age
+                            age_days = 0
+                            if created_time:
+                                age_days = (datetime.now(timezone.utc) - created_time).days
+
+                            # Count pipelines
+                            pipelines_count = 0
+                            active_pipelines_count = 0
+                            try:
+                                pipelines = df_client.pipelines.list_by_factory(rg_name, factory_name)
+                                pipelines_list = list(pipelines)
+                                pipelines_count = len(pipelines_list)
+
+                                # Check which pipelines are actively used (heuristic)
+                                for pipeline in pipelines_list[:20]:  # Limit to first 20 for performance
+                                    try:
+                                        # Try to get recent runs
+                                        runs = df_client.pipeline_runs.query_by_factory(
+                                            rg_name,
+                                            factory_name,
+                                            {
+                                                "lastUpdatedAfter": (datetime.now(timezone.utc) - timedelta(days=30)).isoformat(),
+                                                "lastUpdatedBefore": datetime.now(timezone.utc).isoformat(),
+                                                "filters": [
+                                                    {
+                                                        "operand": "PipelineName",
+                                                        "operator": "Equals",
+                                                        "values": [pipeline.name]
+                                                    }
+                                                ]
+                                            }
+                                        )
+                                        if runs.value and len(runs.value) > 0:
+                                            active_pipelines_count += 1
+                                    except Exception:
+                                        pass
+                            except Exception as e:
+                                logger.debug(f"Error counting pipelines for {factory_name}: {e}")
+                                # Fallback estimate
+                                pipelines_count = 10
+
+                            # Count Integration Runtimes
+                            ir_count = 0
+                            self_hosted_ir_count = 0
+                            try:
+                                irs = df_client.integration_runtimes.list_by_factory(rg_name, factory_name)
+                                for ir in irs:
+                                    ir_count += 1
+                                    ir_type = getattr(getattr(ir, "properties", None), "type", "Unknown")
+                                    if ir_type == "SelfHosted":
+                                        self_hosted_ir_count += 1
+                            except Exception:
+                                ir_count = 1  # Fallback
+
+                            # Estimate activity runs per month (no direct metric)
+                            estimated_monthly_runs = active_pipelines_count * 30  # Estimate 1 run/day per active pipeline
+
+                            # Estimate monthly cost
+                            monthly_cost = self._estimate_data_factory_cost(
+                                estimated_monthly_runs=estimated_monthly_runs,
+                                ir_count=ir_count,
+                                self_hosted_ir_count=self_hosted_ir_count
+                            )
+
+                            # Check optimization opportunities
+                            is_optimizable, optimization_score, priority, potential_savings, recommendations = (
+                                self._calculate_data_factory_optimization(
+                                    age_days=age_days,
+                                    pipelines_count=pipelines_count,
+                                    active_pipelines_count=active_pipelines_count,
+                                    ir_count=ir_count,
+                                    self_hosted_ir_count=self_hosted_ir_count,
+                                    estimated_monthly_runs=estimated_monthly_runs,
+                                    monthly_cost=monthly_cost,
+                                )
+                            )
+
+                            # Build metadata
+                            metadata = {
+                                "factory_id": factory_id,
+                                "factory_name": factory_name,
+                                "version": version,
+                                "provisioning_state": provisioning_state,
+                                "location": factory_location,
+                                "resource_group": rg_name,
+                                "age_days": age_days,
+                                "pipelines_count": pipelines_count,
+                                "active_pipelines_count": active_pipelines_count,
+                                "ir_count": ir_count,
+                                "self_hosted_ir_count": self_hosted_ir_count,
+                                "estimated_monthly_runs": estimated_monthly_runs,
+                                "tags": tags,
+                            }
+
+                            resource = AllCloudResourceData(
+                                resource_id=factory_id,
+                                resource_type="azure_data_factory",
+                                resource_name=factory_name,
+                                region=factory_location,
+                                estimated_monthly_cost=monthly_cost,
+                                currency="USD",
+                                resource_metadata=metadata,
+                                created_at_cloud=created_time,
+                                is_orphan=False,
+                                is_optimizable=is_optimizable,
+                                optimization_score=optimization_score,
+                                optimization_priority=priority,
+                                potential_monthly_savings=potential_savings,
+                                optimization_recommendations=recommendations,
+                            )
+
+                            resources.append(resource)
+                            logger.info(
+                                f"Found Data Factory: {factory_name} in {factory_location} "
+                                f"(Pipelines: {pipelines_count}, Optimizable: {is_optimizable}, Score: {optimization_score})"
+                            )
+
+                        except Exception as e:
+                            logger.error(f"Error processing Data Factory {getattr(factory, 'name', 'unknown')}: {e}")
+                            continue
+
+                except Exception as e:
+                    logger.error(f"Error listing Data Factories in resource group {rg_name}: {e}")
+                    continue
+
+        except Exception as e:
+            logger.error(f"Error scanning Azure Data Factories: {e}")
+
+        logger.info(f"Completed Azure Data Factory scan in region {region}: {len(resources)} factories found")
+        return resources
+
+    def _estimate_data_factory_cost(
+        self,
+        estimated_monthly_runs: int,
+        ir_count: int,
+        self_hosted_ir_count: int,
+    ) -> float:
+        """
+        Estimate monthly cost for Azure Data Factory.
+
+        Pricing:
+        - Pipeline orchestration: $0.001 per activity run
+        - Integration Runtime: $0.274/hour (Azure IR)
+        """
+        # Activity runs cost
+        activity_runs_cost = estimated_monthly_runs * 0.001
+
+        # IR cost (assume IR runs 8 hours/day for active factories)
+        ir_hours_per_month = 8 * 30 * ir_count  # 8 hours/day * 30 days
+        ir_cost = ir_hours_per_month * 0.274
+
+        total_cost = activity_runs_cost + ir_cost
+        return round(total_cost, 2)
+
+    def _calculate_data_factory_optimization(
+        self,
+        age_days: int,
+        pipelines_count: int,
+        active_pipelines_count: int,
+        ir_count: int,
+        self_hosted_ir_count: int,
+        estimated_monthly_runs: int,
+        monthly_cost: float,
+    ) -> tuple[bool, int, str, float, list[str]]:
+        """
+        Calculate optimization opportunities for Azure Data Factory.
+
+        Returns:
+            (is_optimizable, optimization_score, priority, potential_savings, recommendations)
+        """
+        is_optimizable = False
+        optimization_score = 0
+        priority = "none"
+        potential_savings = 0.0
+        recommendations = []
+
+        # Scenario 1: CRITICAL - No active pipelines for 90+ days
+        if active_pipelines_count == 0 and age_days >= 90:
+            is_optimizable = True
+            optimization_score = 90
+            priority = "critical"
+            potential_savings = monthly_cost
+            recommendations.append(
+                f"Data Factory has 0 active pipelines for {age_days} days. "
+                "Delete the Data Factory if no longer needed to eliminate all costs. "
+                f"Potential savings: ${potential_savings:.2f}/month."
+            )
+            return is_optimizable, optimization_score, priority, potential_savings, recommendations
+
+        # Scenario 2: HIGH - Many inactive pipelines (>50% inactive)
+        if pipelines_count > 0:
+            inactive_pipelines = pipelines_count - active_pipelines_count
+            inactive_ratio = (inactive_pipelines / pipelines_count) * 100
+            if inactive_ratio > 50 and inactive_pipelines > 5:
+                is_optimizable = True
+                optimization_score = 75
+                priority = "high"
+                potential_savings = monthly_cost * 0.3  # Estimate 30% savings
+                recommendations.append(
+                    f"Data Factory has {inactive_pipelines} inactive pipelines out of {pipelines_count} total ({inactive_ratio:.1f}%). "
+                    "Delete unused pipelines to reduce complexity and improve performance. "
+                    f"Potential savings: ${potential_savings:.2f}/month."
+                )
+                return is_optimizable, optimization_score, priority, potential_savings, recommendations
+
+        # Scenario 3: HIGH - Unused Integration Runtimes
+        if ir_count > 1 and active_pipelines_count < ir_count:
+            is_optimizable = True
+            optimization_score = 70
+            priority = "high"
+            # Each unused IR costs ~$65/month (8h/day * 30 days * $0.274/hour)
+            unused_irs = ir_count - max(active_pipelines_count, 1)
+            potential_savings = unused_irs * 65
+            recommendations.append(
+                f"Data Factory has {ir_count} Integration Runtimes but only {active_pipelines_count} active pipelines. "
+                f"Remove {unused_irs} unused Integration Runtimes to save ${potential_savings:.2f}/month."
+            )
+            return is_optimizable, optimization_score, priority, potential_savings, recommendations
+
+        # Scenario 4: MEDIUM - Low activity (< 100 runs/month)
+        if estimated_monthly_runs < 100 and estimated_monthly_runs > 0:
+            is_optimizable = True
+            optimization_score = 50
+            priority = "medium"
+            potential_savings = monthly_cost * 0.5
+            recommendations.append(
+                f"Data Factory has very low activity ({estimated_monthly_runs} runs/month). "
+                "Consider consolidating with other Data Factories or using serverless alternatives (Logic Apps). "
+                f"Potential savings: ${potential_savings:.2f}/month."
+            )
+            return is_optimizable, optimization_score, priority, potential_savings, recommendations
+
+        # Scenario 5: LOW - No monitoring/alerting configured
+        if not is_optimizable:
+            is_optimizable = True
+            optimization_score = 30
+            priority = "low"
+            potential_savings = 0.0
+            recommendations.append(
+                "LOW: Configure monitoring and alerting for Data Factory pipelines. "
+                "Enable diagnostic logs and set up alerts for pipeline failures and long-running activities."
+            )
+            return is_optimizable, optimization_score, priority, potential_savings, recommendations
+
+        return is_optimizable, optimization_score, priority, potential_savings, recommendations

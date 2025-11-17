@@ -1031,6 +1031,33 @@ async def _scan_cloud_account_async(
                             app_configuration_count=len(app_config_resources),
                         )
 
+                        # Scan API Management services (all)
+                        api_mgmt_resources = await inventory_scanner.scan_api_managements(region)
+                        all_inventory_resources.extend(api_mgmt_resources)
+                        logger.info(
+                            "inventory.api_managements_scanned",
+                            region=region,
+                            api_management_count=len(api_mgmt_resources),
+                        )
+
+                        # Scan Logic Apps (all)
+                        logic_app_resources = await inventory_scanner.scan_logic_apps(region)
+                        all_inventory_resources.extend(logic_app_resources)
+                        logger.info(
+                            "inventory.logic_apps_scanned",
+                            region=region,
+                            logic_app_count=len(logic_app_resources),
+                        )
+
+                        # Scan Data Factories (all)
+                        data_factory_resources = await inventory_scanner.scan_data_factories(region)
+                        all_inventory_resources.extend(data_factory_resources)
+                        logger.info(
+                            "inventory.data_factories_scanned",
+                            region=region,
+                            data_factory_count=len(data_factory_resources),
+                        )
+
                     # Save all inventory resources to database
                     for resource in all_inventory_resources:
                         all_cloud_resource = AllCloudResource(

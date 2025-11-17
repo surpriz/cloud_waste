@@ -351,7 +351,10 @@ export type ResourceType =
   | "azure_service_bus_queue"
   | "azure_event_grid_subscription"
   | "azure_key_vault_secret"
-  | "azure_app_configuration";
+  | "azure_app_configuration"
+  | "azure_api_management"
+  | "azure_logic_app"
+  | "azure_data_factory";
 
 export type ConfidenceLevel = "critical" | "high" | "medium" | "low";
 
