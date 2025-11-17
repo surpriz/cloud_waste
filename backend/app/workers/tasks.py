@@ -959,6 +959,24 @@ async def _scan_cloud_account_async(
                             vpn_gateway_count=len(vpn_gateway_resources),
                         )
 
+                        # Scan VNet Peerings (all)
+                        vnet_peering_resources = await inventory_scanner.scan_vnet_peerings(region)
+                        all_inventory_resources.extend(vnet_peering_resources)
+                        logger.info(
+                            "inventory.vnet_peerings_scanned",
+                            region=region,
+                            vnet_peering_count=len(vnet_peering_resources),
+                        )
+
+                        # Scan Front Doors (global - only once, not per region)
+                        if region == regions[0]:  # Only scan once (Front Door is global)
+                            front_door_resources = await inventory_scanner.scan_front_doors(region)
+                            all_inventory_resources.extend(front_door_resources)
+                            logger.info(
+                                "inventory.front_doors_scanned",
+                                front_door_count=len(front_door_resources),
+                            )
+
                     # Save all inventory resources to database
                     for resource in all_inventory_resources:
                         all_cloud_resource = AllCloudResource(

@@ -29,6 +29,7 @@ azure-identity==1.15.0
 azure-mgmt-resource==23.0.1
 azure-mgmt-compute==30.5.0
 azure-mgmt-network==25.2.0
+azure-mgmt-frontdoor==1.1.0  # Azure Front Door management
 azure-mgmt-storage==21.1.0
 azure-storage-blob==12.27.1  # Azure Storage Blob client for blob operations
 azure-mgmt-monitor==6.0.2

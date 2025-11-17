@@ -41,6 +41,8 @@ import {
   Mic,
   Bot,
   Brain,
+  GitBranch,
+  Inbox,
 } from "lucide-react";
 import {
   PieChart as RechartsPie,
@@ -119,6 +121,9 @@ const resourceIcons: Record<ResourceType, any> = {
   azure_ml_endpoint: Brain,
   azure_synapse_sql_pool: BarChart3,
   azure_vpn_gateway: Shield,
+  azure_vnet_peering: GitBranch,
+  azure_front_door: Globe,
+  azure_cosmos_db_mongodb: Inbox,
   // Add more as needed (truncated for brevity)
 } as any;
 

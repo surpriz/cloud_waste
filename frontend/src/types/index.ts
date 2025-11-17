@@ -342,7 +342,10 @@ export type ResourceType =
   | "azure_hdinsight_kafka"
   | "azure_ml_endpoint"
   | "azure_synapse_sql_pool"
-  | "azure_vpn_gateway";
+  | "azure_vpn_gateway"
+  | "azure_vnet_peering"
+  | "azure_front_door"
+  | "azure_cosmos_db_mongodb";
 
 export type ConfidenceLevel = "critical" | "high" | "medium" | "low";
 
