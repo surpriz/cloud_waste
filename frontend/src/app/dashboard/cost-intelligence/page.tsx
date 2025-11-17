@@ -41,8 +41,7 @@ import {
   Mic,
   Bot,
   Brain,
-  GitBranch,
-  Inbox,
+  Key,
 } from "lucide-react";
 import {
   PieChart as RechartsPie,
@@ -127,6 +126,9 @@ const resourceIcons: Record<ResourceType, any> = {
   azure_container_registry: Box,
   azure_service_bus_topic: Radio,
   azure_service_bus_queue: MessageSquare,
+  azure_event_grid_subscription: Zap,
+  azure_key_vault_secret: Key,
+  azure_app_configuration: FileText,
   // Add more as needed (truncated for brevity)
 } as any;
 

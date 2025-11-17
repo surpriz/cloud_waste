@@ -1004,6 +1004,33 @@ async def _scan_cloud_account_async(
                             service_bus_queue_count=len(service_bus_queue_resources),
                         )
 
+                        # Scan Event Grid Subscriptions (all)
+                        event_grid_sub_resources = await inventory_scanner.scan_event_grid_subscriptions(region)
+                        all_inventory_resources.extend(event_grid_sub_resources)
+                        logger.info(
+                            "inventory.event_grid_subscriptions_scanned",
+                            region=region,
+                            event_grid_subscription_count=len(event_grid_sub_resources),
+                        )
+
+                        # Scan Key Vault Secrets (all)
+                        key_vault_secret_resources = await inventory_scanner.scan_key_vault_secrets(region)
+                        all_inventory_resources.extend(key_vault_secret_resources)
+                        logger.info(
+                            "inventory.key_vault_secrets_scanned",
+                            region=region,
+                            key_vault_secret_count=len(key_vault_secret_resources),
+                        )
+
+                        # Scan App Configuration stores (all)
+                        app_config_resources = await inventory_scanner.scan_app_configurations(region)
+                        all_inventory_resources.extend(app_config_resources)
+                        logger.info(
+                            "inventory.app_configurations_scanned",
+                            region=region,
+                            app_configuration_count=len(app_config_resources),
+                        )
+
                     # Save all inventory resources to database
                     for resource in all_inventory_resources:
                         all_cloud_resource = AllCloudResource(

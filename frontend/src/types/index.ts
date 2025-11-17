@@ -348,7 +348,10 @@ export type ResourceType =
   | "azure_cosmos_db_mongodb"
   | "azure_container_registry"
   | "azure_service_bus_topic"
-  | "azure_service_bus_queue";
+  | "azure_service_bus_queue"
+  | "azure_event_grid_subscription"
+  | "azure_key_vault_secret"
+  | "azure_app_configuration";
 
 export type ConfidenceLevel = "critical" | "high" | "medium" | "low";
 

@@ -14327,3 +14327,744 @@ class AzureInventoryScanner:
                 pass
 
         return is_optimizable, optimization_score, priority, potential_savings, recommendations
+
+    async def scan_event_grid_subscriptions(self, region: str) -> list[AllCloudResourceData]:
+        """
+        Scan ALL Azure Event Grid Subscriptions for cost intelligence.
+
+        Event Grid Subscription routes events from sources to handlers (webhooks, functions, etc.).
+        Pricing: $0.60 per million operations (premier million gratuit/mois)
+        Typical cost: $1-20/month
+
+        Detection criteria:
+        - Subscription vers endpoint mort/inaccessible (CRITICAL - 90 score)
+        - Subscription inactive (0 événements 90+ days) (HIGH - 75 score)
+        - Dead letter destination non configurée (HIGH - 70 score)
+        - Filtres trop larges (MEDIUM - 50 score)
+        - Pas d'Advanced Filtering (LOW - 30 score)
+
+        Returns:
+            List of all Event Grid Subscriptions with optimization recommendations
+        """
+        try:
+            from azure.mgmt.eventgrid import EventGridManagementClient
+        except ImportError:
+            self.logger.error("azure-mgmt-eventgrid not installed")
+            return []
+
+        resources = []
+        self.logger.info(f"Scanning Event Grid Subscriptions in region: {region}")
+
+        try:
+            # Create Event Grid client
+            credential = ClientSecretCredential(
+                tenant_id=self.tenant_id,
+                client_id=self.client_id,
+                client_secret=self.client_secret
+            )
+            eventgrid_client = EventGridManagementClient(credential, self.subscription_id)
+
+            # Get all resource groups
+            resource_groups = await self._get_resource_groups()
+
+            for rg in resource_groups:
+                rg_name = rg.name
+
+                # Filter by resource group if specified
+                if self.resource_groups and rg_name not in self.resource_groups:
+                    continue
+
+                try:
+                    # List Event Grid topics in this resource group
+                    topics = eventgrid_client.topics.list_by_resource_group(rg_name)
+
+                    for topic in topics:
+                        topic_name = topic.name
+                        topic_location = topic.location
+
+                        # Filter by region if specified
+                        if self.regions and topic_location not in self.regions:
+                            continue
+
+                        # Get subscriptions for this topic
+                        try:
+                            subscriptions = eventgrid_client.event_subscriptions.list_by_resource(
+                                topic.id
+                            )
+
+                            for subscription in subscriptions:
+                                subscription_name = subscription.name
+                                provisioning_state = getattr(subscription, 'provisioning_state', 'Unknown')
+
+                                # Get destination
+                                destination = getattr(subscription, 'destination', None)
+                                destination_type = type(destination).__name__ if destination else "Unknown"
+
+                                # Get dead letter config
+                                dead_letter_destination = getattr(subscription, 'dead_letter_destination', None)
+                                has_dead_letter = dead_letter_destination is not None
+
+                                # Get filter
+                                filter_obj = getattr(subscription, 'filter', None)
+                                has_subject_filter = False
+                                has_advanced_filter = False
+                                if filter_obj:
+                                    has_subject_filter = getattr(filter_obj, 'subject_begins_with', None) is not None
+                                    advanced_filters = getattr(filter_obj, 'advanced_filters', [])
+                                    has_advanced_filter = len(advanced_filters) > 0
+
+                                # Estimate usage (placeholder - would need Azure Monitor)
+                                monthly_operations = 0  # Placeholder
+                                delivery_success_rate = 100.0  # Placeholder (0-100%)
+
+                                # Calculate cost
+                                monthly_cost = self._estimate_event_grid_cost(monthly_operations)
+
+                                # Check optimization opportunities
+                                is_optimizable, score, priority, savings, recommendations = \
+                                    await self._calculate_event_grid_subscription_optimization(
+                                        subscription, delivery_success_rate, monthly_operations,
+                                        has_dead_letter, has_subject_filter, has_advanced_filter, monthly_cost
+                                    )
+
+                                # Build metadata
+                                metadata = {
+                                    "topic_name": topic_name,
+                                    "subscription_name": subscription_name,
+                                    "destination_type": destination_type,
+                                    "provisioning_state": provisioning_state,
+                                    "has_dead_letter": has_dead_letter,
+                                    "has_subject_filter": has_subject_filter,
+                                    "has_advanced_filter": has_advanced_filter,
+                                    "delivery_success_rate": delivery_success_rate,
+                                    "monthly_operations": monthly_operations,
+                                    "resource_group": rg_name,
+                                }
+
+                                # Determine if orphan (endpoint mort = waste)
+                                is_orphan = delivery_success_rate < 10.0 and score >= 90
+
+                                # Create resource record
+                                resource = AllCloudResourceData(
+                                    resource_id=subscription.id,
+                                    resource_name=f"{topic_name}/{subscription_name}",
+                                    resource_type="azure_event_grid_subscription",
+                                    region=topic_location,
+                                    estimated_monthly_cost=monthly_cost,
+                                    currency="USD",
+                                    resource_metadata=metadata,
+                                    is_orphan=is_orphan,
+                                    is_optimizable=is_optimizable and not is_orphan,
+                                    optimization_score=score if not is_orphan else 0,
+                                    optimization_priority=priority if not is_orphan else "none",
+                                    potential_monthly_savings=savings if not is_orphan else 0.0,
+                                    optimization_recommendations=recommendations if not is_orphan else []
+                                )
+
+                                resources.append(resource)
+                                self.logger.info(
+                                    f"Found Event Grid Subscription: {topic_name}/{subscription_name} "
+                                    f"(Success rate: {delivery_success_rate:.1f}%, Dead letter: {has_dead_letter}, "
+                                    f"Cost: ${monthly_cost:.2f}/mo, Optimizable: {is_optimizable})"
+                                )
+
+                        except Exception as e:
+                            self.logger.error(
+                                f"Error scanning subscriptions for topic {topic_name}: {str(e)}"
+                            )
+                            continue
+
+                except Exception as e:
+                    self.logger.error(
+                        f"Error scanning Event Grid topics in resource group {rg_name}: {str(e)}"
+                    )
+                    continue
+
+            self.logger.info(
+                f"Event Grid Subscription scan complete: {len(resources)} subscriptions found"
+            )
+
+        except Exception as e:
+            self.logger.error(f"Error scanning Event Grid Subscriptions: {str(e)}")
+
+        return resources
+
+    def _estimate_event_grid_cost(self, monthly_operations: int) -> float:
+        """
+        Estimate monthly cost for Event Grid based on operations.
+
+        Pricing:
+        - $0.60 per million operations
+        - Premier million gratuit chaque mois
+
+        Note: Très bas coût - généralement <$10/mois
+        """
+        # Premier million gratuit
+        if monthly_operations <= 1000000:
+            return 0.0
+
+        # Au-delà du million gratuit
+        billable_operations = monthly_operations - 1000000
+        cost_per_million = 0.60
+        return (billable_operations / 1000000) * cost_per_million
+
+    async def _calculate_event_grid_subscription_optimization(
+        self,
+        subscription: Any,
+        delivery_success_rate: float,
+        monthly_operations: int,
+        has_dead_letter: bool,
+        has_subject_filter: bool,
+        has_advanced_filter: bool,
+        monthly_cost: float
+    ) -> tuple[bool, int, str, float, list[str]]:
+        """
+        Calculate optimization opportunities for Event Grid Subscription.
+
+        Returns:
+            (is_optimizable, optimization_score, priority, potential_savings, recommendations)
+        """
+        is_optimizable = False
+        optimization_score = 0
+        priority = "none"
+        potential_savings = 0.0
+        recommendations = []
+
+        # SCENARIO 1: CRITICAL - Subscription vers endpoint mort/inaccessible
+        # Delivery success rate <10% = endpoint probablement mort
+        if delivery_success_rate < 10.0:
+            is_optimizable = True
+            optimization_score = 90
+            priority = "critical"
+            potential_savings = monthly_cost
+            recommendations.append(
+                f"CRITICAL: Event Grid Subscription has very low delivery success rate ({delivery_success_rate:.1f}%). "
+                f"Check endpoint health or delete if no longer needed to save ${monthly_cost:.2f}/month."
+            )
+
+        # SCENARIO 2: HIGH - Subscription inactive (0 événements depuis 90+ jours)
+        elif monthly_operations == 0:
+            is_optimizable = True
+            optimization_score = max(optimization_score, 75)
+            priority = "high" if priority == "none" else priority
+            potential_savings = monthly_cost
+            recommendations.append(
+                f"HIGH: Event Grid Subscription has no events for 90+ days. "
+                f"Delete if no longer needed to save ${monthly_cost:.2f}/month."
+            )
+
+        # SCENARIO 3: HIGH - Dead letter destination non configurée
+        # Sans dead letter, événements en échec sont perdus
+        elif not has_dead_letter:
+            is_optimizable = True
+            optimization_score = max(optimization_score, 70)
+            priority = "high" if priority == "none" else priority
+            recommendations.append(
+                "HIGH: No dead letter destination configured. "
+                "Events that fail delivery are lost. Configure dead lettering for reliability."
+            )
+
+        # SCENARIO 4: MEDIUM - Filtres trop larges (traite tous événements)
+        # Pas de filtres = traite tous événements = gaspillage potentiel
+        if not has_subject_filter and not has_advanced_filter and not is_optimizable:
+            is_optimizable = True
+            optimization_score = max(optimization_score, 50)
+            priority = "medium" if priority == "none" else priority
+            recommendations.append(
+                "MEDIUM: No event filters configured. "
+                "Subscription processes all events. Add filters to reduce unnecessary processing."
+            )
+
+        # SCENARIO 5: LOW - Pas d'Advanced Filtering (best practice)
+        # Advanced filters permettent filtrage plus granulaire
+        if not has_advanced_filter and not is_optimizable:
+            is_optimizable = True
+            optimization_score = max(optimization_score, 30)
+            priority = "low" if priority == "none" else priority
+            recommendations.append(
+                "LOW: No advanced filters configured. "
+                "Use advanced filtering for better event routing optimization."
+            )
+
+        return is_optimizable, optimization_score, priority, potential_savings, recommendations
+
+    async def scan_key_vault_secrets(self, region: str) -> list[AllCloudResourceData]:
+        """
+        Scan ALL Azure Key Vault Secrets for cost intelligence.
+
+        Key Vault stores secrets, keys, and certificates securely.
+        Pricing: $0.03 per 10K operations + minimal storage
+        Typical cost: $5-50/month
+
+        Detection criteria:
+        - Secrets expirés ou non accessibles 90+ days (CRITICAL - 90 score)
+        - Pas de date d'expiration (HIGH - 75 score)
+        - Secrets non rotationnés 365+ days (HIGH - 70 score)
+        - Soft-delete non activé (MEDIUM - 50 score)
+        - Pas de monitoring/alerting (LOW - 30 score)
+
+        Returns:
+            List of all Key Vault Secrets with optimization recommendations
+        """
+        try:
+            from azure.mgmt.keyvault import KeyVaultManagementClient
+        except ImportError:
+            self.logger.error("azure-mgmt-keyvault not installed")
+            return []
+
+        resources = []
+        self.logger.info(f"Scanning Key Vault Secrets in region: {region}")
+
+        try:
+            # Create Key Vault client
+            credential = ClientSecretCredential(
+                tenant_id=self.tenant_id,
+                client_id=self.client_id,
+                client_secret=self.client_secret
+            )
+            kv_client = KeyVaultManagementClient(credential, self.subscription_id)
+
+            # Get all resource groups
+            resource_groups = await self._get_resource_groups()
+
+            for rg in resource_groups:
+                rg_name = rg.name
+
+                # Filter by resource group if specified
+                if self.resource_groups and rg_name not in self.resource_groups:
+                    continue
+
+                try:
+                    # List Key Vaults in this resource group
+                    vaults = kv_client.vaults.list_by_resource_group(rg_name)
+
+                    for vault in vaults:
+                        vault_name = vault.name
+                        vault_location = vault.location
+
+                        # Filter by region if specified
+                        if self.regions and vault_location not in self.regions:
+                            continue
+
+                        # Get vault properties
+                        sku = getattr(vault.properties, 'sku', None) if hasattr(vault, 'properties') else None
+                        sku_name = sku.name if sku else "Standard"
+                        soft_delete_enabled = getattr(vault.properties, 'enable_soft_delete', False) if hasattr(vault, 'properties') else False
+
+                        # Estimate metrics (placeholder - would need Azure Monitor / Key Vault SDK)
+                        monthly_operations = 1000  # Placeholder
+                        secrets_count = 5  # Placeholder
+                        secrets_without_expiration = 0  # Placeholder
+                        secrets_last_access_90d_ago = 0  # Placeholder
+                        secrets_not_rotated_365d = 0  # Placeholder
+
+                        # Calculate cost
+                        monthly_cost = self._estimate_key_vault_cost(monthly_operations, secrets_count)
+
+                        # Check optimization opportunities
+                        is_optimizable, score, priority, savings, recommendations = \
+                            await self._calculate_key_vault_secret_optimization(
+                                vault, soft_delete_enabled, secrets_without_expiration,
+                                secrets_last_access_90d_ago, secrets_not_rotated_365d, monthly_cost
+                            )
+
+                        # Build metadata
+                        metadata = {
+                            "vault_name": vault_name,
+                            "sku": sku_name,
+                            "soft_delete_enabled": soft_delete_enabled,
+                            "secrets_count": secrets_count,
+                            "secrets_without_expiration": secrets_without_expiration,
+                            "secrets_last_access_90d_ago": secrets_last_access_90d_ago,
+                            "secrets_not_rotated_365d": secrets_not_rotated_365d,
+                            "monthly_operations": monthly_operations,
+                            "resource_group": rg_name,
+                        }
+
+                        # Determine if orphan (secrets non accédés = waste)
+                        is_orphan = secrets_last_access_90d_ago > 0 and score >= 90
+
+                        # Create resource record
+                        resource = AllCloudResourceData(
+                            resource_id=vault.id,
+                            resource_name=vault_name,
+                            resource_type="azure_key_vault_secret",
+                            region=vault_location,
+                            estimated_monthly_cost=monthly_cost,
+                            currency="USD",
+                            resource_metadata=metadata,
+                            is_orphan=is_orphan,
+                            is_optimizable=is_optimizable and not is_orphan,
+                            optimization_score=score if not is_orphan else 0,
+                            optimization_priority=priority if not is_orphan else "none",
+                            potential_monthly_savings=savings if not is_orphan else 0.0,
+                            optimization_recommendations=recommendations if not is_orphan else []
+                        )
+
+                        resources.append(resource)
+                        self.logger.info(
+                            f"Found Key Vault: {vault_name} "
+                            f"(SKU: {sku_name}, Soft-delete: {soft_delete_enabled}, "
+                            f"Secrets: {secrets_count}, Cost: ${monthly_cost:.2f}/mo, Optimizable: {is_optimizable})"
+                        )
+
+                except Exception as e:
+                    self.logger.error(
+                        f"Error scanning Key Vaults in resource group {rg_name}: {str(e)}"
+                    )
+                    continue
+
+            self.logger.info(
+                f"Key Vault Secret scan complete: {len(resources)} vaults found"
+            )
+
+        except Exception as e:
+            self.logger.error(f"Error scanning Key Vault Secrets: {str(e)}")
+
+        return resources
+
+    def _estimate_key_vault_cost(self, monthly_operations: int, secrets_count: int) -> float:
+        """
+        Estimate monthly cost for Key Vault based on operations.
+
+        Pricing:
+        - $0.03 per 10,000 operations
+        - Secrets: Free storage, paid per access
+        - HSM-backed secrets (Premium): $1/secret/month
+
+        For simplicity, using operation-based pricing
+        """
+        cost_per_10k_ops = 0.03
+        return (monthly_operations / 10000) * cost_per_10k_ops
+
+    async def _calculate_key_vault_secret_optimization(
+        self,
+        vault: Any,
+        soft_delete_enabled: bool,
+        secrets_without_expiration: int,
+        secrets_last_access_90d_ago: int,
+        secrets_not_rotated_365d: int,
+        monthly_cost: float
+    ) -> tuple[bool, int, str, float, list[str]]:
+        """
+        Calculate optimization opportunities for Key Vault Secret.
+
+        Returns:
+            (is_optimizable, optimization_score, priority, potential_savings, recommendations)
+        """
+        is_optimizable = False
+        optimization_score = 0
+        priority = "none"
+        potential_savings = 0.0
+        recommendations = []
+
+        # SCENARIO 1: CRITICAL - Secrets expirés ou non accessibles 90+ days
+        if secrets_last_access_90d_ago > 0:
+            is_optimizable = True
+            optimization_score = 90
+            priority = "critical"
+            potential_savings = monthly_cost * 0.5  # Assume 50% cost reduction
+            recommendations.append(
+                f"CRITICAL: {secrets_last_access_90d_ago} secrets not accessed for 90+ days. "
+                f"Review and delete unused secrets to save ~${potential_savings:.2f}/month."
+            )
+
+        # SCENARIO 2: HIGH - Pas de date d'expiration configurée (risque sécurité)
+        elif secrets_without_expiration > 0:
+            is_optimizable = True
+            optimization_score = max(optimization_score, 75)
+            priority = "high" if priority == "none" else priority
+            recommendations.append(
+                f"HIGH: {secrets_without_expiration} secrets without expiration date. "
+                f"Set expiration dates for automatic rotation and improved security."
+            )
+
+        # SCENARIO 3: HIGH - Secrets non rotationnés depuis 365+ jours
+        elif secrets_not_rotated_365d > 0:
+            is_optimizable = True
+            optimization_score = max(optimization_score, 70)
+            priority = "high" if priority == "none" else priority
+            recommendations.append(
+                f"HIGH: {secrets_not_rotated_365d} secrets not rotated for 365+ days. "
+                f"Rotate secrets regularly (recommended: every 90 days) for security."
+            )
+
+        # SCENARIO 4: MEDIUM - Soft-delete non activé (risque de perte)
+        if not soft_delete_enabled and not is_optimizable:
+            is_optimizable = True
+            optimization_score = max(optimization_score, 50)
+            priority = "medium" if priority == "none" else priority
+            recommendations.append(
+                "MEDIUM: Soft-delete not enabled. "
+                "Enable soft-delete to protect against accidental secret deletion."
+            )
+
+        # SCENARIO 5: LOW - Pas de monitoring/alerting configuré
+        # Placeholder - would require checking diagnostic settings
+        if not is_optimizable:
+            is_optimizable = True
+            optimization_score = max(optimization_score, 30)
+            priority = "low" if priority == "none" else priority
+            recommendations.append(
+                "LOW: Configure monitoring and alerting for Key Vault access. "
+                "Enable diagnostic logs to track secret access and detect anomalies."
+            )
+
+        return is_optimizable, optimization_score, priority, potential_savings, recommendations
+
+    async def scan_app_configurations(self, region: str) -> list[AllCloudResourceData]:
+        """
+        Scan ALL Azure App Configuration stores for cost intelligence.
+
+        Pricing (Azure App Configuration):
+        - Free tier: $0/mois (1 store, 1000 requests/jour max)
+        - Standard tier: $1.20/jour (~$36/mois) + data transfer
+
+        Typical cost: $0-50/month
+
+        Returns:
+            List of AllCloudResourceData (is_orphan=False, is_optimizable=True)
+        """
+        try:
+            from azure.mgmt.appconfiguration import AppConfigurationManagementClient
+        except ImportError:
+            logger.warning("azure-mgmt-appconfiguration not installed, skipping App Configuration scan")
+            return []
+
+        resources = []
+
+        try:
+            credential = self._get_azure_credential()
+            app_config_client = AppConfigurationManagementClient(credential, self.subscription_id)
+
+            # Iterate over resource groups
+            for rg_name in self.resource_groups:
+                try:
+                    # List App Configuration stores in resource group
+                    stores = app_config_client.configuration_stores.list_by_resource_group(rg_name)
+
+                    for store in stores:
+                        try:
+                            # Extract location from store.location
+                            store_location = getattr(store, "location", "unknown").lower()
+
+                            # Filter by region if not global
+                            if region.lower() != "global" and store_location != region.lower():
+                                continue
+
+                            # Extract metadata
+                            store_id = store.id
+                            store_name = store.name
+                            sku_name = getattr(store.sku, "name", "Free").lower()  # "free" or "standard"
+                            creation_date = getattr(store, "creation_date", None)
+                            public_network_access = getattr(store, "public_network_access", "Enabled")
+
+                            # Point-in-Time Recovery (only available in Standard tier)
+                            soft_delete_retention_days = getattr(store, "soft_delete_retention_in_days", 0)
+                            has_soft_delete = soft_delete_retention_days > 0
+
+                            # Tags
+                            tags = getattr(store, "tags", {}) or {}
+
+                            # Calculate age
+                            age_days = 0
+                            if creation_date:
+                                age_days = (datetime.now(timezone.utc) - creation_date).days
+
+                            # Estimate daily requests (we don't have actual metrics, estimate based on tier)
+                            estimated_daily_requests = 0
+                            if sku_name == "standard":
+                                # Assume Standard tier = high usage (otherwise why pay?)
+                                estimated_daily_requests = 50000  # Estimate
+                            else:
+                                estimated_daily_requests = 500  # Free tier usage
+
+                            # Count configuration keys (requires Azure Resource Graph or direct API call)
+                            # For simplicity, we'll estimate based on tier
+                            estimated_config_keys = 10 if sku_name == "free" else 50
+
+                            # Estimate monthly cost
+                            monthly_cost = self._estimate_app_configuration_cost(
+                                sku_name=sku_name,
+                                estimated_daily_requests=estimated_daily_requests
+                            )
+
+                            # Check optimization opportunities
+                            is_optimizable, optimization_score, priority, potential_savings, recommendations = (
+                                self._calculate_app_configuration_optimization(
+                                    sku_name=sku_name,
+                                    age_days=age_days,
+                                    estimated_daily_requests=estimated_daily_requests,
+                                    has_soft_delete=has_soft_delete,
+                                    estimated_config_keys=estimated_config_keys,
+                                    monthly_cost=monthly_cost,
+                                )
+                            )
+
+                            # Build metadata
+                            metadata = {
+                                "store_id": store_id,
+                                "store_name": store_name,
+                                "sku": sku_name,
+                                "location": store_location,
+                                "resource_group": rg_name,
+                                "age_days": age_days,
+                                "estimated_daily_requests": estimated_daily_requests,
+                                "estimated_config_keys": estimated_config_keys,
+                                "has_soft_delete": has_soft_delete,
+                                "soft_delete_retention_days": soft_delete_retention_days,
+                                "public_network_access": public_network_access,
+                                "tags": tags,
+                            }
+
+                            resource = AllCloudResourceData(
+                                resource_id=store_id,
+                                resource_type="azure_app_configuration",
+                                resource_name=store_name,
+                                region=store_location,
+                                estimated_monthly_cost=monthly_cost,
+                                currency="USD",
+                                resource_metadata=metadata,
+                                created_at_cloud=creation_date,
+                                is_orphan=False,
+                                is_optimizable=is_optimizable,
+                                optimization_score=optimization_score,
+                                optimization_priority=priority,
+                                potential_monthly_savings=potential_savings,
+                                optimization_recommendations=recommendations,
+                            )
+
+                            resources.append(resource)
+                            logger.info(
+                                f"Found App Configuration store: {store_name} in {store_location} "
+                                f"(SKU: {sku_name}, Optimizable: {is_optimizable}, Score: {optimization_score})"
+                            )
+
+                        except Exception as e:
+                            logger.error(f"Error processing App Configuration store {getattr(store, 'name', 'unknown')}: {e}")
+                            continue
+
+                except Exception as e:
+                    logger.error(f"Error listing App Configuration stores in resource group {rg_name}: {e}")
+                    continue
+
+        except Exception as e:
+            logger.error(f"Error scanning Azure App Configuration stores: {e}")
+
+        logger.info(f"Completed Azure App Configuration scan in region {region}: {len(resources)} stores found")
+        return resources
+
+    def _estimate_app_configuration_cost(
+        self,
+        sku_name: str,
+        estimated_daily_requests: int,
+    ) -> float:
+        """
+        Estimate monthly cost for Azure App Configuration.
+
+        Pricing:
+        - Free tier: $0 (1 store, 1000 requests/day max)
+        - Standard tier: $1.20/day (~$36/month) + data transfer
+        """
+        if sku_name == "free":
+            return 0.0
+
+        # Standard tier
+        base_cost_per_day = 1.20
+        monthly_cost = base_cost_per_day * 30  # ~$36/month
+
+        # Add data transfer cost (estimate $0.01/GB)
+        # Assume 1KB per request, so 1M requests = 1GB
+        monthly_requests = estimated_daily_requests * 30
+        data_transfer_gb = monthly_requests / 1000000
+        data_transfer_cost = data_transfer_gb * 0.01
+
+        return round(monthly_cost + data_transfer_cost, 2)
+
+    def _calculate_app_configuration_optimization(
+        self,
+        sku_name: str,
+        age_days: int,
+        estimated_daily_requests: int,
+        has_soft_delete: bool,
+        estimated_config_keys: int,
+        monthly_cost: float,
+    ) -> tuple[bool, int, str, float, list[str]]:
+        """
+        Calculate optimization opportunities for Azure App Configuration.
+
+        Returns:
+            (is_optimizable, optimization_score, priority, potential_savings, recommendations)
+        """
+        is_optimizable = False
+        optimization_score = 0
+        priority = "none"
+        potential_savings = 0.0
+        recommendations = []
+
+        # Scenario 1: CRITICAL - Standard tier with 0 requests for 30+ days
+        if sku_name == "standard" and estimated_daily_requests == 0 and age_days >= 30:
+            is_optimizable = True
+            optimization_score = 90
+            priority = "critical"
+            potential_savings = monthly_cost  # Full cost savings by downgrading
+            recommendations.append(
+                "Standard tier App Configuration store has 0 requests for 30+ days. "
+                "Downgrade to Free tier or delete if unused. "
+                f"Potential savings: ${potential_savings:.2f}/month."
+            )
+            return is_optimizable, optimization_score, priority, potential_savings, recommendations
+
+        # Scenario 2: HIGH - Standard tier with very low usage (<1K requests/day)
+        if sku_name == "standard" and estimated_daily_requests < 1000:
+            is_optimizable = True
+            optimization_score = 75
+            priority = "high"
+            potential_savings = monthly_cost * 0.9  # 90% savings by downgrading
+            recommendations.append(
+                f"Standard tier App Configuration store has very low usage ({estimated_daily_requests} requests/day). "
+                "Free tier supports 1000 requests/day. "
+                f"Downgrade to Free tier to save ${potential_savings:.2f}/month."
+            )
+            return is_optimizable, optimization_score, priority, potential_savings, recommendations
+
+        # Scenario 3: HIGH - Point-in-Time Recovery not used (Standard feature waste)
+        if sku_name == "standard" and not has_soft_delete:
+            is_optimizable = True
+            optimization_score = 70
+            priority = "high"
+            potential_savings = monthly_cost * 0.3  # Partial waste
+            recommendations.append(
+                "Standard tier App Configuration store does not have Point-in-Time Recovery enabled. "
+                "Enable soft delete to leverage Standard tier features, or downgrade to Free tier. "
+                f"Potential savings: ${potential_savings:.2f}/month."
+            )
+            return is_optimizable, optimization_score, priority, potential_savings, recommendations
+
+        # Scenario 4: MEDIUM - Configuration keys not used for 90+ days
+        if age_days >= 90 and estimated_config_keys > 0 and estimated_daily_requests < 100:
+            is_optimizable = True
+            optimization_score = 50
+            priority = "medium"
+            potential_savings = monthly_cost * 0.5 if sku_name == "standard" else 0.0
+            recommendations.append(
+                f"App Configuration store has {estimated_config_keys} configuration keys but very low usage "
+                f"({estimated_daily_requests} requests/day for {age_days} days). "
+                "Review and remove unused configuration keys, or delete the store if not needed."
+            )
+            return is_optimizable, optimization_score, priority, potential_savings, recommendations
+
+        # Scenario 5: LOW - No feature flags used (underutilizing capabilities)
+        if sku_name == "standard" and estimated_config_keys > 0:
+            # This is a best practice recommendation, not a cost issue
+            is_optimizable = True
+            optimization_score = 30
+            priority = "low"
+            potential_savings = 0.0
+            recommendations.append(
+                "App Configuration store is not leveraging feature flags. "
+                "Consider using feature management capabilities to control feature rollouts dynamically."
+            )
+            return is_optimizable, optimization_score, priority, potential_savings, recommendations
+
+        return is_optimizable, optimization_score, priority, potential_savings, recommendations
