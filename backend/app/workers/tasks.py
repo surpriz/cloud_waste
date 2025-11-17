@@ -355,6 +355,42 @@ async def _scan_cloud_account_async(
                             nat_count=len(nat_resources),
                         )
 
+                        # Scan EKS Clusters (all)
+                        eks_resources = await inventory_scanner.scan_eks_clusters(region)
+                        all_inventory_resources.extend(eks_resources)
+                        logger.info(
+                            "inventory.eks_scanned",
+                            region=region,
+                            eks_count=len(eks_resources),
+                        )
+
+                        # Scan Lambda Functions (all)
+                        lambda_resources = await inventory_scanner.scan_lambda_functions(region)
+                        all_inventory_resources.extend(lambda_resources)
+                        logger.info(
+                            "inventory.lambda_scanned",
+                            region=region,
+                            lambda_count=len(lambda_resources),
+                        )
+
+                        # Scan DynamoDB Tables (all)
+                        dynamodb_resources = await inventory_scanner.scan_dynamodb_tables(region)
+                        all_inventory_resources.extend(dynamodb_resources)
+                        logger.info(
+                            "inventory.dynamodb_scanned",
+                            region=region,
+                            dynamodb_count=len(dynamodb_resources),
+                        )
+
+                        # Scan Fargate Tasks (all)
+                        fargate_resources = await inventory_scanner.scan_fargate_tasks(region)
+                        all_inventory_resources.extend(fargate_resources)
+                        logger.info(
+                            "inventory.fargate_scanned",
+                            region=region,
+                            fargate_count=len(fargate_resources),
+                        )
+
                         # Scan RDS instances (all)
                         rds_resources = await inventory_scanner.scan_rds_instances(region)
                         all_inventory_resources.extend(rds_resources)

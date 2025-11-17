@@ -20521,3 +20521,1560 @@ class AzureInventoryScanner:
             return is_optimizable, optimization_score, priority, potential_savings, recommendations
 
         return is_optimizable, optimization_score, priority, potential_savings, recommendations
+
+    # ============================================================================
+    # AWS - EKS CLUSTER (Cost Intelligence / Inventory Mode)
+    # ============================================================================
+
+    def _calculate_eks_monthly_cost(
+        self,
+        node_group_costs: float,
+        fargate_costs: float,
+        region: str,
+    ) -> float:
+        """
+        Calculate estimated monthly cost for AWS EKS Cluster.
+
+        Cost structure:
+        - Control plane: $73/month (0.10/hour * 730 hours)
+        - Node groups: Sum of EC2 instance costs
+        - Fargate pods: vCPU + memory costs
+
+        Args:
+            node_group_costs: Total monthly cost of all node groups (EC2 instances)
+            fargate_costs: Total monthly cost of Fargate pods
+            region: AWS region
+
+        Returns:
+            Total estimated monthly cost
+        """
+        # EKS control plane cost (fixed)
+        control_plane_cost = 73.0  # $0.10/hour * 730 hours/month
+
+        total_cost = control_plane_cost + node_group_costs + fargate_costs
+
+        return total_cost
+
+    def _calculate_eks_optimization(
+        self,
+        cluster: dict[str, Any],
+        node_groups: list[dict[str, Any]],
+        fargate_profiles: list[dict[str, Any]],
+        monthly_cost: float,
+        avg_cpu_utilization: float,
+        node_instance_types: list[str],
+    ) -> tuple[bool, int, str, float, list[dict[str, Any]]]:
+        """
+        Calculate AWS EKS Cluster optimization metrics.
+
+        Optimization scenarios (5):
+        1. No worker nodes - Cluster with 0 nodes (paying control plane only)
+        2. All nodes unhealthy - All nodes in degraded/failed state
+        3. Over-provisioned nodes - All nodes with CPU <20% (right-sizing opportunity)
+        4. Old generation nodes - Using t2/m4/c4/r4 instance types
+        5. Spot instances not used - 100% On-Demand nodes (Spot 70% cheaper)
+
+        Args:
+            cluster: EKS cluster details
+            node_groups: List of node groups
+            fargate_profiles: List of Fargate profiles
+            monthly_cost: Total monthly cost
+            avg_cpu_utilization: Average CPU utilization across all nodes
+            node_instance_types: List of instance types used by nodes
+
+        Returns:
+            Tuple of (is_optimizable, optimization_score, priority, potential_savings, recommendations)
+        """
+        is_optimizable = False
+        optimization_score = 0
+        priority = "none"
+        potential_savings = 0.0
+        recommendations: list[dict[str, Any]] = []
+
+        cluster_name = cluster.get("name", "Unknown")
+        total_node_count = sum(ng.get("scalingConfig", {}).get("desiredSize", 0) for ng in node_groups)
+
+        # Scenario 1: CRITICAL - No worker nodes (paying control plane only)
+        if total_node_count == 0 and not fargate_profiles:
+            is_optimizable = True
+            optimization_score = 95
+            priority = "critical"
+            potential_savings = monthly_cost  # Full cluster cost is waste
+            recommendations.append({
+                "type": "no_nodes",
+                "severity": "critical",
+                "message": (
+                    f"CRITICAL: EKS cluster '{cluster_name}' has NO worker nodes or Fargate profiles (costs ${monthly_cost:.2f}/month). "
+                    f"You're paying ${73:.2f}/month for control plane with no compute resources. "
+                    "Delete this cluster immediately or add node groups/Fargate profiles if needed."
+                ),
+                "impact": "Paying full EKS costs with zero workload capacity",
+                "action": "Delete cluster or add worker nodes/Fargate profiles",
+            })
+            return is_optimizable, optimization_score, priority, potential_savings, recommendations
+
+        # Scenario 2: HIGH - All nodes unhealthy (dead cluster)
+        unhealthy_nodes = sum(
+            1 for ng in node_groups
+            if ng.get("health", {}).get("issues", [])
+        )
+        if total_node_count > 0 and unhealthy_nodes == len(node_groups):
+            is_optimizable = True
+            optimization_score = 90
+            priority = "high"
+            potential_savings = monthly_cost  # Entire cluster is waste
+            recommendations.append({
+                "type": "all_unhealthy",
+                "severity": "high",
+                "message": (
+                    f"HIGH: EKS cluster '{cluster_name}' has ALL node groups unhealthy (costs ${monthly_cost:.2f}/month). "
+                    f"All {len(node_groups)} node groups are in degraded/failed state. "
+                    "This cluster is not serving any workloads. Investigate node group health or delete cluster."
+                ),
+                "impact": "Cluster not operational, all costs are waste",
+                "action": "Fix node group health issues or delete cluster",
+            })
+            return is_optimizable, optimization_score, priority, potential_savings, recommendations
+
+        # Scenario 3: MEDIUM - Over-provisioned nodes (CPU <20%)
+        if avg_cpu_utilization > 0 and avg_cpu_utilization < 20.0:
+            is_optimizable = True
+            optimization_score = 70
+            priority = "medium"
+            # Assume 30% savings from right-sizing (reduce node count or instance types)
+            potential_savings = monthly_cost * 0.30
+            recommendations.append({
+                "type": "over_provisioned",
+                "severity": "medium",
+                "message": (
+                    f"MEDIUM: EKS cluster '{cluster_name}' has very low CPU utilization ({avg_cpu_utilization:.1f}%, costs ${monthly_cost:.2f}/month). "
+                    f"Nodes are under-utilized. Right-size node groups: reduce node count or use smaller instance types. "
+                    f"Potential savings: ${potential_savings:.2f}/month (30% reduction)."
+                ),
+                "impact": f"Wasting {100 - avg_cpu_utilization:.1f}% of node capacity",
+                "action": "Reduce node count or downgrade instance types",
+            })
+            return is_optimizable, optimization_score, priority, potential_savings, recommendations
+
+        # Scenario 4: MEDIUM - Old generation nodes (t2/m4/c4/r4)
+        old_generation_types = ["t2", "m4", "c4", "r4"]
+        old_instances = [it for it in node_instance_types if any(it.startswith(old) for old in old_generation_types)]
+        if old_instances:
+            is_optimizable = True
+            optimization_score = 65
+            priority = "medium"
+            # Assume 15% savings from upgrading to newer generation
+            potential_savings = monthly_cost * 0.15
+            recommendations.append({
+                "type": "old_generation",
+                "severity": "medium",
+                "message": (
+                    f"MEDIUM: EKS cluster '{cluster_name}' uses old generation instance types (costs ${monthly_cost:.2f}/month). "
+                    f"Found: {', '.join(set(old_instances))}. "
+                    "Upgrade to newer generations (t3, m5, c5, r5) for 15% cost savings and better performance."
+                ),
+                "impact": "Missing out on 15% cost savings and improved performance",
+                "action": f"Upgrade to newer generation: {', '.join(set(old_instances)).replace('t2', 't3').replace('m4', 'm5').replace('c4', 'c5').replace('r4', 'r5')}",
+            })
+            return is_optimizable, optimization_score, priority, potential_savings, recommendations
+
+        # Scenario 5: MEDIUM - Spot instances not used (100% On-Demand)
+        # Check if any node group uses Spot instances
+        has_spot = any(ng.get("capacityType", "ON_DEMAND") == "SPOT" for ng in node_groups)
+        if not has_spot and total_node_count >= 3:
+            is_optimizable = True
+            optimization_score = 60
+            priority = "medium"
+            # Spot instances are typically 70% cheaper
+            # Recommend 60% of nodes on Spot (conservative mix)
+            potential_savings = monthly_cost * 0.60 * 0.70
+            recommendations.append({
+                "type": "no_spot",
+                "severity": "medium",
+                "message": (
+                    f"MEDIUM: EKS cluster '{cluster_name}' uses 100% On-Demand nodes (costs ${monthly_cost:.2f}/month). "
+                    f"Cluster has {total_node_count} nodes. "
+                    "Use Spot instances for 60% of nodes to save 70% on those nodes. "
+                    f"Potential savings: ${potential_savings:.2f}/month (42% total reduction)."
+                ),
+                "impact": "Missing out on 42% cost savings from Spot instances",
+                "action": "Create Spot node groups for stateless/fault-tolerant workloads",
+            })
+            return is_optimizable, optimization_score, priority, potential_savings, recommendations
+
+        # No optimization opportunities found
+        return is_optimizable, optimization_score, priority, potential_savings, recommendations
+
+    async def scan_eks_clusters(self, region: str) -> list[AllCloudResourceData]:
+        """
+        Scan ALL AWS EKS Clusters for cost intelligence.
+
+        This method scans EKS clusters to provide cost visibility and optimization
+        recommendations. Unlike orphan detection, this scans ALL clusters regardless
+        of usage patterns.
+
+        Args:
+            region: AWS region to scan
+
+        Returns:
+            List of AllCloudResourceData objects for all EKS clusters
+        """
+        resources: list[AllCloudResourceData] = []
+
+        try:
+            async with self.session.client("eks", region_name=region) as eks:
+                async with self.session.client("ec2", region_name=region) as ec2:
+                    async with self.session.client("cloudwatch", region_name=region) as cloudwatch:
+                        # List all clusters
+                        response = await eks.list_clusters()
+                        cluster_names = response.get("clusters", [])
+
+                        for cluster_name in cluster_names:
+                            try:
+                                # Get cluster details
+                                cluster_response = await eks.describe_cluster(name=cluster_name)
+                                cluster = cluster_response["cluster"]
+
+                                cluster_arn = cluster.get("arn", "")
+                                created_at = cluster.get("createdAt")
+                                status = cluster.get("status", "UNKNOWN")
+
+                                # List node groups
+                                node_groups_response = await eks.list_nodegroups(clusterName=cluster_name)
+                                node_group_names = node_groups_response.get("nodegroups", [])
+
+                                node_groups = []
+                                node_group_costs = 0.0
+                                node_instance_types = []
+                                total_nodes = 0
+
+                                for ng_name in node_group_names:
+                                    ng_response = await eks.describe_nodegroup(
+                                        clusterName=cluster_name,
+                                        nodegroupName=ng_name
+                                    )
+                                    ng = ng_response["nodegroup"]
+                                    node_groups.append(ng)
+
+                                    # Calculate node group cost
+                                    scaling_config = ng.get("scalingConfig", {})
+                                    desired_size = scaling_config.get("desiredSize", 0)
+                                    total_nodes += desired_size
+
+                                    instance_types = ng.get("instanceTypes", [])
+                                    node_instance_types.extend(instance_types)
+
+                                    # Simplified cost calculation (assume $0.05/hour per node avg)
+                                    # In reality, this varies by instance type
+                                    node_group_costs += desired_size * 0.05 * 730  # $0.05/hour * 730 hours
+
+                                # List Fargate profiles
+                                fargate_response = await eks.list_fargate_profiles(clusterName=cluster_name)
+                                fargate_profile_names = fargate_response.get("fargateProfileNames", [])
+
+                                fargate_profiles = []
+                                fargate_costs = 0.0
+
+                                for fp_name in fargate_profile_names:
+                                    fp_response = await eks.describe_fargate_profile(
+                                        clusterName=cluster_name,
+                                        fargateProfileName=fp_name
+                                    )
+                                    fp = fp_response["fargateProfile"]
+                                    fargate_profiles.append(fp)
+
+                                    # Simplified Fargate cost (hard to estimate without pod metrics)
+                                    # Assume minimal cost for now
+                                    fargate_costs += 10.0  # Placeholder
+
+                                # Get CloudWatch CPU metrics (if nodes exist)
+                                avg_cpu_utilization = 0.0
+                                if total_nodes > 0:
+                                    try:
+                                        # Get average CPU utilization for the cluster (last 14 days)
+                                        end_time = datetime.utcnow()
+                                        start_time = end_time - timedelta(days=14)
+
+                                        cpu_response = await cloudwatch.get_metric_statistics(
+                                            Namespace="ContainerInsights",
+                                            MetricName="node_cpu_utilization",
+                                            Dimensions=[
+                                                {"Name": "ClusterName", "Value": cluster_name},
+                                            ],
+                                            StartTime=start_time,
+                                            EndTime=end_time,
+                                            Period=86400,  # 1 day
+                                            Statistics=["Average"],
+                                        )
+
+                                        datapoints = cpu_response.get("Datapoints", [])
+                                        if datapoints:
+                                            avg_cpu_utilization = sum(dp["Average"] for dp in datapoints) / len(datapoints)
+                                    except Exception as e:
+                                        logger.warning(
+                                            "eks.cloudwatch_metrics_failed",
+                                            cluster_name=cluster_name,
+                                            error=str(e),
+                                        )
+
+                                # Calculate total monthly cost
+                                monthly_cost = self._calculate_eks_monthly_cost(
+                                    node_group_costs=node_group_costs,
+                                    fargate_costs=fargate_costs,
+                                    region=region,
+                                )
+
+                                # Calculate optimization metrics
+                                (
+                                    is_optimizable,
+                                    optimization_score,
+                                    optimization_priority,
+                                    potential_savings,
+                                    optimization_recommendations,
+                                ) = self._calculate_eks_optimization(
+                                    cluster=cluster,
+                                    node_groups=node_groups,
+                                    fargate_profiles=fargate_profiles,
+                                    monthly_cost=monthly_cost,
+                                    avg_cpu_utilization=avg_cpu_utilization,
+                                    node_instance_types=node_instance_types,
+                                )
+
+                                # Build metadata
+                                metadata = {
+                                    "cluster_name": cluster_name,
+                                    "cluster_arn": cluster_arn,
+                                    "status": status,
+                                    "kubernetes_version": cluster.get("version", "unknown"),
+                                    "node_groups_count": len(node_groups),
+                                    "total_nodes": total_nodes,
+                                    "fargate_profiles_count": len(fargate_profiles),
+                                    "avg_cpu_utilization": round(avg_cpu_utilization, 2),
+                                    "node_instance_types": list(set(node_instance_types)),
+                                }
+
+                                # Create resource entry
+                                resource = AllCloudResourceData(
+                                    resource_id=cluster_arn,
+                                    resource_type="eks_cluster",
+                                    resource_name=cluster_name,
+                                    region=region,
+                                    estimated_monthly_cost=monthly_cost,
+                                    currency="USD",
+                                    resource_metadata=metadata,
+                                    created_at_cloud=created_at,
+                                    is_optimizable=is_optimizable,
+                                    optimization_score=optimization_score,
+                                    optimization_priority=optimization_priority,
+                                    potential_monthly_savings=potential_savings,
+                                    optimization_recommendations=optimization_recommendations,
+                                )
+
+                                resources.append(resource)
+
+                            except Exception as e:
+                                logger.error(
+                                    "eks.cluster_scan_failed",
+                                    cluster_name=cluster_name,
+                                    region=region,
+                                    error=str(e),
+                                )
+                                continue
+
+        except Exception as e:
+            logger.error(
+                "eks.scan_failed",
+                region=region,
+                error=str(e),
+            )
+
+        return resources
+
+    # ============================================================================
+    # AWS - LAMBDA FUNCTION (Cost Intelligence / Inventory Mode)
+    # ============================================================================
+
+    def _calculate_lambda_monthly_cost(
+        self,
+        invocations_monthly: int,
+        avg_duration_ms: float,
+        memory_mb: int,
+        provisioned_concurrency: int,
+        region: str,
+    ) -> float:
+        """
+        Calculate estimated monthly cost for AWS Lambda Function.
+
+        Cost structure:
+        - Request cost: $0.20 per 1 million requests
+        - Compute cost: $0.0000166667 per GB-second (us-east-1 pricing)
+        - Provisioned concurrency: $0.0000041667 per GB-hour
+
+        Args:
+            invocations_monthly: Number of invocations per month
+            avg_duration_ms: Average duration in milliseconds
+            memory_mb: Memory allocation in MB
+            provisioned_concurrency: Provisioned concurrency units
+            region: AWS region
+
+        Returns:
+            Total estimated monthly cost
+        """
+        # Request cost
+        request_cost = (invocations_monthly / 1_000_000) * 0.20
+
+        # Compute cost
+        compute_seconds = (invocations_monthly * avg_duration_ms) / 1000
+        memory_gb = memory_mb / 1024
+        compute_cost = compute_seconds * memory_gb * 0.0000166667
+
+        # Provisioned concurrency cost (if configured)
+        provisioned_cost = 0.0
+        if provisioned_concurrency > 0:
+            # $0.0000041667 per GB-hour * 730 hours/month
+            provisioned_cost = provisioned_concurrency * memory_gb * 0.0000041667 * 730
+
+        total_cost = request_cost + compute_cost + provisioned_cost
+
+        return total_cost
+
+    def _calculate_lambda_optimization(
+        self,
+        function: dict[str, Any],
+        invocations_monthly: int,
+        error_count: int,
+        avg_duration_ms: float,
+        memory_mb: int,
+        timeout_seconds: int,
+        provisioned_concurrency: int,
+        runtime: str,
+        monthly_cost: float,
+    ) -> tuple[bool, int, str, float, list[dict[str, Any]]]:
+        """
+        Calculate AWS Lambda Function optimization metrics.
+
+        Optimization scenarios (5):
+        1. Unused provisioned concurrency - VERY EXPENSIVE (highest priority)
+        2. Never invoked - Function created but never executed
+        3. 100% failures - All invocations fail (dead function)
+        4. Over-provisioned memory - >50% unused memory
+        5. Old/deprecated runtime - Security risk + no support
+
+        Args:
+            function: Lambda function details
+            invocations_monthly: Monthly invocation count
+            error_count: Number of errors in the period
+            avg_duration_ms: Average duration in milliseconds
+            memory_mb: Memory allocation in MB
+            timeout_seconds: Function timeout in seconds
+            provisioned_concurrency: Provisioned concurrency units
+            runtime: Lambda runtime (python3.11, nodejs20.x, etc.)
+            monthly_cost: Total monthly cost
+
+        Returns:
+            Tuple of (is_optimizable, optimization_score, priority, potential_savings, recommendations)
+        """
+        is_optimizable = False
+        optimization_score = 0
+        priority = "none"
+        potential_savings = 0.0
+        recommendations: list[dict[str, Any]] = []
+
+        function_name = function.get("FunctionName", "Unknown")
+
+        # Scenario 1: CRITICAL - Unused provisioned concurrency (VERY EXPENSIVE)
+        if provisioned_concurrency > 0 and invocations_monthly < 100:
+            is_optimizable = True
+            optimization_score = 95
+            priority = "critical"
+            # Provisioned concurrency is typically 90% of the cost for low-traffic functions
+            memory_gb = memory_mb / 1024
+            provisioned_monthly_cost = provisioned_concurrency * memory_gb * 0.0000041667 * 730
+            potential_savings = provisioned_monthly_cost
+            recommendations.append({
+                "type": "unused_provisioned",
+                "severity": "critical",
+                "message": (
+                    f"CRITICAL: Lambda function '{function_name}' has PROVISIONED CONCURRENCY configured but very low usage (costs ${monthly_cost:.2f}/month). "
+                    f"Provisioned concurrency: {provisioned_concurrency} units, Invocations: {invocations_monthly}/month. "
+                    f"Provisioned concurrency costs ${provisioned_monthly_cost:.2f}/month. "
+                    "This is the MOST EXPENSIVE Lambda configuration. Remove provisioned concurrency immediately."
+                ),
+                "impact": f"Wasting ${provisioned_monthly_cost:.2f}/month on unused provisioned capacity",
+                "action": "Remove provisioned concurrency configuration",
+            })
+            return is_optimizable, optimization_score, priority, potential_savings, recommendations
+
+        # Scenario 2: HIGH - Never invoked (function created but never used)
+        if invocations_monthly == 0:
+            is_optimizable = True
+            optimization_score = 90
+            priority = "high"
+            potential_savings = monthly_cost  # All cost is waste
+            recommendations.append({
+                "type": "never_invoked",
+                "severity": "high",
+                "message": (
+                    f"HIGH: Lambda function '{function_name}' has NEVER been invoked (costs ${monthly_cost:.2f}/month). "
+                    "This function is not being used by any service. "
+                    "Delete this function or integrate it if it was meant to be used."
+                ),
+                "impact": "Paying for a function that is never used",
+                "action": "Delete function or integrate into application",
+            })
+            return is_optimizable, optimization_score, priority, potential_savings, recommendations
+
+        # Scenario 3: HIGH - 100% failures (all invocations fail)
+        if invocations_monthly > 0 and error_count > 0:
+            error_rate = (error_count / invocations_monthly) * 100
+            if error_rate >= 95.0:
+                is_optimizable = True
+                optimization_score = 85
+                priority = "high"
+                potential_savings = monthly_cost  # Dead function is waste
+                recommendations.append({
+                    "type": "all_failures",
+                    "severity": "high",
+                    "message": (
+                        f"HIGH: Lambda function '{function_name}' has {error_rate:.1f}% error rate (costs ${monthly_cost:.2f}/month). "
+                        f"Out of {invocations_monthly} invocations, {error_count} failed. "
+                        "This function is effectively broken. Fix errors or delete function."
+                    ),
+                    "impact": "Paying for a broken function that always fails",
+                    "action": "Fix errors in function code or delete function",
+                })
+                return is_optimizable, optimization_score, priority, potential_savings, recommendations
+
+        # Scenario 4: MEDIUM - Over-provisioned memory (>50% unused)
+        # Estimate: If avg_duration is very low relative to timeout, memory is likely over-provisioned
+        # This is a simplified heuristic (real memory usage requires custom metrics)
+        if invocations_monthly > 100 and avg_duration_ms < (timeout_seconds * 1000 * 0.3):
+            is_optimizable = True
+            optimization_score = 65
+            priority = "medium"
+            # Assume 30% savings from right-sizing memory
+            potential_savings = monthly_cost * 0.30
+            recommendations.append({
+                "type": "over_provisioned_memory",
+                "severity": "medium",
+                "message": (
+                    f"MEDIUM: Lambda function '{function_name}' may have over-provisioned memory (costs ${monthly_cost:.2f}/month). "
+                    f"Memory: {memory_mb}MB, Avg duration: {avg_duration_ms:.0f}ms, Timeout: {timeout_seconds}s. "
+                    f"Function completes very quickly ({avg_duration_ms:.0f}ms) suggesting memory may be excessive. "
+                    f"Test with lower memory (e.g., {int(memory_mb * 0.7)}MB) to save ${potential_savings:.2f}/month (30% reduction)."
+                ),
+                "impact": "Paying for unused memory capacity",
+                "action": f"Reduce memory allocation from {memory_mb}MB to {int(memory_mb * 0.7)}MB",
+            })
+            return is_optimizable, optimization_score, priority, potential_savings, recommendations
+
+        # Scenario 5: MEDIUM - Old/deprecated runtime (security risk)
+        deprecated_runtimes = [
+            "python2.7", "python3.6", "python3.7",
+            "nodejs", "nodejs4.3", "nodejs6.10", "nodejs8.10", "nodejs10.x", "nodejs12.x", "nodejs14.x",
+            "ruby2.5", "ruby2.7",
+            "java8",
+            "dotnetcore2.0", "dotnetcore2.1", "dotnetcore3.1",
+            "go1.x"
+        ]
+        if runtime in deprecated_runtimes:
+            is_optimizable = True
+            optimization_score = 60
+            priority = "medium"
+            potential_savings = 0.0  # No direct cost savings, but security risk
+            recommendations.append({
+                "type": "old_runtime",
+                "severity": "medium",
+                "message": (
+                    f"MEDIUM: Lambda function '{function_name}' uses DEPRECATED runtime '{runtime}' (costs ${monthly_cost:.2f}/month). "
+                    "This runtime is no longer supported by AWS and has known security vulnerabilities. "
+                    "Upgrade to latest runtime: python3.11+, nodejs20.x+, java17+, etc."
+                ),
+                "impact": "Security vulnerabilities, no AWS support, future breaking changes",
+                "action": f"Upgrade runtime from '{runtime}' to latest version",
+            })
+            return is_optimizable, optimization_score, priority, potential_savings, recommendations
+
+        # No optimization opportunities found
+        return is_optimizable, optimization_score, priority, potential_savings, recommendations
+
+    async def scan_lambda_functions(self, region: str) -> list[AllCloudResourceData]:
+        """
+        Scan ALL AWS Lambda Functions for cost intelligence.
+
+        This method scans Lambda functions to provide cost visibility and optimization
+        recommendations. Unlike orphan detection, this scans ALL functions regardless
+        of usage patterns.
+
+        Args:
+            region: AWS region to scan
+
+        Returns:
+            List of AllCloudResourceData objects for all Lambda functions
+        """
+        resources: list[AllCloudResourceData] = []
+
+        try:
+            async with self.session.client("lambda", region_name=region) as lambda_client:
+                async with self.session.client("cloudwatch", region_name=region) as cloudwatch:
+                    # List all Lambda functions
+                    paginator = lambda_client.get_paginator("list_functions")
+                    async for page in paginator.paginate():
+                        functions = page.get("Functions", [])
+
+                        for function in functions:
+                            try:
+                                function_name = function.get("FunctionName", "")
+                                function_arn = function.get("FunctionArn", "")
+                                runtime = function.get("Runtime", "unknown")
+                                memory_mb = function.get("MemorySize", 128)
+                                timeout_seconds = function.get("Timeout", 3)
+
+                                # Get last modified date
+                                last_modified = function.get("LastModified", "")
+                                try:
+                                    created_at = datetime.fromisoformat(last_modified.replace("Z", "+00:00"))
+                                except Exception:
+                                    created_at = None
+
+                                # Check for provisioned concurrency
+                                provisioned_concurrency = 0
+                                try:
+                                    pc_response = await lambda_client.list_provisioned_concurrency_configs(
+                                        FunctionName=function_name
+                                    )
+                                    configs = pc_response.get("ProvisionedConcurrencyConfigs", [])
+                                    if configs:
+                                        # Sum all provisioned concurrency
+                                        provisioned_concurrency = sum(c.get("AllocatedConcurrentExecutions", 0) for c in configs)
+                                except Exception:
+                                    pass
+
+                                # Get CloudWatch metrics (last 30 days)
+                                end_time = datetime.utcnow()
+                                start_time = end_time - timedelta(days=30)
+
+                                # Get invocations count
+                                invocations_monthly = 0
+                                try:
+                                    invocations_response = await cloudwatch.get_metric_statistics(
+                                        Namespace="AWS/Lambda",
+                                        MetricName="Invocations",
+                                        Dimensions=[
+                                            {"Name": "FunctionName", "Value": function_name},
+                                        ],
+                                        StartTime=start_time,
+                                        EndTime=end_time,
+                                        Period=2592000,  # 30 days
+                                        Statistics=["Sum"],
+                                    )
+
+                                    datapoints = invocations_response.get("Datapoints", [])
+                                    if datapoints:
+                                        invocations_monthly = int(datapoints[0].get("Sum", 0))
+                                except Exception as e:
+                                    logger.warning(
+                                        "lambda.invocations_metrics_failed",
+                                        function_name=function_name,
+                                        error=str(e),
+                                    )
+
+                                # Get error count
+                                error_count = 0
+                                try:
+                                    errors_response = await cloudwatch.get_metric_statistics(
+                                        Namespace="AWS/Lambda",
+                                        MetricName="Errors",
+                                        Dimensions=[
+                                            {"Name": "FunctionName", "Value": function_name},
+                                        ],
+                                        StartTime=start_time,
+                                        EndTime=end_time,
+                                        Period=2592000,  # 30 days
+                                        Statistics=["Sum"],
+                                    )
+
+                                    datapoints = errors_response.get("Datapoints", [])
+                                    if datapoints:
+                                        error_count = int(datapoints[0].get("Sum", 0))
+                                except Exception:
+                                    pass
+
+                                # Get average duration
+                                avg_duration_ms = 0.0
+                                try:
+                                    duration_response = await cloudwatch.get_metric_statistics(
+                                        Namespace="AWS/Lambda",
+                                        MetricName="Duration",
+                                        Dimensions=[
+                                            {"Name": "FunctionName", "Value": function_name},
+                                        ],
+                                        StartTime=start_time,
+                                        EndTime=end_time,
+                                        Period=2592000,  # 30 days
+                                        Statistics=["Average"],
+                                    )
+
+                                    datapoints = duration_response.get("Datapoints", [])
+                                    if datapoints:
+                                        avg_duration_ms = datapoints[0].get("Average", 0.0)
+                                except Exception:
+                                    # Fallback to a reasonable default
+                                    avg_duration_ms = 100.0
+
+                                # Calculate monthly cost
+                                monthly_cost = self._calculate_lambda_monthly_cost(
+                                    invocations_monthly=invocations_monthly,
+                                    avg_duration_ms=avg_duration_ms,
+                                    memory_mb=memory_mb,
+                                    provisioned_concurrency=provisioned_concurrency,
+                                    region=region,
+                                )
+
+                                # Calculate optimization metrics
+                                (
+                                    is_optimizable,
+                                    optimization_score,
+                                    optimization_priority,
+                                    potential_savings,
+                                    optimization_recommendations,
+                                ) = self._calculate_lambda_optimization(
+                                    function=function,
+                                    invocations_monthly=invocations_monthly,
+                                    error_count=error_count,
+                                    avg_duration_ms=avg_duration_ms,
+                                    memory_mb=memory_mb,
+                                    timeout_seconds=timeout_seconds,
+                                    provisioned_concurrency=provisioned_concurrency,
+                                    runtime=runtime,
+                                    monthly_cost=monthly_cost,
+                                )
+
+                                # Build metadata
+                                metadata = {
+                                    "function_name": function_name,
+                                    "function_arn": function_arn,
+                                    "runtime": runtime,
+                                    "memory_mb": memory_mb,
+                                    "timeout_seconds": timeout_seconds,
+                                    "invocations_monthly": invocations_monthly,
+                                    "error_count": error_count,
+                                    "error_rate": round((error_count / invocations_monthly * 100) if invocations_monthly > 0 else 0.0, 2),
+                                    "avg_duration_ms": round(avg_duration_ms, 2),
+                                    "provisioned_concurrency": provisioned_concurrency,
+                                }
+
+                                # Create resource entry
+                                resource = AllCloudResourceData(
+                                    resource_id=function_arn,
+                                    resource_type="lambda_function",
+                                    resource_name=function_name,
+                                    region=region,
+                                    estimated_monthly_cost=monthly_cost,
+                                    currency="USD",
+                                    resource_metadata=metadata,
+                                    created_at_cloud=created_at,
+                                    is_optimizable=is_optimizable,
+                                    optimization_score=optimization_score,
+                                    optimization_priority=optimization_priority,
+                                    potential_monthly_savings=potential_savings,
+                                    optimization_recommendations=optimization_recommendations,
+                                )
+
+                                resources.append(resource)
+
+                            except Exception as e:
+                                logger.error(
+                                    "lambda.function_scan_failed",
+                                    function_name=function.get("FunctionName", "Unknown"),
+                                    region=region,
+                                    error=str(e),
+                                )
+                                continue
+
+        except Exception as e:
+            logger.error(
+                "lambda.scan_failed",
+                region=region,
+                error=str(e),
+            )
+
+        return resources
+
+    # ============================================================================
+    # AWS - DYNAMODB TABLE (Cost Intelligence / Inventory Mode)
+    # ============================================================================
+
+    def _calculate_dynamodb_monthly_cost(
+        self,
+        billing_mode: str,
+        read_capacity: int,
+        write_capacity: int,
+        storage_gb: float,
+        gsi_count: int,
+        gsi_read_capacity: int,
+        gsi_write_capacity: int,
+        region: str,
+    ) -> float:
+        """
+        Calculate estimated monthly cost for AWS DynamoDB Table.
+
+        Cost structure (us-east-1 pricing):
+
+        Provisioned mode:
+        - Read Capacity Unit (RCU): $0.00065/hour = $0.47/month per RCU
+        - Write Capacity Unit (WCU): $0.00013/hour = $0.095/month per WCU
+        - Storage: $0.25/GB-month
+        - GSI: Same pricing as base table (doubles cost if same capacity)
+
+        On-Demand mode:
+        - Write Request Unit (WRU): $1.25 per million writes
+        - Read Request Unit (RRU): $0.25 per million reads
+        - Storage: $0.25/GB-month
+        - GSI: Same pricing as base table
+
+        Args:
+            billing_mode: "PROVISIONED" or "PAY_PER_REQUEST" (On-Demand)
+            read_capacity: Provisioned read capacity units (0 for On-Demand)
+            write_capacity: Provisioned write capacity units (0 for On-Demand)
+            storage_gb: Table size in GB
+            gsi_count: Number of Global Secondary Indexes
+            gsi_read_capacity: Total GSI read capacity (Provisioned only)
+            gsi_write_capacity: Total GSI write capacity (Provisioned only)
+            region: AWS region
+
+        Returns:
+            Total estimated monthly cost
+        """
+        storage_cost = storage_gb * 0.25  # $0.25/GB-month
+
+        if billing_mode == "PROVISIONED":
+            # Base table RCU/WCU costs
+            base_read_cost = read_capacity * 0.00065 * 730  # $0.00065/hour * 730 hours
+            base_write_cost = write_capacity * 0.00013 * 730  # $0.00013/hour * 730 hours
+
+            # GSI RCU/WCU costs (same pricing as base table)
+            gsi_read_cost = gsi_read_capacity * 0.00065 * 730
+            gsi_write_cost = gsi_write_capacity * 0.00013 * 730
+
+            total_cost = base_read_cost + base_write_cost + gsi_read_cost + gsi_write_cost + storage_cost
+        else:  # PAY_PER_REQUEST (On-Demand)
+            # For On-Demand, we don't know the actual request count without CloudWatch metrics
+            # Return storage cost only (actual cost calculated later with metrics)
+            total_cost = storage_cost
+
+        return total_cost
+
+    def _calculate_dynamodb_optimization(
+        self,
+        table: dict[str, Any],
+        billing_mode: str,
+        read_capacity: int,
+        write_capacity: int,
+        consumed_read_capacity: float,
+        consumed_write_capacity: float,
+        gsi_count: int,
+        gsi_read_capacity: int,
+        gsi_write_capacity: int,
+        item_count: int,
+        monthly_cost: float,
+    ) -> tuple[bool, int, str, float, list[dict[str, Any]]]:
+        """
+        Calculate AWS DynamoDB Table optimization metrics.
+
+        Optimization scenarios (5):
+        1. Over-provisioned capacity - <10% utilization (VERY EXPENSIVE)
+        2. Unused Global Secondary Indexes - GSI never queried (doubles cost)
+        3. Never used tables (Provisioned) - 0 usage since creation
+        4. Never used tables (On-Demand) - 0 usage in 60 days
+        5. Empty tables - 0 items for 90+ days
+
+        Args:
+            table: DynamoDB table details
+            billing_mode: "PROVISIONED" or "PAY_PER_REQUEST"
+            read_capacity: Provisioned read capacity units
+            write_capacity: Provisioned write capacity units
+            consumed_read_capacity: Actual consumed RCU (from CloudWatch)
+            consumed_write_capacity: Actual consumed WCU (from CloudWatch)
+            gsi_count: Number of GSIs
+            gsi_read_capacity: Total GSI read capacity
+            gsi_write_capacity: Total GSI write capacity
+            item_count: Number of items in table
+            monthly_cost: Total monthly cost
+
+        Returns:
+            Tuple of (is_optimizable, optimization_score, priority, potential_savings, recommendations)
+        """
+        is_optimizable = False
+        optimization_score = 0
+        priority = "none"
+        potential_savings = 0.0
+        recommendations: list[dict[str, Any]] = []
+
+        table_name = table.get("TableName", "Unknown")
+
+        # Scenario 1: CRITICAL - Over-provisioned capacity (<10% utilization)
+        if billing_mode == "PROVISIONED":
+            # Calculate utilization percentages
+            read_utilization = (consumed_read_capacity / read_capacity * 100) if read_capacity > 0 else 0.0
+            write_utilization = (consumed_write_capacity / write_capacity * 100) if write_capacity > 0 else 0.0
+            avg_utilization = (read_utilization + write_utilization) / 2
+
+            if avg_utilization < 10.0 and (read_capacity > 0 or write_capacity > 0):
+                is_optimizable = True
+                optimization_score = 95
+                priority = "critical"
+                # Assume 70% savings from right-sizing to actual usage
+                potential_savings = monthly_cost * 0.70
+                recommendations.append({
+                    "type": "over_provisioned",
+                    "severity": "critical",
+                    "message": (
+                        f"CRITICAL: DynamoDB table '{table_name}' has VERY LOW capacity utilization (costs ${monthly_cost:.2f}/month). "
+                        f"Read: {read_utilization:.1f}% ({consumed_read_capacity:.0f}/{read_capacity} RCU), "
+                        f"Write: {write_utilization:.1f}% ({consumed_write_capacity:.0f}/{write_capacity} WCU). "
+                        f"You're wasting {100 - avg_utilization:.1f}% of provisioned capacity. "
+                        f"Right-size to actual usage or switch to On-Demand mode. Potential savings: ${potential_savings:.2f}/month (70% reduction)."
+                    ),
+                    "impact": f"Wasting {100 - avg_utilization:.1f}% of provisioned capacity",
+                    "action": f"Reduce capacity to {int(consumed_read_capacity * 1.5)} RCU / {int(consumed_write_capacity * 1.5)} WCU or switch to On-Demand",
+                })
+                return is_optimizable, optimization_score, priority, potential_savings, recommendations
+
+        # Scenario 2: HIGH - Unused Global Secondary Indexes (doubles cost)
+        if gsi_count > 0 and (gsi_read_capacity > 0 or gsi_write_capacity > 0):
+            is_optimizable = True
+            optimization_score = 85
+            priority = "high"
+            # GSI cost is typically 50% of total cost for tables with GSIs
+            gsi_monthly_cost = monthly_cost * 0.50
+            potential_savings = gsi_monthly_cost
+            recommendations.append({
+                "type": "unused_gsi",
+                "severity": "high",
+                "message": (
+                    f"HIGH: DynamoDB table '{table_name}' has {gsi_count} Global Secondary Indexes (costs ${monthly_cost:.2f}/month). "
+                    f"GSIs double your costs ({gsi_count} GSIs = ~${gsi_monthly_cost:.2f}/month). "
+                    f"Verify all GSIs are actively used in queries. Delete unused GSIs immediately. "
+                    f"Each unused GSI wastes ~${gsi_monthly_cost / gsi_count:.2f}/month."
+                ),
+                "impact": f"GSIs cost ${gsi_monthly_cost:.2f}/month - verify usage",
+                "action": f"Delete unused GSIs (check CloudWatch GSI metrics)",
+            })
+            return is_optimizable, optimization_score, priority, potential_savings, recommendations
+
+        # Scenario 3: HIGH - Never used tables (Provisioned mode)
+        if billing_mode == "PROVISIONED" and consumed_read_capacity == 0 and consumed_write_capacity == 0:
+            is_optimizable = True
+            optimization_score = 90
+            priority = "high"
+            potential_savings = monthly_cost  # All cost is waste
+            recommendations.append({
+                "type": "never_used_provisioned",
+                "severity": "high",
+                "message": (
+                    f"HIGH: DynamoDB table '{table_name}' in PROVISIONED mode has NEVER been used (costs ${monthly_cost:.2f}/month). "
+                    f"0 reads and 0 writes detected. "
+                    "This table is not integrated with any application. Delete table or integrate if needed."
+                ),
+                "impact": "Paying for provisioned capacity with zero usage",
+                "action": "Delete table or integrate into application",
+            })
+            return is_optimizable, optimization_score, priority, potential_savings, recommendations
+
+        # Scenario 4: HIGH - Never used tables (On-Demand mode)
+        if billing_mode == "PAY_PER_REQUEST" and consumed_read_capacity == 0 and consumed_write_capacity == 0:
+            is_optimizable = True
+            optimization_score = 85
+            priority = "high"
+            potential_savings = monthly_cost  # Storage cost is waste
+            recommendations.append({
+                "type": "never_used_ondemand",
+                "severity": "high",
+                "message": (
+                    f"HIGH: DynamoDB table '{table_name}' in ON-DEMAND mode has NO usage (costs ${monthly_cost:.2f}/month). "
+                    f"0 reads and 0 writes in last 60 days. "
+                    "This table is not being accessed. Delete table if no longer needed."
+                ),
+                "impact": f"Paying storage cost (${monthly_cost:.2f}/month) with no access",
+                "action": "Delete table or verify integration",
+            })
+            return is_optimizable, optimization_score, priority, potential_savings, recommendations
+
+        # Scenario 5: MEDIUM - Empty tables (0 items for 90+ days)
+        if item_count == 0:
+            is_optimizable = True
+            optimization_score = 75
+            priority = "medium"
+            potential_savings = monthly_cost  # Empty table is waste
+            recommendations.append({
+                "type": "empty_table",
+                "severity": "medium",
+                "message": (
+                    f"MEDIUM: DynamoDB table '{table_name}' is EMPTY (costs ${monthly_cost:.2f}/month). "
+                    f"Table has 0 items. "
+                    "Empty table has been idle for extended period. Delete if no longer needed."
+                ),
+                "impact": f"Paying ${monthly_cost:.2f}/month for empty table",
+                "action": "Delete table if no longer needed",
+            })
+            return is_optimizable, optimization_score, priority, potential_savings, recommendations
+
+        # No optimization opportunities found
+        return is_optimizable, optimization_score, priority, potential_savings, recommendations
+
+    async def scan_dynamodb_tables(self, region: str) -> list[AllCloudResourceData]:
+        """
+        Scan ALL AWS DynamoDB Tables for cost intelligence.
+
+        This method scans DynamoDB tables to provide cost visibility and optimization
+        recommendations. Unlike orphan detection, this scans ALL tables regardless
+        of usage patterns.
+
+        Args:
+            region: AWS region to scan
+
+        Returns:
+            List of AllCloudResourceData objects for all DynamoDB tables
+        """
+        resources: list[AllCloudResourceData] = []
+
+        try:
+            async with self.session.client("dynamodb", region_name=region) as dynamodb:
+                async with self.session.client("cloudwatch", region_name=region) as cloudwatch:
+                    # List all tables
+                    paginator = dynamodb.get_paginator("list_tables")
+                    async for page in paginator.paginate():
+                        table_names = page.get("TableNames", [])
+
+                        for table_name in table_names:
+                            try:
+                                # Get table details
+                                response = await dynamodb.describe_table(TableName=table_name)
+                                table = response["Table"]
+
+                                table_arn = table.get("TableArn", "")
+                                billing_mode_summary = table.get("BillingModeSummary", {})
+                                billing_mode = billing_mode_summary.get("BillingMode", "PROVISIONED")
+
+                                # Get creation date
+                                created_at = table.get("CreationDateTime")
+
+                                # Get provisioned throughput (for Provisioned mode)
+                                provisioned_throughput = table.get("ProvisionedThroughput", {})
+                                read_capacity = provisioned_throughput.get("ReadCapacityUnits", 0)
+                                write_capacity = provisioned_throughput.get("WriteCapacityUnits", 0)
+
+                                # Get table size and item count
+                                storage_gb = table.get("TableSizeBytes", 0) / (1024 ** 3)  # Convert bytes to GB
+                                item_count = table.get("ItemCount", 0)
+
+                                # Get GSI information
+                                global_secondary_indexes = table.get("GlobalSecondaryIndexes", [])
+                                gsi_count = len(global_secondary_indexes)
+                                gsi_read_capacity = 0
+                                gsi_write_capacity = 0
+
+                                for gsi in global_secondary_indexes:
+                                    gsi_throughput = gsi.get("ProvisionedThroughput", {})
+                                    gsi_read_capacity += gsi_throughput.get("ReadCapacityUnits", 0)
+                                    gsi_write_capacity += gsi_throughput.get("WriteCapacityUnits", 0)
+
+                                # Get CloudWatch metrics (last 14 days)
+                                end_time = datetime.utcnow()
+                                start_time = end_time - timedelta(days=14)
+
+                                # Get consumed read capacity
+                                consumed_read_capacity = 0.0
+                                try:
+                                    read_response = await cloudwatch.get_metric_statistics(
+                                        Namespace="AWS/DynamoDB",
+                                        MetricName="ConsumedReadCapacityUnits",
+                                        Dimensions=[
+                                            {"Name": "TableName", "Value": table_name},
+                                        ],
+                                        StartTime=start_time,
+                                        EndTime=end_time,
+                                        Period=1209600,  # 14 days
+                                        Statistics=["Average"],
+                                    )
+
+                                    datapoints = read_response.get("Datapoints", [])
+                                    if datapoints:
+                                        consumed_read_capacity = datapoints[0].get("Average", 0.0)
+                                except Exception:
+                                    pass
+
+                                # Get consumed write capacity
+                                consumed_write_capacity = 0.0
+                                try:
+                                    write_response = await cloudwatch.get_metric_statistics(
+                                        Namespace="AWS/DynamoDB",
+                                        MetricName="ConsumedWriteCapacityUnits",
+                                        Dimensions=[
+                                            {"Name": "TableName", "Value": table_name},
+                                        ],
+                                        StartTime=start_time,
+                                        EndTime=end_time,
+                                        Period=1209600,  # 14 days
+                                        Statistics=["Average"],
+                                    )
+
+                                    datapoints = write_response.get("Datapoints", [])
+                                    if datapoints:
+                                        consumed_write_capacity = datapoints[0].get("Average", 0.0)
+                                except Exception:
+                                    pass
+
+                                # Calculate monthly cost
+                                monthly_cost = self._calculate_dynamodb_monthly_cost(
+                                    billing_mode=billing_mode,
+                                    read_capacity=read_capacity,
+                                    write_capacity=write_capacity,
+                                    storage_gb=storage_gb,
+                                    gsi_count=gsi_count,
+                                    gsi_read_capacity=gsi_read_capacity,
+                                    gsi_write_capacity=gsi_write_capacity,
+                                    region=region,
+                                )
+
+                                # Calculate optimization metrics
+                                (
+                                    is_optimizable,
+                                    optimization_score,
+                                    optimization_priority,
+                                    potential_savings,
+                                    optimization_recommendations,
+                                ) = self._calculate_dynamodb_optimization(
+                                    table=table,
+                                    billing_mode=billing_mode,
+                                    read_capacity=read_capacity,
+                                    write_capacity=write_capacity,
+                                    consumed_read_capacity=consumed_read_capacity,
+                                    consumed_write_capacity=consumed_write_capacity,
+                                    gsi_count=gsi_count,
+                                    gsi_read_capacity=gsi_read_capacity,
+                                    gsi_write_capacity=gsi_write_capacity,
+                                    item_count=item_count,
+                                    monthly_cost=monthly_cost,
+                                )
+
+                                # Build metadata
+                                metadata = {
+                                    "table_name": table_name,
+                                    "table_arn": table_arn,
+                                    "billing_mode": billing_mode,
+                                    "read_capacity": read_capacity,
+                                    "write_capacity": write_capacity,
+                                    "consumed_read_capacity": round(consumed_read_capacity, 2),
+                                    "consumed_write_capacity": round(consumed_write_capacity, 2),
+                                    "storage_gb": round(storage_gb, 2),
+                                    "item_count": item_count,
+                                    "gsi_count": gsi_count,
+                                    "gsi_read_capacity": gsi_read_capacity,
+                                    "gsi_write_capacity": gsi_write_capacity,
+                                }
+
+                                # Create resource entry
+                                resource = AllCloudResourceData(
+                                    resource_id=table_arn,
+                                    resource_type="dynamodb_table",
+                                    resource_name=table_name,
+                                    region=region,
+                                    estimated_monthly_cost=monthly_cost,
+                                    currency="USD",
+                                    resource_metadata=metadata,
+                                    created_at_cloud=created_at,
+                                    is_optimizable=is_optimizable,
+                                    optimization_score=optimization_score,
+                                    optimization_priority=optimization_priority,
+                                    potential_monthly_savings=potential_savings,
+                                    optimization_recommendations=optimization_recommendations,
+                                )
+
+                                resources.append(resource)
+
+                            except Exception as e:
+                                logger.error(
+                                    "dynamodb.table_scan_failed",
+                                    table_name=table_name,
+                                    region=region,
+                                    error=str(e),
+                                )
+                                continue
+
+        except Exception as e:
+            logger.error(
+                "dynamodb.scan_failed",
+                region=region,
+                error=str(e),
+            )
+
+        return resources
+
+    # ============================================================================
+    # AWS - FARGATE TASK (Cost Intelligence / Inventory Mode)
+    # ============================================================================
+
+    def _calculate_fargate_monthly_cost(
+        self,
+        vcpu: float,
+        memory_gb: float,
+        hours_running: float,
+        region: str,
+    ) -> float:
+        """
+        Calculate estimated monthly cost for AWS Fargate Task.
+
+        Cost structure (us-east-1 pricing, Linux x86_64):
+        - vCPU: $0.04048 per vCPU-hour
+        - Memory: $0.004445 per GB-hour
+
+        Args:
+            vcpu: Number of vCPUs (e.g., 0.25, 0.5, 1, 2, 4)
+            memory_gb: Memory in GB (e.g., 0.5, 1, 2, 4, 8, 16)
+            hours_running: Hours running in the month (0-730)
+            region: AWS region
+
+        Returns:
+            Total estimated monthly cost
+        """
+        vcpu_cost = vcpu * 0.04048 * hours_running
+        memory_cost = memory_gb * 0.004445 * hours_running
+
+        total_cost = vcpu_cost + memory_cost
+
+        return total_cost
+
+    def _calculate_fargate_optimization(
+        self,
+        task: dict[str, Any],
+        task_definition: dict[str, Any],
+        last_status: str,
+        avg_cpu_utilization: float,
+        avg_memory_utilization: float,
+        hours_running_monthly: float,
+        monthly_cost: float,
+    ) -> tuple[bool, int, str, float, list[dict[str, Any]]]:
+        """
+        Calculate AWS Fargate Task optimization metrics.
+
+        Optimization scenarios (4):
+        1. Stopped tasks - Task stopped but still allocated (critical)
+        2. Low CPU utilization - CPU <10% (high)
+        3. EC2 would be cheaper - Long-running tasks (medium)
+        4. Over-provisioned vCPU/memory - Underutilized (low)
+
+        Args:
+            task: ECS task details
+            task_definition: Task definition details
+            last_status: Task status (RUNNING, STOPPED, etc.)
+            avg_cpu_utilization: Average CPU utilization percentage
+            avg_memory_utilization: Average memory utilization percentage
+            hours_running_monthly: Hours running in the month
+            monthly_cost: Total monthly cost
+
+        Returns:
+            Tuple of (is_optimizable, optimization_score, priority, potential_savings, recommendations)
+        """
+        is_optimizable = False
+        optimization_score = 0
+        priority = "none"
+        potential_savings = 0.0
+        recommendations: list[dict[str, Any]] = []
+
+        task_arn = task.get("taskArn", "")
+        task_id = task_arn.split("/")[-1][:8] if task_arn else "Unknown"
+
+        # Extract vCPU and memory from task definition
+        vcpu = float(task_definition.get("cpu", "256")) / 1024  # Convert CPU units to vCPU
+        memory_gb = float(task_definition.get("memory", "512")) / 1024  # Convert MB to GB
+
+        # Scenario 1: CRITICAL - Stopped tasks (allocated but not running)
+        if last_status != "RUNNING" and hours_running_monthly > 0:
+            is_optimizable = True
+            optimization_score = 95
+            priority = "critical"
+            potential_savings = monthly_cost  # All cost is waste
+            recommendations.append({
+                "type": "stopped_task",
+                "severity": "critical",
+                "message": (
+                    f"CRITICAL: Fargate task '{task_id}' is STOPPED but still allocated (costs ${monthly_cost:.2f}/month). "
+                    f"Status: {last_status}. "
+                    "Stopped tasks should not be allocated. Stop or delete this task immediately."
+                ),
+                "impact": "Paying for stopped task capacity",
+                "action": "Stop or delete Fargate task",
+            })
+            return is_optimizable, optimization_score, priority, potential_savings, recommendations
+
+        # Scenario 2: HIGH - Low CPU utilization (CPU <10%)
+        if avg_cpu_utilization > 0 and avg_cpu_utilization < 10.0:
+            is_optimizable = True
+            optimization_score = 85
+            priority = "high"
+            # Assume 40% savings from right-sizing CPU
+            potential_savings = monthly_cost * 0.40
+            recommendations.append({
+                "type": "low_cpu",
+                "severity": "high",
+                "message": (
+                    f"HIGH: Fargate task '{task_id}' has VERY LOW CPU utilization (costs ${monthly_cost:.2f}/month). "
+                    f"CPU: {avg_cpu_utilization:.1f}% (vCPU: {vcpu}). "
+                    f"Task is using only {avg_cpu_utilization:.1f}% of allocated CPU. "
+                    f"Reduce vCPU allocation to save ${potential_savings:.2f}/month (40% reduction)."
+                ),
+                "impact": f"Wasting {100 - avg_cpu_utilization:.1f}% of CPU capacity",
+                "action": f"Reduce vCPU from {vcpu} to {vcpu * 0.5:.2f}",
+            })
+            return is_optimizable, optimization_score, priority, potential_savings, recommendations
+
+        # Scenario 3: MEDIUM - EC2 would be cheaper (long-running tasks)
+        # Fargate break-even is ~10-15 pods; for long-running tasks, EC2 is cheaper
+        if hours_running_monthly >= 720:  # Running 24/7
+            is_optimizable = True
+            optimization_score = 70
+            priority = "medium"
+            # EC2 is typically 30% cheaper for 24/7 workloads
+            potential_savings = monthly_cost * 0.30
+            recommendations.append({
+                "type": "ec2_cheaper",
+                "severity": "medium",
+                "message": (
+                    f"MEDIUM: Fargate task '{task_id}' runs 24/7 (costs ${monthly_cost:.2f}/month). "
+                    f"Running {hours_running_monthly:.0f} hours/month. "
+                    "Fargate is optimized for sporadic/burst workloads. "
+                    f"For 24/7 workloads, EC2 instances are 30% cheaper. Consider migrating to ECS on EC2 to save ${potential_savings:.2f}/month."
+                ),
+                "impact": "Fargate is 30% more expensive than EC2 for 24/7 workloads",
+                "action": "Migrate to ECS on EC2 instances",
+            })
+            return is_optimizable, optimization_score, priority, potential_savings, recommendations
+
+        # Scenario 4: LOW - Over-provisioned vCPU/memory (underutilized)
+        if avg_cpu_utilization > 0 and avg_cpu_utilization < 30.0 and avg_memory_utilization < 30.0:
+            is_optimizable = True
+            optimization_score = 50
+            priority = "low"
+            # Assume 20% savings from right-sizing
+            potential_savings = monthly_cost * 0.20
+            recommendations.append({
+                "type": "over_provisioned",
+                "severity": "low",
+                "message": (
+                    f"LOW: Fargate task '{task_id}' has low CPU and memory utilization (costs ${monthly_cost:.2f}/month). "
+                    f"CPU: {avg_cpu_utilization:.1f}%, Memory: {avg_memory_utilization:.1f}%. "
+                    f"Current: {vcpu} vCPU, {memory_gb:.2f} GB memory. "
+                    f"Right-size to {vcpu * 0.8:.2f} vCPU / {memory_gb * 0.8:.2f} GB to save ${potential_savings:.2f}/month (20% reduction)."
+                ),
+                "impact": "Underutilized CPU and memory resources",
+                "action": f"Reduce to {vcpu * 0.8:.2f} vCPU / {memory_gb * 0.8:.2f} GB",
+            })
+            return is_optimizable, optimization_score, priority, potential_savings, recommendations
+
+        # No optimization opportunities found
+        return is_optimizable, optimization_score, priority, potential_savings, recommendations
+
+    async def scan_fargate_tasks(self, region: str) -> list[AllCloudResourceData]:
+        """
+        Scan ALL AWS Fargate Tasks for cost intelligence.
+
+        This method scans Fargate tasks running in ECS clusters to provide cost
+        visibility and optimization recommendations. Unlike orphan detection, this
+        scans ALL tasks regardless of usage patterns.
+
+        Args:
+            region: AWS region to scan
+
+        Returns:
+            List of AllCloudResourceData objects for all Fargate tasks
+        """
+        resources: list[AllCloudResourceData] = []
+
+        try:
+            async with self.session.client("ecs", region_name=region) as ecs:
+                async with self.session.client("cloudwatch", region_name=region) as cloudwatch:
+                    # List all ECS clusters
+                    clusters_response = await ecs.list_clusters()
+                    cluster_arns = clusters_response.get("clusterArns", [])
+
+                    for cluster_arn in cluster_arns:
+                        try:
+                            # List tasks in cluster with Fargate launch type
+                            tasks_response = await ecs.list_tasks(
+                                cluster=cluster_arn,
+                                launchType="FARGATE",
+                            )
+                            task_arns = tasks_response.get("taskArns", [])
+
+                            if not task_arns:
+                                continue
+
+                            # Describe tasks
+                            described_tasks_response = await ecs.describe_tasks(
+                                cluster=cluster_arn,
+                                tasks=task_arns,
+                            )
+                            tasks = described_tasks_response.get("tasks", [])
+
+                            for task in tasks:
+                                try:
+                                    task_arn = task.get("taskArn", "")
+                                    task_definition_arn = task.get("taskDefinitionArn", "")
+                                    last_status = task.get("lastStatus", "UNKNOWN")
+                                    created_at = task.get("createdAt")
+
+                                    # Get task definition details
+                                    task_def_response = await ecs.describe_task_definition(
+                                        taskDefinition=task_definition_arn
+                                    )
+                                    task_definition = task_def_response["taskDefinition"]
+
+                                    # Extract vCPU and memory
+                                    cpu_str = task_definition.get("cpu", "256")  # CPU units
+                                    memory_str = task_definition.get("memory", "512")  # MB
+                                    vcpu = float(cpu_str) / 1024  # Convert to vCPU
+                                    memory_gb = float(memory_str) / 1024  # Convert to GB
+
+                                    # Calculate hours running (estimate from creation time)
+                                    hours_running_monthly = 0.0
+                                    if created_at:
+                                        age = datetime.utcnow() - created_at.replace(tzinfo=None)
+                                        hours_running_monthly = min(age.total_seconds() / 3600, 730)
+
+                                    # Get CloudWatch CPU metrics (last 7 days)
+                                    avg_cpu_utilization = 0.0
+                                    avg_memory_utilization = 0.0
+
+                                    if last_status == "RUNNING":
+                                        try:
+                                            end_time = datetime.utcnow()
+                                            start_time = end_time - timedelta(days=7)
+
+                                            # Get CPU utilization
+                                            cpu_response = await cloudwatch.get_metric_statistics(
+                                                Namespace="ECS/ContainerInsights",
+                                                MetricName="CpuUtilized",
+                                                Dimensions=[
+                                                    {"Name": "ClusterName", "Value": cluster_arn.split("/")[-1]},
+                                                    {"Name": "TaskId", "Value": task_arn.split("/")[-1]},
+                                                ],
+                                                StartTime=start_time,
+                                                EndTime=end_time,
+                                                Period=604800,  # 7 days
+                                                Statistics=["Average"],
+                                            )
+
+                                            datapoints = cpu_response.get("Datapoints", [])
+                                            if datapoints:
+                                                avg_cpu_utilization = datapoints[0].get("Average", 0.0)
+                                        except Exception:
+                                            pass
+
+                                        try:
+                                            # Get Memory utilization
+                                            memory_response = await cloudwatch.get_metric_statistics(
+                                                Namespace="ECS/ContainerInsights",
+                                                MetricName="MemoryUtilized",
+                                                Dimensions=[
+                                                    {"Name": "ClusterName", "Value": cluster_arn.split("/")[-1]},
+                                                    {"Name": "TaskId", "Value": task_arn.split("/")[-1]},
+                                                ],
+                                                StartTime=start_time,
+                                                EndTime=end_time,
+                                                Period=604800,  # 7 days
+                                                Statistics=["Average"],
+                                            )
+
+                                            datapoints = memory_response.get("Datapoints", [])
+                                            if datapoints:
+                                                avg_memory_utilization = datapoints[0].get("Average", 0.0)
+                                        except Exception:
+                                            pass
+
+                                    # Calculate monthly cost
+                                    monthly_cost = self._calculate_fargate_monthly_cost(
+                                        vcpu=vcpu,
+                                        memory_gb=memory_gb,
+                                        hours_running=hours_running_monthly,
+                                        region=region,
+                                    )
+
+                                    # Calculate optimization metrics
+                                    (
+                                        is_optimizable,
+                                        optimization_score,
+                                        optimization_priority,
+                                        potential_savings,
+                                        optimization_recommendations,
+                                    ) = self._calculate_fargate_optimization(
+                                        task=task,
+                                        task_definition=task_definition,
+                                        last_status=last_status,
+                                        avg_cpu_utilization=avg_cpu_utilization,
+                                        avg_memory_utilization=avg_memory_utilization,
+                                        hours_running_monthly=hours_running_monthly,
+                                        monthly_cost=monthly_cost,
+                                    )
+
+                                    # Build metadata
+                                    task_id = task_arn.split("/")[-1] if task_arn else "unknown"
+                                    metadata = {
+                                        "task_id": task_id,
+                                        "task_arn": task_arn,
+                                        "cluster_arn": cluster_arn,
+                                        "last_status": last_status,
+                                        "vcpu": vcpu,
+                                        "memory_gb": memory_gb,
+                                        "hours_running_monthly": round(hours_running_monthly, 2),
+                                        "avg_cpu_utilization": round(avg_cpu_utilization, 2),
+                                        "avg_memory_utilization": round(avg_memory_utilization, 2),
+                                    }
+
+                                    # Create resource entry
+                                    resource = AllCloudResourceData(
+                                        resource_id=task_arn,
+                                        resource_type="fargate_task",
+                                        resource_name=f"fargate-{task_id}",
+                                        region=region,
+                                        estimated_monthly_cost=monthly_cost,
+                                        currency="USD",
+                                        resource_metadata=metadata,
+                                        created_at_cloud=created_at,
+                                        is_optimizable=is_optimizable,
+                                        optimization_score=optimization_score,
+                                        optimization_priority=optimization_priority,
+                                        potential_monthly_savings=potential_savings,
+                                        optimization_recommendations=optimization_recommendations,
+                                    )
+
+                                    resources.append(resource)
+
+                                except Exception as e:
+                                    logger.error(
+                                        "fargate.task_scan_failed",
+                                        task_arn=task.get("taskArn", "Unknown"),
+                                        cluster_arn=cluster_arn,
+                                        region=region,
+                                        error=str(e),
+                                    )
+                                    continue
+
+                        except Exception as e:
+                            logger.error(
+                                "fargate.cluster_scan_failed",
+                                cluster_arn=cluster_arn,
+                                region=region,
+                                error=str(e),
+                            )
+                            continue
+
+        except Exception as e:
+            logger.error(
+                "fargate.scan_failed",
+                region=region,
+                error=str(e),
+            )
+
+        return resources

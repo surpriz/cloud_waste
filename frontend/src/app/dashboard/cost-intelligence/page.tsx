@@ -70,6 +70,8 @@ const resourceIcons: Record<ResourceType, any> = {
   s3_bucket: HardDrive,
   lambda_function: Zap,
   dynamodb_table: Database,
+  eks_cluster: Server,
+  fargate_task: Server,
   // Azure - Cost Intelligence (Inventory mode)
   azure_vm: Server,
   azure_managed_disk: HardDrive,
