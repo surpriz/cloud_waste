@@ -459,6 +459,303 @@ class AWSInventoryScanner:
 
         return all_eips
 
+    async def scan_aws_load_balancers(self, region: str) -> list[AllCloudResourceData]:
+        """
+        Scan ALL AWS Load Balancers (ALB, NLB, GLB, CLB) for cost intelligence.
+
+        Unlike orphan detection, this returns ALL load balancers with
+        utilization status and optimization recommendations.
+
+        Args:
+            region: AWS region to scan
+
+        Returns:
+            List of all load balancer resources
+        """
+        logger.info("inventory.scan_aws_lb_start", region=region)
+        all_lbs: list[AllCloudResourceData] = []
+
+        try:
+            # ================================================================
+            # Scan Application/Network/Gateway Load Balancers (ELBv2)
+            # ================================================================
+            async with self.session.client("elbv2", region_name=region) as elbv2:
+                response = await elbv2.describe_load_balancers()
+
+                for lb in response.get("LoadBalancers", []):
+                    lb_arn = lb["LoadBalancerArn"]
+                    lb_name = lb["LoadBalancerName"]
+                    lb_type = lb["Type"]  # 'application', 'network', or 'gateway'
+                    lb_state = lb["State"]["Code"]  # 'active', 'provisioning', 'failed'
+                    created_at = lb["CreatedTime"]
+
+                    # Extract tags
+                    tags = {}
+                    try:
+                        tags_response = await elbv2.describe_tags(ResourceArns=[lb_arn])
+                        for tag_desc in tags_response.get("TagDescriptions", []):
+                            for tag in tag_desc.get("Tags", []):
+                                tags[tag["Key"]] = tag["Value"]
+                    except Exception:
+                        pass
+
+                    # Get listeners count
+                    try:
+                        listeners_response = await elbv2.describe_listeners(
+                            LoadBalancerArn=lb_arn
+                        )
+                        listener_count = len(listeners_response.get("Listeners", []))
+                    except Exception:
+                        listener_count = 0
+
+                    # Get target groups for this LB
+                    try:
+                        tg_response = await elbv2.describe_target_groups(
+                            LoadBalancerArn=lb_arn
+                        )
+                        target_groups = tg_response.get("TargetGroups", [])
+                        target_group_count = len(target_groups)
+                    except Exception:
+                        target_groups = []
+                        target_group_count = 0
+
+                    # Get target health
+                    healthy_target_count = 0
+                    total_target_count = 0
+                    for tg in target_groups:
+                        tg_arn = tg["TargetGroupArn"]
+                        try:
+                            health_response = await elbv2.describe_target_health(
+                                TargetGroupArn=tg_arn
+                            )
+                            targets = health_response.get("TargetHealthDescriptions", [])
+                            total_target_count += len(targets)
+                            for target in targets:
+                                if target["TargetHealth"]["State"] == "healthy":
+                                    healthy_target_count += 1
+                        except Exception:
+                            pass
+
+                    # Calculate monthly cost
+                    monthly_cost = self._calculate_alb_monthly_cost(lb_type, region)
+
+                    # Determine utilization status
+                    if lb_state != "active":
+                        utilization_status = "idle"
+                    elif listener_count == 0 or target_group_count == 0:
+                        utilization_status = "idle"
+                    elif total_target_count > 0 and healthy_target_count == 0:
+                        utilization_status = "idle"
+                    elif healthy_target_count > 0:
+                        utilization_status = "active"
+                    else:
+                        utilization_status = "unknown"
+
+                    # Calculate optimization
+                    (
+                        is_optimizable,
+                        optimization_score,
+                        optimization_priority,
+                        potential_savings,
+                        recommendations,
+                    ) = self._calculate_alb_optimization(
+                        lb,
+                        listener_count,
+                        target_group_count,
+                        healthy_target_count,
+                        total_target_count,
+                        monthly_cost,
+                        lb_type,
+                    )
+
+                    # Check if LB is orphan
+                    is_orphan = (
+                        listener_count == 0
+                        or target_group_count == 0
+                        or (total_target_count > 0 and healthy_target_count == 0)
+                    )
+
+                    # Create resource data
+                    resource = AllCloudResourceData(
+                        resource_type="load_balancer",
+                        resource_id=lb_arn,
+                        resource_name=lb_name,
+                        region=region,
+                        estimated_monthly_cost=monthly_cost,
+                        resource_metadata={
+                            "lb_type": lb_type,
+                            "lb_state": lb_state,
+                            "dns_name": lb.get("DNSName"),
+                            "scheme": lb.get("Scheme", "internet-facing"),
+                            "vpc_id": lb.get("VpcId"),
+                            "availability_zones": [
+                                az.get("ZoneName") for az in lb.get("AvailabilityZones", [])
+                            ],
+                            "listener_count": listener_count,
+                            "target_group_count": target_group_count,
+                            "healthy_target_count": healthy_target_count,
+                            "total_target_count": total_target_count,
+                        },
+                        currency="USD",
+                        utilization_status=utilization_status,
+                        cpu_utilization_percent=None,
+                        memory_utilization_percent=None,
+                        storage_utilization_percent=None,
+                        network_utilization_mbps=None,
+                        is_optimizable=is_optimizable,
+                        optimization_priority=optimization_priority,
+                        optimization_score=optimization_score,
+                        potential_monthly_savings=potential_savings,
+                        optimization_recommendations=recommendations,
+                        tags=tags,
+                        resource_status=lb_state,
+                        is_orphan=is_orphan,
+                        created_at_cloud=created_at,
+                        last_used_at=None,
+                    )
+
+                    all_lbs.append(resource)
+
+            # ================================================================
+            # Scan Classic Load Balancers (ELB)
+            # ================================================================
+            async with self.session.client("elb", region_name=region) as elb:
+                response = await elb.describe_load_balancers()
+
+                for lb in response.get("LoadBalancerDescriptions", []):
+                    lb_name = lb["LoadBalancerName"]
+                    created_at = lb.get("CreatedTime")
+                    dns_name = lb.get("DNSName")
+                    scheme = lb.get("Scheme", "internet-facing")
+                    vpc_id = lb.get("VPCId")
+                    availability_zones = lb.get("AvailabilityZones", [])
+
+                    # Extract tags
+                    tags = {}
+                    try:
+                        tags_response = await elb.describe_tags(
+                            LoadBalancerNames=[lb_name]
+                        )
+                        for tag_desc in tags_response.get("TagDescriptions", []):
+                            for tag in tag_desc.get("Tags", []):
+                                tags[tag["Key"]] = tag["Value"]
+                    except Exception:
+                        pass
+
+                    # Get listeners count
+                    listeners = lb.get("ListenerDescriptions", [])
+                    listener_count = len(listeners)
+
+                    # Get registered instances (CLB doesn't use target groups)
+                    instances = lb.get("Instances", [])
+                    total_target_count = len(instances)
+
+                    # Get instance health
+                    healthy_target_count = 0
+                    if instances:
+                        try:
+                            health_response = await elb.describe_instance_health(
+                                LoadBalancerName=lb_name
+                            )
+                            for instance_state in health_response.get("InstanceStates", []):
+                                if instance_state["State"] == "InService":
+                                    healthy_target_count += 1
+                        except Exception:
+                            pass
+
+                    # Calculate monthly cost for CLB
+                    monthly_cost = self._calculate_alb_monthly_cost("classic", region)
+
+                    # Determine utilization status
+                    if listener_count == 0 or total_target_count == 0:
+                        utilization_status = "idle"
+                    elif total_target_count > 0 and healthy_target_count == 0:
+                        utilization_status = "idle"
+                    elif healthy_target_count > 0:
+                        utilization_status = "active"
+                    else:
+                        utilization_status = "unknown"
+
+                    # Calculate optimization
+                    (
+                        is_optimizable,
+                        optimization_score,
+                        optimization_priority,
+                        potential_savings,
+                        recommendations,
+                    ) = self._calculate_alb_optimization(
+                        {"LoadBalancerName": lb_name, "Name": lb_name},
+                        listener_count,
+                        0,  # CLB doesn't have target groups
+                        healthy_target_count,
+                        total_target_count,
+                        monthly_cost,
+                        "classic",
+                    )
+
+                    # Check if CLB is orphan
+                    is_orphan = (
+                        listener_count == 0
+                        or total_target_count == 0
+                        or (total_target_count > 0 and healthy_target_count == 0)
+                    )
+
+                    # Create resource data
+                    resource = AllCloudResourceData(
+                        resource_type="load_balancer",
+                        resource_id=lb_name,  # CLB uses name as ID
+                        resource_name=lb_name,
+                        region=region,
+                        estimated_monthly_cost=monthly_cost,
+                        resource_metadata={
+                            "lb_type": "classic",
+                            "lb_state": "active",  # CLB doesn't have state field
+                            "dns_name": dns_name,
+                            "scheme": scheme,
+                            "vpc_id": vpc_id,
+                            "availability_zones": availability_zones,
+                            "listener_count": listener_count,
+                            "target_group_count": 0,  # CLB doesn't use target groups
+                            "healthy_target_count": healthy_target_count,
+                            "total_target_count": total_target_count,
+                        },
+                        currency="USD",
+                        utilization_status=utilization_status,
+                        cpu_utilization_percent=None,
+                        memory_utilization_percent=None,
+                        storage_utilization_percent=None,
+                        network_utilization_mbps=None,
+                        is_optimizable=is_optimizable,
+                        optimization_priority=optimization_priority,
+                        optimization_score=optimization_score,
+                        potential_monthly_savings=potential_savings,
+                        optimization_recommendations=recommendations,
+                        tags=tags,
+                        resource_status="active",
+                        is_orphan=is_orphan,
+                        created_at_cloud=created_at,
+                        last_used_at=None,
+                    )
+
+                    all_lbs.append(resource)
+
+            logger.info(
+                "inventory.scan_aws_lb_complete",
+                region=region,
+                total_lbs=len(all_lbs),
+            )
+
+        except Exception as e:
+            logger.error(
+                "inventory.scan_aws_lb_error",
+                region=region,
+                error=str(e),
+                exc_info=True,
+            )
+            raise
+
+        return all_lbs
+
     async def scan_rds_instances(self, region: str) -> list[AllCloudResourceData]:
         """
         Scan ALL RDS instances for cost intelligence.
@@ -1255,6 +1552,149 @@ class AWSInventoryScanner:
                     "details": f"Low IOPS usage. Consider gp3 (3K-16K IOPS) to save ${potential_savings:.2f}/month",
                     "priority": "low",
                 })
+
+        return is_optimizable, optimization_score, priority, potential_savings, recommendations
+
+    def _calculate_alb_monthly_cost(
+        self,
+        lb_type: str,
+        region: str,
+        data_processed_gb: float = 0.0,
+    ) -> float:
+        """
+        Calculate estimated monthly cost for AWS Load Balancer.
+
+        AWS Load Balancer pricing:
+        - ALB: $22.61/month base + $0.008/LCU-hour (~$5.76/month for 1 LCU-hour average)
+        - NLB: $22.61/month base + $0.006/LCU-hour (~$4.32/month for 1 LCU-hour average)
+        - CLB: $18.03/month base + $0.008/GB data processed
+
+        Args:
+            lb_type: Load balancer type ('application', 'network', 'classic')
+            region: AWS region
+            data_processed_gb: Data processed in GB (for CLB pricing)
+
+        Returns:
+            Estimated monthly cost in USD
+        """
+        # Base hourly rates * 730 hours/month
+        if lb_type == "application":
+            base_cost = 22.61
+            # Simplified LCU cost: assume 1 LCU-hour average
+            # 1 LCU-hour = $0.008/hour * 730 hours = $5.84/month
+            lcu_cost = 5.84
+            return base_cost + lcu_cost
+        elif lb_type == "network":
+            base_cost = 22.61
+            # 1 LCU-hour for NLB = $0.006/hour * 730 hours = $4.38/month
+            lcu_cost = 4.38
+            return base_cost + lcu_cost
+        elif lb_type == "classic":
+            base_cost = 18.03
+            # Data processing: $0.008/GB
+            data_cost = data_processed_gb * 0.008
+            return base_cost + data_cost
+        else:
+            # Default to ALB pricing
+            return 28.45
+
+    def _calculate_alb_optimization(
+        self,
+        lb: dict[str, Any],
+        listener_count: int,
+        target_group_count: int,
+        healthy_target_count: int,
+        total_target_count: int,
+        monthly_cost: float,
+        lb_type: str,
+    ) -> tuple[bool, int, str, float, list[dict[str, Any]]]:
+        """
+        Calculate AWS Load Balancer optimization metrics.
+
+        Returns:
+            (is_optimizable, optimization_score, priority, potential_savings, recommendations)
+        """
+        recommendations = []
+        is_optimizable = False
+        optimization_score = 0
+        potential_savings = 0.0
+        priority = "none"
+
+        lb_name = lb.get("LoadBalancerName") or lb.get("Name", "Unknown")
+
+        # Scenario 1: No listeners configured (Critical)
+        if listener_count == 0:
+            is_optimizable = True
+            optimization_score = 95
+            priority = "critical"
+            potential_savings = monthly_cost  # 100% savings
+            recommendations.append({
+                "action": "Delete load balancer",
+                "details": f"Load balancer has no listeners configured. Delete to save ${potential_savings:.2f}/month",
+                "priority": "critical",
+            })
+
+        # Scenario 2: No target groups (Critical)
+        elif target_group_count == 0 and lb_type != "classic":
+            is_optimizable = True
+            optimization_score = 95
+            priority = "critical"
+            potential_savings = monthly_cost  # 100% savings
+            recommendations.append({
+                "action": "Delete load balancer",
+                "details": f"Load balancer has no target groups. No backends configured. Delete to save ${potential_savings:.2f}/month",
+                "priority": "critical",
+            })
+
+        # Scenario 3: All targets unhealthy (High)
+        elif total_target_count > 0 and healthy_target_count == 0:
+            is_optimizable = True
+            optimization_score = 85
+            priority = "high"
+            potential_savings = monthly_cost * 0.9  # Assume 90% savings if deleted
+            recommendations.append({
+                "action": "Fix or delete load balancer",
+                "details": f"All {total_target_count} targets are unhealthy. Fix targets or delete LB to save ~${potential_savings:.2f}/month",
+                "priority": "high",
+            })
+
+        # Scenario 4: No targets at all for CLB (High)
+        elif lb_type == "classic" and total_target_count == 0:
+            is_optimizable = True
+            optimization_score = 90
+            priority = "high"
+            potential_savings = monthly_cost
+            recommendations.append({
+                "action": "Delete Classic Load Balancer",
+                "details": f"CLB has no registered instances. Delete to save ${potential_savings:.2f}/month",
+                "priority": "high",
+            })
+
+        # Scenario 5: CLB migration opportunity (Medium)
+        elif lb_type == "classic" and healthy_target_count > 0:
+            is_optimizable = True
+            optimization_score = 50
+            priority = "medium"
+            # ALB costs ~$4/month more but offers better features
+            alb_cost = 28.45
+            potential_savings = -(alb_cost - monthly_cost)  # Negative = additional cost
+            recommendations.append({
+                "action": "Migrate Classic LB to Application LB",
+                "details": f"Upgrade to ALB for better features (HTTP/2, WebSocket, path-based routing). Additional cost: ${abs(potential_savings):.2f}/month",
+                "alternatives": [
+                    {
+                        "name": "Application Load Balancer",
+                        "cost": alb_cost,
+                        "savings": potential_savings,
+                        "benefits": "HTTP/2, WebSocket, path-based routing, host-based routing, better health checks"
+                    }
+                ],
+                "priority": "medium",
+            })
+
+        # Scenario 6: Very low utilization (Low)
+        # This would require CloudWatch metrics, which we can add later
+        # For now, we focus on structural issues
 
         return is_optimizable, optimization_score, priority, potential_savings, recommendations
 

@@ -328,6 +328,15 @@ async def _scan_cloud_account_async(
                             eip_count=len(eip_resources),
                         )
 
+                        # Scan AWS Load Balancers (all: ALB, NLB, GLB, CLB)
+                        lb_resources = await inventory_scanner.scan_aws_load_balancers(region)
+                        all_inventory_resources.extend(lb_resources)
+                        logger.info(
+                            "inventory.lb_scanned",
+                            region=region,
+                            lb_count=len(lb_resources),
+                        )
+
                         # Scan RDS instances (all)
                         rds_resources = await inventory_scanner.scan_rds_instances(region)
                         all_inventory_resources.extend(rds_resources)
