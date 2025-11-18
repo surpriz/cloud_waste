@@ -210,6 +210,18 @@ class AWSProvider(CloudProviderBase):
         # Transfer Family pricing
         "transfer_family_endpoint_per_hour": 0.30,  # $0.30/hour (~$216/month) - charged even if idle
         "transfer_family_data_transfer_per_gb": 0.04,  # $0.04/GB data transferred
+        # Elastic Beanstalk pricing (underlying resources: EC2 + ELB)
+        "elastic_beanstalk_ec2_t3_micro": 0.0104,  # $0.0104/hour (~$7.50/month)
+        "elastic_beanstalk_ec2_m5_large": 0.096,  # $0.096/hour (~$70/month)
+        "elastic_beanstalk_elb": 0.0225,  # $0.0225/hour (~$16/month)
+        # Direct Connect pricing
+        "direct_connect_1gbps_port_hour": 0.30,  # $0.30/hour (~$216/month)
+        "direct_connect_10gbps_port_hour": 2.25,  # $2.25/hour (~$1,620/month)
+        "direct_connect_data_transfer_out_per_gb": 0.02,  # $0.02/GB (IN is free)
+        # MQ Broker pricing
+        "mq_broker_t3_micro": 0.0375,  # $0.0375/hour (~$27/month)
+        "mq_broker_m5_large": 0.598,  # $0.598/hour (~$431/month)
+        "mq_storage_per_gb": 0.10,  # $0.10/GB/month
     }
 
     def __init__(

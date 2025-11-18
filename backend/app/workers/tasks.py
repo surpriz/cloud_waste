@@ -626,6 +626,33 @@ async def _scan_cloud_account_async(
                             transfer_family_count=len(transfer_family_resources),
                         )
 
+                        # Scan Elastic Beanstalk Environments (all)
+                        elastic_beanstalk_resources = await inventory_scanner.scan_elastic_beanstalk_environments(region)
+                        all_inventory_resources.extend(elastic_beanstalk_resources)
+                        logger.info(
+                            "inventory.elastic_beanstalk_scanned",
+                            region=region,
+                            elastic_beanstalk_count=len(elastic_beanstalk_resources),
+                        )
+
+                        # Scan Direct Connect Connections (all)
+                        direct_connect_resources = await inventory_scanner.scan_direct_connect_connections(region)
+                        all_inventory_resources.extend(direct_connect_resources)
+                        logger.info(
+                            "inventory.direct_connect_scanned",
+                            region=region,
+                            direct_connect_count=len(direct_connect_resources),
+                        )
+
+                        # Scan MQ Brokers (all)
+                        mq_broker_resources = await inventory_scanner.scan_mq_brokers(region)
+                        all_inventory_resources.extend(mq_broker_resources)
+                        logger.info(
+                            "inventory.mq_scanned",
+                            region=region,
+                            mq_count=len(mq_broker_resources),
+                        )
+
                     # Scan S3 buckets (global, only once)
                     if regions_to_scan:
                         s3_resources = await inventory_scanner.scan_s3_buckets()

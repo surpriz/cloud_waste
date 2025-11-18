@@ -33,6 +33,9 @@ import {
   Boxes,
   Brain,
   Upload,
+  Package,
+  Cable,
+  MessageSquare,
 } from "lucide-react";
 import type { ResourceStatus, ResourceType } from "@/types";
 import { ResourceChartsSection } from "@/components/dashboard/ResourceChartsSection";
@@ -69,6 +72,9 @@ const resourceIcons: Record<ResourceType, any> = {
   emr_cluster: Cpu,
   sagemaker_notebook: Brain,
   transfer_family_server: Upload,
+  elastic_beanstalk_environment: Package,
+  direct_connect_connection: Cable,
+  mq_broker: MessageSquare,
   s3_bucket: HardDrive,
   lambda_function: Zap,
   dynamodb_table: Database,

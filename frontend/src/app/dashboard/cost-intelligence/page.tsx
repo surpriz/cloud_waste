@@ -46,6 +46,8 @@ import {
   Archive,
   Boxes,
   Cpu,
+  Package,
+  Cable,
 } from "lucide-react";
 import {
   PieChart as RechartsPie,
@@ -102,6 +104,9 @@ const resourceIcons: Record<ResourceType, any> = {
   emr_cluster: Cpu,
   sagemaker_notebook: Brain,
   transfer_family_server: Upload,
+  elastic_beanstalk_environment: Package,
+  direct_connect_connection: Cable,
+  mq_broker: MessageSquare,
   // Azure - Cost Intelligence (Inventory mode)
   azure_vm: Server,
   azure_managed_disk: HardDrive,
