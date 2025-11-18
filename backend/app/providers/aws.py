@@ -199,6 +199,17 @@ class AWSProvider(CloudProviderBase):
         "workspaces_power": 80.00,  # 4 vCPU, 16GB RAM
         # Glue Crawler pricing
         "glue_dpu_per_hour": 0.44,  # $0.44 per DPU-Hour (minimum 2 DPUs)
+        # EMR Cluster pricing (per-instance-hour surcharge on top of EC2 cost)
+        "emr_surcharge_small": 0.03,  # Small instances (t3, m5.large)
+        "emr_surcharge_medium": 0.096,  # Medium instances (m5.xlarge, c5.xlarge)
+        "emr_surcharge_large": 0.27,  # Large instances (r5.4xlarge+)
+        # SageMaker Notebook pricing (per-hour)
+        "sagemaker_ml_t3_medium": 0.0582,  # ml.t3.medium (~$42/month)
+        "sagemaker_ml_m5_large": 0.134,  # ml.m5.large (~$97/month)
+        "sagemaker_ml_m5_xlarge": 0.269,  # ml.m5.xlarge (~$194/month)
+        # Transfer Family pricing
+        "transfer_family_endpoint_per_hour": 0.30,  # $0.30/hour (~$216/month) - charged even if idle
+        "transfer_family_data_transfer_per_gb": 0.04,  # $0.04/GB data transferred
     }
 
     def __init__(

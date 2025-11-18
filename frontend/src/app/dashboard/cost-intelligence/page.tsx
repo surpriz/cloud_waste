@@ -45,6 +45,7 @@ import {
   Bell,
   Archive,
   Boxes,
+  Cpu,
 } from "lucide-react";
 import {
   PieChart as RechartsPie,
@@ -98,6 +99,9 @@ const resourceIcons: Record<ResourceType, any> = {
   secrets_manager_secret: Key,
   backup_vault: Archive,
   app_runner_service: Boxes,
+  emr_cluster: Cpu,
+  sagemaker_notebook: Brain,
+  transfer_family_server: Upload,
   // Azure - Cost Intelligence (Inventory mode)
   azure_vm: Server,
   azure_managed_disk: HardDrive,

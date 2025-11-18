@@ -599,6 +599,33 @@ async def _scan_cloud_account_async(
                             app_runner_count=len(app_runner_resources),
                         )
 
+                        # Scan EMR Clusters (all)
+                        emr_resources = await inventory_scanner.scan_emr_clusters(region)
+                        all_inventory_resources.extend(emr_resources)
+                        logger.info(
+                            "inventory.emr_scanned",
+                            region=region,
+                            emr_count=len(emr_resources),
+                        )
+
+                        # Scan SageMaker Notebook Instances (all)
+                        sagemaker_resources = await inventory_scanner.scan_sagemaker_notebooks(region)
+                        all_inventory_resources.extend(sagemaker_resources)
+                        logger.info(
+                            "inventory.sagemaker_scanned",
+                            region=region,
+                            sagemaker_count=len(sagemaker_resources),
+                        )
+
+                        # Scan Transfer Family Servers (all)
+                        transfer_family_resources = await inventory_scanner.scan_transfer_family_servers(region)
+                        all_inventory_resources.extend(transfer_family_resources)
+                        logger.info(
+                            "inventory.transfer_family_scanned",
+                            region=region,
+                            transfer_family_count=len(transfer_family_resources),
+                        )
+
                     # Scan S3 buckets (global, only once)
                     if regions_to_scan:
                         s3_resources = await inventory_scanner.scan_s3_buckets()

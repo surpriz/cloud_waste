@@ -31,6 +31,8 @@ import {
   Key,
   Archive,
   Boxes,
+  Brain,
+  Upload,
 } from "lucide-react";
 import type { ResourceStatus, ResourceType } from "@/types";
 import { ResourceChartsSection } from "@/components/dashboard/ResourceChartsSection";
@@ -64,6 +66,9 @@ const resourceIcons: Record<ResourceType, any> = {
   secrets_manager_secret: Key,
   backup_vault: Archive,
   app_runner_service: Boxes,
+  emr_cluster: Cpu,
+  sagemaker_notebook: Brain,
+  transfer_family_server: Upload,
   s3_bucket: HardDrive,
   lambda_function: Zap,
   dynamodb_table: Database,

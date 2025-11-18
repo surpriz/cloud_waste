@@ -33324,3 +33324,1238 @@ class AzureInventoryScanner:
             )
 
         return resources
+
+    def _calculate_emr_cluster_monthly_cost(
+        self, instance_type: str, instance_count: int, running_hours: int, region: str
+    ) -> float:
+        """
+        Calculate estimated monthly cost for AWS EMR Cluster.
+
+        EMR pricing = EC2 instance cost + EMR per-instance-hour surcharge.
+
+        Args:
+            instance_type: EC2 instance type (e.g., "m5.xlarge")
+            instance_count: Number of instances in cluster (core + task nodes)
+            running_hours: Hours running per month (~730 for 24/7)
+            region: AWS region
+
+        Returns:
+            Estimated monthly cost in USD
+        """
+        # EMR surcharge rates (approximate, varies by region)
+        if instance_type.startswith(("t3.", "t2.", "m5.large")):
+            emr_surcharge = self.PRICING.get("emr_surcharge_small", 0.03)
+        elif instance_type.startswith(("m5.xlarge", "c5.xlarge", "m5.2xlarge")):
+            emr_surcharge = self.PRICING.get("emr_surcharge_medium", 0.096)
+        else:  # Large instances (r5.4xlarge+, etc.)
+            emr_surcharge = self.PRICING.get("emr_surcharge_large", 0.27)
+
+        # Simplified EC2 cost estimation (actual cost varies by instance type)
+        # This is a rough estimate - real implementation would query AWS Pricing API
+        ec2_cost_per_hour = {
+            "m5.large": 0.096,
+            "m5.xlarge": 0.192,
+            "m5.2xlarge": 0.384,
+            "c5.xlarge": 0.17,
+            "r5.xlarge": 0.252,
+            "r5.4xlarge": 1.008,
+        }.get(instance_type, 0.192)  # Default to m5.xlarge
+
+        total_hourly_cost = (ec2_cost_per_hour + emr_surcharge) * instance_count
+        monthly_cost = total_hourly_cost * running_hours
+
+        return round(monthly_cost, 2)
+
+    def _calculate_emr_cluster_optimization(
+        self,
+        cluster_id: str,
+        cluster_name: str,
+        state: str,
+        instance_type: str,
+        instance_count: int,
+        running_hours: int,
+        is_idle: bool,
+        apps_running: int,
+        apps_completed_30d: int,
+        hdfs_utilization_pct: float,
+        creation_time: datetime,
+        region: str,
+    ) -> list[OptimizationScenario]:
+        """
+        Calculate optimization scenarios for EMR Cluster.
+
+        Scenarios:
+        1. Cluster Idle Long-Term (CRITICAL) - IsIdle=1 for 7+ days
+        2. Cluster Never Used (HIGH) - 0 apps completed in 30 days
+        3. Long-Running Dev/Test Cluster (MEDIUM) - >168h/month non-production
+        4. Oversized Cluster Low Utilization (MEDIUM) - <20% HDFS usage
+        5. Cluster Running 24/7 Non-Production (LOW) - Auto-terminate schedule
+
+        Args:
+            cluster_id: EMR cluster ID
+            cluster_name: Cluster name/tag
+            state: Cluster state (RUNNING, WAITING, TERMINATED, etc.)
+            instance_type: EC2 instance type
+            instance_count: Number of instances
+            running_hours: Hours running this month
+            is_idle: Whether cluster is idle (IsIdle metric)
+            apps_running: Number of apps currently running
+            apps_completed_30d: Apps completed in last 30 days
+            hdfs_utilization_pct: HDFS utilization percentage
+            creation_time: Cluster creation timestamp
+            region: AWS region
+
+        Returns:
+            List of optimization scenarios
+        """
+        scenarios = []
+        age_days = (datetime.now(timezone.utc) - creation_time).days
+        monthly_cost = self._calculate_emr_cluster_monthly_cost(
+            instance_type, instance_count, running_hours, region
+        )
+
+        # Scenario 1: Cluster Idle Long-Term (CRITICAL - 95)
+        if is_idle and age_days >= 7:
+            scenarios.append(
+                OptimizationScenario(
+                    scenario_name="Cluster Idle Long-Term",
+                    priority_level=95,
+                    description=(
+                        f"EMR cluster '{cluster_name}' (ID: {cluster_id}) has been idle for {age_days} days. "
+                        f"IsIdle metric shows cluster is not processing any jobs. "
+                        f"Consider terminating cluster to save ~${monthly_cost:.2f}/month."
+                    ),
+                    estimated_monthly_savings=monthly_cost,
+                    recommended_action=(
+                        "Terminate idle EMR cluster. If needed in future, create new cluster with "
+                        "auto-termination enabled or use EMR Serverless for on-demand processing."
+                    ),
+                    confidence_level="critical",
+                )
+            )
+
+        # Scenario 2: Cluster Never Used (HIGH - 85)
+        if apps_completed_30d == 0 and age_days >= 30:
+            scenarios.append(
+                OptimizationScenario(
+                    scenario_name="Cluster Never Used",
+                    priority_level=85,
+                    description=(
+                        f"EMR cluster '{cluster_name}' (ID: {cluster_id}) has completed 0 applications "
+                        f"in the last 30 days (age: {age_days} days). Cluster is running but unused. "
+                        f"Current monthly cost: ~${monthly_cost:.2f}/month."
+                    ),
+                    estimated_monthly_savings=monthly_cost,
+                    recommended_action=(
+                        "Terminate unused EMR cluster. Verify cluster is not needed for scheduled jobs. "
+                        "Consider EMR Serverless or on-demand cluster creation for future needs."
+                    ),
+                    confidence_level="high",
+                )
+            )
+
+        # Scenario 3: Long-Running Dev/Test Cluster (MEDIUM - 70)
+        if running_hours > 168 and ("dev" in cluster_name.lower() or "test" in cluster_name.lower()):
+            # 168 hours = 1 week continuous runtime
+            # Estimate 50% savings by using spot instances or auto-termination
+            estimated_savings = monthly_cost * 0.50
+            scenarios.append(
+                OptimizationScenario(
+                    scenario_name="Long-Running Dev/Test Cluster",
+                    priority_level=70,
+                    description=(
+                        f"EMR cluster '{cluster_name}' appears to be a dev/test cluster running {running_hours}h "
+                        f"this month ({running_hours / 730 * 100:.1f}% uptime). Dev/test clusters should use "
+                        f"spot instances or auto-termination. Current cost: ~${monthly_cost:.2f}/month."
+                    ),
+                    estimated_monthly_savings=estimated_savings,
+                    recommended_action=(
+                        "Migrate to EMR with spot instances (70-90% savings on EC2 cost) or enable "
+                        "auto-termination after idle period. Consider EMR Serverless for dev/test workloads."
+                    ),
+                    confidence_level="medium",
+                )
+            )
+
+        # Scenario 4: Oversized Cluster Low Utilization (MEDIUM - 65)
+        if hdfs_utilization_pct > 0 and hdfs_utilization_pct < 20 and instance_count >= 3:
+            # Low HDFS utilization suggests oversized cluster
+            # Estimate 40% savings by reducing cluster size
+            estimated_savings = monthly_cost * 0.40
+            scenarios.append(
+                OptimizationScenario(
+                    scenario_name="Oversized Cluster Low Utilization",
+                    priority_level=65,
+                    description=(
+                        f"EMR cluster '{cluster_name}' has low HDFS utilization ({hdfs_utilization_pct:.1f}%) "
+                        f"with {instance_count} instances. Cluster may be oversized for current workload. "
+                        f"Current cost: ~${monthly_cost:.2f}/month."
+                    ),
+                    estimated_monthly_savings=estimated_savings,
+                    recommended_action=(
+                        f"Reduce cluster size by ~40% (from {instance_count} to {int(instance_count * 0.6)} instances) "
+                        f"or downgrade instance type. Monitor performance after optimization."
+                    ),
+                    confidence_level="medium",
+                )
+            )
+
+        # Scenario 5: Cluster Running 24/7 Non-Production (LOW - 50)
+        if (
+            running_hours >= 700  # ~95% uptime (730h/month * 0.95 = 693.5h)
+            and apps_completed_30d < 100  # Low job frequency
+            and "prod" not in cluster_name.lower()
+        ):
+            # Estimate 60% savings by scheduling cluster runtime
+            estimated_savings = monthly_cost * 0.60
+            scenarios.append(
+                OptimizationScenario(
+                    scenario_name="Cluster Running 24/7 Non-Production",
+                    priority_level=50,
+                    description=(
+                        f"EMR cluster '{cluster_name}' is running 24/7 ({running_hours}h this month) "
+                        f"but completed only {apps_completed_30d} jobs in 30 days. Non-production clusters "
+                        f"should use auto-termination schedules. Current cost: ~${monthly_cost:.2f}/month."
+                    ),
+                    estimated_monthly_savings=estimated_savings,
+                    recommended_action=(
+                        "Implement auto-termination schedule (e.g., terminate after 8h business hours). "
+                        "Use EMR managed scaling and auto-termination policies. Consider step execution mode "
+                        "where cluster terminates automatically after job completion."
+                    ),
+                    confidence_level="low",
+                )
+            )
+
+        return scenarios
+
+    async def scan_emr_clusters(self, region: str) -> list[AllCloudResourceData]:
+        """
+        Scan ALL AWS EMR (Elastic MapReduce) clusters for cost intelligence.
+
+        EMR is a managed Big Data platform for processing large datasets using
+        frameworks like Apache Hadoop, Spark, Presto, and HBase.
+
+        CloudWatch Metrics Used:
+        - IsIdle (AWS/ElasticMapReduce) - Cluster idle status (7 days)
+        - CoreNodesRunning (AWS/ElasticMapReduce) - Number of core nodes (7 days)
+        - AppsCompleted (AWS/ElasticMapReduce) - Applications completed (30 days)
+        - HDFSUtilization (AWS/ElasticMapReduce) - HDFS storage used % (7 days)
+
+        API Calls:
+        - list_clusters() - List all clusters
+        - describe_cluster() - Get cluster details
+
+        Cost Optimization Scenarios:
+        1. Cluster Idle Long-Term (CRITICAL) - IsIdle=1 for 7+ days → Terminate
+        2. Cluster Never Used (HIGH) - 0 apps completed 30 days → Delete unused
+        3. Long-Running Dev/Test (MEDIUM) - >168h/month → Spot instances
+        4. Oversized Low Utilization (MEDIUM) - <20% HDFS → Downsize 40%
+        5. 24/7 Non-Production (LOW) - Always on → Auto-terminate schedule
+
+        Args:
+            region: AWS region to scan
+
+        Returns:
+            List of all EMR clusters with optimization recommendations
+        """
+        resources = []
+
+        try:
+            async with self.session.client("emr", region_name=region) as emr:
+                # List all EMR clusters (active and recently terminated)
+                cluster_states = ["RUNNING", "WAITING", "TERMINATING", "TERMINATED"]
+                paginator = emr.get_paginator("list_clusters")
+
+                async for page in paginator.paginate(
+                    ClusterStates=cluster_states,
+                    CreatedAfter=datetime.now(timezone.utc) - timedelta(days=90),
+                ):
+                    for cluster_summary in page.get("Clusters", []):
+                        try:
+                            cluster_id = cluster_summary.get("Id")
+                            cluster_name = cluster_summary.get("Name", "Unnamed")
+                            state = cluster_summary["Status"]["State"]
+
+                            # Get detailed cluster info
+                            cluster_response = await emr.describe_cluster(ClusterId=cluster_id)
+                            cluster = cluster_response["Cluster"]
+
+                            creation_time = cluster["Status"]["Timeline"]["CreationDateTime"]
+                            instance_count = cluster.get("NormalizedInstanceHours", 0)
+
+                            # Get instance fleet/group info for cost calculation
+                            instance_type = "m5.xlarge"  # Default
+                            total_instances = 0
+
+                            if "InstanceGroups" in cluster:
+                                for group in cluster.get("InstanceGroups", []):
+                                    instance_type = group.get("InstanceType", instance_type)
+                                    total_instances += group.get("RequestedInstanceCount", 0)
+                            elif "InstanceFleets" in cluster:
+                                for fleet in cluster.get("InstanceFleets", []):
+                                    if fleet.get("InstanceFleetType") == "CORE":
+                                        # Use target capacity as instance count approximation
+                                        total_instances += fleet.get("TargetOnDemandCapacity", 0)
+
+                            total_instances = max(total_instances, 1)  # At least 1 instance
+
+                            # Calculate running hours (approximate based on age and state)
+                            age_hours = (datetime.now(timezone.utc) - creation_time).total_seconds() / 3600
+                            if state in ["RUNNING", "WAITING"]:
+                                running_hours = min(age_hours, 730)  # Cap at 1 month
+                            elif state == "TERMINATED":
+                                end_time = cluster["Status"]["Timeline"].get("EndDateTime")
+                                if end_time:
+                                    running_hours = (end_time - creation_time).total_seconds() / 3600
+                                else:
+                                    running_hours = age_hours
+                            else:
+                                running_hours = age_hours
+
+                            running_hours = int(running_hours)
+
+                            # Fetch CloudWatch metrics
+                            is_idle = False
+                            apps_completed_30d = 0
+                            hdfs_utilization_pct = 0.0
+
+                            try:
+                                async with self.session.client(
+                                    "cloudwatch", region_name=region
+                                ) as cloudwatch:
+                                    # IsIdle metric (7 days)
+                                    idle_response = await cloudwatch.get_metric_statistics(
+                                        Namespace="AWS/ElasticMapReduce",
+                                        MetricName="IsIdle",
+                                        Dimensions=[
+                                            {"Name": "JobFlowId", "Value": cluster_id}
+                                        ],
+                                        StartTime=datetime.now(timezone.utc) - timedelta(days=7),
+                                        EndTime=datetime.now(timezone.utc),
+                                        Period=86400,  # 1 day
+                                        Statistics=["Maximum"],
+                                    )
+                                    if idle_response.get("Datapoints"):
+                                        # If any datapoint shows idle (1), cluster is idle
+                                        is_idle = any(
+                                            dp["Maximum"] >= 1 for dp in idle_response["Datapoints"]
+                                        )
+
+                                    # AppsCompleted metric (30 days)
+                                    apps_response = await cloudwatch.get_metric_statistics(
+                                        Namespace="AWS/ElasticMapReduce",
+                                        MetricName="AppsCompleted",
+                                        Dimensions=[
+                                            {"Name": "JobFlowId", "Value": cluster_id}
+                                        ],
+                                        StartTime=datetime.now(timezone.utc) - timedelta(days=30),
+                                        EndTime=datetime.now(timezone.utc),
+                                        Period=2592000,  # 30 days
+                                        Statistics=["Sum"],
+                                    )
+                                    if apps_response.get("Datapoints"):
+                                        apps_completed_30d = int(
+                                            apps_response["Datapoints"][0].get("Sum", 0)
+                                        )
+
+                                    # HDFSUtilization metric (7 days average)
+                                    hdfs_response = await cloudwatch.get_metric_statistics(
+                                        Namespace="AWS/ElasticMapReduce",
+                                        MetricName="HDFSUtilization",
+                                        Dimensions=[
+                                            {"Name": "JobFlowId", "Value": cluster_id}
+                                        ],
+                                        StartTime=datetime.now(timezone.utc) - timedelta(days=7),
+                                        EndTime=datetime.now(timezone.utc),
+                                        Period=604800,  # 7 days
+                                        Statistics=["Average"],
+                                    )
+                                    if hdfs_response.get("Datapoints"):
+                                        hdfs_utilization_pct = hdfs_response["Datapoints"][0].get(
+                                            "Average", 0.0
+                                        )
+
+                            except Exception as e:
+                                logger.warning(
+                                    "emr.cloudwatch_error",
+                                    cluster_id=cluster_id,
+                                    region=region,
+                                    error=str(e),
+                                )
+
+                            # Calculate monthly cost
+                            monthly_cost = self._calculate_emr_cluster_monthly_cost(
+                                instance_type, total_instances, running_hours, region
+                            )
+
+                            # Calculate optimization scenarios
+                            optimization_scenarios = self._calculate_emr_cluster_optimization(
+                                cluster_id=cluster_id,
+                                cluster_name=cluster_name,
+                                state=state,
+                                instance_type=instance_type,
+                                instance_count=total_instances,
+                                running_hours=running_hours,
+                                is_idle=is_idle,
+                                apps_running=0,  # Would need to track active jobs separately
+                                apps_completed_30d=apps_completed_30d,
+                                hdfs_utilization_pct=hdfs_utilization_pct,
+                                creation_time=creation_time,
+                                region=region,
+                            )
+
+                            # Get tags
+                            tags = {tag["Key"]: tag["Value"] for tag in cluster.get("Tags", [])}
+
+                            resources.append(
+                                AllCloudResourceData(
+                                    provider="aws",
+                                    account_id=self.access_key[:12],
+                                    region=region,
+                                    resource_type="emr_cluster",
+                                    resource_id=cluster_id,
+                                    resource_name=cluster_name,
+                                    resource_arn=cluster.get("ClusterArn", ""),
+                                    estimated_monthly_cost=monthly_cost,
+                                    currency="USD",
+                                    resource_metadata={
+                                        "state": state,
+                                        "instance_type": instance_type,
+                                        "instance_count": total_instances,
+                                        "running_hours_month": running_hours,
+                                        "is_idle": is_idle,
+                                        "apps_completed_30d": apps_completed_30d,
+                                        "hdfs_utilization_pct": round(hdfs_utilization_pct, 2),
+                                        "creation_time": creation_time.isoformat(),
+                                        "tags": tags,
+                                    },
+                                    created_at_cloud=creation_time,
+                                    optimization_scenarios=optimization_scenarios,
+                                )
+                            )
+
+                            logger.info(
+                                "emr.cluster_scanned",
+                                cluster_id=cluster_id,
+                                cluster_name=cluster_name,
+                                region=region,
+                                state=state,
+                                monthly_cost=monthly_cost,
+                                scenarios_count=len(optimization_scenarios),
+                            )
+
+                        except Exception as e:
+                            logger.warning(
+                                "emr.scan_error",
+                                cluster_id=cluster_summary.get("Id", "unknown"),
+                                region=region,
+                                error=str(e),
+                            )
+                            continue
+
+        except Exception as e:
+            logger.error(
+                "emr.scan_failed",
+                region=region,
+                error=str(e),
+            )
+
+        return resources
+
+    def _calculate_sagemaker_notebook_monthly_cost(
+        self, instance_type: str, running_hours: int, region: str
+    ) -> float:
+        """
+        Calculate estimated monthly cost for AWS SageMaker Notebook Instance.
+
+        SageMaker pricing is per-instance-hour based on instance type.
+
+        Args:
+            instance_type: SageMaker instance type (e.g., "ml.t3.medium")
+            running_hours: Hours running per month (~730 for 24/7)
+            region: AWS region
+
+        Returns:
+            Estimated monthly cost in USD
+        """
+        # SageMaker notebook instance pricing (approximate, varies by region)
+        hourly_rate_map = {
+            "ml.t3.medium": self.PRICING.get("sagemaker_ml_t3_medium", 0.0582),
+            "ml.t3.large": 0.1164,
+            "ml.t3.xlarge": 0.2328,
+            "ml.m5.large": self.PRICING.get("sagemaker_ml_m5_large", 0.134),
+            "ml.m5.xlarge": self.PRICING.get("sagemaker_ml_m5_xlarge", 0.269),
+            "ml.m5.2xlarge": 0.538,
+            "ml.m5.4xlarge": 1.075,
+            "ml.p3.2xlarge": 3.825,  # GPU instance
+        }
+
+        hourly_rate = hourly_rate_map.get(instance_type, 0.134)  # Default to ml.m5.large
+        monthly_cost = hourly_rate * running_hours
+
+        return round(monthly_cost, 2)
+
+    def _calculate_sagemaker_notebook_optimization(
+        self,
+        notebook_name: str,
+        instance_type: str,
+        status: str,
+        running_hours: int,
+        cpu_utilization_pct: float,
+        memory_utilization_pct: float,
+        last_modified_time: datetime,
+        creation_time: datetime,
+        region: str,
+    ) -> list[OptimizationScenario]:
+        """
+        Calculate optimization scenarios for SageMaker Notebook Instance.
+
+        Scenarios:
+        1. Notebook Stopped But Not Deleted (CRITICAL) - InService but not accessed 30+ days
+        2. Notebook Never Used (HIGH) - 0% CPU for 30 days
+        3. Notebook Idle (MEDIUM) - <5% CPU for 7+ days
+        4. Oversized Instance (MEDIUM) - <20% CPU/Memory utilization
+        5. Notebook Running 24/7 Dev/Test (LOW) - Auto-stop script recommended
+
+        Args:
+            notebook_name: Notebook instance name
+            instance_type: Instance type (ml.t3.medium, etc.)
+            status: Notebook status (InService, Stopped, etc.)
+            running_hours: Hours running this month
+            cpu_utilization_pct: Average CPU utilization (7 days)
+            memory_utilization_pct: Average memory utilization (7 days)
+            last_modified_time: Last modification timestamp
+            creation_time: Notebook creation timestamp
+            region: AWS region
+
+        Returns:
+            List of optimization scenarios
+        """
+        scenarios = []
+        age_days = (datetime.now(timezone.utc) - creation_time).days
+        days_since_modified = (datetime.now(timezone.utc) - last_modified_time).days
+        monthly_cost = self._calculate_sagemaker_notebook_monthly_cost(
+            instance_type, running_hours, region
+        )
+
+        # Scenario 1: Notebook Stopped But Not Deleted (CRITICAL - 95)
+        # Note: Stopped notebooks don't incur compute charges, but this scenario
+        # identifies long-term stopped notebooks that should be deleted
+        if status == "Stopped" and days_since_modified >= 30:
+            scenarios.append(
+                OptimizationScenario(
+                    scenario_name="Notebook Stopped Long-Term",
+                    priority_level=95,
+                    description=(
+                        f"SageMaker notebook '{notebook_name}' has been stopped for {days_since_modified} days "
+                        f"(last modified: {last_modified_time.strftime('%Y-%m-%d')}). Stopped notebooks don't "
+                        f"incur charges, but should be deleted if no longer needed to avoid clutter."
+                    ),
+                    estimated_monthly_savings=0.0,  # No cost savings (already stopped)
+                    recommended_action=(
+                        "Delete stopped SageMaker notebook if no longer needed. If needed, can recreate "
+                        "from saved work on EBS volume or Git repository."
+                    ),
+                    confidence_level="critical",
+                )
+            )
+
+        # Scenario 2: Notebook Never Used (HIGH - 85)
+        if status == "InService" and cpu_utilization_pct < 1.0 and age_days >= 30:
+            scenarios.append(
+                OptimizationScenario(
+                    scenario_name="Notebook Never Used",
+                    priority_level=85,
+                    description=(
+                        f"SageMaker notebook '{notebook_name}' has been running for {age_days} days "
+                        f"with minimal CPU usage ({cpu_utilization_pct:.1f}% avg). Notebook appears unused. "
+                        f"Current monthly cost: ~${monthly_cost:.2f}/month."
+                    ),
+                    estimated_monthly_savings=monthly_cost,
+                    recommended_action=(
+                        "Stop or delete unused SageMaker notebook. If needed periodically, use auto-stop "
+                        "lifecycle configuration to stop after inactivity."
+                    ),
+                    confidence_level="high",
+                )
+            )
+
+        # Scenario 3: Notebook Idle (MEDIUM - 70)
+        if status == "InService" and cpu_utilization_pct < 5.0 and age_days >= 7:
+            scenarios.append(
+                OptimizationScenario(
+                    scenario_name="Notebook Idle",
+                    priority_level=70,
+                    description=(
+                        f"SageMaker notebook '{notebook_name}' has low CPU utilization ({cpu_utilization_pct:.1f}% avg) "
+                        f"for {age_days} days. Notebook is running but appears idle. "
+                        f"Current monthly cost: ~${monthly_cost:.2f}/month."
+                    ),
+                    estimated_monthly_savings=monthly_cost,
+                    recommended_action=(
+                        "Stop idle notebook instance when not in use. Configure auto-stop lifecycle script "
+                        "to stop after 1 hour of inactivity (saves ~80% if used 8h/day)."
+                    ),
+                    confidence_level="medium",
+                )
+            )
+
+        # Scenario 4: Oversized Instance (MEDIUM - 65)
+        if (
+            status == "InService"
+            and cpu_utilization_pct > 0
+            and cpu_utilization_pct < 20
+            and memory_utilization_pct < 20
+        ):
+            # Estimate 50% savings by downsizing instance
+            estimated_savings = monthly_cost * 0.50
+            # Suggest smaller instance type
+            downgrade_map = {
+                "ml.m5.xlarge": "ml.m5.large",
+                "ml.m5.2xlarge": "ml.m5.xlarge",
+                "ml.m5.4xlarge": "ml.m5.2xlarge",
+                "ml.t3.large": "ml.t3.medium",
+                "ml.t3.xlarge": "ml.t3.large",
+            }
+            suggested_type = downgrade_map.get(instance_type, "ml.t3.medium")
+
+            scenarios.append(
+                OptimizationScenario(
+                    scenario_name="Oversized Instance",
+                    priority_level=65,
+                    description=(
+                        f"SageMaker notebook '{notebook_name}' has low resource utilization "
+                        f"(CPU: {cpu_utilization_pct:.1f}%, Memory: {memory_utilization_pct:.1f}%) "
+                        f"on instance type '{instance_type}'. Instance appears oversized. "
+                        f"Current cost: ~${monthly_cost:.2f}/month."
+                    ),
+                    estimated_monthly_savings=estimated_savings,
+                    recommended_action=(
+                        f"Downgrade to smaller instance type (e.g., '{suggested_type}') for ~50% savings. "
+                        f"Monitor performance after downgrade. Use ml.t3.medium for basic development work."
+                    ),
+                    confidence_level="medium",
+                )
+            )
+
+        # Scenario 5: Notebook Running 24/7 Dev/Test (LOW - 50)
+        if (
+            status == "InService"
+            and running_hours >= 700  # ~95% uptime
+            and ("dev" in notebook_name.lower() or "test" in notebook_name.lower())
+        ):
+            # Estimate 50% savings with auto-stop (assuming 8h/day usage)
+            estimated_savings = monthly_cost * 0.50
+            scenarios.append(
+                OptimizationScenario(
+                    scenario_name="Notebook Running 24/7 Dev/Test",
+                    priority_level=50,
+                    description=(
+                        f"SageMaker notebook '{notebook_name}' appears to be a dev/test notebook running "
+                        f"24/7 ({running_hours}h this month). Dev notebooks should auto-stop when idle. "
+                        f"Current cost: ~${monthly_cost:.2f}/month."
+                    ),
+                    estimated_monthly_savings=estimated_savings,
+                    recommended_action=(
+                        "Configure auto-stop lifecycle script to stop after 1 hour of inactivity. "
+                        "Can save ~50% by stopping during non-working hours (8h/day usage vs 24/7). "
+                        "Use AWS-provided lifecycle scripts or custom CloudWatch-based automation."
+                    ),
+                    confidence_level="low",
+                )
+            )
+
+        return scenarios
+
+    async def scan_sagemaker_notebooks(self, region: str) -> list[AllCloudResourceData]:
+        """
+        Scan ALL AWS SageMaker Notebook Instances for cost intelligence.
+
+        SageMaker Notebook Instances are managed Jupyter notebook environments
+        for ML development and experimentation.
+
+        CloudWatch Metrics Used:
+        - CPUUtilization (AWS/SageMaker) - CPU usage percentage (7 days)
+        - MemoryUtilization (AWS/SageMaker) - Memory usage percentage (7 days)
+        - DiskUtilization (AWS/SageMaker) - Disk usage percentage (7 days)
+
+        API Calls:
+        - list_notebook_instances() - List all notebook instances
+        - describe_notebook_instance() - Get notebook details
+
+        Cost Optimization Scenarios:
+        1. Notebook Stopped Long-Term (CRITICAL) - Stopped 30+ days → Delete
+        2. Notebook Never Used (HIGH) - <1% CPU 30 days → Stop/delete
+        3. Notebook Idle (MEDIUM) - <5% CPU 7+ days → Auto-stop script
+        4. Oversized Instance (MEDIUM) - <20% CPU/Memory → Downgrade ~50%
+        5. 24/7 Dev/Test (LOW) - Always running → Auto-stop ~50% savings
+
+        Args:
+            region: AWS region to scan
+
+        Returns:
+            List of all SageMaker notebook instances with optimization recommendations
+        """
+        resources = []
+
+        try:
+            async with self.session.client("sagemaker", region_name=region) as sagemaker:
+                # List all notebook instances
+                paginator = sagemaker.get_paginator("list_notebook_instances")
+
+                async for page in paginator.paginate():
+                    for notebook_summary in page.get("NotebookInstances", []):
+                        try:
+                            notebook_name = notebook_summary.get("NotebookInstanceName")
+                            status = notebook_summary.get("NotebookInstanceStatus", "Unknown")
+                            instance_type = notebook_summary.get("InstanceType", "ml.t3.medium")
+                            creation_time = notebook_summary.get("CreationTime")
+                            last_modified_time = notebook_summary.get(
+                                "LastModifiedTime", creation_time
+                            )
+
+                            # Get detailed notebook info
+                            notebook_response = await sagemaker.describe_notebook_instance(
+                                NotebookInstanceName=notebook_name
+                            )
+                            notebook = notebook_response
+
+                            # Calculate running hours (approximate based on status and age)
+                            age_hours = (
+                                datetime.now(timezone.utc) - creation_time
+                            ).total_seconds() / 3600
+
+                            if status == "InService":
+                                # Assume running continuously if InService
+                                running_hours = min(age_hours, 730)  # Cap at 1 month
+                            elif status == "Stopped":
+                                # Not currently running
+                                running_hours = 0
+                            else:
+                                # Unknown status, estimate conservatively
+                                running_hours = age_hours * 0.5
+
+                            running_hours = int(running_hours)
+
+                            # Fetch CloudWatch metrics (only for InService notebooks)
+                            cpu_utilization_pct = 0.0
+                            memory_utilization_pct = 0.0
+
+                            if status == "InService":
+                                try:
+                                    async with self.session.client(
+                                        "cloudwatch", region_name=region
+                                    ) as cloudwatch:
+                                        # CPUUtilization metric (7 days)
+                                        cpu_response = await cloudwatch.get_metric_statistics(
+                                            Namespace="AWS/SageMaker",
+                                            MetricName="CPUUtilization",
+                                            Dimensions=[
+                                                {"Name": "NotebookInstanceName", "Value": notebook_name}
+                                            ],
+                                            StartTime=datetime.now(timezone.utc) - timedelta(days=7),
+                                            EndTime=datetime.now(timezone.utc),
+                                            Period=604800,  # 7 days
+                                            Statistics=["Average"],
+                                        )
+                                        if cpu_response.get("Datapoints"):
+                                            cpu_utilization_pct = cpu_response["Datapoints"][0].get(
+                                                "Average", 0.0
+                                            )
+
+                                        # MemoryUtilization metric (7 days)
+                                        memory_response = await cloudwatch.get_metric_statistics(
+                                            Namespace="AWS/SageMaker",
+                                            MetricName="MemoryUtilization",
+                                            Dimensions=[
+                                                {"Name": "NotebookInstanceName", "Value": notebook_name}
+                                            ],
+                                            StartTime=datetime.now(timezone.utc) - timedelta(days=7),
+                                            EndTime=datetime.now(timezone.utc),
+                                            Period=604800,  # 7 days
+                                            Statistics=["Average"],
+                                        )
+                                        if memory_response.get("Datapoints"):
+                                            memory_utilization_pct = memory_response["Datapoints"][
+                                                0
+                                            ].get("Average", 0.0)
+
+                                except Exception as e:
+                                    logger.warning(
+                                        "sagemaker.cloudwatch_error",
+                                        notebook_name=notebook_name,
+                                        region=region,
+                                        error=str(e),
+                                    )
+
+                            # Calculate monthly cost
+                            monthly_cost = self._calculate_sagemaker_notebook_monthly_cost(
+                                instance_type, running_hours, region
+                            )
+
+                            # Calculate optimization scenarios
+                            optimization_scenarios = self._calculate_sagemaker_notebook_optimization(
+                                notebook_name=notebook_name,
+                                instance_type=instance_type,
+                                status=status,
+                                running_hours=running_hours,
+                                cpu_utilization_pct=cpu_utilization_pct,
+                                memory_utilization_pct=memory_utilization_pct,
+                                last_modified_time=last_modified_time,
+                                creation_time=creation_time,
+                                region=region,
+                            )
+
+                            # Get notebook ARN and other metadata
+                            notebook_arn = notebook.get("NotebookInstanceArn", "")
+                            subnet_id = notebook.get("SubnetId", "")
+                            volume_size_gb = notebook.get("VolumeSizeInGB", 0)
+
+                            resources.append(
+                                AllCloudResourceData(
+                                    provider="aws",
+                                    account_id=self.access_key[:12],
+                                    region=region,
+                                    resource_type="sagemaker_notebook",
+                                    resource_id=notebook_name,
+                                    resource_name=notebook_name,
+                                    resource_arn=notebook_arn,
+                                    estimated_monthly_cost=monthly_cost,
+                                    currency="USD",
+                                    resource_metadata={
+                                        "status": status,
+                                        "instance_type": instance_type,
+                                        "running_hours_month": running_hours,
+                                        "cpu_utilization_pct": round(cpu_utilization_pct, 2),
+                                        "memory_utilization_pct": round(memory_utilization_pct, 2),
+                                        "volume_size_gb": volume_size_gb,
+                                        "subnet_id": subnet_id,
+                                        "creation_time": creation_time.isoformat(),
+                                        "last_modified_time": last_modified_time.isoformat(),
+                                    },
+                                    created_at_cloud=creation_time,
+                                    optimization_scenarios=optimization_scenarios,
+                                )
+                            )
+
+                            logger.info(
+                                "sagemaker.notebook_scanned",
+                                notebook_name=notebook_name,
+                                region=region,
+                                status=status,
+                                monthly_cost=monthly_cost,
+                                scenarios_count=len(optimization_scenarios),
+                            )
+
+                        except Exception as e:
+                            logger.warning(
+                                "sagemaker.scan_error",
+                                notebook_name=notebook_summary.get("NotebookInstanceName", "unknown"),
+                                region=region,
+                                error=str(e),
+                            )
+                            continue
+
+        except Exception as e:
+            logger.error(
+                "sagemaker.scan_failed",
+                region=region,
+                error=str(e),
+            )
+
+        return resources
+
+    def _calculate_transfer_family_monthly_cost(
+        self, running_hours: int, data_transfer_gb: float, region: str
+    ) -> float:
+        """
+        Calculate estimated monthly cost for AWS Transfer Family Server.
+
+        Transfer Family pricing = Endpoint per-hour + Data transfer cost.
+        IMPORTANT: Endpoint is charged even if idle (similar to Lightsail stopped instances).
+
+        Args:
+            running_hours: Hours endpoint is provisioned per month (~730 for 24/7)
+            data_transfer_gb: Total GB transferred (in + out) per month
+            region: AWS region
+
+        Returns:
+            Estimated monthly cost in USD
+        """
+        # Transfer Family endpoint pricing
+        endpoint_per_hour = self.PRICING.get("transfer_family_endpoint_per_hour", 0.30)
+        data_transfer_per_gb = self.PRICING.get("transfer_family_data_transfer_per_gb", 0.04)
+
+        endpoint_cost = endpoint_per_hour * running_hours
+        data_transfer_cost = data_transfer_per_gb * data_transfer_gb
+        total_cost = endpoint_cost + data_transfer_cost
+
+        return round(total_cost, 2)
+
+    def _calculate_transfer_family_optimization(
+        self,
+        server_id: str,
+        protocols: list[str],
+        running_hours: int,
+        files_transferred_30d: int,
+        bytes_transferred_30d: float,
+        endpoint_type: str,
+        creation_time: datetime,
+        region: str,
+    ) -> list[OptimizationScenario]:
+        """
+        Calculate optimization scenarios for AWS Transfer Family Server.
+
+        Scenarios:
+        1. Endpoint Zero Transfers (CRITICAL) - 0 files transferred in 30 days
+        2. Endpoint Idle Long-Term (HIGH) - 0 transfers for 90+ days
+        3. Very Low Usage (MEDIUM) - <100 files/month (migrate to S3 presigned URLs)
+        4. Dev/Test Endpoint Always On (MEDIUM) - Stop when not needed
+        5. Low Data Transfer High Endpoint Cost (LOW) - Consider alternatives
+
+        Args:
+            server_id: Transfer Family server ID
+            protocols: List of protocols (SFTP, FTP, FTPS)
+            running_hours: Hours endpoint provisioned this month
+            files_transferred_30d: Number of files transferred (30 days)
+            bytes_transferred_30d: Total bytes transferred (30 days)
+            endpoint_type: Endpoint type (PUBLIC, VPC, etc.)
+            creation_time: Server creation timestamp
+            region: AWS region
+
+        Returns:
+            List of optimization scenarios
+        """
+        scenarios = []
+        age_days = (datetime.now(timezone.utc) - creation_time).days
+        data_transfer_gb = bytes_transferred_30d / (1024**3)  # Convert bytes to GB
+
+        # Calculate monthly cost (endpoint + data transfer)
+        monthly_cost = self._calculate_transfer_family_monthly_cost(
+            running_hours, data_transfer_gb, region
+        )
+        endpoint_cost = self.PRICING.get("transfer_family_endpoint_per_hour", 0.30) * running_hours
+
+        # Scenario 1: Endpoint Zero Transfers (CRITICAL - 95)
+        if files_transferred_30d == 0 and age_days >= 30:
+            scenarios.append(
+                OptimizationScenario(
+                    scenario_name="Endpoint Zero Transfers",
+                    priority_level=95,
+                    description=(
+                        f"Transfer Family server '{server_id}' has transferred 0 files in the last 30 days "
+                        f"(age: {age_days} days). Endpoint is charged ${endpoint_cost:.2f}/month even with no usage. "
+                        f"Total monthly cost: ~${monthly_cost:.2f}/month."
+                    ),
+                    estimated_monthly_savings=endpoint_cost,  # Save endpoint cost
+                    recommended_action=(
+                        "Delete unused Transfer Family endpoint. If needed occasionally, recreate on-demand. "
+                        "For infrequent file transfers, consider S3 presigned URLs or AWS CLI/SDK instead."
+                    ),
+                    confidence_level="critical",
+                )
+            )
+
+        # Scenario 2: Endpoint Idle Long-Term (HIGH - 85)
+        if files_transferred_30d == 0 and age_days >= 90:
+            scenarios.append(
+                OptimizationScenario(
+                    scenario_name="Endpoint Idle Long-Term",
+                    priority_level=85,
+                    description=(
+                        f"Transfer Family server '{server_id}' has been idle for {age_days} days "
+                        f"with 0 file transfers. Endpoint cost: ~${endpoint_cost:.2f}/month (charged even if idle). "
+                        f"Total monthly cost: ~${monthly_cost:.2f}/month."
+                    ),
+                    estimated_monthly_savings=endpoint_cost,
+                    recommended_action=(
+                        "Delete idle Transfer Family endpoint. Validate server is not needed for scheduled "
+                        "file transfers. Use AWS DataSync, S3 Transfer Acceleration, or presigned URLs as alternatives."
+                    ),
+                    confidence_level="high",
+                )
+            )
+
+        # Scenario 3: Very Low Usage (MEDIUM - 70)
+        if files_transferred_30d > 0 and files_transferred_30d < 100:
+            # Low usage - endpoint cost likely exceeds value
+            # Estimate full endpoint cost as savings (migrate to serverless alternative)
+            scenarios.append(
+                OptimizationScenario(
+                    scenario_name="Very Low Usage",
+                    priority_level=70,
+                    description=(
+                        f"Transfer Family server '{server_id}' has very low usage ({files_transferred_30d} files "
+                        f"in 30 days, {data_transfer_gb:.2f} GB transferred). Endpoint cost "
+                        f"(${endpoint_cost:.2f}/month) likely exceeds value for low-volume transfers. "
+                        f"Total monthly cost: ~${monthly_cost:.2f}/month."
+                    ),
+                    estimated_monthly_savings=endpoint_cost,
+                    recommended_action=(
+                        "Migrate to S3 presigned URLs for low-volume file transfers. For SFTP specifically, "
+                        "consider AWS DataSync or third-party solutions. S3 presigned URLs cost only storage + "
+                        "data transfer with no endpoint fees."
+                    ),
+                    confidence_level="medium",
+                )
+            )
+
+        # Scenario 4: Dev/Test Endpoint Always On (MEDIUM - 65)
+        if running_hours >= 700 and ("dev" in server_id.lower() or "test" in server_id.lower()):
+            # Dev/test endpoint running 24/7
+            # Estimate 50% savings by deleting when not in use
+            estimated_savings = endpoint_cost * 0.50
+            scenarios.append(
+                OptimizationScenario(
+                    scenario_name="Dev/Test Endpoint Always On",
+                    priority_level=65,
+                    description=(
+                        f"Transfer Family server '{server_id}' appears to be a dev/test endpoint running 24/7 "
+                        f"({running_hours}h this month). Dev/test endpoints should be deleted when not actively used. "
+                        f"Endpoint cost: ~${endpoint_cost:.2f}/month."
+                    ),
+                    estimated_monthly_savings=estimated_savings,
+                    recommended_action=(
+                        "Delete dev/test Transfer Family endpoint when not in use. Can recreate quickly via "
+                        "CloudFormation/Terraform when needed. Estimate 50% savings by running only during testing periods."
+                    ),
+                    confidence_level="medium",
+                )
+            )
+
+        # Scenario 5: Low Data Transfer High Endpoint Cost Ratio (LOW - 50)
+        if data_transfer_gb > 0 and endpoint_cost / monthly_cost > 0.90:
+            # Endpoint cost is >90% of total cost (very low data transfer)
+            scenarios.append(
+                OptimizationScenario(
+                    scenario_name="Low Data Transfer High Endpoint Cost",
+                    priority_level=50,
+                    description=(
+                        f"Transfer Family server '{server_id}' has endpoint cost (${endpoint_cost:.2f}/month) "
+                        f"representing {endpoint_cost / monthly_cost * 100:.1f}% of total cost "
+                        f"(${monthly_cost:.2f}/month). Only {data_transfer_gb:.2f} GB transferred. "
+                        f"Consider alternatives for low-volume transfers."
+                    ),
+                    estimated_monthly_savings=endpoint_cost * 0.8,  # 80% of endpoint cost
+                    recommended_action=(
+                        "Evaluate alternatives: (1) S3 presigned URLs for occasional transfers, "
+                        "(2) AWS Lambda + API Gateway for file upload/download, (3) AWS DataSync for scheduled transfers. "
+                        "These solutions can reduce costs significantly for low-volume use cases."
+                    ),
+                    confidence_level="low",
+                )
+            )
+
+        return scenarios
+
+    async def scan_transfer_family_servers(self, region: str) -> list[AllCloudResourceData]:
+        """
+        Scan ALL AWS Transfer Family Servers for cost intelligence.
+
+        AWS Transfer Family provides fully managed SFTP, FTP, and FTPS file transfer
+        directly into and out of Amazon S3 or Amazon EFS.
+
+        CloudWatch Metrics Used:
+        - BytesIn (AWS/Transfer) - Bytes uploaded (30 days)
+        - BytesOut (AWS/Transfer) - Bytes downloaded (30 days)
+        - FilesIn (AWS/Transfer) - Files uploaded (30 days)
+        - FilesOut (AWS/Transfer) - Files downloaded (30 days)
+
+        API Calls:
+        - list_servers() - List all Transfer Family servers
+        - describe_server() - Get server details
+
+        Cost Optimization Scenarios:
+        1. Endpoint Zero Transfers (CRITICAL) - 0 files 30 days → Delete ~$216/month
+        2. Endpoint Idle Long-Term (HIGH) - 0 transfers 90+ days → Delete
+        3. Very Low Usage (MEDIUM) - <100 files/month → Migrate to S3 presigned URLs
+        4. Dev/Test Always On (MEDIUM) - 24/7 dev/test → Delete when unused ~50% savings
+        5. Low Data High Endpoint Cost (LOW) - >90% endpoint cost → Consider alternatives
+
+        Args:
+            region: AWS region to scan
+
+        Returns:
+            List of all Transfer Family servers with optimization recommendations
+        """
+        resources = []
+
+        try:
+            async with self.session.client("transfer", region_name=region) as transfer:
+                # List all Transfer Family servers
+                paginator = transfer.get_paginator("list_servers")
+
+                async for page in paginator.paginate():
+                    for server_summary in page.get("Servers", []):
+                        try:
+                            server_id = server_summary.get("ServerId")
+
+                            # Get detailed server info
+                            server_response = await transfer.describe_server(ServerId=server_id)
+                            server = server_response["Server"]
+
+                            protocols = server.get("Protocols", [])
+                            endpoint_type = server.get("EndpointType", "PUBLIC")
+                            state = server.get("State", "OFFLINE")
+
+                            # For servers in certain states, skip cost calculation
+                            if state in ["STOPPING", "STOPPED", "OFFLINE"]:
+                                running_hours = 0
+                            else:
+                                # Assume provisioned for full month if online
+                                running_hours = 730
+
+                            # Try to get creation time from tags or use current time as fallback
+                            tags = {tag["Key"]: tag["Value"] for tag in server.get("Tags", [])}
+                            creation_time = datetime.now(timezone.utc) - timedelta(days=30)  # Default
+
+                            # Fetch CloudWatch metrics
+                            files_in = 0
+                            files_out = 0
+                            bytes_in = 0.0
+                            bytes_out = 0.0
+
+                            try:
+                                async with self.session.client(
+                                    "cloudwatch", region_name=region
+                                ) as cloudwatch:
+                                    # FilesIn metric (30 days)
+                                    files_in_response = await cloudwatch.get_metric_statistics(
+                                        Namespace="AWS/Transfer",
+                                        MetricName="FilesIn",
+                                        Dimensions=[{"Name": "ServerId", "Value": server_id}],
+                                        StartTime=datetime.now(timezone.utc) - timedelta(days=30),
+                                        EndTime=datetime.now(timezone.utc),
+                                        Period=2592000,  # 30 days
+                                        Statistics=["Sum"],
+                                    )
+                                    if files_in_response.get("Datapoints"):
+                                        files_in = int(
+                                            files_in_response["Datapoints"][0].get("Sum", 0)
+                                        )
+
+                                    # FilesOut metric (30 days)
+                                    files_out_response = await cloudwatch.get_metric_statistics(
+                                        Namespace="AWS/Transfer",
+                                        MetricName="FilesOut",
+                                        Dimensions=[{"Name": "ServerId", "Value": server_id}],
+                                        StartTime=datetime.now(timezone.utc) - timedelta(days=30),
+                                        EndTime=datetime.now(timezone.utc),
+                                        Period=2592000,  # 30 days
+                                        Statistics=["Sum"],
+                                    )
+                                    if files_out_response.get("Datapoints"):
+                                        files_out = int(
+                                            files_out_response["Datapoints"][0].get("Sum", 0)
+                                        )
+
+                                    # BytesIn metric (30 days)
+                                    bytes_in_response = await cloudwatch.get_metric_statistics(
+                                        Namespace="AWS/Transfer",
+                                        MetricName="BytesIn",
+                                        Dimensions=[{"Name": "ServerId", "Value": server_id}],
+                                        StartTime=datetime.now(timezone.utc) - timedelta(days=30),
+                                        EndTime=datetime.now(timezone.utc),
+                                        Period=2592000,  # 30 days
+                                        Statistics=["Sum"],
+                                    )
+                                    if bytes_in_response.get("Datapoints"):
+                                        bytes_in = bytes_in_response["Datapoints"][0].get("Sum", 0.0)
+
+                                    # BytesOut metric (30 days)
+                                    bytes_out_response = await cloudwatch.get_metric_statistics(
+                                        Namespace="AWS/Transfer",
+                                        MetricName="BytesOut",
+                                        Dimensions=[{"Name": "ServerId", "Value": server_id}],
+                                        StartTime=datetime.now(timezone.utc) - timedelta(days=30),
+                                        EndTime=datetime.now(timezone.utc),
+                                        Period=2592000,  # 30 days
+                                        Statistics=["Sum"],
+                                    )
+                                    if bytes_out_response.get("Datapoints"):
+                                        bytes_out = bytes_out_response["Datapoints"][0].get(
+                                            "Sum", 0.0
+                                        )
+
+                            except Exception as e:
+                                logger.warning(
+                                    "transfer_family.cloudwatch_error",
+                                    server_id=server_id,
+                                    region=region,
+                                    error=str(e),
+                                )
+
+                            # Total files and bytes transferred
+                            total_files = files_in + files_out
+                            total_bytes = bytes_in + bytes_out
+
+                            # Calculate monthly cost
+                            monthly_cost = self._calculate_transfer_family_monthly_cost(
+                                running_hours, total_bytes / (1024**3), region  # Convert to GB
+                            )
+
+                            # Calculate optimization scenarios
+                            optimization_scenarios = self._calculate_transfer_family_optimization(
+                                server_id=server_id,
+                                protocols=protocols,
+                                running_hours=running_hours,
+                                files_transferred_30d=total_files,
+                                bytes_transferred_30d=total_bytes,
+                                endpoint_type=endpoint_type,
+                                creation_time=creation_time,
+                                region=region,
+                            )
+
+                            resources.append(
+                                AllCloudResourceData(
+                                    provider="aws",
+                                    account_id=self.access_key[:12],
+                                    region=region,
+                                    resource_type="transfer_family_server",
+                                    resource_id=server_id,
+                                    resource_name=server_id,  # Transfer Family doesn't have names
+                                    resource_arn=server.get("Arn", ""),
+                                    estimated_monthly_cost=monthly_cost,
+                                    currency="USD",
+                                    resource_metadata={
+                                        "state": state,
+                                        "protocols": protocols,
+                                        "endpoint_type": endpoint_type,
+                                        "running_hours_month": running_hours,
+                                        "files_transferred_30d": total_files,
+                                        "bytes_transferred_30d": total_bytes,
+                                        "bytes_transferred_gb": round(total_bytes / (1024**3), 2),
+                                        "tags": tags,
+                                    },
+                                    created_at_cloud=creation_time,
+                                    optimization_scenarios=optimization_scenarios,
+                                )
+                            )
+
+                            logger.info(
+                                "transfer_family.server_scanned",
+                                server_id=server_id,
+                                region=region,
+                                state=state,
+                                monthly_cost=monthly_cost,
+                                scenarios_count=len(optimization_scenarios),
+                            )
+
+                        except Exception as e:
+                            logger.warning(
+                                "transfer_family.scan_error",
+                                server_id=server_summary.get("ServerId", "unknown"),
+                                region=region,
+                                error=str(e),
+                            )
+                            continue
+
+        except Exception as e:
+            logger.error(
+                "transfer_family.scan_failed",
+                region=region,
+                error=str(e),
+            )
+
+        return resources
