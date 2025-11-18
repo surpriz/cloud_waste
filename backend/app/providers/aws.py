@@ -115,6 +115,15 @@ class AWSProvider(CloudProviderBase):
         "cloudfront_http_requests_per_10k": 0.0075,  # HTTP requests per 10,000
         "cloudfront_https_requests_per_10k": 0.010,  # HTTPS requests per 10,000
         "cloudfront_invalidation_per_path": 0.005,  # Invalidation per path (after first 1000 free)
+        # ECS Cluster pricing
+        "ecs_service_connect_per_vcpu_hour": 0.01,  # Service Connect ($0.01/vCPU/hour, optional feature)
+        # Note: ECS Control Plane = FREE, cost = Fargate/EC2 compute only
+        # CloudWatch Logs pricing
+        "cloudwatch_logs_ingestion_per_gb": 0.50,     # Data ingestion ($0.50 per GB)
+        "cloudwatch_logs_storage_per_gb": 0.03,       # Storage after retention ($0.03 per GB/month)
+        "cloudwatch_logs_insights_per_gb": 0.005,     # CloudWatch Insights queries ($0.005 per GB scanned)
+        "cloudwatch_logs_archival_per_gb": 0.03,      # S3 archival export ($0.03 per GB)
+        # Note: Vended Logs (VPC Flow, Lambda, RDS, etc.) have FREE ingestion
         "global_accelerator": 18.00,  # Global Accelerator (base cost)
         "kinesis_shard": 10.80,  # Kinesis shard ($0.015/hour * 730 hours)
         "kinesis_retention_extended_per_gb": 0.020,  # Extended retention (25-168h)

@@ -78,6 +78,8 @@ const resourceIcons: Record<ResourceType, any> = {
   opensearch_domain: Search,
   api_gateway: Globe,
   cloudfront_distribution: Globe,
+  ecs_cluster: Server,
+  cloudwatch_log_group: FileText,
   // Azure - Cost Intelligence (Inventory mode)
   azure_vm: Server,
   azure_managed_disk: HardDrive,

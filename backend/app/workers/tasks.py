@@ -436,6 +436,24 @@ async def _scan_cloud_account_async(
                             apigateway_count=len(apigateway_resources),
                         )
 
+                        # Scan ECS Clusters (all)
+                        ecs_resources = await inventory_scanner.scan_ecs_clusters(region)
+                        all_inventory_resources.extend(ecs_resources)
+                        logger.info(
+                            "inventory.ecs_scanned",
+                            region=region,
+                            ecs_count=len(ecs_resources),
+                        )
+
+                        # Scan CloudWatch Log Groups (all)
+                        log_group_resources = await inventory_scanner.scan_cloudwatch_log_groups(region)
+                        all_inventory_resources.extend(log_group_resources)
+                        logger.info(
+                            "inventory.log_groups_scanned",
+                            region=region,
+                            log_group_count=len(log_group_resources),
+                        )
+
                         # Scan RDS instances (all)
                         rds_resources = await inventory_scanner.scan_rds_instances(region)
                         all_inventory_resources.extend(rds_resources)

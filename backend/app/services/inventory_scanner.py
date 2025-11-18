@@ -24848,3 +24848,777 @@ class AzureInventoryScanner:
             )
 
         return resources
+
+    # ============================================================================
+    # AWS - ECS CLUSTER (Cost Intelligence / Inventory Mode)
+    # ============================================================================
+
+    def _calculate_ecs_cluster_monthly_cost(
+        self,
+        total_fargate_vcpu: float,
+        total_fargate_memory_gb: float,
+        total_ec2_instances: int,
+        service_connect_enabled: bool,
+        region: str,
+    ) -> float:
+        """
+        Calculate estimated monthly cost for AWS ECS Cluster.
+
+        Cost structure:
+        - ECS Control Plane: FREE (no cost for cluster itself)
+        - Fargate compute: $0.04048/vCPU-hour + $0.004445/GB-hour
+        - EC2 instances: Separate cost (instance pricing)
+        - Service Connect (optional): $0.01/vCPU-hour
+
+        Args:
+            total_fargate_vcpu: Total Fargate vCPUs running in cluster
+            total_fargate_memory_gb: Total Fargate memory GB running in cluster
+            total_ec2_instances: Number of EC2 container instances
+            service_connect_enabled: Whether Service Connect is enabled
+            region: AWS region
+
+        Returns:
+            Estimated monthly cost for cluster (Fargate compute + Service Connect)
+        """
+        # Fargate compute cost (monthly = 730 hours)
+        fargate_vcpu_cost = total_fargate_vcpu * 0.04048 * 730
+        fargate_memory_cost = total_fargate_memory_gb * 0.004445 * 730
+        fargate_total = fargate_vcpu_cost + fargate_memory_cost
+
+        # Service Connect cost (if enabled)
+        service_connect_cost = 0.0
+        if service_connect_enabled and total_fargate_vcpu > 0:
+            service_connect_rate = self.PRICING.get("ecs_service_connect_per_vcpu_hour", 0.01)
+            service_connect_cost = total_fargate_vcpu * service_connect_rate * 730
+
+        # Note: EC2 instance costs are tracked separately (not included here)
+        total_cost = fargate_total + service_connect_cost
+
+        return total_cost
+
+    def _calculate_ecs_cluster_optimization(
+        self,
+        cluster_name: str,
+        running_tasks_count: int,
+        active_services_count: int,
+        registered_container_instances: int,
+        capacity_providers: list,
+        avg_cpu_utilization: float,
+        avg_memory_utilization: float,
+        monthly_cost: float,
+    ) -> tuple[bool, int, str, float, list]:
+        """
+        Calculate optimization opportunities for ECS Cluster.
+
+        Scenarios:
+        1. CRITICAL (95): Empty cluster (0 tasks, 0 services) → Delete cluster
+        2. HIGH (85): Low usage (<5 tasks, <3 services) → Consolidate to another cluster
+        3. HIGH (80): Inactive services (services with desired count = 0) → Clean up
+        4. MEDIUM (70): Mixed Fargate + EC2 (inefficient) → Pure Fargate or pure EC2
+        5. MEDIUM (65): No auto-scaling configured → Enable ECS Service Auto Scaling
+
+        Args:
+            cluster_name: ECS cluster name
+            running_tasks_count: Number of running tasks
+            active_services_count: Number of active services
+            registered_container_instances: Number of EC2 container instances
+            capacity_providers: List of capacity providers (["FARGATE", "FARGATE_SPOT", "EC2", etc.])
+            avg_cpu_utilization: Average CPU utilization (%)
+            avg_memory_utilization: Average memory utilization (%)
+            monthly_cost: Estimated monthly cost
+
+        Returns:
+            Tuple of (is_optimizable, optimization_score, priority, potential_savings, recommendations)
+        """
+        recommendations = []
+        optimization_score = 0
+        optimization_priority = "none"
+        potential_savings = 0.0
+        is_optimizable = False
+
+        # Scenario 1: CRITICAL - Empty cluster (0 tasks, 0 services)
+        if running_tasks_count == 0 and active_services_count == 0:
+            optimization_score = 95
+            optimization_priority = "critical"
+            potential_savings = monthly_cost  # Save entire cluster cost
+            is_optimizable = True
+            recommendations.append({
+                "scenario": "empty_cluster",
+                "action": "delete_cluster",
+                "priority": "critical",
+                "estimated_savings": monthly_cost,
+                "details": f"Cluster '{cluster_name}' is empty (0 tasks, 0 services). Delete to eliminate costs.",
+                "recommendation": "Delete cluster - no workloads running"
+            })
+
+        # Scenario 2: HIGH - Low usage (<5 tasks, <3 services)
+        if running_tasks_count > 0 and running_tasks_count < 5 and active_services_count < 3 and optimization_score < 85:
+            optimization_score = max(optimization_score, 85)
+            optimization_priority = "high" if optimization_priority == "none" else optimization_priority
+            potential_savings = max(potential_savings, monthly_cost * 0.4)
+            is_optimizable = True
+            recommendations.append({
+                "scenario": "low_usage",
+                "action": "consolidate_cluster",
+                "priority": "high",
+                "estimated_savings": monthly_cost * 0.4,
+                "details": f"Cluster '{cluster_name}' has only {running_tasks_count} tasks and {active_services_count} services. Consolidate to another cluster.",
+                "recommendation": "Consolidate workloads into a single cluster to reduce overhead (40% savings)"
+            })
+
+        # Scenario 3: HIGH - Inactive services (detect via metadata if available)
+        # Note: This requires service-level metadata, simplified here
+        # In production, you'd fetch describe_services() to check desiredCount
+        if active_services_count == 0 and running_tasks_count > 0 and optimization_score < 80:
+            optimization_score = max(optimization_score, 80)
+            optimization_priority = "high" if optimization_priority == "none" else optimization_priority
+            is_optimizable = True
+            recommendations.append({
+                "scenario": "inactive_services",
+                "action": "cleanup_services",
+                "priority": "high",
+                "estimated_savings": 0.0,
+                "details": f"Cluster '{cluster_name}' has services with desired count = 0. Clean up unused service definitions.",
+                "recommendation": "Delete inactive services (no cost impact, but improves visibility)"
+            })
+
+        # Scenario 4: MEDIUM - Mixed Fargate + EC2 (inefficient)
+        has_fargate = any("FARGATE" in cp for cp in capacity_providers)
+        has_ec2 = registered_container_instances > 0 or "EC2" in " ".join(capacity_providers)
+
+        if has_fargate and has_ec2 and optimization_score < 70:
+            optimization_score = max(optimization_score, 70)
+            optimization_priority = "medium" if optimization_priority == "none" else optimization_priority
+            potential_savings = max(potential_savings, monthly_cost * 0.2)
+            is_optimizable = True
+            recommendations.append({
+                "scenario": "mixed_capacity_providers",
+                "action": "standardize_launch_type",
+                "priority": "medium",
+                "estimated_savings": monthly_cost * 0.2,
+                "details": f"Cluster '{cluster_name}' uses both Fargate and EC2 instances. Standardize to pure Fargate or pure EC2 for better cost efficiency.",
+                "recommendation": "Use pure Fargate (easier management) or pure EC2 (lower cost for steady workloads)",
+                "alternatives": [
+                    {"name": "Pure Fargate", "savings": 0.0, "benefit": "Serverless, no instance management"},
+                    {"name": "Pure EC2", "savings": monthly_cost * 0.2, "benefit": "20% cheaper for steady workloads"}
+                ]
+            })
+
+        # Scenario 5: MEDIUM - No auto-scaling (heuristic: low CPU/memory utilization suggests over-provisioning)
+        if (avg_cpu_utilization < 30 or avg_memory_utilization < 30) and running_tasks_count > 3 and optimization_score < 65:
+            optimization_score = max(optimization_score, 65)
+            optimization_priority = "medium" if optimization_priority == "none" else optimization_priority
+            is_optimizable = True
+            recommendations.append({
+                "scenario": "no_auto_scaling",
+                "action": "enable_auto_scaling",
+                "priority": "medium",
+                "estimated_savings": 0.0,
+                "details": f"Cluster '{cluster_name}' has low CPU ({avg_cpu_utilization:.1f}%) or memory ({avg_memory_utilization:.1f}%) utilization. Enable ECS Service Auto Scaling to scale down during low demand.",
+                "recommendation": "Configure ECS Service Auto Scaling (target CPU 70%, target memory 80%)"
+            })
+
+        return is_optimizable, optimization_score, optimization_priority, potential_savings, recommendations
+
+    async def scan_ecs_clusters(self, region: str) -> list[AllCloudResourceData]:
+        """
+        Scan ALL AWS ECS Clusters for cost intelligence.
+
+        This method scans all ECS clusters to provide cost visibility and
+        optimization recommendations for container orchestration.
+
+        CloudWatch Metrics (AWS/ECS namespace):
+        - CPUUtilization (cluster-level)
+        - MemoryUtilization (cluster-level)
+
+        Args:
+            region: AWS region to scan
+
+        Returns:
+            List of AllCloudResourceData objects for all ECS clusters
+        """
+        resources: list[AllCloudResourceData] = []
+
+        try:
+            async with self.session.client("ecs", region_name=region) as ecs:
+                async with self.session.client("cloudwatch", region_name=region) as cloudwatch:
+                    # List all ECS clusters
+                    list_response = await ecs.list_clusters()
+                    cluster_arns = list_response.get("clusterArns", [])
+
+                    if not cluster_arns:
+                        logger.info("ecs.no_clusters_found", region=region)
+                        return resources
+
+                    # Describe all clusters
+                    describe_response = await ecs.describe_clusters(clusters=cluster_arns)
+                    clusters = describe_response.get("clusters", [])
+
+                    for cluster in clusters:
+                        try:
+                            cluster_name = cluster.get("clusterName", "unknown")
+                            cluster_arn = cluster.get("clusterArn", "")
+                            status = cluster.get("status", "UNKNOWN")
+                            running_tasks_count = cluster.get("runningTasksCount", 0)
+                            pending_tasks_count = cluster.get("pendingTasksCount", 0)
+                            active_services_count = cluster.get("activeServicesCount", 0)
+                            registered_container_instances = cluster.get("registeredContainerInstancesCount", 0)
+                            capacity_providers = cluster.get("capacityProviders", [])
+                            default_capacity_provider_strategy = cluster.get("defaultCapacityProviderStrategy", [])
+
+                            # Extract tags
+                            tags = {}
+                            for tag in cluster.get("tags", []):
+                                tags[tag["Key"]] = tag["Value"]
+
+                            # Get cluster settings (Service Connect, etc.)
+                            settings = cluster.get("settings", [])
+                            service_connect_enabled = any(
+                                setting.get("name") == "containerInsights" and setting.get("value") == "enabled"
+                                for setting in settings
+                            )
+
+                            # List all services in cluster
+                            services_response = await ecs.list_services(cluster=cluster_arn)
+                            service_arns = services_response.get("serviceArns", [])
+
+                            # List all tasks in cluster
+                            tasks_response = await ecs.list_tasks(cluster=cluster_arn)
+                            task_arns = tasks_response.get("taskArns", [])
+
+                            # Calculate total Fargate vCPU and memory (estimate from running tasks)
+                            total_fargate_vcpu = 0.0
+                            total_fargate_memory_gb = 0.0
+
+                            if task_arns:
+                                # Limit to first 100 tasks for performance
+                                task_arns_sample = task_arns[:100]
+                                tasks_describe_response = await ecs.describe_tasks(
+                                    cluster=cluster_arn,
+                                    tasks=task_arns_sample
+                                )
+                                tasks = tasks_describe_response.get("tasks", [])
+
+                                for task in tasks:
+                                    launch_type = task.get("launchType", "")
+                                    if launch_type == "FARGATE":
+                                        # Get task definition to extract vCPU and memory
+                                        task_def_arn = task.get("taskDefinitionArn", "")
+                                        if task_def_arn:
+                                            try:
+                                                task_def_response = await ecs.describe_task_definition(
+                                                    taskDefinition=task_def_arn
+                                                )
+                                                task_definition = task_def_response["taskDefinition"]
+                                                cpu_str = task_definition.get("cpu", "256")
+                                                memory_str = task_definition.get("memory", "512")
+                                                vcpu = float(cpu_str) / 1024
+                                                memory_gb = float(memory_str) / 1024
+                                                total_fargate_vcpu += vcpu
+                                                total_fargate_memory_gb += memory_gb
+                                            except Exception:
+                                                pass
+
+                            # Get CloudWatch metrics (last 7 days)
+                            avg_cpu_utilization = 0.0
+                            avg_memory_utilization = 0.0
+
+                            try:
+                                end_time = datetime.utcnow()
+                                start_time = end_time - timedelta(days=7)
+
+                                # CPU Utilization (cluster-level)
+                                cpu_response = await cloudwatch.get_metric_statistics(
+                                    Namespace="AWS/ECS",
+                                    MetricName="CPUUtilization",
+                                    Dimensions=[
+                                        {"Name": "ClusterName", "Value": cluster_name}
+                                    ],
+                                    StartTime=start_time,
+                                    EndTime=end_time,
+                                    Period=604800,  # 7 days
+                                    Statistics=["Average"],
+                                )
+
+                                datapoints = cpu_response.get("Datapoints", [])
+                                if datapoints:
+                                    avg_cpu_utilization = datapoints[0].get("Average", 0.0)
+                            except Exception:
+                                pass
+
+                            try:
+                                # Memory Utilization (cluster-level)
+                                memory_response = await cloudwatch.get_metric_statistics(
+                                    Namespace="AWS/ECS",
+                                    MetricName="MemoryUtilization",
+                                    Dimensions=[
+                                        {"Name": "ClusterName", "Value": cluster_name}
+                                    ],
+                                    StartTime=start_time,
+                                    EndTime=end_time,
+                                    Period=604800,  # 7 days
+                                    Statistics=["Average"],
+                                )
+
+                                datapoints = memory_response.get("Datapoints", [])
+                                if datapoints:
+                                    avg_memory_utilization = datapoints[0].get("Average", 0.0)
+                            except Exception:
+                                pass
+
+                            # Calculate monthly cost
+                            monthly_cost = self._calculate_ecs_cluster_monthly_cost(
+                                total_fargate_vcpu=total_fargate_vcpu,
+                                total_fargate_memory_gb=total_fargate_memory_gb,
+                                total_ec2_instances=registered_container_instances,
+                                service_connect_enabled=service_connect_enabled,
+                                region=region,
+                            )
+
+                            # Calculate optimization metrics
+                            (
+                                is_optimizable,
+                                optimization_score,
+                                optimization_priority,
+                                potential_savings,
+                                optimization_recommendations,
+                            ) = self._calculate_ecs_cluster_optimization(
+                                cluster_name=cluster_name,
+                                running_tasks_count=running_tasks_count,
+                                active_services_count=active_services_count,
+                                registered_container_instances=registered_container_instances,
+                                capacity_providers=capacity_providers,
+                                avg_cpu_utilization=avg_cpu_utilization,
+                                avg_memory_utilization=avg_memory_utilization,
+                                monthly_cost=monthly_cost,
+                            )
+
+                            # Determine utilization status
+                            if running_tasks_count == 0 and active_services_count == 0:
+                                utilization_status = "idle"
+                            elif running_tasks_count < 5:
+                                utilization_status = "low"
+                            elif running_tasks_count < 20:
+                                utilization_status = "medium"
+                            else:
+                                utilization_status = "high"
+
+                            # Build metadata
+                            metadata = {
+                                "cluster_arn": cluster_arn,
+                                "status": status,
+                                "running_tasks_count": running_tasks_count,
+                                "pending_tasks_count": pending_tasks_count,
+                                "active_services_count": active_services_count,
+                                "registered_container_instances_count": registered_container_instances,
+                                "capacity_providers": capacity_providers,
+                                "default_capacity_provider_strategy": default_capacity_provider_strategy,
+                                "service_count": len(service_arns),
+                                "task_count": len(task_arns),
+                                "total_fargate_vcpu": total_fargate_vcpu,
+                                "total_fargate_memory_gb": total_fargate_memory_gb,
+                                "service_connect_enabled": service_connect_enabled,
+                            }
+
+                            # Create resource
+                            resource = AllCloudResourceData(
+                                resource_type="ecs_cluster",
+                                resource_id=cluster_name,
+                                resource_name=cluster_name,
+                                region=region,
+                                estimated_monthly_cost=monthly_cost,
+                                resource_metadata=metadata,
+                                currency="USD",
+                                utilization_status=utilization_status,
+                                cpu_utilization_percent=avg_cpu_utilization,
+                                memory_utilization_percent=avg_memory_utilization,
+                                storage_utilization_percent=None,
+                                network_utilization_mbps=None,
+                                is_optimizable=is_optimizable,
+                                optimization_priority=optimization_priority,
+                                optimization_score=optimization_score,
+                                potential_monthly_savings=potential_savings,
+                                optimization_recommendations=optimization_recommendations,
+                                tags=tags,
+                                resource_status=status,
+                                is_orphan=running_tasks_count == 0 and active_services_count == 0,
+                                created_at_cloud=None,  # ECS clusters don't have creation timestamp in API
+                                last_used_at=None,
+                            )
+
+                            resources.append(resource)
+
+                        except Exception as e:
+                            logger.error(
+                                "ecs.cluster_scan_failed",
+                                cluster_name=cluster.get("clusterName", "unknown"),
+                                region=region,
+                                error=str(e),
+                            )
+                            continue
+
+        except Exception as e:
+            logger.error(
+                "ecs.scan_failed",
+                region=region,
+                error=str(e),
+            )
+
+        return resources
+
+    # ============================================================================
+    # AWS - CLOUDWATCH LOG GROUP (Cost Intelligence / Inventory Mode)
+    # ============================================================================
+
+    def _calculate_cloudwatch_log_group_monthly_cost(
+        self,
+        stored_bytes: float,
+        ingestion_bytes_per_month: float,
+        retention_days: int,
+        region: str,
+    ) -> float:
+        """
+        Calculate estimated monthly cost for AWS CloudWatch Log Group.
+
+        Cost structure:
+        - Ingestion: $0.50 per GB
+        - Storage: $0.03 per GB/month (after retention period)
+        - Vended Logs (VPC Flow, Lambda, RDS, etc.): FREE ingestion
+        - Insights Queries: $0.005 per GB scanned (not included here)
+
+        Args:
+            stored_bytes: Total bytes stored in log group
+            ingestion_bytes_per_month: Monthly ingestion in bytes
+            retention_days: Log retention period in days
+            region: AWS region
+
+        Returns:
+            Estimated monthly cost for log group
+        """
+        # Convert bytes to GB
+        stored_gb = stored_bytes / (1024 ** 3)
+        ingestion_gb_per_month = ingestion_bytes_per_month / (1024 ** 3)
+
+        # Ingestion cost
+        ingestion_rate = self.PRICING.get("cloudwatch_logs_ingestion_per_gb", 0.50)
+        ingestion_cost = ingestion_gb_per_month * ingestion_rate
+
+        # Storage cost (only charged after retention period)
+        storage_rate = self.PRICING.get("cloudwatch_logs_storage_per_gb", 0.03)
+        storage_cost = stored_gb * storage_rate
+
+        total_cost = ingestion_cost + storage_cost
+
+        return total_cost
+
+    def _calculate_cloudwatch_log_group_optimization(
+        self,
+        log_group_name: str,
+        stored_bytes: float,
+        ingestion_bytes_per_month: float,
+        retention_days: int,
+        creation_time: int,
+        metric_filter_count: int,
+        monthly_cost: float,
+    ) -> tuple[bool, int, str, float, list]:
+        """
+        Calculate optimization opportunities for CloudWatch Log Group.
+
+        Scenarios:
+        1. CRITICAL (95): Empty log group (0 bytes, never used since 30+ days) → Delete
+        2. HIGH (85): Excessive retention (365+ days, <1 GB stored) → Reduce to 30 days
+        3. HIGH (80): Orphaned log group (resource source deleted) → Delete
+        4. MEDIUM (70): Large size (>100 GB) + long retention (>90 days) → Archive to S3
+        5. MEDIUM (65): High ingestion (>10 GB/day) without filters → Add subscription filters
+        6. LOW (50): Critical logs without S3 export → Configure export
+
+        Args:
+            log_group_name: Log group name
+            stored_bytes: Total bytes stored
+            ingestion_bytes_per_month: Monthly ingestion in bytes
+            retention_days: Retention period in days
+            creation_time: Unix timestamp of log group creation
+            metric_filter_count: Number of metric filters configured
+            monthly_cost: Estimated monthly cost
+
+        Returns:
+            Tuple of (is_optimizable, optimization_score, priority, potential_savings, recommendations)
+        """
+        recommendations = []
+        optimization_score = 0
+        optimization_priority = "none"
+        potential_savings = 0.0
+        is_optimizable = False
+
+        stored_gb = stored_bytes / (1024 ** 3)
+        ingestion_gb_per_month = ingestion_bytes_per_month / (1024 ** 3)
+        ingestion_gb_per_day = ingestion_gb_per_month / 30
+
+        # Calculate age in days
+        age_days = 0
+        if creation_time:
+            age_days = (datetime.utcnow().timestamp() - creation_time) / 86400
+
+        # Scenario 1: CRITICAL - Empty log group (never used since 30+ days)
+        if stored_bytes == 0 and ingestion_bytes_per_month == 0 and age_days > 30:
+            optimization_score = 95
+            optimization_priority = "critical"
+            potential_savings = monthly_cost
+            is_optimizable = True
+            recommendations.append({
+                "scenario": "empty_log_group",
+                "action": "delete_log_group",
+                "priority": "critical",
+                "estimated_savings": monthly_cost,
+                "details": f"Log group '{log_group_name}' is empty and unused for {age_days:.0f} days. Delete to eliminate costs.",
+                "recommendation": "Delete log group - no data logged"
+            })
+
+        # Scenario 2: HIGH - Excessive retention (365+ days, <1 GB stored)
+        if retention_days >= 365 and stored_gb < 1 and optimization_score < 85:
+            optimization_score = max(optimization_score, 85)
+            optimization_priority = "high" if optimization_priority == "none" else optimization_priority
+            # Reducing retention from 365 to 30 days saves 90% storage cost
+            storage_savings = monthly_cost * 0.9
+            potential_savings = max(potential_savings, storage_savings)
+            is_optimizable = True
+            recommendations.append({
+                "scenario": "excessive_retention",
+                "action": "reduce_retention",
+                "priority": "high",
+                "estimated_savings": storage_savings,
+                "details": f"Log group '{log_group_name}' has 365+ days retention but only {stored_gb:.2f} GB stored. Reduce retention to 30 days.",
+                "recommendation": "Reduce retention to 30 days (90% storage savings)",
+                "alternatives": [
+                    {"name": "30 days", "savings": storage_savings, "benefit": "Standard retention"},
+                    {"name": "90 days", "savings": storage_savings * 0.7, "benefit": "Compliance-friendly"}
+                ]
+            })
+
+        # Scenario 3: HIGH - Orphaned log group (heuristic: contains "/aws/" in name but no recent ingestion)
+        is_aws_service_log = "/aws/" in log_group_name or log_group_name.startswith("aws/")
+        if is_aws_service_log and ingestion_bytes_per_month == 0 and age_days > 7 and optimization_score < 80:
+            optimization_score = max(optimization_score, 80)
+            optimization_priority = "high" if optimization_priority == "none" else optimization_priority
+            potential_savings = max(potential_savings, monthly_cost)
+            is_optimizable = True
+            recommendations.append({
+                "scenario": "orphaned_log_group",
+                "action": "delete_orphaned",
+                "priority": "high",
+                "estimated_savings": monthly_cost,
+                "details": f"Log group '{log_group_name}' appears orphaned (AWS service log with no ingestion for {age_days:.0f} days). Source resource may be deleted.",
+                "recommendation": "Delete orphaned log group - source resource deleted"
+            })
+
+        # Scenario 4: MEDIUM - Large size (>100 GB) + long retention (>90 days)
+        if stored_gb > 100 and retention_days > 90 and optimization_score < 70:
+            optimization_score = max(optimization_score, 70)
+            optimization_priority = "medium" if optimization_priority == "none" else optimization_priority
+            # Archive to S3 saves 40% (S3 is cheaper than CloudWatch Logs storage)
+            archive_savings = monthly_cost * 0.4
+            potential_savings = max(potential_savings, archive_savings)
+            is_optimizable = True
+            recommendations.append({
+                "scenario": "large_log_group",
+                "action": "archive_to_s3",
+                "priority": "medium",
+                "estimated_savings": archive_savings,
+                "details": f"Log group '{log_group_name}' has {stored_gb:.2f} GB stored with {retention_days} days retention. Archive older logs to S3.",
+                "recommendation": "Export logs to S3 and reduce CloudWatch retention to 7-30 days (40% savings)"
+            })
+
+        # Scenario 5: MEDIUM - High ingestion (>10 GB/day) without filters
+        if ingestion_gb_per_day > 10 and metric_filter_count == 0 and optimization_score < 65:
+            optimization_score = max(optimization_score, 65)
+            optimization_priority = "medium" if optimization_priority == "none" else optimization_priority
+            # Subscription filters can reduce ingestion by 30%
+            filter_savings = monthly_cost * 0.3
+            potential_savings = max(potential_savings, filter_savings)
+            is_optimizable = True
+            recommendations.append({
+                "scenario": "high_ingestion_no_filters",
+                "action": "add_subscription_filters",
+                "priority": "medium",
+                "estimated_savings": filter_savings,
+                "details": f"Log group '{log_group_name}' ingests {ingestion_gb_per_day:.2f} GB/day without subscription filters. Add filters to reduce noise.",
+                "recommendation": "Configure subscription filters to drop verbose/debug logs (30% ingestion reduction)"
+            })
+
+        # Scenario 6: LOW - Critical logs without S3 export
+        is_critical_log = any(keyword in log_group_name.lower() for keyword in ["prod", "production", "error", "critical"])
+        if is_critical_log and stored_gb > 1 and optimization_score < 50:
+            optimization_score = max(optimization_score, 50)
+            optimization_priority = "low" if optimization_priority == "none" else optimization_priority
+            is_optimizable = True
+            recommendations.append({
+                "scenario": "no_s3_export",
+                "action": "configure_s3_export",
+                "priority": "low",
+                "estimated_savings": 0.0,
+                "details": f"Log group '{log_group_name}' contains critical logs but no S3 export configured. Enable export for compliance/disaster recovery.",
+                "recommendation": "Configure automated S3 export for long-term retention (no cost impact, but improves compliance)"
+            })
+
+        return is_optimizable, optimization_score, optimization_priority, potential_savings, recommendations
+
+    async def scan_cloudwatch_log_groups(self, region: str) -> list[AllCloudResourceData]:
+        """
+        Scan ALL AWS CloudWatch Log Groups for cost intelligence.
+
+        This method scans all CloudWatch Log Groups to provide cost visibility
+        and optimization recommendations for log management.
+
+        CloudWatch Metrics (AWS/Logs namespace):
+        - IncomingBytes (last 7 days)
+        - IncomingLogEvents
+
+        Args:
+            region: AWS region to scan
+
+        Returns:
+            List of AllCloudResourceData objects for all CloudWatch Log Groups
+        """
+        resources: list[AllCloudResourceData] = []
+
+        try:
+            async with self.session.client("logs", region_name=region) as logs:
+                async with self.session.client("cloudwatch", region_name=region) as cloudwatch:
+                    # Paginate through all log groups
+                    paginator = logs.get_paginator("describe_log_groups")
+
+                    async for page in paginator.paginate():
+                        log_groups = page.get("logGroups", [])
+
+                        for log_group in log_groups:
+                            try:
+                                log_group_name = log_group.get("logGroupName", "unknown")
+                                stored_bytes = log_group.get("storedBytes", 0)
+                                retention_days = log_group.get("retentionInDays", 0)  # 0 = never expire
+                                creation_time = log_group.get("creationTime", 0) / 1000  # Convert ms to seconds
+                                kms_key_id = log_group.get("kmsKeyId")
+                                metric_filter_count = log_group.get("metricFilterCount", 0)
+
+                                # Get CloudWatch metrics for ingestion (last 30 days)
+                                ingestion_bytes_per_month = 0.0
+
+                                try:
+                                    end_time = datetime.utcnow()
+                                    start_time = end_time - timedelta(days=30)
+
+                                    # IncomingBytes metric
+                                    ingestion_response = await cloudwatch.get_metric_statistics(
+                                        Namespace="AWS/Logs",
+                                        MetricName="IncomingBytes",
+                                        Dimensions=[
+                                            {"Name": "LogGroupName", "Value": log_group_name}
+                                        ],
+                                        StartTime=start_time,
+                                        EndTime=end_time,
+                                        Period=2592000,  # 30 days
+                                        Statistics=["Sum"],
+                                    )
+
+                                    datapoints = ingestion_response.get("Datapoints", [])
+                                    if datapoints:
+                                        ingestion_bytes_per_month = datapoints[0].get("Sum", 0.0)
+                                except Exception:
+                                    pass
+
+                                # Calculate monthly cost
+                                monthly_cost = self._calculate_cloudwatch_log_group_monthly_cost(
+                                    stored_bytes=stored_bytes,
+                                    ingestion_bytes_per_month=ingestion_bytes_per_month,
+                                    retention_days=retention_days if retention_days > 0 else 365,  # Default to 365 if never expire
+                                    region=region,
+                                )
+
+                                # Calculate optimization metrics
+                                (
+                                    is_optimizable,
+                                    optimization_score,
+                                    optimization_priority,
+                                    potential_savings,
+                                    optimization_recommendations,
+                                ) = self._calculate_cloudwatch_log_group_optimization(
+                                    log_group_name=log_group_name,
+                                    stored_bytes=stored_bytes,
+                                    ingestion_bytes_per_month=ingestion_bytes_per_month,
+                                    retention_days=retention_days if retention_days > 0 else 365,
+                                    creation_time=creation_time,
+                                    metric_filter_count=metric_filter_count,
+                                    monthly_cost=monthly_cost,
+                                )
+
+                                # Determine utilization status
+                                stored_gb = stored_bytes / (1024 ** 3)
+                                ingestion_gb_per_month = ingestion_bytes_per_month / (1024 ** 3)
+
+                                if stored_bytes == 0 and ingestion_bytes_per_month == 0:
+                                    utilization_status = "idle"
+                                elif ingestion_gb_per_month < 1:  # <1 GB/month
+                                    utilization_status = "low"
+                                elif ingestion_gb_per_month < 10:  # <10 GB/month
+                                    utilization_status = "medium"
+                                else:
+                                    utilization_status = "high"
+
+                                # Build metadata
+                                metadata = {
+                                    "log_group_name": log_group_name,
+                                    "stored_bytes": stored_bytes,
+                                    "stored_gb": stored_gb,
+                                    "retention_in_days": retention_days,
+                                    "kms_key_id": kms_key_id,
+                                    "creation_time": creation_time,
+                                    "metric_filter_count": metric_filter_count,
+                                    "ingestion_bytes_per_month": ingestion_bytes_per_month,
+                                    "ingestion_gb_per_month": ingestion_gb_per_month,
+                                    "ingestion_gb_per_day": ingestion_gb_per_month / 30,
+                                }
+
+                                # Create resource
+                                resource = AllCloudResourceData(
+                                    resource_type="cloudwatch_log_group",
+                                    resource_id=log_group_name,
+                                    resource_name=log_group_name,
+                                    region=region,
+                                    estimated_monthly_cost=monthly_cost,
+                                    resource_metadata=metadata,
+                                    currency="USD",
+                                    utilization_status=utilization_status,
+                                    cpu_utilization_percent=None,
+                                    memory_utilization_percent=None,
+                                    storage_utilization_percent=None,  # N/A for log groups
+                                    network_utilization_mbps=None,
+                                    is_optimizable=is_optimizable,
+                                    optimization_priority=optimization_priority,
+                                    optimization_score=optimization_score,
+                                    potential_monthly_savings=potential_savings,
+                                    optimization_recommendations=optimization_recommendations,
+                                    tags={},  # Log groups don't support tags in API
+                                    resource_status="ACTIVE",
+                                    is_orphan=stored_bytes == 0 and ingestion_bytes_per_month == 0,
+                                    created_at_cloud=datetime.fromtimestamp(creation_time) if creation_time else None,
+                                    last_used_at=None,
+                                )
+
+                                resources.append(resource)
+
+                            except Exception as e:
+                                logger.error(
+                                    "cloudwatch_logs.log_group_scan_failed",
+                                    log_group_name=log_group.get("logGroupName", "unknown"),
+                                    region=region,
+                                    error=str(e),
+                                )
+                                continue
+
+        except Exception as e:
+            logger.error(
+                "cloudwatch_logs.scan_failed",
+                region=region,
+                error=str(e),
+            )
+
+        return resources

@@ -160,6 +160,8 @@ export type ResourceType =
   | "dynamodb_table"
   | "api_gateway"
   | "cloudfront_distribution"
+  | "ecs_cluster"
+  | "cloudwatch_log_group"
   // Azure Resources
   | "managed_disk_unattached"
   | "public_ip_unassociated"

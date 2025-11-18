@@ -57,6 +57,8 @@ const resourceIcons: Record<ResourceType, any> = {
   dynamodb_table: Database,
   api_gateway: Network,
   cloudfront_distribution: Network,
+  ecs_cluster: Server,
+  cloudwatch_log_group: FileText,
   // Azure Resources
   managed_disk_unattached: HardDrive,
   public_ip_unassociated: Wifi,
