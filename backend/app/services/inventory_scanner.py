@@ -29840,3 +29840,1343 @@ class AzureInventoryScanner:
             )
 
         return resources
+
+    # ============================================================
+    # RESSOURCE 30 : ECR REPOSITORY (ELASTIC CONTAINER REGISTRY)
+    # ============================================================
+
+    def _calculate_ecr_monthly_cost(
+        self,
+        storage_gb: float,
+        region: str,
+    ) -> float:
+        """
+        Calculate estimated monthly cost for AWS ECR Repository.
+
+        ECR (Elastic Container Registry) is a fully managed Docker container registry
+        that stores, manages, and deploys Docker container images.
+
+        Cost Components:
+        1. Storage cost ($0.10 per GB/month)
+        2. Data transfer cost (not included - standard AWS rates)
+
+        Args:
+            storage_gb: Storage size in GB
+            region: AWS region
+
+        Returns:
+            Estimated monthly cost in USD (storage only)
+
+        Example:
+            Repository with 10 GB of images:
+            - Storage: 10 GB × $0.10/GB = $1.00/month
+        """
+        # Storage cost ($0.10 per GB/month)
+        storage_cost_per_gb = self.PRICING.get("ecr_storage_per_gb", 0.10)
+        storage_cost = storage_gb * storage_cost_per_gb
+
+        return round(storage_cost, 2)
+
+    def _calculate_ecr_optimization(
+        self,
+        repository_name: str,
+        image_count: int,
+        storage_gb: float,
+        oldest_image_days: int,
+        newest_image_days: int,
+        untagged_image_count: int,
+        pull_count_90d: int,
+        has_lifecycle_policy: bool,
+        tags: dict,
+        region: str,
+    ) -> list[OptimizationScenario]:
+        """
+        Calculate optimization scenarios for AWS ECR Repository.
+
+        ECR Repository Optimization Scenarios:
+        1. Empty Repository (CRITICAL) - 0 images + age > 90 days → Delete repository
+        2. All Images Very Old (HIGH) - All images > 365 days old → Delete or archive
+        3. No Image Pulls (MEDIUM) - 0 pulls for 90 days → Archive or delete
+        4. Untagged Images (MEDIUM) - >50% untagged images → Cleanup untagged
+        5. No Lifecycle Policy (LOW) - No lifecycle policy → Enable lifecycle policy
+
+        Args:
+            repository_name: ECR repository name
+            image_count: Total number of images in repository
+            storage_gb: Total storage size in GB
+            oldest_image_days: Age of oldest image in days
+            newest_image_days: Age of newest image in days
+            untagged_image_count: Number of untagged images
+            pull_count_90d: Number of image pulls over 90 days
+            has_lifecycle_policy: Whether lifecycle policy is configured
+            tags: Resource tags
+            region: AWS region
+
+        Returns:
+            List of optimization scenarios with priority, estimated savings, and recommendations
+        """
+        scenarios = []
+
+        # Current cost (storage only)
+        current_cost = self._calculate_ecr_monthly_cost(
+            storage_gb=storage_gb,
+            region=region,
+        )
+
+        # Detect environment from tags
+        env = tags.get("Environment", tags.get("environment", "")).lower()
+        is_production = env in ["production", "prod", "prd"]
+
+        # =============================================
+        # SCENARIO 1: Empty Repository (CRITICAL)
+        # =============================================
+        if image_count == 0 and newest_image_days > 90:
+            # 0 images + age > 90 days → Delete repository
+            potential_savings = current_cost
+            scenarios.append(
+                OptimizationScenario(
+                    scenario_name="ecr_empty_repository",
+                    priority="CRITICAL",
+                    estimated_monthly_savings=potential_savings,
+                    current_monthly_cost=current_cost,
+                    optimized_monthly_cost=0.0,
+                    confidence_level="high",
+                    description=(
+                        f"ECR Repository '{repository_name}' has zero images and has not been used "
+                        f"for {newest_image_days} days. The repository serves no purpose and should be deleted."
+                    ),
+                    recommendation=(
+                        "Delete empty ECR Repository:\n"
+                        "1. Verify no images are stored: aws ecr describe-images "
+                        f"--repository-name {repository_name} --region {region}\n"
+                        f"2. Delete repository: aws ecr delete-repository --repository-name {repository_name} "
+                        f"--force --region {region}\n\n"
+                        f"💰 Monthly Savings: ${potential_savings:.2f}"
+                    ),
+                    optimization_score=95,
+                )
+            )
+
+        # =============================================
+        # SCENARIO 2: All Images Very Old (HIGH)
+        # =============================================
+        elif image_count > 0 and newest_image_days > 365:
+            # All images > 365 days old → Delete or archive
+            potential_savings = current_cost
+            scenarios.append(
+                OptimizationScenario(
+                    scenario_name="ecr_all_images_old",
+                    priority="HIGH",
+                    estimated_monthly_savings=potential_savings,
+                    current_monthly_cost=current_cost,
+                    optimized_monthly_cost=0.0,
+                    confidence_level="high",
+                    description=(
+                        f"ECR Repository '{repository_name}' contains {image_count} image(s), "
+                        f"but ALL images are over 365 days old (newest image: {newest_image_days} days). "
+                        f"This indicates the repository is no longer actively maintained."
+                    ),
+                    recommendation=(
+                        "Delete or archive ECR Repository with very old images:\n"
+                        f"1. List all images: aws ecr describe-images --repository-name {repository_name} --region {region}\n"
+                        f"2. All images are over {newest_image_days} days old\n"
+                        "3. Option A: Delete repository if not needed\n"
+                        "4. Option B: Export critical images to S3, then delete repository\n\n"
+                        f"💰 Monthly Savings: ${potential_savings:.2f}"
+                    ),
+                    optimization_score=85,
+                )
+            )
+
+        # =============================================
+        # SCENARIO 3: No Image Pulls (MEDIUM)
+        # =============================================
+        if pull_count_90d == 0 and image_count > 0:
+            # 0 pulls for 90 days → Archive or delete
+            potential_savings = current_cost
+            scenarios.append(
+                OptimizationScenario(
+                    scenario_name="ecr_no_pulls",
+                    priority="MEDIUM",
+                    estimated_monthly_savings=potential_savings,
+                    current_monthly_cost=current_cost,
+                    optimized_monthly_cost=0.0,
+                    confidence_level="high",
+                    description=(
+                        f"ECR Repository '{repository_name}' has {image_count} image(s) "
+                        f"({storage_gb:.2f} GB) but zero image pulls over the last 90 days. "
+                        f"The repository is not being used by any deployments."
+                    ),
+                    recommendation=(
+                        "Archive or delete ECR Repository with no pulls:\n"
+                        "1. Check CloudWatch RepositoryPullCount metric\n"
+                        f"2. No pulls in 90 days for repository '{repository_name}'\n"
+                        "3. Verify no active deployments using these images\n"
+                        "4. Delete repository: aws ecr delete-repository --repository-name "
+                        f"{repository_name} --force --region {region}\n\n"
+                        f"💰 Monthly Savings: ${potential_savings:.2f} (storage)"
+                    ),
+                    optimization_score=70,
+                )
+            )
+
+        # =============================================
+        # SCENARIO 4: Untagged Images (MEDIUM)
+        # =============================================
+        if untagged_image_count > 0 and (untagged_image_count / max(image_count, 1)) > 0.5:
+            # >50% untagged images → Cleanup untagged
+            # Estimate untagged images = 50% of storage
+            untagged_storage_gb = storage_gb * (untagged_image_count / max(image_count, 1))
+            potential_savings = self._calculate_ecr_monthly_cost(
+                storage_gb=untagged_storage_gb,
+                region=region,
+            )
+            scenarios.append(
+                OptimizationScenario(
+                    scenario_name="ecr_untagged_images",
+                    priority="MEDIUM",
+                    estimated_monthly_savings=potential_savings,
+                    current_monthly_cost=current_cost,
+                    optimized_monthly_cost=current_cost - potential_savings,
+                    confidence_level="medium",
+                    description=(
+                        f"ECR Repository '{repository_name}' has {untagged_image_count} untagged images "
+                        f"out of {image_count} total images ({untagged_image_count / max(image_count, 1) * 100:.1f}%). "
+                        f"Untagged images consume ~{untagged_storage_gb:.2f} GB of storage."
+                    ),
+                    recommendation=(
+                        "Cleanup untagged images in ECR Repository:\n"
+                        f"1. List untagged images: aws ecr list-images --repository-name {repository_name} "
+                        f"--filter tagStatus=UNTAGGED --region {region}\n"
+                        f"2. Delete untagged images: aws ecr batch-delete-image --repository-name {repository_name} "
+                        f"--image-ids imageDigest=<digest> --region {region}\n"
+                        "3. Or enable lifecycle policy to auto-cleanup untagged images\n\n"
+                        f"💰 Monthly Savings: ${potential_savings:.2f} (~{untagged_storage_gb:.2f} GB)"
+                    ),
+                    optimization_score=65,
+                )
+            )
+
+        # =============================================
+        # SCENARIO 5: No Lifecycle Policy (LOW)
+        # =============================================
+        if not has_lifecycle_policy and image_count > 0:
+            # No lifecycle policy → Enable lifecycle policy
+            # Estimate 20% savings from lifecycle cleanup
+            potential_savings = current_cost * 0.2
+            scenarios.append(
+                OptimizationScenario(
+                    scenario_name="ecr_no_lifecycle_policy",
+                    priority="LOW",
+                    estimated_monthly_savings=potential_savings,
+                    current_monthly_cost=current_cost,
+                    optimized_monthly_cost=current_cost * 0.8,
+                    confidence_level="medium",
+                    description=(
+                        f"ECR Repository '{repository_name}' has no lifecycle policy configured. "
+                        f"Without lifecycle policies, old and untagged images accumulate unnecessarily, "
+                        f"increasing storage costs over time."
+                    ),
+                    recommendation=(
+                        "Enable lifecycle policy for ECR Repository:\n"
+                        f"1. Create lifecycle policy for repository '{repository_name}'\n"
+                        "2. Recommended rules:\n"
+                        "   - Delete untagged images after 14 days\n"
+                        "   - Keep only 10 most recent tagged images\n"
+                        "   - Delete images older than 180 days\n"
+                        "3. aws ecr put-lifecycle-policy --repository-name "
+                        f"{repository_name} --lifecycle-policy-text file://policy.json --region {region}\n\n"
+                        f"💰 Monthly Savings: ~${potential_savings:.2f} (20% reduction)"
+                    ),
+                    optimization_score=50,
+                )
+            )
+
+        return scenarios
+
+    async def scan_ecr_repositories(
+        self, region: str
+    ) -> list[AllCloudResourceData]:
+        """
+        Scan ALL AWS ECR Repositories for cost intelligence.
+
+        ECR (Elastic Container Registry) is a fully managed Docker container registry
+        that stores, manages, and deploys Docker container images.
+
+        CloudWatch Metrics Used:
+        - RepositoryPullCount (AWS/ECR) - Image pulls over 90 days
+
+        Cost Optimization Scenarios:
+        1. Empty Repository (CRITICAL) - 0 images + age > 90 days → Delete repository
+        2. All Images Very Old (HIGH) - All images > 365 days old → Delete or archive
+        3. No Image Pulls (MEDIUM) - 0 pulls for 90 days → Archive or delete
+        4. Untagged Images (MEDIUM) - >50% untagged images → Cleanup untagged
+        5. No Lifecycle Policy (LOW) - No lifecycle policy → Enable lifecycle policy
+
+        Args:
+            region: AWS region to scan
+
+        Returns:
+            List of all ECR Repositories with optimization recommendations
+        """
+        import structlog
+
+        logger = structlog.get_logger()
+        resources = []
+
+        try:
+            async with self.provider.session.client("ecr", region_name=region) as ecr:
+                async with self.provider.session.client(
+                    "cloudwatch", region_name=region
+                ) as cw:
+                    # Describe all ECR repositories
+                    response = await ecr.describe_repositories()
+
+                    for repository in response.get("repositories", []):
+                        try:
+                            repository_name = repository["repositoryName"]
+                            repository_arn = repository["repositoryArn"]
+                            repository_uri = repository["repositoryUri"]
+                            created_at = repository.get("createdAt")
+
+                            # Get image count and storage size
+                            try:
+                                images_response = await ecr.describe_images(
+                                    repositoryName=repository_name
+                                )
+                                images = images_response.get("imageDetails", [])
+                                image_count = len(images)
+
+                                # Calculate total storage size
+                                storage_bytes = sum(
+                                    img.get("imageSizeInBytes", 0) for img in images
+                                )
+                                storage_gb = storage_bytes / (1024**3)
+
+                                # Find oldest and newest images
+                                if images:
+                                    image_pushed_dates = [
+                                        img.get("imagePushedAt")
+                                        for img in images
+                                        if img.get("imagePushedAt")
+                                    ]
+                                    if image_pushed_dates:
+                                        oldest_image_date = min(image_pushed_dates)
+                                        newest_image_date = max(image_pushed_dates)
+                                        now = datetime.now(timezone.utc)
+                                        oldest_image_days = (
+                                            now - oldest_image_date
+                                        ).days
+                                        newest_image_days = (
+                                            now - newest_image_date
+                                        ).days
+                                    else:
+                                        oldest_image_days = 0
+                                        newest_image_days = 0
+                                else:
+                                    oldest_image_days = 0
+                                    newest_image_days = (
+                                        datetime.now(timezone.utc) - created_at
+                                    ).days if created_at else 365
+
+                                # Count untagged images
+                                untagged_image_count = sum(
+                                    1
+                                    for img in images
+                                    if not img.get("imageTags")
+                                )
+
+                            except Exception as e:
+                                logger.warning(
+                                    "ecr.images_failed",
+                                    repository_name=repository_name,
+                                    error=str(e),
+                                )
+                                image_count = 0
+                                storage_gb = 0.0
+                                oldest_image_days = 0
+                                newest_image_days = 0
+                                untagged_image_count = 0
+
+                            # Check lifecycle policy
+                            has_lifecycle_policy = False
+                            try:
+                                await ecr.get_lifecycle_policy(
+                                    repositoryName=repository_name
+                                )
+                                has_lifecycle_policy = True
+                            except Exception:
+                                # No lifecycle policy configured
+                                pass
+
+                            # Extract tags
+                            tags = {}
+                            try:
+                                tags_response = await ecr.list_tags_for_resource(
+                                    resourceArn=repository_arn
+                                )
+                                for tag in tags_response.get("tags", []):
+                                    tags[tag["Key"]] = tag["Value"]
+                            except Exception as e:
+                                logger.warning(
+                                    "ecr.tags_failed",
+                                    repository_name=repository_name,
+                                    error=str(e),
+                                )
+
+                            # ====================================
+                            # CLOUDWATCH METRICS (90-day lookback)
+                            # ====================================
+                            now = datetime.now(timezone.utc)
+                            start_time = now - timedelta(days=90)
+
+                            # RepositoryPullCount metric (90 days)
+                            try:
+                                pull_count_response = await cw.get_metric_statistics(
+                                    Namespace="AWS/ECR",
+                                    MetricName="RepositoryPullCount",
+                                    Dimensions=[
+                                        {"Name": "RepositoryName", "Value": repository_name},
+                                    ],
+                                    StartTime=start_time,
+                                    EndTime=now,
+                                    Period=86400,  # 1 day
+                                    Statistics=["Sum"],
+                                )
+                                pull_count_90d = int(
+                                    sum(
+                                        dp["Sum"]
+                                        for dp in pull_count_response.get("Datapoints", [])
+                                    )
+                                )
+                            except Exception as e:
+                                logger.warning(
+                                    "ecr.pull_count_metric_failed",
+                                    repository_name=repository_name,
+                                    error=str(e),
+                                )
+                                pull_count_90d = 0
+
+                            # ====================================
+                            # COST CALCULATION
+                            # ====================================
+                            monthly_cost = self._calculate_ecr_monthly_cost(
+                                storage_gb=storage_gb,
+                                region=region,
+                            )
+
+                            # ====================================
+                            # OPTIMIZATION SCENARIOS
+                            # ====================================
+                            optimization_scenarios = self._calculate_ecr_optimization(
+                                repository_name=repository_name,
+                                image_count=image_count,
+                                storage_gb=storage_gb,
+                                oldest_image_days=oldest_image_days,
+                                newest_image_days=newest_image_days,
+                                untagged_image_count=untagged_image_count,
+                                pull_count_90d=pull_count_90d,
+                                has_lifecycle_policy=has_lifecycle_policy,
+                                tags=tags,
+                                region=region,
+                            )
+
+                            # ====================================
+                            # ORPHAN DETECTION
+                            # ====================================
+                            is_orphan = (
+                                image_count == 0 and newest_image_days > 90
+                            ) or (pull_count_90d == 0 and image_count > 0)
+
+                            # ====================================
+                            # CREATE RESOURCE DATA
+                            # ====================================
+                            resource = AllCloudResourceData(
+                                resource_type="ecr_repository",
+                                resource_id=repository_arn,
+                                resource_name=repository_name,
+                                region=region,
+                                estimated_monthly_cost=monthly_cost,
+                                currency="USD",
+                                resource_metadata={
+                                    "repository_name": repository_name,
+                                    "repository_arn": repository_arn,
+                                    "repository_uri": repository_uri,
+                                    "image_count": image_count,
+                                    "storage_gb": round(storage_gb, 2),
+                                    "untagged_image_count": untagged_image_count,
+                                    "oldest_image_days": oldest_image_days,
+                                    "newest_image_days": newest_image_days,
+                                    "pull_count_90d": pull_count_90d,
+                                    "has_lifecycle_policy": has_lifecycle_policy,
+                                    "image_scanning_enabled": repository.get(
+                                        "imageScanningConfiguration", {}
+                                    ).get("scanOnPush", False),
+                                    "encryption_type": repository.get(
+                                        "encryptionConfiguration", {}
+                                    ).get("encryptionType", "AES256"),
+                                    "tags": tags,
+                                },
+                                optimization_scenarios=optimization_scenarios,
+                                is_orphan=is_orphan,
+                                created_at_cloud=created_at,
+                            )
+
+                            resources.append(resource)
+
+                            logger.debug(
+                                "ecr.repository_scanned",
+                                repository_name=repository_name,
+                                image_count=image_count,
+                                storage_gb=round(storage_gb, 2),
+                                monthly_cost=monthly_cost,
+                                pull_count_90d=pull_count_90d,
+                                scenarios_count=len(optimization_scenarios),
+                                is_orphan=is_orphan,
+                            )
+
+                        except Exception as e:
+                            logger.error(
+                                "ecr.repository_scan_failed",
+                                repository_name=repository.get("repositoryName", "unknown"),
+                                region=region,
+                                error=str(e),
+                            )
+                            continue
+
+        except Exception as e:
+            logger.error(
+                "ecr.scan_failed",
+                region=region,
+                error=str(e),
+            )
+
+        return resources
+
+    # ============================================================
+    # RESSOURCE 31 : SNS TOPIC (SIMPLE NOTIFICATION SERVICE)
+    # ============================================================
+
+    def _calculate_sns_monthly_cost(
+        self,
+        topic_type: str,
+        publishes_30d: int,
+        region: str,
+    ) -> float:
+        """
+        Calculate estimated monthly cost for AWS SNS Topic.
+
+        SNS (Simple Notification Service) enables pub/sub messaging for distributed systems.
+
+        Cost Components:
+        1. Publishes cost (after 1M free tier per month)
+        2. Subscription cost (not included - SMS/email charged separately)
+
+        Args:
+            topic_type: Topic type ('standard' or 'fifo')
+            publishes_30d: Number of publishes in last 30 days
+            region: AWS region
+
+        Returns:
+            Estimated monthly cost in USD
+
+        Example:
+            Standard topic with 5M publishes:
+            - First 1M: $0 (free tier)
+            - Next 4M: 4 × $0.50 = $2.00/month
+        """
+        free_tier = 1_000_000  # 1M free publishes per month
+        billable_publishes = max(0, publishes_30d - free_tier)
+
+        if topic_type == "fifo":
+            rate_per_million = self.PRICING.get("sns_fifo_per_million", 0.60)
+        else:  # standard
+            rate_per_million = self.PRICING.get("sns_standard_per_million", 0.50)
+
+        cost = (billable_publishes / 1_000_000) * rate_per_million
+
+        return round(cost, 2)
+
+    def _calculate_sns_optimization(
+        self,
+        topic_name: str,
+        topic_arn: str,
+        topic_type: str,
+        subscription_count: int,
+        publishes_30d: int,
+        delivered_30d: int,
+        failed_30d: int,
+        tags: dict,
+        region: str,
+    ) -> list[OptimizationScenario]:
+        """
+        Calculate optimization scenarios for AWS SNS Topic.
+
+        SNS Topic Optimization Scenarios:
+        1. Zero Subscriptions (CRITICAL) - 0 subscriptions + age > 30 days → Delete topic
+        2. Zero Publishes (HIGH) - 0 publishes for 30 days → Delete topic
+        3. All Subscriptions Failed (MEDIUM) - >95% delivery failures → Fix or delete
+        4. Redundant FIFO Topic (MEDIUM) - FIFO with low volume → Migrate to Standard
+        5. Dev/Test Topic Always Active (LOW) - Dev/test topic → Delete when not needed
+
+        Args:
+            topic_name: SNS topic name
+            topic_arn: Topic ARN
+            topic_type: Topic type ('standard' or 'fifo')
+            subscription_count: Number of subscriptions
+            publishes_30d: Number of publishes over 30 days
+            delivered_30d: Number of notifications delivered
+            failed_30d: Number of notifications failed
+            tags: Resource tags
+            region: AWS region
+
+        Returns:
+            List of optimization scenarios
+        """
+        scenarios = []
+
+        current_cost = self._calculate_sns_monthly_cost(
+            topic_type=topic_type,
+            publishes_30d=publishes_30d,
+            region=region,
+        )
+
+        env = tags.get("Environment", tags.get("environment", "")).lower()
+        is_production = env in ["production", "prod", "prd"]
+
+        # SCENARIO 1: Zero Subscriptions (CRITICAL)
+        if subscription_count == 0:
+            potential_savings = current_cost
+            scenarios.append(
+                OptimizationScenario(
+                    scenario_name="sns_zero_subscriptions",
+                    priority="CRITICAL",
+                    estimated_monthly_savings=potential_savings,
+                    current_monthly_cost=current_cost,
+                    optimized_monthly_cost=0.0,
+                    confidence_level="high",
+                    description=(
+                        f"SNS Topic '{topic_name}' has zero subscriptions. "
+                        f"Without subscriptions, the topic serves no purpose."
+                    ),
+                    recommendation=(
+                        f"Delete SNS Topic with no subscriptions:\n"
+                        f"1. aws sns delete-topic --topic-arn {topic_arn} --region {region}\n\n"
+                        f"💰 Monthly Savings: ${potential_savings:.2f}"
+                    ),
+                    optimization_score=95,
+                )
+            )
+
+        # SCENARIO 2: Zero Publishes (HIGH)
+        elif publishes_30d == 0:
+            potential_savings = current_cost
+            scenarios.append(
+                OptimizationScenario(
+                    scenario_name="sns_zero_publishes",
+                    priority="HIGH",
+                    estimated_monthly_savings=potential_savings,
+                    current_monthly_cost=current_cost,
+                    optimized_monthly_cost=0.0,
+                    confidence_level="high",
+                    description=(
+                        f"SNS Topic '{topic_name}' has zero publishes over 30 days "
+                        f"({subscription_count} subscription(s)). The topic is not being used."
+                    ),
+                    recommendation=(
+                        f"Delete inactive SNS Topic:\n"
+                        f"1. aws sns delete-topic --topic-arn {topic_arn} --region {region}\n\n"
+                        f"💰 Monthly Savings: ${potential_savings:.2f}"
+                    ),
+                    optimization_score=85,
+                )
+            )
+
+        # SCENARIO 3: All Subscriptions Failed (MEDIUM)
+        if delivered_30d > 0 and failed_30d > 0:
+            failure_rate = failed_30d / (delivered_30d + failed_30d)
+            if failure_rate > 0.95:
+                potential_savings = current_cost * 0.5  # Partial savings
+                scenarios.append(
+                    OptimizationScenario(
+                        scenario_name="sns_high_failure_rate",
+                        priority="MEDIUM",
+                        estimated_monthly_savings=potential_savings,
+                        current_monthly_cost=current_cost,
+                        optimized_monthly_cost=current_cost * 0.5,
+                        confidence_level="high",
+                        description=(
+                            f"SNS Topic '{topic_name}' has {failure_rate * 100:.1f}% delivery failure rate "
+                            f"({failed_30d} failed, {delivered_30d} delivered). Subscriptions are broken."
+                        ),
+                        recommendation=(
+                            f"Fix or delete SNS Topic with high failures:\n"
+                            f"1. List subscriptions: aws sns list-subscriptions-by-topic --topic-arn {topic_arn}\n"
+                            f"2. Fix broken endpoints or delete failed subscriptions\n\n"
+                            f"💰 Monthly Savings: ${potential_savings:.2f} (if deleted)"
+                        ),
+                        optimization_score=70,
+                    )
+                )
+
+        # SCENARIO 4: Redundant FIFO Topic (MEDIUM)
+        if topic_type == "fifo" and publishes_30d < 300:  # <10/day
+            # FIFO costs $0.10 more per million than Standard
+            potential_savings = (publishes_30d / 1_000_000) * 0.10
+            scenarios.append(
+                OptimizationScenario(
+                    scenario_name="sns_redundant_fifo",
+                    priority="MEDIUM",
+                    estimated_monthly_savings=potential_savings,
+                    current_monthly_cost=current_cost,
+                    optimized_monthly_cost=current_cost - potential_savings,
+                    confidence_level="medium",
+                    description=(
+                        f"SNS Topic '{topic_name}' is FIFO type but has very low volume "
+                        f"({publishes_30d} publishes in 30 days). FIFO costs 20% more than Standard."
+                    ),
+                    recommendation=(
+                        f"Migrate FIFO topic to Standard for low volume:\n"
+                        f"1. Create Standard topic with same name (without .fifo suffix)\n"
+                        f"2. Update publishers to use new topic ARN\n"
+                        f"3. Delete FIFO topic when migration complete\n\n"
+                        f"💰 Monthly Savings: ${potential_savings:.2f} (FIFO premium)"
+                    ),
+                    optimization_score=65,
+                )
+            )
+
+        # SCENARIO 5: Dev/Test Topic Always Active (LOW)
+        if not is_production and env in ["dev", "test", "staging", "development"]:
+            potential_savings = current_cost
+            scenarios.append(
+                OptimizationScenario(
+                    scenario_name="sns_dev_test_always_on",
+                    priority="LOW",
+                    estimated_monthly_savings=potential_savings,
+                    current_monthly_cost=current_cost,
+                    optimized_monthly_cost=0.0,
+                    confidence_level="medium",
+                    description=(
+                        f"SNS Topic '{topic_name}' is tagged as '{env}' environment. "
+                        f"Dev/test topics should be deleted when not in use."
+                    ),
+                    recommendation=(
+                        f"Delete dev/test SNS Topic when not needed:\n"
+                        f"1. aws sns delete-topic --topic-arn {topic_arn} --region {region}\n"
+                        f"2. Recreate when needed (IaC: Terraform/CloudFormation)\n\n"
+                        f"💰 Monthly Savings: ${potential_savings:.2f}"
+                    ),
+                    optimization_score=50,
+                )
+            )
+
+        return scenarios
+
+    async def scan_sns_topics(
+        self, region: str
+    ) -> list[AllCloudResourceData]:
+        """
+        Scan ALL AWS SNS Topics for cost intelligence.
+
+        SNS (Simple Notification Service) enables pub/sub messaging.
+
+        CloudWatch Metrics Used:
+        - NumberOfMessagesPublished (AWS/SNS) - Publishes over 30 days
+        - NumberOfNotificationsDelivered (AWS/SNS) - Delivered over 30 days
+        - NumberOfNotificationsFailed (AWS/SNS) - Failed over 30 days
+
+        Cost Optimization Scenarios:
+        1. Zero Subscriptions (CRITICAL) - 0 subscriptions → Delete topic
+        2. Zero Publishes (HIGH) - 0 publishes for 30 days → Delete topic
+        3. All Subscriptions Failed (MEDIUM) - >95% delivery failures → Fix or delete
+        4. Redundant FIFO Topic (MEDIUM) - FIFO with low volume → Migrate to Standard
+        5. Dev/Test Topic Always Active (LOW) - Dev/test topic → Delete when not needed
+
+        Args:
+            region: AWS region to scan
+
+        Returns:
+            List of all SNS Topics with optimization recommendations
+        """
+        import structlog
+
+        logger = structlog.get_logger()
+        resources = []
+
+        try:
+            async with self.provider.session.client("sns", region_name=region) as sns:
+                async with self.provider.session.client(
+                    "cloudwatch", region_name=region
+                ) as cw:
+                    # List all SNS topics
+                    response = await sns.list_topics()
+
+                    for topic in response.get("Topics", []):
+                        try:
+                            topic_arn = topic["TopicArn"]
+                            topic_name = topic_arn.split(":")[-1]
+
+                            # Get topic attributes
+                            attrs_response = await sns.get_topic_attributes(TopicArn=topic_arn)
+                            attributes = attrs_response.get("Attributes", {})
+
+                            # Determine topic type (FIFO or Standard)
+                            topic_type = "fifo" if topic_name.endswith(".fifo") else "standard"
+
+                            # Count subscriptions
+                            subs_response = await sns.list_subscriptions_by_topic(TopicArn=topic_arn)
+                            subscription_count = len(subs_response.get("Subscriptions", []))
+
+                            # Extract tags
+                            tags = {}
+                            try:
+                                tags_response = await sns.list_tags_for_resource(ResourceArn=topic_arn)
+                                for tag in tags_response.get("Tags", []):
+                                    tags[tag["Key"]] = tag["Value"]
+                            except Exception:
+                                pass
+
+                            # CloudWatch Metrics (30-day lookback)
+                            now = datetime.now(timezone.utc)
+                            start_time = now - timedelta(days=30)
+
+                            # NumberOfMessagesPublished metric
+                            try:
+                                publishes_response = await cw.get_metric_statistics(
+                                    Namespace="AWS/SNS",
+                                    MetricName="NumberOfMessagesPublished",
+                                    Dimensions=[{"Name": "TopicName", "Value": topic_name}],
+                                    StartTime=start_time,
+                                    EndTime=now,
+                                    Period=86400,
+                                    Statistics=["Sum"],
+                                )
+                                publishes_30d = int(sum(dp["Sum"] for dp in publishes_response.get("Datapoints", [])))
+                            except Exception:
+                                publishes_30d = 0
+
+                            # NumberOfNotificationsDelivered metric
+                            try:
+                                delivered_response = await cw.get_metric_statistics(
+                                    Namespace="AWS/SNS",
+                                    MetricName="NumberOfNotificationsDelivered",
+                                    Dimensions=[{"Name": "TopicName", "Value": topic_name}],
+                                    StartTime=start_time,
+                                    EndTime=now,
+                                    Period=86400,
+                                    Statistics=["Sum"],
+                                )
+                                delivered_30d = int(sum(dp["Sum"] for dp in delivered_response.get("Datapoints", [])))
+                            except Exception:
+                                delivered_30d = 0
+
+                            # NumberOfNotificationsFailed metric
+                            try:
+                                failed_response = await cw.get_metric_statistics(
+                                    Namespace="AWS/SNS",
+                                    MetricName="NumberOfNotificationsFailed",
+                                    Dimensions=[{"Name": "TopicName", "Value": topic_name}],
+                                    StartTime=start_time,
+                                    EndTime=now,
+                                    Period=86400,
+                                    Statistics=["Sum"],
+                                )
+                                failed_30d = int(sum(dp["Sum"] for dp in failed_response.get("Datapoints", [])))
+                            except Exception:
+                                failed_30d = 0
+
+                            # Cost calculation
+                            monthly_cost = self._calculate_sns_monthly_cost(
+                                topic_type=topic_type,
+                                publishes_30d=publishes_30d,
+                                region=region,
+                            )
+
+                            # Optimization scenarios
+                            optimization_scenarios = self._calculate_sns_optimization(
+                                topic_name=topic_name,
+                                topic_arn=topic_arn,
+                                topic_type=topic_type,
+                                subscription_count=subscription_count,
+                                publishes_30d=publishes_30d,
+                                delivered_30d=delivered_30d,
+                                failed_30d=failed_30d,
+                                tags=tags,
+                                region=region,
+                            )
+
+                            # Orphan detection
+                            is_orphan = subscription_count == 0 or publishes_30d == 0
+
+                            # Create resource data
+                            resource = AllCloudResourceData(
+                                resource_type="sns_topic",
+                                resource_id=topic_arn,
+                                resource_name=topic_name,
+                                region=region,
+                                estimated_monthly_cost=monthly_cost,
+                                currency="USD",
+                                resource_metadata={
+                                    "topic_name": topic_name,
+                                    "topic_arn": topic_arn,
+                                    "topic_type": topic_type,
+                                    "subscription_count": subscription_count,
+                                    "publishes_30d": publishes_30d,
+                                    "delivered_30d": delivered_30d,
+                                    "failed_30d": failed_30d,
+                                    "failure_rate": round(failed_30d / (delivered_30d + failed_30d), 3) if (delivered_30d + failed_30d) > 0 else 0,
+                                    "tags": tags,
+                                },
+                                optimization_scenarios=optimization_scenarios,
+                                is_orphan=is_orphan,
+                                created_at_cloud=None,
+                            )
+
+                            resources.append(resource)
+
+                            logger.debug(
+                                "sns.topic_scanned",
+                                topic_name=topic_name,
+                                subscription_count=subscription_count,
+                                publishes_30d=publishes_30d,
+                                monthly_cost=monthly_cost,
+                                scenarios_count=len(optimization_scenarios),
+                                is_orphan=is_orphan,
+                            )
+
+                        except Exception as e:
+                            logger.error(
+                                "sns.topic_scan_failed",
+                                topic_arn=topic.get("TopicArn", "unknown"),
+                                region=region,
+                                error=str(e),
+                            )
+                            continue
+
+        except Exception as e:
+            logger.error(
+                "sns.scan_failed",
+                region=region,
+                error=str(e),
+            )
+
+        return resources
+
+    # ============================================================
+    # RESSOURCE 32 : SQS QUEUE (SIMPLE QUEUE SERVICE)
+    # ============================================================
+
+    def _calculate_sqs_monthly_cost(
+        self,
+        queue_type: str,
+        requests_30d: int,
+        region: str,
+    ) -> float:
+        """
+        Calculate estimated monthly cost for AWS SQS Queue.
+
+        SQS (Simple Queue Service) enables message queueing for distributed applications.
+
+        Cost Components:
+        1. Request cost (after 1M free tier per month)
+        2. No charge for empty queues
+
+        Args:
+            queue_type: Queue type ('standard' or 'fifo')
+            requests_30d: Number of requests in last 30 days
+            region: AWS region
+
+        Returns:
+            Estimated monthly cost in USD
+
+        Example:
+            Standard queue with 5M requests:
+            - First 1M: $0 (free tier)
+            - Next 4M: 4 × $0.40 = $1.60/month
+        """
+        free_tier = 1_000_000  # 1M free requests per month
+        billable_requests = max(0, requests_30d - free_tier)
+
+        if queue_type == "fifo":
+            rate_per_million = self.PRICING.get("sqs_fifo_per_million", 0.50)
+        else:  # standard
+            rate_per_million = self.PRICING.get("sqs_standard_per_million", 0.40)
+
+        cost = (billable_requests / 1_000_000) * rate_per_million
+
+        return round(cost, 2)
+
+    def _calculate_sqs_optimization(
+        self,
+        queue_name: str,
+        queue_url: str,
+        queue_type: str,
+        messages_sent_30d: int,
+        messages_received_30d: int,
+        messages_visible: int,
+        oldest_message_age_seconds: int,
+        is_dead_letter_queue: bool,
+        has_redrive_policy: bool,
+        tags: dict,
+        region: str,
+    ) -> list[OptimizationScenario]:
+        """
+        Calculate optimization scenarios for AWS SQS Queue.
+
+        SQS Queue Optimization Scenarios:
+        1. Zero Messages (CRITICAL) - 0 messages for 30 days → Delete queue
+        2. High Message Age (HIGH) - Messages > 14 days old → Process or purge
+        3. Dead Letter Queue Not Processed (MEDIUM) - DLQ with no redrive → Process
+        4. Redundant FIFO Queue (MEDIUM) - FIFO with low volume → Migrate to Standard
+        5. No Redrive Policy (LOW) - Queue without DLQ → Configure DLQ
+
+        Args:
+            queue_name: SQS queue name
+            queue_url: Queue URL
+            queue_type: Queue type ('standard' or 'fifo')
+            messages_sent_30d: Messages sent over 30 days
+            messages_received_30d: Messages received over 30 days
+            messages_visible: Current visible messages
+            oldest_message_age_seconds: Age of oldest message in seconds
+            is_dead_letter_queue: Whether queue is a DLQ
+            has_redrive_policy: Whether queue has redrive policy
+            tags: Resource tags
+            region: AWS region
+
+        Returns:
+            List of optimization scenarios
+        """
+        scenarios = []
+
+        total_requests_30d = messages_sent_30d + messages_received_30d
+        current_cost = self._calculate_sqs_monthly_cost(
+            queue_type=queue_type,
+            requests_30d=total_requests_30d,
+            region=region,
+        )
+
+        env = tags.get("Environment", tags.get("environment", "")).lower()
+        is_production = env in ["production", "prod", "prd"]
+
+        oldest_message_age_days = oldest_message_age_seconds / 86400
+
+        # SCENARIO 1: Zero Messages (CRITICAL)
+        if messages_sent_30d == 0 and messages_received_30d == 0:
+            potential_savings = current_cost
+            scenarios.append(
+                OptimizationScenario(
+                    scenario_name="sqs_zero_messages",
+                    priority="CRITICAL",
+                    estimated_monthly_savings=potential_savings,
+                    current_monthly_cost=current_cost,
+                    optimized_monthly_cost=0.0,
+                    confidence_level="high",
+                    description=(
+                        f"SQS Queue '{queue_name}' has zero messages sent or received "
+                        f"over 30 days. The queue is not being used."
+                    ),
+                    recommendation=(
+                        f"Delete inactive SQS Queue:\n"
+                        f"1. aws sqs delete-queue --queue-url {queue_url} --region {region}\n\n"
+                        f"💰 Monthly Savings: ${potential_savings:.2f}"
+                    ),
+                    optimization_score=95,
+                )
+            )
+
+        # SCENARIO 2: High Message Age (HIGH)
+        if oldest_message_age_days > 14 and messages_visible > 0:
+            potential_savings = current_cost * 0.8  # Partial savings
+            scenarios.append(
+                OptimizationScenario(
+                    scenario_name="sqs_high_message_age",
+                    priority="HIGH",
+                    estimated_monthly_savings=potential_savings,
+                    current_monthly_cost=current_cost,
+                    optimized_monthly_cost=current_cost * 0.2,
+                    confidence_level="high",
+                    description=(
+                        f"SQS Queue '{queue_name}' has {messages_visible} messages with oldest message "
+                        f"{int(oldest_message_age_days)} days old. Messages are stuck in the queue."
+                    ),
+                    recommendation=(
+                        f"Process or purge old messages in SQS Queue:\n"
+                        f"1. Investigate why messages are not being processed\n"
+                        f"2. Fix consumer application or delete stuck messages\n"
+                        f"3. Purge queue: aws sqs purge-queue --queue-url {queue_url} --region {region}\n\n"
+                        f"💰 Monthly Savings: ${potential_savings:.2f} (if queue deleted)"
+                    ),
+                    optimization_score=85,
+                )
+            )
+
+        # SCENARIO 3: Dead Letter Queue Not Processed (MEDIUM)
+        if is_dead_letter_queue and messages_visible > 0 and messages_received_30d < 10:
+            potential_savings = current_cost * 0.6
+            scenarios.append(
+                OptimizationScenario(
+                    scenario_name="sqs_dlq_not_processed",
+                    priority="MEDIUM",
+                    estimated_monthly_savings=potential_savings,
+                    current_monthly_cost=current_cost,
+                    optimized_monthly_cost=current_cost * 0.4,
+                    confidence_level="high",
+                    description=(
+                        f"SQS Queue '{queue_name}' is a Dead Letter Queue with {messages_visible} messages "
+                        f"but only {messages_received_30d} messages processed in 30 days. "
+                        f"Failed messages are not being redriven."
+                    ),
+                    recommendation=(
+                        f"Process Dead Letter Queue messages:\n"
+                        f"1. Inspect failed messages: aws sqs receive-message --queue-url {queue_url}\n"
+                        f"2. Redrive messages to source queue or fix and reprocess\n"
+                        f"3. Purge after processing: aws sqs purge-queue --queue-url {queue_url}\n\n"
+                        f"💰 Monthly Savings: ${potential_savings:.2f} (if processed/deleted)"
+                    ),
+                    optimization_score=70,
+                )
+            )
+
+        # SCENARIO 4: Redundant FIFO Queue (MEDIUM)
+        if queue_type == "fifo" and total_requests_30d < 3000:  # <100/day
+            # FIFO costs $0.10 more per million than Standard
+            potential_savings = (total_requests_30d / 1_000_000) * 0.10
+            scenarios.append(
+                OptimizationScenario(
+                    scenario_name="sqs_redundant_fifo",
+                    priority="MEDIUM",
+                    estimated_monthly_savings=potential_savings,
+                    current_monthly_cost=current_cost,
+                    optimized_monthly_cost=current_cost - potential_savings,
+                    confidence_level="medium",
+                    description=(
+                        f"SQS Queue '{queue_name}' is FIFO type but has very low volume "
+                        f"({total_requests_30d} requests in 30 days). FIFO costs 25% more than Standard."
+                    ),
+                    recommendation=(
+                        f"Migrate FIFO queue to Standard for low volume:\n"
+                        f"1. Create Standard queue with same name (without .fifo suffix)\n"
+                        f"2. Update producers/consumers to use new queue URL\n"
+                        f"3. Delete FIFO queue when migration complete\n\n"
+                        f"💰 Monthly Savings: ${potential_savings:.2f} (FIFO premium)"
+                    ),
+                    optimization_score=65,
+                )
+            )
+
+        # SCENARIO 5: No Redrive Policy (LOW)
+        if not has_redrive_policy and not is_dead_letter_queue and messages_sent_30d > 0:
+            potential_savings = 0.0  # Best practice, no direct savings
+            scenarios.append(
+                OptimizationScenario(
+                    scenario_name="sqs_no_redrive_policy",
+                    priority="LOW",
+                    estimated_monthly_savings=potential_savings,
+                    current_monthly_cost=current_cost,
+                    optimized_monthly_cost=current_cost,
+                    confidence_level="medium",
+                    description=(
+                        f"SQS Queue '{queue_name}' has no Dead Letter Queue configured. "
+                        f"Failed messages will be lost without a DLQ redrive policy."
+                    ),
+                    recommendation=(
+                        f"Configure Dead Letter Queue for '{queue_name}':\n"
+                        f"1. Create DLQ: aws sqs create-queue --queue-name {queue_name}-dlq\n"
+                        f"2. Set redrive policy with maxReceiveCount=3-5\n"
+                        f"3. Monitor DLQ for failed messages\n\n"
+                        f"⚠️ No direct cost savings, but improves reliability"
+                    ),
+                    optimization_score=50,
+                )
+            )
+
+        return scenarios
+
+    async def scan_sqs_queues(
+        self, region: str
+    ) -> list[AllCloudResourceData]:
+        """
+        Scan ALL AWS SQS Queues for cost intelligence.
+
+        SQS (Simple Queue Service) enables message queueing for distributed applications.
+
+        CloudWatch Metrics Used:
+        - NumberOfMessagesSent (AWS/SQS) - Messages sent over 30 days
+        - NumberOfMessagesReceived (AWS/SQS) - Messages received over 30 days
+        - ApproximateNumberOfMessagesVisible (Queue Attribute) - Current message count
+        - ApproximateAgeOfOldestMessage (Queue Attribute) - Oldest message age
+
+        Cost Optimization Scenarios:
+        1. Zero Messages (CRITICAL) - 0 messages for 30 days → Delete queue
+        2. High Message Age (HIGH) - Messages > 14 days old → Process or purge
+        3. Dead Letter Queue Not Processed (MEDIUM) - DLQ with no redrive → Process
+        4. Redundant FIFO Queue (MEDIUM) - FIFO with low volume → Migrate to Standard
+        5. No Redrive Policy (LOW) - Queue without DLQ → Configure DLQ
+
+        Args:
+            region: AWS region to scan
+
+        Returns:
+            List of all SQS Queues with optimization recommendations
+        """
+        import structlog
+
+        logger = structlog.get_logger()
+        resources = []
+
+        try:
+            async with self.provider.session.client("sqs", region_name=region) as sqs:
+                async with self.provider.session.client(
+                    "cloudwatch", region_name=region
+                ) as cw:
+                    # List all SQS queues
+                    response = await sqs.list_queues()
+                    queue_urls = response.get("QueueUrls", [])
+
+                    for queue_url in queue_urls:
+                        try:
+                            queue_name = queue_url.split("/")[-1]
+
+                            # Get queue attributes
+                            attrs_response = await sqs.get_queue_attributes(
+                                QueueUrl=queue_url,
+                                AttributeNames=["All"]
+                            )
+                            attributes = attrs_response.get("Attributes", {})
+
+                            # Determine queue type
+                            queue_type = "fifo" if attributes.get("FifoQueue") == "true" else "standard"
+
+                            # Get queue metadata
+                            messages_visible = int(attributes.get("ApproximateNumberOfMessagesVisible", 0))
+                            oldest_message_age_seconds = int(attributes.get("ApproximateAgeOfOldestMessage", 0))
+                            has_redrive_policy = "RedrivePolicy" in attributes
+
+                            # Check if this is a DLQ (has -dlq suffix or is target of redrive)
+                            is_dead_letter_queue = queue_name.endswith("-dlq") or queue_name.endswith("_dlq")
+
+                            # Extract tags
+                            tags = {}
+                            try:
+                                tags_response = await sqs.list_queue_tags(QueueUrl=queue_url)
+                                tags = tags_response.get("Tags", {})
+                            except Exception:
+                                pass
+
+                            # CloudWatch Metrics (30-day lookback)
+                            now = datetime.now(timezone.utc)
+                            start_time = now - timedelta(days=30)
+
+                            # NumberOfMessagesSent metric
+                            try:
+                                sent_response = await cw.get_metric_statistics(
+                                    Namespace="AWS/SQS",
+                                    MetricName="NumberOfMessagesSent",
+                                    Dimensions=[{"Name": "QueueName", "Value": queue_name}],
+                                    StartTime=start_time,
+                                    EndTime=now,
+                                    Period=86400,
+                                    Statistics=["Sum"],
+                                )
+                                messages_sent_30d = int(sum(dp["Sum"] for dp in sent_response.get("Datapoints", [])))
+                            except Exception:
+                                messages_sent_30d = 0
+
+                            # NumberOfMessagesReceived metric
+                            try:
+                                received_response = await cw.get_metric_statistics(
+                                    Namespace="AWS/SQS",
+                                    MetricName="NumberOfMessagesReceived",
+                                    Dimensions=[{"Name": "QueueName", "Value": queue_name}],
+                                    StartTime=start_time,
+                                    EndTime=now,
+                                    Period=86400,
+                                    Statistics=["Sum"],
+                                )
+                                messages_received_30d = int(sum(dp["Sum"] for dp in received_response.get("Datapoints", [])))
+                            except Exception:
+                                messages_received_30d = 0
+
+                            # Cost calculation
+                            total_requests_30d = messages_sent_30d + messages_received_30d
+                            monthly_cost = self._calculate_sqs_monthly_cost(
+                                queue_type=queue_type,
+                                requests_30d=total_requests_30d,
+                                region=region,
+                            )
+
+                            # Optimization scenarios
+                            optimization_scenarios = self._calculate_sqs_optimization(
+                                queue_name=queue_name,
+                                queue_url=queue_url,
+                                queue_type=queue_type,
+                                messages_sent_30d=messages_sent_30d,
+                                messages_received_30d=messages_received_30d,
+                                messages_visible=messages_visible,
+                                oldest_message_age_seconds=oldest_message_age_seconds,
+                                is_dead_letter_queue=is_dead_letter_queue,
+                                has_redrive_policy=has_redrive_policy,
+                                tags=tags,
+                                region=region,
+                            )
+
+                            # Orphan detection
+                            is_orphan = messages_sent_30d == 0 and messages_received_30d == 0
+
+                            # Create resource data
+                            resource = AllCloudResourceData(
+                                resource_type="sqs_queue",
+                                resource_id=queue_url,
+                                resource_name=queue_name,
+                                region=region,
+                                estimated_monthly_cost=monthly_cost,
+                                currency="USD",
+                                resource_metadata={
+                                    "queue_name": queue_name,
+                                    "queue_url": queue_url,
+                                    "queue_type": queue_type,
+                                    "messages_sent_30d": messages_sent_30d,
+                                    "messages_received_30d": messages_received_30d,
+                                    "total_requests_30d": total_requests_30d,
+                                    "messages_visible": messages_visible,
+                                    "oldest_message_age_seconds": oldest_message_age_seconds,
+                                    "oldest_message_age_days": round(oldest_message_age_seconds / 86400, 1),
+                                    "is_dead_letter_queue": is_dead_letter_queue,
+                                    "has_redrive_policy": has_redrive_policy,
+                                    "tags": tags,
+                                },
+                                optimization_scenarios=optimization_scenarios,
+                                is_orphan=is_orphan,
+                                created_at_cloud=None,
+                            )
+
+                            resources.append(resource)
+
+                            logger.debug(
+                                "sqs.queue_scanned",
+                                queue_name=queue_name,
+                                queue_type=queue_type,
+                                messages_visible=messages_visible,
+                                monthly_cost=monthly_cost,
+                                scenarios_count=len(optimization_scenarios),
+                                is_orphan=is_orphan,
+                            )
+
+                        except Exception as e:
+                            logger.error(
+                                "sqs.queue_scan_failed",
+                                queue_url=queue_url,
+                                region=region,
+                                error=str(e),
+                            )
+                            continue
+
+        except Exception as e:
+            logger.error(
+                "sqs.scan_failed",
+                region=region,
+                error=str(e),
+            )
+
+        return resources

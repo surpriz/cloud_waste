@@ -167,6 +167,14 @@ class AWSProvider(CloudProviderBase):
         "dynamodb_storage_per_gb": 0.25,  # Per GB/month
         "dynamodb_ondemand_write_per_million": 1.25,  # Per 1M write requests
         "dynamodb_ondemand_read_per_million": 0.25,  # Per 1M read requests, then $0.00008 per GB-month
+        # ECR (Elastic Container Registry) pricing
+        "ecr_storage_per_gb": 0.10,  # $0.10 per GB/month
+        # SNS (Simple Notification Service) pricing
+        "sns_standard_per_million": 0.50,  # $0.50 per million publishes (after 1M free)
+        "sns_fifo_per_million": 0.60,  # $0.60 per million publishes (FIFO topics)
+        # SQS (Simple Queue Service) pricing
+        "sqs_standard_per_million": 0.40,  # $0.40 per million requests (after 1M free)
+        "sqs_fifo_per_million": 0.50,  # $0.50 per million requests (FIFO queues)
     }
 
     def __init__(

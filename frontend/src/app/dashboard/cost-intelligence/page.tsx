@@ -42,6 +42,7 @@ import {
   Bot,
   Brain,
   Key,
+  Bell,
 } from "lucide-react";
 import {
   PieChart as RechartsPie,
@@ -89,6 +90,9 @@ const resourceIcons: Record<ResourceType, any> = {
   transit_gateway_attachment: Network,
   global_accelerator: Network,
   documentdb_cluster: Database,
+  ecr_repository: Box,
+  sns_topic: Bell,
+  sqs_queue: Inbox,
   // Azure - Cost Intelligence (Inventory mode)
   azure_vm: Server,
   azure_managed_disk: HardDrive,

@@ -545,6 +545,33 @@ async def _scan_cloud_account_async(
                             documentdb_count=len(documentdb_resources),
                         )
 
+                        # Scan ECR Repositories (all)
+                        ecr_resources = await inventory_scanner.scan_ecr_repositories(region)
+                        all_inventory_resources.extend(ecr_resources)
+                        logger.info(
+                            "inventory.ecr_scanned",
+                            region=region,
+                            ecr_count=len(ecr_resources),
+                        )
+
+                        # Scan SNS Topics (all)
+                        sns_resources = await inventory_scanner.scan_sns_topics(region)
+                        all_inventory_resources.extend(sns_resources)
+                        logger.info(
+                            "inventory.sns_scanned",
+                            region=region,
+                            sns_count=len(sns_resources),
+                        )
+
+                        # Scan SQS Queues (all)
+                        sqs_resources = await inventory_scanner.scan_sqs_queues(region)
+                        all_inventory_resources.extend(sqs_resources)
+                        logger.info(
+                            "inventory.sqs_scanned",
+                            region=region,
+                            sqs_count=len(sqs_resources),
+                        )
+
                     # Scan S3 buckets (global, only once)
                     if regions_to_scan:
                         s3_resources = await inventory_scanner.scan_s3_buckets()

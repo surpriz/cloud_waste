@@ -25,6 +25,9 @@ import {
   Clock,
   FileText,
   Cpu,
+  Box,
+  Bell,
+  Inbox,
 } from "lucide-react";
 import type { ResourceStatus, ResourceType } from "@/types";
 import { ResourceChartsSection } from "@/components/dashboard/ResourceChartsSection";
@@ -52,6 +55,9 @@ const resourceIcons: Record<ResourceType, any> = {
   kinesis_stream: Server,
   vpc_endpoint: Network,
   documentdb_cluster: Database,
+  ecr_repository: Box,
+  sns_topic: Bell,
+  sqs_queue: Inbox,
   s3_bucket: HardDrive,
   lambda_function: Zap,
   dynamodb_table: Database,
