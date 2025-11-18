@@ -454,6 +454,33 @@ async def _scan_cloud_account_async(
                             log_group_count=len(log_group_resources),
                         )
 
+                        # Scan VPC Endpoints (all)
+                        vpc_endpoint_resources = await inventory_scanner.scan_vpc_endpoints(region)
+                        all_inventory_resources.extend(vpc_endpoint_resources)
+                        logger.info(
+                            "inventory.vpc_endpoints_scanned",
+                            region=region,
+                            vpc_endpoint_count=len(vpc_endpoint_resources),
+                        )
+
+                        # Scan Neptune Database Clusters (all)
+                        neptune_resources = await inventory_scanner.scan_neptune_clusters(region)
+                        all_inventory_resources.extend(neptune_resources)
+                        logger.info(
+                            "inventory.neptune_scanned",
+                            region=region,
+                            neptune_count=len(neptune_resources),
+                        )
+
+                        # Scan MSK (Kafka) Clusters (all)
+                        msk_resources = await inventory_scanner.scan_msk_clusters(region)
+                        all_inventory_resources.extend(msk_resources)
+                        logger.info(
+                            "inventory.msk_scanned",
+                            region=region,
+                            msk_count=len(msk_resources),
+                        )
+
                         # Scan RDS instances (all)
                         rds_resources = await inventory_scanner.scan_rds_instances(region)
                         all_inventory_resources.extend(rds_resources)
@@ -461,6 +488,33 @@ async def _scan_cloud_account_async(
                             "inventory.rds_scanned",
                             region=region,
                             rds_count=len(rds_resources),
+                        )
+
+                        # Scan SageMaker Endpoints (all)
+                        sagemaker_resources = await inventory_scanner.scan_sagemaker_endpoints(region)
+                        all_inventory_resources.extend(sagemaker_resources)
+                        logger.info(
+                            "inventory.sagemaker_scanned",
+                            region=region,
+                            sagemaker_count=len(sagemaker_resources),
+                        )
+
+                        # Scan Redshift Clusters (all)
+                        redshift_resources = await inventory_scanner.scan_redshift_clusters(region)
+                        all_inventory_resources.extend(redshift_resources)
+                        logger.info(
+                            "inventory.redshift_scanned",
+                            region=region,
+                            redshift_count=len(redshift_resources),
+                        )
+
+                        # Scan VPN Connections (all)
+                        vpn_resources = await inventory_scanner.scan_vpn_connections(region)
+                        all_inventory_resources.extend(vpn_resources)
+                        logger.info(
+                            "inventory.vpn_scanned",
+                            region=region,
+                            vpn_count=len(vpn_resources),
                         )
 
                     # Scan S3 buckets (global, only once)

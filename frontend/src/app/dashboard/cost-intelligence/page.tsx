@@ -80,6 +80,12 @@ const resourceIcons: Record<ResourceType, any> = {
   cloudfront_distribution: Globe,
   ecs_cluster: Server,
   cloudwatch_log_group: FileText,
+  vpc_endpoint: Network,
+  neptune_cluster: Database,
+  msk_cluster: Activity,
+  sagemaker_endpoint: Activity,
+  redshift_cluster: Database,
+  vpn_connection: Network,
   // Azure - Cost Intelligence (Inventory mode)
   azure_vm: Server,
   azure_managed_disk: HardDrive,

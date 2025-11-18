@@ -162,6 +162,9 @@ export type ResourceType =
   | "cloudfront_distribution"
   | "ecs_cluster"
   | "cloudwatch_log_group"
+  | "vpc_endpoint"
+  | "neptune_cluster"
+  | "msk_cluster"
   // Azure Resources
   | "managed_disk_unattached"
   | "public_ip_unassociated"

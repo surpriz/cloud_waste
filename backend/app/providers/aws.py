@@ -77,8 +77,17 @@ class AWSProvider(CloudProviderBase):
         "eks_r5_large": 91.98,  # r5.large node (~$0.126/hour * 730)
         "sagemaker_ml_m5_large": 0.115,  # SageMaker ml.m5.large (per hour) = ~$83/month
         "sagemaker_ml_m5_xlarge": 0.23,  # SageMaker ml.m5.xlarge = ~$165/month
+        # SageMaker pricing (additional instance types)
+        "sagemaker_ml_m5_2xlarge": 0.46,  # ml.m5.2xlarge (8 vCPU, 32 GB RAM) = ~$335/month
+        "sagemaker_ml_m5_4xlarge": 0.92,  # ml.m5.4xlarge (16 vCPU, 64 GB RAM) = ~$671/month
+        "sagemaker_ml_t3_medium": 0.056,  # ml.t3.medium (2 vCPU, 4 GB RAM, dev/test) = ~$40/month
         "redshift_dc2_large": 0.25,  # Redshift dc2.large (per hour) = ~$180/month
         "redshift_dc2_xlarge": 1.00,  # Redshift dc2.xlarge = ~$720/month
+        # Redshift pricing (additional node types)
+        "redshift_dc2_8xlarge": 4.80,  # dc2.8xlarge (32 vCPU, 244 GB RAM) = ~$3,504/month
+        "redshift_ra3_xlplus": 1.086,  # ra3.xlplus (4 vCPU, 32 GB RAM, managed storage) = ~$793/month
+        "redshift_ra3_4xlarge": 3.26,  # ra3.4xlarge (12 vCPU, 96 GB RAM, managed storage) = ~$2,380/month
+        "redshift_storage_per_gb": 0.024,  # Managed storage for RA3 nodes ($0.024 per GB-month)
         # ElastiCache pricing (us-east-1) - Extended node types
         "elasticache_t3_micro": 0.017,      # cache.t3.micro = ~$12/month
         "elasticache_t3_small": 0.034,      # cache.t3.small = ~$24/month
@@ -124,6 +133,17 @@ class AWSProvider(CloudProviderBase):
         "cloudwatch_logs_insights_per_gb": 0.005,     # CloudWatch Insights queries ($0.005 per GB scanned)
         "cloudwatch_logs_archival_per_gb": 0.03,      # S3 archival export ($0.03 per GB)
         # Note: Vended Logs (VPC Flow, Lambda, RDS, etc.) have FREE ingestion
+        # Neptune Database pricing (additional instance types)
+        "neptune_db_r5_2xlarge": 1.392,      # Neptune db.r5.2xlarge (per hour) = ~$1000/month
+        "neptune_db_r5_4xlarge": 2.784,      # Neptune db.r5.4xlarge = ~$2000/month
+        "neptune_storage_per_gb": 0.10,      # Neptune storage $0.10/GB/month
+        "neptune_io_per_million": 0.20,      # I/O requests $0.20 per 1M requests
+        "neptune_backup_storage_per_gb": 0.021,  # Backup storage $0.021/GB/month
+        # MSK (Managed Kafka) pricing (additional instance types)
+        "msk_kafka_m5_2xlarge": 0.84,       # MSK kafka.m5.2xlarge (per broker/hour) = ~$600/month
+        "msk_kafka_m5_4xlarge": 1.68,       # MSK kafka.m5.4xlarge = ~$1200/month
+        "msk_storage_per_gb": 0.10,         # EBS storage $0.10/GB/month per broker
+        "msk_data_transfer_per_gb": 0.01,   # Cross-AZ data transfer $0.01/GB
         "global_accelerator": 18.00,  # Global Accelerator (base cost)
         "kinesis_shard": 10.80,  # Kinesis shard ($0.015/hour * 730 hours)
         "kinesis_retention_extended_per_gb": 0.020,  # Extended retention (25-168h)

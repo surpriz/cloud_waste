@@ -42,7 +42,7 @@ const resourceIcons: Record<ResourceType, any> = {
   neptune_cluster: Database,
   msk_cluster: Server,
   eks_cluster: Server,
-  sagemaker_endpoint: Server,
+  sagemaker_endpoint: Activity,
   redshift_cluster: Database,
   elasticache_cluster: Database,
   vpn_connection: Network,
@@ -59,6 +59,9 @@ const resourceIcons: Record<ResourceType, any> = {
   cloudfront_distribution: Network,
   ecs_cluster: Server,
   cloudwatch_log_group: FileText,
+  vpc_endpoint: Network,
+  neptune_cluster: Database,
+  msk_cluster: Activity,
   // Azure Resources
   managed_disk_unattached: HardDrive,
   public_ip_unassociated: Wifi,
