@@ -28408,3 +28408,1435 @@ class AzureInventoryScanner:
             )
 
         return resources
+
+    # ============================================================
+    # RESSOURCE 27 : TRANSIT GATEWAY ATTACHMENT
+    # ============================================================
+
+    def _calculate_transit_gateway_monthly_cost(
+        self,
+        region: str,
+    ) -> float:
+        """
+        Calculate estimated monthly cost for AWS Transit Gateway Attachment.
+
+        Transit Gateway Attachments connect VPCs, VPNs, and on-premises networks
+        to a central Transit Gateway for simplified network topology.
+
+        Cost Components:
+        1. Attachment cost ($36/month flat rate per attachment)
+        2. Data processing cost (not included - varies by usage)
+
+        Args:
+            region: AWS region
+
+        Returns:
+            Estimated monthly cost in USD (flat rate)
+
+        Example:
+            Single TGW Attachment:
+            - Attachment: $36/month (flat rate)
+        """
+        # Transit Gateway Attachment is a flat rate ($36/month)
+        tgw_attachment_cost = self.PRICING.get("transit_gateway_attachment", 36.00)
+
+        return round(tgw_attachment_cost, 2)
+
+    def _calculate_transit_gateway_optimization(
+        self,
+        attachment_id: str,
+        total_bytes_in_30d: float,
+        total_bytes_out_30d: float,
+        packet_drop_blackhole: float,
+        attachment_state: str,
+        resource_type: str,
+        tags: dict,
+        region: str,
+    ) -> list[OptimizationScenario]:
+        """
+        Calculate optimization scenarios for AWS Transit Gateway Attachment.
+
+        Transit Gateway Attachment Optimization Scenarios:
+        1. Zero Data Transfer (CRITICAL) - No data transfer for 30+ days → Delete attachment
+        2. Very Low Data Transfer (HIGH) - <100 MB/month → Delete or consolidate
+        3. Blackhole Packet Drops (MEDIUM) - Route invalid → Fix routing tables
+        4. Duplicate Attachment (MEDIUM) - Same VPC + TGW → Remove duplicates
+        5. Dev/Test Attachment (LOW) - Dev/test attachment always on → Delete when not needed
+
+        Args:
+            attachment_id: Transit Gateway Attachment ID
+            total_bytes_in_30d: Total incoming bytes over 30 days
+            total_bytes_out_30d: Total outgoing bytes over 30 days
+            packet_drop_blackhole: Packet drops due to blackhole routes over 7 days
+            attachment_state: Attachment state (available, deleted, etc.)
+            resource_type: Attachment resource type (vpc, vpn, etc.)
+            tags: Resource tags
+            region: AWS region
+
+        Returns:
+            List of optimization scenarios with priority, estimated savings, and recommendations
+        """
+        scenarios = []
+
+        # Current cost (flat rate)
+        current_cost = self._calculate_transit_gateway_monthly_cost(region=region)
+
+        # Detect environment from tags
+        env = tags.get("Environment", tags.get("environment", "")).lower()
+        is_production = env in ["production", "prod", "prd"]
+
+        # Calculate total data transfer
+        total_bytes_transferred = total_bytes_in_30d + total_bytes_out_30d
+        total_mb_transferred = total_bytes_transferred / (1024 ** 2)
+
+        # =============================================
+        # SCENARIO 1: Zero Data Transfer (CRITICAL)
+        # =============================================
+        if total_bytes_transferred == 0 and attachment_state == "available":
+            # No data transfer for 30+ days → Delete attachment
+            potential_savings = current_cost
+            scenarios.append(
+                OptimizationScenario(
+                    scenario_name="tgw_zero_data_transfer",
+                    priority="CRITICAL",
+                    estimated_monthly_savings=potential_savings,
+                    current_monthly_cost=current_cost,
+                    optimized_monthly_cost=0.0,
+                    confidence_level="high",
+                    description=(
+                        f"Transit Gateway Attachment '{attachment_id}' has zero data transfer "
+                        f"over the last 30 days. This attachment is completely idle and should be deleted."
+                    ),
+                    recommendation=(
+                        "Delete this Transit Gateway Attachment to eliminate costs:\n"
+                        "1. Verify no critical traffic is routed through this attachment\n"
+                        "2. aws ec2 delete-transit-gateway-attachment --transit-gateway-attachment-id "
+                        f"{attachment_id} --region {region}\n"
+                        "3. Update route tables if necessary\n\n"
+                        f"💰 Monthly Savings: ${potential_savings:.2f}"
+                    ),
+                    optimization_score=95,
+                )
+            )
+
+        # =============================================
+        # SCENARIO 2: Very Low Data Transfer (HIGH)
+        # =============================================
+        elif 0 < total_mb_transferred < 100 and attachment_state == "available":
+            # <100 MB/month → Delete or consolidate
+            potential_savings = current_cost
+            scenarios.append(
+                OptimizationScenario(
+                    scenario_name="tgw_low_data_transfer",
+                    priority="HIGH",
+                    estimated_monthly_savings=potential_savings,
+                    current_monthly_cost=current_cost,
+                    optimized_monthly_cost=0.0,
+                    confidence_level="high",
+                    description=(
+                        f"Transit Gateway Attachment '{attachment_id}' has very low data transfer "
+                        f"({total_mb_transferred:.2f} MB over 30 days). Consider consolidating traffic "
+                        f"through other attachments or deleting if not critical."
+                    ),
+                    recommendation=(
+                        "Delete or consolidate this Transit Gateway Attachment:\n"
+                        f"1. Current data transfer: {total_mb_transferred:.2f} MB/month\n"
+                        "2. Consider consolidating traffic through other attachments\n"
+                        "3. If not critical, delete to save costs\n"
+                        "4. aws ec2 delete-transit-gateway-attachment --transit-gateway-attachment-id "
+                        f"{attachment_id} --region {region}\n\n"
+                        f"💰 Monthly Savings: ${potential_savings:.2f}"
+                    ),
+                    optimization_score=85,
+                )
+            )
+
+        # =============================================
+        # SCENARIO 3: Blackhole Packet Drops (MEDIUM)
+        # =============================================
+        if packet_drop_blackhole > 1000:
+            # Route invalid → Fix routing tables
+            potential_savings = 0.0  # Opportunity cost
+            scenarios.append(
+                OptimizationScenario(
+                    scenario_name="tgw_blackhole_packet_drops",
+                    priority="MEDIUM",
+                    estimated_monthly_savings=potential_savings,
+                    current_monthly_cost=current_cost,
+                    optimized_monthly_cost=current_cost,
+                    confidence_level="high",
+                    description=(
+                        f"Transit Gateway Attachment '{attachment_id}' has {int(packet_drop_blackhole)} "
+                        f"blackhole packet drops over 7 days. This indicates invalid routing configuration. "
+                        f"The attachment is configured but not functioning properly."
+                    ),
+                    recommendation=(
+                        "Fix routing configuration for this Transit Gateway Attachment:\n"
+                        f"1. Blackhole packet drops: {int(packet_drop_blackhole)} (last 7 days)\n"
+                        "2. Check Transit Gateway route tables: aws ec2 describe-transit-gateway-route-tables\n"
+                        "3. Verify VPC/VPN route tables for valid routes\n"
+                        "4. Fix routes or delete attachment if not needed\n\n"
+                        "⚠️ No direct cost savings, but improves network reliability"
+                    ),
+                    optimization_score=70,
+                )
+            )
+
+        # =============================================
+        # SCENARIO 4: Duplicate Attachment (MEDIUM)
+        # =============================================
+        # Note: This scenario requires cross-attachment analysis, which is complex.
+        # For simplicity, we'll check if there are tags indicating duplication.
+        duplicate_tag = tags.get("Duplicate", tags.get("duplicate", "")).lower()
+        if duplicate_tag in ["true", "yes", "1"]:
+            # Same VPC + TGW → Remove duplicates
+            potential_savings = current_cost
+            scenarios.append(
+                OptimizationScenario(
+                    scenario_name="tgw_duplicate_attachment",
+                    priority="MEDIUM",
+                    estimated_monthly_savings=potential_savings,
+                    current_monthly_cost=current_cost,
+                    optimized_monthly_cost=0.0,
+                    confidence_level="medium",
+                    description=(
+                        f"Transit Gateway Attachment '{attachment_id}' appears to be a duplicate "
+                        f"(based on tags). Multiple attachments for the same VPC/Transit Gateway "
+                        f"can be consolidated."
+                    ),
+                    recommendation=(
+                        "Remove duplicate Transit Gateway Attachment:\n"
+                        "1. List all attachments: aws ec2 describe-transit-gateway-attachments\n"
+                        "2. Identify duplicate attachments for same VPC/TGW\n"
+                        "3. Delete duplicate: aws ec2 delete-transit-gateway-attachment "
+                        f"--transit-gateway-attachment-id {attachment_id} --region {region}\n\n"
+                        f"💰 Monthly Savings: ${potential_savings:.2f}"
+                    ),
+                    optimization_score=65,
+                )
+            )
+
+        # =============================================
+        # SCENARIO 5: Dev/Test Attachment (LOW)
+        # =============================================
+        if not is_production and env in ["dev", "test", "staging", "development"]:
+            # Dev/test attachment always on → Delete when not needed
+            potential_savings = current_cost
+            scenarios.append(
+                OptimizationScenario(
+                    scenario_name="tgw_dev_test_always_on",
+                    priority="LOW",
+                    estimated_monthly_savings=potential_savings,
+                    current_monthly_cost=current_cost,
+                    optimized_monthly_cost=0.0,
+                    confidence_level="medium",
+                    description=(
+                        f"Transit Gateway Attachment '{attachment_id}' is tagged as '{env}' environment "
+                        f"but remains always on. Dev/test attachments should be deleted when not in use."
+                    ),
+                    recommendation=(
+                        "Delete dev/test Transit Gateway Attachment when not needed:\n"
+                        f"1. Environment: {env}\n"
+                        "2. Delete during off-hours or non-testing periods\n"
+                        "3. Recreate when needed (IaC: Terraform/CloudFormation)\n"
+                        "4. aws ec2 delete-transit-gateway-attachment --transit-gateway-attachment-id "
+                        f"{attachment_id} --region {region}\n\n"
+                        f"💰 Monthly Savings: ${potential_savings:.2f}"
+                    ),
+                    optimization_score=50,
+                )
+            )
+
+        return scenarios
+
+    async def scan_transit_gateway_attachments(
+        self, region: str
+    ) -> list[AllCloudResourceData]:
+        """
+        Scan ALL AWS Transit Gateway Attachments for cost intelligence.
+
+        Transit Gateway Attachments connect VPCs, VPNs, Direct Connect gateways,
+        and peering connections to a central Transit Gateway hub.
+
+        CloudWatch Metrics Used:
+        - BytesIn (AWS/TransitGateway) - Incoming bytes over 30 days
+        - BytesOut (AWS/TransitGateway) - Outgoing bytes over 30 days
+        - PacketDropCountBlackhole (AWS/TransitGateway) - Packet drops due to invalid routes
+
+        Cost Optimization Scenarios:
+        1. Zero Data Transfer (CRITICAL) - No data transfer for 30+ days → Delete
+        2. Very Low Data Transfer (HIGH) - <100 MB/month → Delete or consolidate
+        3. Blackhole Packet Drops (MEDIUM) - Route invalid → Fix routing tables
+        4. Duplicate Attachment (MEDIUM) - Same VPC + TGW → Remove duplicates
+        5. Dev/Test Attachment (LOW) - Dev/test attachment always on → Delete when not needed
+
+        Args:
+            region: AWS region to scan
+
+        Returns:
+            List of all Transit Gateway Attachments with optimization recommendations
+        """
+        import structlog
+
+        logger = structlog.get_logger()
+        resources = []
+
+        try:
+            async with self.provider.session.client("ec2", region_name=region) as ec2:
+                async with self.provider.session.client(
+                    "cloudwatch", region_name=region
+                ) as cw:
+                    # Describe all Transit Gateway attachments
+                    response = await ec2.describe_transit_gateway_attachments()
+
+                    for attachment in response.get("TransitGatewayAttachments", []):
+                        try:
+                            attachment_id = attachment["TransitGatewayAttachmentId"]
+                            attachment_state = attachment.get("State", "unknown")
+                            resource_type = attachment.get("ResourceType", "unknown")
+
+                            # Skip deleted/deleting/failed attachments
+                            if attachment_state in ["deleted", "deleting", "failed"]:
+                                continue
+
+                            # Extract tags
+                            tags = {}
+                            for tag in attachment.get("Tags", []):
+                                tags[tag["Key"]] = tag["Value"]
+
+                            # ====================================
+                            # CLOUDWATCH METRICS (30-day lookback)
+                            # ====================================
+                            now = datetime.now(timezone.utc)
+                            start_time = now - timedelta(days=30)
+
+                            # BytesIn metric (30 days)
+                            bytes_in_response = await cw.get_metric_statistics(
+                                Namespace="AWS/TransitGateway",
+                                MetricName="BytesIn",
+                                Dimensions=[
+                                    {
+                                        "Name": "TransitGatewayAttachment",
+                                        "Value": attachment_id,
+                                    },
+                                ],
+                                StartTime=start_time,
+                                EndTime=now,
+                                Period=86400,  # 1 day
+                                Statistics=["Sum"],
+                            )
+                            total_bytes_in_30d = sum(
+                                dp["Sum"]
+                                for dp in bytes_in_response.get("Datapoints", [])
+                            )
+
+                            # BytesOut metric (30 days)
+                            bytes_out_response = await cw.get_metric_statistics(
+                                Namespace="AWS/TransitGateway",
+                                MetricName="BytesOut",
+                                Dimensions=[
+                                    {
+                                        "Name": "TransitGatewayAttachment",
+                                        "Value": attachment_id,
+                                    },
+                                ],
+                                StartTime=start_time,
+                                EndTime=now,
+                                Period=86400,  # 1 day
+                                Statistics=["Sum"],
+                            )
+                            total_bytes_out_30d = sum(
+                                dp["Sum"]
+                                for dp in bytes_out_response.get("Datapoints", [])
+                            )
+
+                            # PacketDropCountBlackhole metric (7 days)
+                            start_time_7d = now - timedelta(days=7)
+                            blackhole_response = await cw.get_metric_statistics(
+                                Namespace="AWS/TransitGateway",
+                                MetricName="PacketDropCountBlackhole",
+                                Dimensions=[
+                                    {
+                                        "Name": "TransitGatewayAttachment",
+                                        "Value": attachment_id,
+                                    },
+                                ],
+                                StartTime=start_time_7d,
+                                EndTime=now,
+                                Period=3600,  # 1 hour
+                                Statistics=["Sum"],
+                            )
+                            packet_drop_blackhole = sum(
+                                dp["Sum"]
+                                for dp in blackhole_response.get("Datapoints", [])
+                            )
+
+                            # ====================================
+                            # COST CALCULATION
+                            # ====================================
+                            monthly_cost = self._calculate_transit_gateway_monthly_cost(
+                                region=region
+                            )
+
+                            # ====================================
+                            # OPTIMIZATION SCENARIOS
+                            # ====================================
+                            optimization_scenarios = (
+                                self._calculate_transit_gateway_optimization(
+                                    attachment_id=attachment_id,
+                                    total_bytes_in_30d=total_bytes_in_30d,
+                                    total_bytes_out_30d=total_bytes_out_30d,
+                                    packet_drop_blackhole=packet_drop_blackhole,
+                                    attachment_state=attachment_state,
+                                    resource_type=resource_type,
+                                    tags=tags,
+                                    region=region,
+                                )
+                            )
+
+                            # ====================================
+                            # ORPHAN DETECTION
+                            # ====================================
+                            total_bytes_transferred = (
+                                total_bytes_in_30d + total_bytes_out_30d
+                            )
+                            is_orphan = (
+                                total_bytes_transferred == 0
+                                and attachment_state == "available"
+                            )
+
+                            # ====================================
+                            # CREATE RESOURCE DATA
+                            # ====================================
+                            resource = AllCloudResourceData(
+                                resource_type="transit_gateway_attachment",
+                                resource_id=attachment_id,
+                                resource_name=tags.get("Name", attachment_id),
+                                region=region,
+                                estimated_monthly_cost=monthly_cost,
+                                currency="USD",
+                                resource_metadata={
+                                    "attachment_id": attachment_id,
+                                    "attachment_state": attachment_state,
+                                    "resource_type": resource_type,
+                                    "transit_gateway_id": attachment.get(
+                                        "TransitGatewayId", "unknown"
+                                    ),
+                                    "resource_id": attachment.get(
+                                        "ResourceId", "unknown"
+                                    ),
+                                    "resource_owner_id": attachment.get(
+                                        "ResourceOwnerId", "unknown"
+                                    ),
+                                    "total_bytes_in_30d": int(total_bytes_in_30d),
+                                    "total_bytes_out_30d": int(total_bytes_out_30d),
+                                    "total_mb_transferred_30d": round(
+                                        (total_bytes_in_30d + total_bytes_out_30d)
+                                        / (1024**2),
+                                        2,
+                                    ),
+                                    "packet_drop_blackhole_7d": int(
+                                        packet_drop_blackhole
+                                    ),
+                                    "tags": tags,
+                                },
+                                optimization_scenarios=optimization_scenarios,
+                                is_orphan=is_orphan,
+                                created_at_cloud=attachment.get("CreationTime"),
+                            )
+
+                            resources.append(resource)
+
+                            logger.debug(
+                                "tgw.attachment_scanned",
+                                attachment_id=attachment_id,
+                                attachment_state=attachment_state,
+                                monthly_cost=monthly_cost,
+                                total_mb_transferred_30d=round(
+                                    (total_bytes_in_30d + total_bytes_out_30d)
+                                    / (1024**2),
+                                    2,
+                                ),
+                                scenarios_count=len(optimization_scenarios),
+                                is_orphan=is_orphan,
+                            )
+
+                        except Exception as e:
+                            logger.error(
+                                "tgw.attachment_scan_failed",
+                                attachment_id=attachment.get(
+                                    "TransitGatewayAttachmentId", "unknown"
+                                ),
+                                region=region,
+                                error=str(e),
+                            )
+                            continue
+
+        except Exception as e:
+            logger.error(
+                "tgw.scan_failed",
+                region=region,
+                error=str(e),
+            )
+
+        return resources
+
+    # ============================================================
+    # RESSOURCE 28 : GLOBAL ACCELERATOR (CDN)
+    # ============================================================
+
+    def _calculate_global_accelerator_monthly_cost(
+        self,
+        region: str = "global",
+    ) -> float:
+        """
+        Calculate estimated monthly cost for AWS Global Accelerator.
+
+        Global Accelerator improves application availability and performance by routing traffic
+        through the AWS global network to optimal endpoints.
+
+        Cost Components:
+        1. Fixed fee ($18/month per accelerator)
+        2. Data transfer cost (not included - $0.025/GB varies by usage)
+
+        Args:
+            region: AWS region (always "global" for Global Accelerator)
+
+        Returns:
+            Estimated monthly cost in USD (fixed fee only)
+
+        Example:
+            Single Global Accelerator:
+            - Fixed fee: $18/month
+            - Data transfer: Variable (not included in base cost)
+        """
+        # Global Accelerator fixed fee ($18/month)
+        ga_cost = self.PRICING.get("global_accelerator", 18.00)
+
+        return round(ga_cost, 2)
+
+    def _calculate_global_accelerator_optimization(
+        self,
+        accelerator_arn: str,
+        accelerator_name: str,
+        endpoint_count: int,
+        total_bytes_in_30d: float,
+        active_flow_count_7d: float,
+        enabled: bool,
+        tags: dict,
+        region: str = "global",
+    ) -> list[OptimizationScenario]:
+        """
+        Calculate optimization scenarios for AWS Global Accelerator.
+
+        Global Accelerator Optimization Scenarios:
+        1. Zero Endpoints Configured (CRITICAL) - No endpoints → Delete accelerator
+        2. Zero Traffic (HIGH) - No traffic for 30+ days → Delete accelerator
+        3. Very Low Traffic (MEDIUM) - <1 GB/month → Use CloudFront instead
+        4. No Active Flows (MEDIUM) - No active connections for 7+ days → Delete
+        5. Disabled Accelerator (LOW) - Accelerator disabled but still charged → Delete
+
+        Args:
+            accelerator_arn: Global Accelerator ARN
+            accelerator_name: Accelerator name
+            endpoint_count: Number of endpoints configured
+            total_bytes_in_30d: Total processed bytes over 30 days
+            active_flow_count_7d: Active flow count over 7 days
+            enabled: Whether accelerator is enabled
+            tags: Resource tags
+            region: AWS region (always "global")
+
+        Returns:
+            List of optimization scenarios with priority, estimated savings, and recommendations
+        """
+        scenarios = []
+
+        # Current cost (fixed fee only, data transfer not included)
+        current_cost = self._calculate_global_accelerator_monthly_cost(region=region)
+
+        # Detect environment from tags
+        env = tags.get("Environment", tags.get("environment", "")).lower()
+        is_production = env in ["production", "prod", "prd"]
+
+        # Calculate data transfer in GB
+        total_gb_transferred = total_bytes_in_30d / (1024**3)
+
+        # =============================================
+        # SCENARIO 1: Zero Endpoints Configured (CRITICAL)
+        # =============================================
+        if endpoint_count == 0:
+            # No endpoints → Delete accelerator
+            potential_savings = current_cost
+            scenarios.append(
+                OptimizationScenario(
+                    scenario_name="ga_zero_endpoints",
+                    priority="CRITICAL",
+                    estimated_monthly_savings=potential_savings,
+                    current_monthly_cost=current_cost,
+                    optimized_monthly_cost=0.0,
+                    confidence_level="high",
+                    description=(
+                        f"Global Accelerator '{accelerator_name}' has zero endpoints configured. "
+                        f"Without endpoints, the accelerator serves no purpose and should be deleted."
+                    ),
+                    recommendation=(
+                        "Delete Global Accelerator with no endpoints:\n"
+                        "1. Verify no endpoints are configured: aws globalaccelerator list-accelerators\n"
+                        f"2. Delete accelerator: aws globalaccelerator delete-accelerator --accelerator-arn {accelerator_arn}\n"
+                        "3. Wait for deletion to complete (can take a few minutes)\n\n"
+                        f"💰 Monthly Savings: ${potential_savings:.2f}"
+                    ),
+                    optimization_score=95,
+                )
+            )
+
+        # =============================================
+        # SCENARIO 2: Zero Traffic (HIGH)
+        # =============================================
+        elif total_bytes_in_30d == 0 and endpoint_count > 0:
+            # No traffic for 30+ days → Delete accelerator
+            potential_savings = current_cost
+            scenarios.append(
+                OptimizationScenario(
+                    scenario_name="ga_zero_traffic",
+                    priority="HIGH",
+                    estimated_monthly_savings=potential_savings,
+                    current_monthly_cost=current_cost,
+                    optimized_monthly_cost=0.0,
+                    confidence_level="high",
+                    description=(
+                        f"Global Accelerator '{accelerator_name}' has {endpoint_count} endpoint(s) "
+                        f"but zero traffic over the last 30 days. The accelerator is not being used."
+                    ),
+                    recommendation=(
+                        "Delete Global Accelerator with zero traffic:\n"
+                        "1. Verify no traffic: Check CloudWatch ProcessedBytesIn metric\n"
+                        f"2. Delete accelerator: aws globalaccelerator delete-accelerator --accelerator-arn {accelerator_arn}\n"
+                        "3. Remove DNS records pointing to accelerator\n\n"
+                        f"💰 Monthly Savings: ${potential_savings:.2f}"
+                    ),
+                    optimization_score=85,
+                )
+            )
+
+        # =============================================
+        # SCENARIO 3: Very Low Traffic (MEDIUM)
+        # =============================================
+        elif 0 < total_gb_transferred < 1:
+            # <1 GB/month → Use CloudFront instead
+            potential_savings = current_cost  # CloudFront has no fixed fee
+            scenarios.append(
+                OptimizationScenario(
+                    scenario_name="ga_low_traffic",
+                    priority="MEDIUM",
+                    estimated_monthly_savings=potential_savings,
+                    current_monthly_cost=current_cost,
+                    optimized_monthly_cost=0.0,
+                    confidence_level="medium",
+                    description=(
+                        f"Global Accelerator '{accelerator_name}' has very low traffic "
+                        f"({total_gb_transferred:.2f} GB over 30 days). For low traffic volumes, "
+                        f"CloudFront is more cost-effective (no fixed fee, $0.085/GB)."
+                    ),
+                    recommendation=(
+                        "Migrate from Global Accelerator to CloudFront for low traffic:\n"
+                        f"1. Current traffic: {total_gb_transferred:.2f} GB/month\n"
+                        f"2. Global Accelerator cost: ${current_cost}/month + ${total_gb_transferred * 0.025:.2f} (data transfer)\n"
+                        f"3. CloudFront cost: ${total_gb_transferred * 0.085:.2f} (no fixed fee)\n"
+                        "4. Migrate to CloudFront distribution\n"
+                        f"5. Delete accelerator: aws globalaccelerator delete-accelerator --accelerator-arn {accelerator_arn}\n\n"
+                        f"💰 Monthly Savings: ${potential_savings:.2f} (fixed fee)"
+                    ),
+                    optimization_score=70,
+                )
+            )
+
+        # =============================================
+        # SCENARIO 4: No Active Flows (MEDIUM)
+        # =============================================
+        if active_flow_count_7d == 0 and endpoint_count > 0:
+            # No active connections for 7+ days → Delete
+            potential_savings = current_cost
+            scenarios.append(
+                OptimizationScenario(
+                    scenario_name="ga_no_active_flows",
+                    priority="MEDIUM",
+                    estimated_monthly_savings=potential_savings,
+                    current_monthly_cost=current_cost,
+                    optimized_monthly_cost=0.0,
+                    confidence_level="high",
+                    description=(
+                        f"Global Accelerator '{accelerator_name}' has no active flows over the last 7 days. "
+                        f"No clients are actively using the accelerator."
+                    ),
+                    recommendation=(
+                        "Delete Global Accelerator with no active connections:\n"
+                        "1. Verify no active flows: Check CloudWatch ActiveFlowCount metric\n"
+                        f"2. Delete accelerator: aws globalaccelerator delete-accelerator --accelerator-arn {accelerator_arn}\n"
+                        "3. Update DNS records if necessary\n\n"
+                        f"💰 Monthly Savings: ${potential_savings:.2f}"
+                    ),
+                    optimization_score=65,
+                )
+            )
+
+        # =============================================
+        # SCENARIO 5: Disabled Accelerator (LOW)
+        # =============================================
+        if not enabled:
+            # Accelerator disabled but still charged → Delete
+            potential_savings = current_cost
+            scenarios.append(
+                OptimizationScenario(
+                    scenario_name="ga_disabled_accelerator",
+                    priority="LOW",
+                    estimated_monthly_savings=potential_savings,
+                    current_monthly_cost=current_cost,
+                    optimized_monthly_cost=0.0,
+                    confidence_level="high",
+                    description=(
+                        f"Global Accelerator '{accelerator_name}' is disabled but still incurs charges "
+                        f"(${current_cost}/month). Disabled accelerators should be deleted, not just disabled."
+                    ),
+                    recommendation=(
+                        "Delete disabled Global Accelerator (still charged):\n"
+                        "1. Accelerator is disabled but still costs money\n"
+                        f"2. Delete accelerator: aws globalaccelerator delete-accelerator --accelerator-arn {accelerator_arn}\n"
+                        "3. Recreate when needed if necessary\n\n"
+                        f"💰 Monthly Savings: ${potential_savings:.2f}"
+                    ),
+                    optimization_score=50,
+                )
+            )
+
+        return scenarios
+
+    async def scan_global_accelerators(
+        self, region: str
+    ) -> list[AllCloudResourceData]:
+        """
+        Scan ALL AWS Global Accelerators for cost intelligence.
+
+        Global Accelerator is a global service that improves application availability
+        and performance by routing traffic through AWS's global network.
+
+        IMPORTANT: Global Accelerator is a global service. This scan should only
+        be run in us-west-2 region to avoid duplicate results.
+
+        CloudWatch Metrics Used:
+        - ProcessedBytesIn (AWS/GlobalAccelerator) - Incoming bytes over 30 days
+        - ActiveFlowCount (AWS/GlobalAccelerator) - Active connections over 7 days
+
+        Cost Optimization Scenarios:
+        1. Zero Endpoints Configured (CRITICAL) - No endpoints → Delete accelerator
+        2. Zero Traffic (HIGH) - No traffic for 30+ days → Delete accelerator
+        3. Very Low Traffic (MEDIUM) - <1 GB/month → Use CloudFront instead
+        4. No Active Flows (MEDIUM) - No active connections for 7+ days → Delete
+        5. Disabled Accelerator (LOW) - Accelerator disabled but still charged → Delete
+
+        Args:
+            region: AWS region to scan (must be us-west-2 for Global Accelerator)
+
+        Returns:
+            List of all Global Accelerators with optimization recommendations
+        """
+        import structlog
+
+        logger = structlog.get_logger()
+        resources = []
+
+        # Global Accelerator is a global service, only check in us-west-2
+        if region != "us-west-2":
+            logger.debug("ga.skip_region", region=region, reason="Global Accelerator is only scanned in us-west-2")
+            return resources
+
+        try:
+            async with self.provider.session.client(
+                "globalaccelerator", region_name="us-west-2"
+            ) as ga:
+                async with self.provider.session.client(
+                    "cloudwatch", region_name="us-west-2"
+                ) as cw:
+                    # List all Global Accelerators
+                    response = await ga.list_accelerators()
+
+                    for accelerator in response.get("Accelerators", []):
+                        try:
+                            accelerator_arn = accelerator["AcceleratorArn"]
+                            accelerator_name = accelerator.get(
+                                "Name", accelerator_arn.split("/")[-1]
+                            )
+                            enabled = accelerator.get("Enabled", False)
+                            status = accelerator.get("Status", "unknown")
+
+                            # Skip deleted accelerators
+                            if status == "IN_PROGRESS":
+                                continue
+
+                            # Count endpoints
+                            endpoint_count = 0
+                            try:
+                                listeners_response = await ga.list_listeners(
+                                    AcceleratorArn=accelerator_arn
+                                )
+                                for listener in listeners_response.get("Listeners", []):
+                                    listener_arn = listener["ListenerArn"]
+                                    endpoint_groups = await ga.list_endpoint_groups(
+                                        ListenerArn=listener_arn
+                                    )
+                                    for eg in endpoint_groups.get("EndpointGroups", []):
+                                        endpoint_count += len(
+                                            eg.get("EndpointDescriptions", [])
+                                        )
+                            except Exception as e:
+                                logger.warning(
+                                    "ga.endpoint_count_failed",
+                                    accelerator_arn=accelerator_arn,
+                                    error=str(e),
+                                )
+
+                            # Extract tags
+                            tags = {}
+                            try:
+                                tags_response = await ga.list_tags_for_resource(
+                                    ResourceArn=accelerator_arn
+                                )
+                                for tag in tags_response.get("Tags", []):
+                                    tags[tag["Key"]] = tag["Value"]
+                            except Exception as e:
+                                logger.warning(
+                                    "ga.tags_failed",
+                                    accelerator_arn=accelerator_arn,
+                                    error=str(e),
+                                )
+
+                            # ====================================
+                            # CLOUDWATCH METRICS
+                            # ====================================
+                            now = datetime.now(timezone.utc)
+
+                            # ProcessedBytesIn metric (30 days)
+                            start_time_30d = now - timedelta(days=30)
+                            try:
+                                bytes_in_response = await cw.get_metric_statistics(
+                                    Namespace="AWS/GlobalAccelerator",
+                                    MetricName="ProcessedBytesIn",
+                                    Dimensions=[
+                                        {"Name": "Accelerator", "Value": accelerator_arn},
+                                    ],
+                                    StartTime=start_time_30d,
+                                    EndTime=now,
+                                    Period=86400,  # 1 day
+                                    Statistics=["Sum"],
+                                )
+                                total_bytes_in_30d = sum(
+                                    dp["Sum"]
+                                    for dp in bytes_in_response.get("Datapoints", [])
+                                )
+                            except Exception as e:
+                                logger.warning(
+                                    "ga.bytes_in_metric_failed",
+                                    accelerator_arn=accelerator_arn,
+                                    error=str(e),
+                                )
+                                total_bytes_in_30d = 0
+
+                            # ActiveFlowCount metric (7 days)
+                            start_time_7d = now - timedelta(days=7)
+                            try:
+                                flow_count_response = await cw.get_metric_statistics(
+                                    Namespace="AWS/GlobalAccelerator",
+                                    MetricName="ActiveFlowCount",
+                                    Dimensions=[
+                                        {"Name": "Accelerator", "Value": accelerator_arn},
+                                    ],
+                                    StartTime=start_time_7d,
+                                    EndTime=now,
+                                    Period=3600,  # 1 hour
+                                    Statistics=["Average"],
+                                )
+                                active_flow_count_7d = sum(
+                                    dp["Average"]
+                                    for dp in flow_count_response.get("Datapoints", [])
+                                )
+                            except Exception as e:
+                                logger.warning(
+                                    "ga.flow_count_metric_failed",
+                                    accelerator_arn=accelerator_arn,
+                                    error=str(e),
+                                )
+                                active_flow_count_7d = 0
+
+                            # ====================================
+                            # COST CALCULATION
+                            # ====================================
+                            monthly_cost = self._calculate_global_accelerator_monthly_cost(
+                                region="global"
+                            )
+
+                            # ====================================
+                            # OPTIMIZATION SCENARIOS
+                            # ====================================
+                            optimization_scenarios = (
+                                self._calculate_global_accelerator_optimization(
+                                    accelerator_arn=accelerator_arn,
+                                    accelerator_name=accelerator_name,
+                                    endpoint_count=endpoint_count,
+                                    total_bytes_in_30d=total_bytes_in_30d,
+                                    active_flow_count_7d=active_flow_count_7d,
+                                    enabled=enabled,
+                                    tags=tags,
+                                    region="global",
+                                )
+                            )
+
+                            # ====================================
+                            # ORPHAN DETECTION
+                            # ====================================
+                            is_orphan = (
+                                endpoint_count == 0
+                                or (total_bytes_in_30d == 0 and endpoint_count > 0)
+                            )
+
+                            # ====================================
+                            # CREATE RESOURCE DATA
+                            # ====================================
+                            resource = AllCloudResourceData(
+                                resource_type="global_accelerator",
+                                resource_id=accelerator_arn,
+                                resource_name=accelerator_name,
+                                region="global",
+                                estimated_monthly_cost=monthly_cost,
+                                currency="USD",
+                                resource_metadata={
+                                    "accelerator_arn": accelerator_arn,
+                                    "accelerator_name": accelerator_name,
+                                    "enabled": enabled,
+                                    "status": status,
+                                    "endpoint_count": endpoint_count,
+                                    "ip_addresses": accelerator.get("IpSets", []),
+                                    "dns_name": accelerator.get("DnsName", ""),
+                                    "total_bytes_in_30d": int(total_bytes_in_30d),
+                                    "total_gb_transferred_30d": round(
+                                        total_bytes_in_30d / (1024**3), 2
+                                    ),
+                                    "active_flow_count_7d": round(active_flow_count_7d, 2),
+                                    "tags": tags,
+                                },
+                                optimization_scenarios=optimization_scenarios,
+                                is_orphan=is_orphan,
+                                created_at_cloud=accelerator.get("CreatedTime"),
+                            )
+
+                            resources.append(resource)
+
+                            logger.debug(
+                                "ga.accelerator_scanned",
+                                accelerator_name=accelerator_name,
+                                enabled=enabled,
+                                endpoint_count=endpoint_count,
+                                monthly_cost=monthly_cost,
+                                total_gb_transferred_30d=round(
+                                    total_bytes_in_30d / (1024**3), 2
+                                ),
+                                scenarios_count=len(optimization_scenarios),
+                                is_orphan=is_orphan,
+                            )
+
+                        except Exception as e:
+                            logger.error(
+                                "ga.accelerator_scan_failed",
+                                accelerator_arn=accelerator.get("AcceleratorArn", "unknown"),
+                                error=str(e),
+                            )
+                            continue
+
+        except Exception as e:
+            logger.error(
+                "ga.scan_failed",
+                region=region,
+                error=str(e),
+            )
+
+        return resources
+
+    # ============================================================
+    # RESSOURCE 29 : DOCUMENTDB CLUSTER (MONGODB-COMPATIBLE DATABASE)
+    # ============================================================
+
+    def _calculate_documentdb_monthly_cost(
+        self,
+        instance_count: int,
+        instance_class: str,
+        region: str,
+    ) -> float:
+        """
+        Calculate estimated monthly cost for AWS DocumentDB Cluster.
+
+        DocumentDB is a fully managed MongoDB-compatible database service
+        with support for multi-instance clusters.
+
+        Cost Components:
+        1. Instance cost (per instance per hour)
+        2. Storage cost (billed separately, not included here)
+        3. I/O cost (billed separately, not included here)
+
+        Args:
+            instance_count: Number of instances in the cluster
+            instance_class: Instance class (e.g., db.r5.large)
+            region: AWS region
+
+        Returns:
+            Estimated monthly cost in USD (instances only)
+
+        Example:
+            Single db.r5.large instance:
+            - Instance: $0.277/hour × 730 hours = ~$199/month
+        """
+        monthly_hours = 730
+
+        # Instance pricing (only db.r5.large for MVP, default for others)
+        instance_hourly_rate = self.PRICING.get("documentdb_r5_large", 0.277)
+
+        # Calculate total cost for all instances
+        total_cost = instance_hourly_rate * monthly_hours * instance_count
+
+        return round(total_cost, 2)
+
+    def _calculate_documentdb_optimization(
+        self,
+        cluster_id: str,
+        instance_count: int,
+        instance_class: str,
+        avg_connections_7d: float,
+        avg_cpu_7d: float,
+        cluster_status: str,
+        tags: dict,
+        region: str,
+    ) -> list[OptimizationScenario]:
+        """
+        Calculate optimization scenarios for AWS DocumentDB Cluster.
+
+        DocumentDB Cluster Optimization Scenarios:
+        1. Zero Connections (CRITICAL) - No connections for 7+ days → Delete cluster
+        2. Very Low Connections + Multi-Instance (HIGH) - <5 connections/day + >1 instance → Reduce instances
+        3. Low CPU + Multi-Instance (MEDIUM) - <20% CPU + >1 instance → Reduce instances
+        4. Stopped Cluster (MEDIUM) - Status = stopped + age > 7 days → Delete or snapshot
+        5. Oversized Instance (LOW) - Dev/test with production instance → Downsize
+
+        Args:
+            cluster_id: DocumentDB cluster identifier
+            instance_count: Number of instances in the cluster
+            instance_class: Instance class (e.g., db.r5.large)
+            avg_connections_7d: Average database connections over 7 days
+            avg_cpu_7d: Average CPU utilization over 7 days
+            cluster_status: Cluster status (available, stopped, etc.)
+            tags: Resource tags
+            region: AWS region
+
+        Returns:
+            List of optimization scenarios with priority, estimated savings, and recommendations
+        """
+        scenarios = []
+
+        # Current cost (per instance)
+        current_cost = self._calculate_documentdb_monthly_cost(
+            instance_count=instance_count,
+            instance_class=instance_class,
+            region=region,
+        )
+
+        # Cost per instance
+        cost_per_instance = current_cost / max(instance_count, 1)
+
+        # Detect environment from tags
+        env = tags.get("Environment", tags.get("environment", "")).lower()
+        is_production = env in ["production", "prod", "prd"]
+
+        # =============================================
+        # SCENARIO 1: Zero Connections (CRITICAL)
+        # =============================================
+        if avg_connections_7d == 0 and cluster_status == "available":
+            # No connections for 7+ days → Delete cluster
+            potential_savings = current_cost
+            scenarios.append(
+                OptimizationScenario(
+                    scenario_name="documentdb_zero_connections",
+                    priority="CRITICAL",
+                    estimated_monthly_savings=potential_savings,
+                    current_monthly_cost=current_cost,
+                    optimized_monthly_cost=0.0,
+                    confidence_level="high",
+                    description=(
+                        f"DocumentDB Cluster '{cluster_id}' has zero database connections "
+                        f"over the last 7 days ({instance_count} instance(s), ${current_cost}/month). "
+                        f"The cluster is completely idle and should be deleted."
+                    ),
+                    recommendation=(
+                        "Delete DocumentDB Cluster with zero connections:\n"
+                        "1. Verify no applications are using this cluster\n"
+                        f"2. Create final snapshot (optional): aws docdb create-db-cluster-snapshot --db-cluster-identifier {cluster_id} --db-cluster-snapshot-identifier final-snapshot-{cluster_id}\n"
+                        f"3. Delete cluster: aws docdb delete-db-cluster --db-cluster-identifier {cluster_id} --skip-final-snapshot --region {region}\n\n"
+                        f"💰 Monthly Savings: ${potential_savings:.2f}"
+                    ),
+                    optimization_score=95,
+                )
+            )
+
+        # =============================================
+        # SCENARIO 2: Very Low Connections + Multi-Instance (HIGH)
+        # =============================================
+        elif avg_connections_7d < 5 and instance_count > 1 and cluster_status == "available":
+            # <5 connections/day + >1 instance → Reduce to 1 instance
+            instances_to_remove = instance_count - 1
+            potential_savings = cost_per_instance * instances_to_remove
+            scenarios.append(
+                OptimizationScenario(
+                    scenario_name="documentdb_low_connections_multi_instance",
+                    priority="HIGH",
+                    estimated_monthly_savings=potential_savings,
+                    current_monthly_cost=current_cost,
+                    optimized_monthly_cost=cost_per_instance,
+                    confidence_level="high",
+                    description=(
+                        f"DocumentDB Cluster '{cluster_id}' has very low connection volume "
+                        f"({avg_connections_7d:.1f} connections over 7 days) but runs {instance_count} instances. "
+                        f"Reduce to 1 instance for dev/test workloads."
+                    ),
+                    recommendation=(
+                        "Reduce DocumentDB Cluster to 1 instance:\n"
+                        f"1. Current: {instance_count} instances, avg {avg_connections_7d:.1f} connections\n"
+                        f"2. Delete {instances_to_remove} instance(s): aws docdb delete-db-instance --db-instance-identifier <instance-id> --region {region}\n"
+                        "3. Keep only primary instance for low workloads\n\n"
+                        f"💰 Monthly Savings: ${potential_savings:.2f} ({instances_to_remove} instance(s))"
+                    ),
+                    optimization_score=85,
+                )
+            )
+
+        # =============================================
+        # SCENARIO 3: Low CPU + Multi-Instance (MEDIUM)
+        # =============================================
+        if avg_cpu_7d < 20 and instance_count > 1 and cluster_status == "available":
+            # <20% CPU + >1 instance → Reduce instances or downsize
+            instances_to_remove = instance_count - 1
+            potential_savings = cost_per_instance * instances_to_remove
+            scenarios.append(
+                OptimizationScenario(
+                    scenario_name="documentdb_low_cpu_multi_instance",
+                    priority="MEDIUM",
+                    estimated_monthly_savings=potential_savings,
+                    current_monthly_cost=current_cost,
+                    optimized_monthly_cost=cost_per_instance,
+                    confidence_level="medium",
+                    description=(
+                        f"DocumentDB Cluster '{cluster_id}' has low CPU utilization "
+                        f"({avg_cpu_7d:.1f}% over 7 days) with {instance_count} instances. "
+                        f"The cluster is over-provisioned and can be scaled down."
+                    ),
+                    recommendation=(
+                        "Reduce DocumentDB Cluster instances or downsize:\n"
+                        f"1. Current: {instance_count} instances, avg {avg_cpu_7d:.1f}% CPU\n"
+                        f"2. Option A: Delete {instances_to_remove} instance(s) (save ${potential_savings:.2f}/month)\n"
+                        f"3. Option B: Downsize instance class (e.g., {instance_class} → db.t3.medium)\n"
+                        "4. Monitor performance after change\n\n"
+                        f"💰 Monthly Savings: ${potential_savings:.2f} (remove instances)"
+                    ),
+                    optimization_score=70,
+                )
+            )
+
+        # =============================================
+        # SCENARIO 4: Stopped Cluster (MEDIUM)
+        # =============================================
+        if cluster_status == "stopped":
+            # Status = stopped → Delete or snapshot
+            potential_savings = current_cost  # Stopped clusters don't incur instance costs, but storage still costs
+            scenarios.append(
+                OptimizationScenario(
+                    scenario_name="documentdb_stopped_cluster",
+                    priority="MEDIUM",
+                    estimated_monthly_savings=potential_savings,
+                    current_monthly_cost=current_cost,
+                    optimized_monthly_cost=0.0,
+                    confidence_level="high",
+                    description=(
+                        f"DocumentDB Cluster '{cluster_id}' is stopped ({instance_count} instance(s)). "
+                        f"Stopped clusters still incur storage costs. Consider creating a snapshot and deleting."
+                    ),
+                    recommendation=(
+                        "Delete stopped DocumentDB Cluster (storage still charged):\n"
+                        "1. Cluster is stopped but storage is still billed\n"
+                        f"2. Create final snapshot: aws docdb create-db-cluster-snapshot --db-cluster-identifier {cluster_id} --db-cluster-snapshot-identifier final-snapshot-{cluster_id}\n"
+                        f"3. Delete cluster: aws docdb delete-db-cluster --db-cluster-identifier {cluster_id} --skip-final-snapshot --region {region}\n"
+                        "4. Restore from snapshot when needed\n\n"
+                        f"💰 Monthly Savings: ${potential_savings:.2f} (instance cost) + storage cost"
+                    ),
+                    optimization_score=65,
+                )
+            )
+
+        # =============================================
+        # SCENARIO 5: Oversized Instance (LOW)
+        # =============================================
+        if not is_production and env in ["dev", "test", "staging", "development"]:
+            # Dev/test with production instance → Downsize
+            # Estimate 50% savings by downsizing to db.t3.medium
+            potential_savings = current_cost * 0.5
+            scenarios.append(
+                OptimizationScenario(
+                    scenario_name="documentdb_oversized_instance_dev",
+                    priority="LOW",
+                    estimated_monthly_savings=potential_savings,
+                    current_monthly_cost=current_cost,
+                    optimized_monthly_cost=current_cost * 0.5,
+                    confidence_level="medium",
+                    description=(
+                        f"DocumentDB Cluster '{cluster_id}' is tagged as '{env}' environment "
+                        f"but uses production-grade instance class '{instance_class}'. "
+                        f"Dev/test environments should use smaller instance types."
+                    ),
+                    recommendation=(
+                        "Downsize DocumentDB Cluster for dev/test:\n"
+                        f"1. Environment: {env}\n"
+                        f"2. Current: {instance_class} ({instance_count} instance(s))\n"
+                        "3. Recommended: db.t3.medium or db.t4g.medium for dev/test\n"
+                        f"4. Modify instance class: aws docdb modify-db-instance --db-instance-identifier <instance-id> --db-instance-class db.t3.medium --apply-immediately --region {region}\n\n"
+                        f"💰 Monthly Savings: ~${potential_savings:.2f} (50% reduction)"
+                    ),
+                    optimization_score=50,
+                )
+            )
+
+        return scenarios
+
+    async def scan_documentdb_clusters(
+        self, region: str
+    ) -> list[AllCloudResourceData]:
+        """
+        Scan ALL AWS DocumentDB Clusters for cost intelligence.
+
+        DocumentDB is a fully managed MongoDB-compatible database service
+        designed for JSON data storage and querying.
+
+        CloudWatch Metrics Used:
+        - DatabaseConnections (AWS/DocDB) - Average connections over 7 days
+        - CPUUtilization (AWS/DocDB) - Average CPU % over 7 days
+        - FreeableMemory (AWS/DocDB) - Available memory
+
+        Cost Optimization Scenarios:
+        1. Zero Connections (CRITICAL) - No connections for 7+ days → Delete cluster
+        2. Very Low Connections + Multi-Instance (HIGH) - <5 connections/day + >1 instance → Reduce instances
+        3. Low CPU + Multi-Instance (MEDIUM) - <20% CPU + >1 instance → Reduce instances
+        4. Stopped Cluster (MEDIUM) - Status = stopped + age > 7 days → Delete or snapshot
+        5. Oversized Instance (LOW) - Dev/test with production instance → Downsize
+
+        Args:
+            region: AWS region to scan
+
+        Returns:
+            List of all DocumentDB Clusters with optimization recommendations
+        """
+        import structlog
+
+        logger = structlog.get_logger()
+        resources = []
+
+        try:
+            async with self.provider.session.client("docdb", region_name=region) as docdb:
+                async with self.provider.session.client(
+                    "cloudwatch", region_name=region
+                ) as cw:
+                    # Describe all DocumentDB clusters
+                    response = await docdb.describe_db_clusters()
+
+                    for cluster in response.get("DBClusters", []):
+                        try:
+                            cluster_id = cluster["DBClusterIdentifier"]
+                            cluster_status = cluster.get("Status", "unknown")
+                            engine = cluster.get("Engine", "docdb")
+                            engine_version = cluster.get("EngineVersion", "unknown")
+
+                            # Get cluster members (instances)
+                            cluster_members = cluster.get("DBClusterMembers", [])
+                            instance_count = len(cluster_members)
+
+                            # Get instance class (from first instance)
+                            instance_class = "db.r5.large"  # Default
+                            if instance_count > 0:
+                                try:
+                                    first_instance_id = cluster_members[0].get(
+                                        "DBInstanceIdentifier"
+                                    )
+                                    if first_instance_id:
+                                        instances_response = (
+                                            await docdb.describe_db_instances(
+                                                DBInstanceIdentifier=first_instance_id
+                                            )
+                                        )
+                                        if instances_response.get("DBInstances"):
+                                            instance_class = instances_response[
+                                                "DBInstances"
+                                            ][0].get("DBInstanceClass", "db.r5.large")
+                                except Exception as e:
+                                    logger.warning(
+                                        "documentdb.instance_class_failed",
+                                        cluster_id=cluster_id,
+                                        error=str(e),
+                                    )
+
+                            # Extract tags
+                            tags = {}
+                            for tag in cluster.get("TagList", []):
+                                tags[tag["Key"]] = tag["Value"]
+
+                            # ====================================
+                            # CLOUDWATCH METRICS (7-day lookback)
+                            # ====================================
+                            now = datetime.now(timezone.utc)
+                            start_time = now - timedelta(days=7)
+
+                            # DatabaseConnections metric (7 days)
+                            try:
+                                connections_response = await cw.get_metric_statistics(
+                                    Namespace="AWS/DocDB",
+                                    MetricName="DatabaseConnections",
+                                    Dimensions=[
+                                        {"Name": "DBClusterIdentifier", "Value": cluster_id},
+                                    ],
+                                    StartTime=start_time,
+                                    EndTime=now,
+                                    Period=3600,  # 1 hour
+                                    Statistics=["Average"],
+                                )
+                                datapoints = connections_response.get("Datapoints", [])
+                                avg_connections_7d = (
+                                    sum(dp["Average"] for dp in datapoints) / len(datapoints)
+                                    if datapoints
+                                    else 0
+                                )
+                            except Exception as e:
+                                logger.warning(
+                                    "documentdb.connections_metric_failed",
+                                    cluster_id=cluster_id,
+                                    error=str(e),
+                                )
+                                avg_connections_7d = 0
+
+                            # CPUUtilization metric (7 days)
+                            try:
+                                cpu_response = await cw.get_metric_statistics(
+                                    Namespace="AWS/DocDB",
+                                    MetricName="CPUUtilization",
+                                    Dimensions=[
+                                        {"Name": "DBClusterIdentifier", "Value": cluster_id},
+                                    ],
+                                    StartTime=start_time,
+                                    EndTime=now,
+                                    Period=3600,  # 1 hour
+                                    Statistics=["Average"],
+                                )
+                                datapoints = cpu_response.get("Datapoints", [])
+                                avg_cpu_7d = (
+                                    sum(dp["Average"] for dp in datapoints) / len(datapoints)
+                                    if datapoints
+                                    else 0
+                                )
+                            except Exception as e:
+                                logger.warning(
+                                    "documentdb.cpu_metric_failed",
+                                    cluster_id=cluster_id,
+                                    error=str(e),
+                                )
+                                avg_cpu_7d = 0
+
+                            # ====================================
+                            # COST CALCULATION
+                            # ====================================
+                            monthly_cost = self._calculate_documentdb_monthly_cost(
+                                instance_count=max(instance_count, 1),
+                                instance_class=instance_class,
+                                region=region,
+                            )
+
+                            # ====================================
+                            # OPTIMIZATION SCENARIOS
+                            # ====================================
+                            optimization_scenarios = self._calculate_documentdb_optimization(
+                                cluster_id=cluster_id,
+                                instance_count=instance_count,
+                                instance_class=instance_class,
+                                avg_connections_7d=avg_connections_7d,
+                                avg_cpu_7d=avg_cpu_7d,
+                                cluster_status=cluster_status,
+                                tags=tags,
+                                region=region,
+                            )
+
+                            # ====================================
+                            # ORPHAN DETECTION
+                            # ====================================
+                            is_orphan = avg_connections_7d < 0.1 and cluster_status == "available"
+
+                            # ====================================
+                            # CREATE RESOURCE DATA
+                            # ====================================
+                            resource = AllCloudResourceData(
+                                resource_type="documentdb_cluster",
+                                resource_id=cluster_id,
+                                resource_name=cluster_id,
+                                region=region,
+                                estimated_monthly_cost=monthly_cost,
+                                currency="USD",
+                                resource_metadata={
+                                    "cluster_id": cluster_id,
+                                    "cluster_status": cluster_status,
+                                    "engine": engine,
+                                    "engine_version": engine_version,
+                                    "instance_count": instance_count,
+                                    "instance_class": instance_class,
+                                    "cluster_endpoint": cluster.get("Endpoint", ""),
+                                    "reader_endpoint": cluster.get("ReaderEndpoint", ""),
+                                    "port": cluster.get("Port", 27017),
+                                    "multi_az": cluster.get("MultiAZ", False),
+                                    "storage_encrypted": cluster.get("StorageEncrypted", False),
+                                    "avg_connections_7d": round(avg_connections_7d, 2),
+                                    "avg_cpu_7d": round(avg_cpu_7d, 2),
+                                    "tags": tags,
+                                },
+                                optimization_scenarios=optimization_scenarios,
+                                is_orphan=is_orphan,
+                                created_at_cloud=cluster.get("ClusterCreateTime"),
+                            )
+
+                            resources.append(resource)
+
+                            logger.debug(
+                                "documentdb.cluster_scanned",
+                                cluster_id=cluster_id,
+                                cluster_status=cluster_status,
+                                instance_count=instance_count,
+                                monthly_cost=monthly_cost,
+                                avg_connections_7d=round(avg_connections_7d, 2),
+                                avg_cpu_7d=round(avg_cpu_7d, 2),
+                                scenarios_count=len(optimization_scenarios),
+                                is_orphan=is_orphan,
+                            )
+
+                        except Exception as e:
+                            logger.error(
+                                "documentdb.cluster_scan_failed",
+                                cluster_id=cluster.get("DBClusterIdentifier", "unknown"),
+                                region=region,
+                                error=str(e),
+                            )
+                            continue
+
+        except Exception as e:
+            logger.error(
+                "documentdb.scan_failed",
+                region=region,
+                error=str(e),
+            )
+
+        return resources

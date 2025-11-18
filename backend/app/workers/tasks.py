@@ -517,6 +517,34 @@ async def _scan_cloud_account_async(
                             vpn_count=len(vpn_resources),
                         )
 
+                        # Scan Transit Gateway Attachments (all)
+                        tgw_resources = await inventory_scanner.scan_transit_gateway_attachments(region)
+                        all_inventory_resources.extend(tgw_resources)
+                        logger.info(
+                            "inventory.tgw_scanned",
+                            region=region,
+                            tgw_count=len(tgw_resources),
+                        )
+
+                        # Scan Global Accelerators (global service, only in us-west-2)
+                        ga_resources = await inventory_scanner.scan_global_accelerators(region)
+                        all_inventory_resources.extend(ga_resources)
+                        if region == "us-west-2":
+                            logger.info(
+                                "inventory.ga_scanned",
+                                region=region,
+                                ga_count=len(ga_resources),
+                            )
+
+                        # Scan DocumentDB Clusters (all)
+                        documentdb_resources = await inventory_scanner.scan_documentdb_clusters(region)
+                        all_inventory_resources.extend(documentdb_resources)
+                        logger.info(
+                            "inventory.documentdb_scanned",
+                            region=region,
+                            documentdb_count=len(documentdb_resources),
+                        )
+
                     # Scan S3 buckets (global, only once)
                     if regions_to_scan:
                         s3_resources = await inventory_scanner.scan_s3_buckets()

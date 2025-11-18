@@ -86,6 +86,9 @@ const resourceIcons: Record<ResourceType, any> = {
   sagemaker_endpoint: Activity,
   redshift_cluster: Database,
   vpn_connection: Network,
+  transit_gateway_attachment: Network,
+  global_accelerator: Network,
+  documentdb_cluster: Database,
   // Azure - Cost Intelligence (Inventory mode)
   azure_vm: Server,
   azure_managed_disk: HardDrive,
