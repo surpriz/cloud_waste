@@ -36,6 +36,7 @@ import {
   Package,
   Cable,
   MessageSquare,
+  FileCode,
 } from "lucide-react";
 import type { ResourceStatus, ResourceType } from "@/types";
 import { ResourceChartsSection } from "@/components/dashboard/ResourceChartsSection";
@@ -75,6 +76,8 @@ const resourceIcons: Record<ResourceType, any> = {
   elastic_beanstalk_environment: Package,
   direct_connect_connection: Cable,
   mq_broker: MessageSquare,
+  kendra_index: Search,
+  cloudformation_stack: FileCode,
   s3_bucket: HardDrive,
   lambda_function: Zap,
   dynamodb_table: Database,

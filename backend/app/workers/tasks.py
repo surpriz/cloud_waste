@@ -653,6 +653,24 @@ async def _scan_cloud_account_async(
                             mq_count=len(mq_broker_resources),
                         )
 
+                        # Scan Kendra Indexes (all)
+                        kendra_resources = await inventory_scanner.scan_kendra_indexes(region)
+                        all_inventory_resources.extend(kendra_resources)
+                        logger.info(
+                            "inventory.kendra_scanned",
+                            region=region,
+                            kendra_count=len(kendra_resources),
+                        )
+
+                        # Scan CloudFormation Stacks (all)
+                        cloudformation_resources = await inventory_scanner.scan_cloudformation_stacks(region)
+                        all_inventory_resources.extend(cloudformation_resources)
+                        logger.info(
+                            "inventory.cloudformation_scanned",
+                            region=region,
+                            cloudformation_count=len(cloudformation_resources),
+                        )
+
                     # Scan S3 buckets (global, only once)
                     if regions_to_scan:
                         s3_resources = await inventory_scanner.scan_s3_buckets()

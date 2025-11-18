@@ -222,6 +222,10 @@ class AWSProvider(CloudProviderBase):
         "mq_broker_t3_micro": 0.0375,  # $0.0375/hour (~$27/month)
         "mq_broker_m5_large": 0.598,  # $0.598/hour (~$431/month)
         "mq_storage_per_gb": 0.10,  # $0.10/GB/month
+        # Kendra pricing
+        "kendra_enterprise_edition_per_hour": 1.40,  # $1.40/hour (~$1,008/month)
+        "kendra_developer_edition_per_hour": 0.97,  # $0.97/hour (~$700/month)
+        # CloudFormation pricing (CloudFormation itself is FREE - only underlying resources cost money)
     }
 
     def __init__(

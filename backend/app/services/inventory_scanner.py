@@ -35871,3 +35871,653 @@ class AzureInventoryScanner:
             )
 
         return resources
+
+    def _calculate_kendra_monthly_cost(
+        self, edition: str, running_hours: int, region: str
+    ) -> float:
+        """
+        Calculate estimated monthly cost for AWS Kendra Index.
+
+        Args:
+            edition: Kendra edition ('DEVELOPER_EDITION' or 'ENTERPRISE_EDITION')
+            running_hours: Number of hours the index was running (up to 730 hours/month)
+            region: AWS region
+
+        Returns:
+            Estimated monthly cost in USD
+        """
+        # Get pricing for Kendra edition
+        if edition == "ENTERPRISE_EDITION":
+            hourly_rate = self.pricing.get("kendra_enterprise_edition_per_hour", 1.40)
+        else:  # DEVELOPER_EDITION
+            hourly_rate = self.pricing.get("kendra_developer_edition_per_hour", 0.97)
+
+        # Calculate monthly cost (max 730 hours/month)
+        monthly_hours = min(running_hours, 730)
+        monthly_cost = hourly_rate * monthly_hours
+
+        return monthly_cost
+
+    def _calculate_kendra_optimization(
+        self,
+        index_id: str,
+        index_name: str,
+        index_status: str,
+        edition: str,
+        created_at: datetime,
+        updated_at: datetime,
+        document_count: int,
+        region: str,
+        tags: dict[str, str],
+    ) -> list[OptimizationScenario]:
+        """
+        Calculate optimization scenarios for AWS Kendra Index.
+
+        Amazon Kendra is an intelligent search service powered by machine learning.
+        Costs can be significant ($700-$1,008/month), so unused or underutilized indexes
+        should be identified and optimized.
+
+        5 Optimization Scenarios:
+        1. Index Running Zero Queries (CRITICAL) - No queries in 90 days
+        2. Index Never Synced (HIGH) - No data sync in 60+ days
+        3. Very Low Query Volume (MEDIUM) - <10 queries/day (OpenSearch ~70% cheaper)
+        4. Oversized Enterprise Edition (MEDIUM) - Low usage on Enterprise tier
+        5. Dev/Test Always Running (LOW) - Non-prod index running 24/7
+
+        Args:
+            index_id: Kendra Index ID
+            index_name: Index name
+            index_status: Index status (ACTIVE, CREATING, DELETING, FAILED, SYSTEM_UPDATING)
+            edition: Edition (DEVELOPER_EDITION, ENTERPRISE_EDITION)
+            created_at: Index creation timestamp
+            updated_at: Last update timestamp
+            document_count: Number of indexed documents
+            region: AWS region
+            tags: Resource tags
+
+        Returns:
+            List of optimization scenarios
+        """
+        scenarios: list[OptimizationScenario] = []
+        monthly_cost = self._calculate_kendra_monthly_cost(edition, 730, region)
+
+        # Helper: Get environment tag
+        env = tags.get("Environment", tags.get("environment", "unknown")).lower()
+
+        # Scenario 1: Index Running Zero Queries (CRITICAL)
+        # Kendra doesn't expose query metrics in CloudWatch by default
+        # We estimate based on last sync time - if no sync in 90 days, likely no queries
+        days_since_update = (datetime.now() - updated_at).days
+        if days_since_update >= 90:
+            scenarios.append(
+                OptimizationScenario(
+                    priority="critical",
+                    optimization_score=95,
+                    estimated_monthly_savings=monthly_cost,
+                    recommended_action=(
+                        f"Delete Kendra index with zero queries in 90 days:\n"
+                        f"1. Verify no active queries: Check CloudWatch Logs Insights\n"
+                        f"2. aws kendra delete-index --index-id {index_id} --region {region}\n\n"
+                        f"💰 Monthly Savings: ${monthly_cost:.2f}\n\n"
+                        f"Alternative: If search needed, migrate to OpenSearch (~70% cheaper for low volume)"
+                    ),
+                    confidence_level="critical",
+                )
+            )
+
+        # Scenario 2: Index Never Synced (HIGH)
+        # If document count is 0 or very low, index was never properly used
+        if document_count == 0 and days_since_update >= 60:
+            scenarios.append(
+                OptimizationScenario(
+                    priority="high",
+                    optimization_score=85,
+                    estimated_monthly_savings=monthly_cost,
+                    recommended_action=(
+                        f"Delete Kendra index that was never synced (0 documents for 60+ days):\n"
+                        f"1. Index ID: {index_id}\n"
+                        f"2. Document Count: {document_count}\n"
+                        f"3. aws kendra delete-index --index-id {index_id} --region {region}\n\n"
+                        f"💰 Monthly Savings: ${monthly_cost:.2f}"
+                    ),
+                    confidence_level="high",
+                )
+            )
+
+        # Scenario 3: Very Low Query Volume (MEDIUM)
+        # If index has documents but low usage, OpenSearch might be better
+        # We estimate low usage if: small document count (<1000) AND old update (30+ days)
+        if (
+            document_count > 0
+            and document_count < 1000
+            and days_since_update >= 30
+            and "zero queries" not in [s.recommended_action for s in scenarios]
+        ):
+            opensearch_monthly_cost = 75  # ~$75/month for small OpenSearch domain (t3.small)
+            potential_savings = monthly_cost - opensearch_monthly_cost
+
+            scenarios.append(
+                OptimizationScenario(
+                    priority="medium",
+                    optimization_score=70,
+                    estimated_monthly_savings=potential_savings,
+                    recommended_action=(
+                        f"Migrate low-volume Kendra index to OpenSearch (~70% cheaper):\n"
+                        f"1. Current Cost: ${monthly_cost:.2f}/month (Kendra)\n"
+                        f"2. Estimated Cost: ${opensearch_monthly_cost}/month (OpenSearch)\n"
+                        f"3. Document Count: {document_count} (low volume)\n"
+                        f"4. Last Update: {days_since_update} days ago\n\n"
+                        f"💰 Monthly Savings: ${potential_savings:.2f}\n\n"
+                        "Migration Steps:\n"
+                        "1. Create OpenSearch domain (t3.small)\n"
+                        "2. Export documents from Kendra\n"
+                        "3. Import to OpenSearch with same schema\n"
+                        "4. Update application to use OpenSearch API"
+                    ),
+                    confidence_level="medium",
+                )
+            )
+
+        # Scenario 4: Oversized Enterprise Edition (MEDIUM)
+        # If using Enterprise but very low document count, Developer edition sufficient
+        if edition == "ENTERPRISE_EDITION" and document_count < 5000:
+            developer_cost = self._calculate_kendra_monthly_cost("DEVELOPER_EDITION", 730, region)
+            potential_savings = monthly_cost - developer_cost
+
+            scenarios.append(
+                OptimizationScenario(
+                    priority="medium",
+                    optimization_score=65,
+                    estimated_monthly_savings=potential_savings,
+                    recommended_action=(
+                        f"Downgrade from Enterprise to Developer edition (30% savings):\n"
+                        f"1. Current Cost: ${monthly_cost:.2f}/month (Enterprise)\n"
+                        f"2. Developer Cost: ${developer_cost:.2f}/month\n"
+                        f"3. Document Count: {document_count} (Developer supports up to 5,000)\n\n"
+                        f"💰 Monthly Savings: ${potential_savings:.2f}\n\n"
+                        "Downgrade Steps:\n"
+                        "1. Create new Developer edition index\n"
+                        "2. Migrate documents from Enterprise index\n"
+                        "3. Update application to use new index\n"
+                        "4. Delete old Enterprise index"
+                    ),
+                    confidence_level="medium",
+                )
+            )
+
+        # Scenario 5: Dev/Test Always Running (LOW)
+        # Non-production indexes should be deleted when not in use
+        if env in ["dev", "development", "test", "testing", "staging"]:
+            estimated_savings = monthly_cost * 0.5  # Assume 50% savings by running only during work hours
+
+            scenarios.append(
+                OptimizationScenario(
+                    priority="low",
+                    optimization_score=50,
+                    estimated_monthly_savings=estimated_savings,
+                    recommended_action=(
+                        f"Delete dev/test Kendra index when not in use:\n"
+                        f"1. Environment: {env}\n"
+                        f"2. aws kendra delete-index --index-id {index_id} --region {region}\n"
+                        f"3. Recreate when needed (CloudFormation/Terraform)\n\n"
+                        f"💰 Monthly Savings: ${estimated_savings:.2f}\n\n"
+                        "Note: Kendra doesn't support stop/start like RDS. Must delete and recreate."
+                    ),
+                    confidence_level="low",
+                )
+            )
+
+        return scenarios
+
+    async def scan_kendra_indexes(self, region: str) -> list[AllCloudResourceData]:
+        """
+        Scan ALL AWS Kendra Indexes for cost intelligence.
+
+        Amazon Kendra is an intelligent search service powered by machine learning
+        that allows users to search across different content repositories with natural language.
+
+        Pricing:
+        - Enterprise Edition: ~$1.40/hour (~$1,008/month)
+        - Developer Edition: ~$0.97/hour (~$700/month)
+        - Additional query charges apply
+
+        Kendra doesn't expose CloudWatch metrics for query volume by default.
+        We estimate usage based on:
+        - Last sync/update time
+        - Document count
+        - Index status
+
+        Cost Optimization Scenarios:
+        1. Index Running Zero Queries (CRITICAL) - No updates 90 days → Delete ~$700-1,008/month
+        2. Index Never Synced (HIGH) - 0 documents 60+ days → Delete unused index
+        3. Very Low Query Volume (MEDIUM) - <1000 docs + old → OpenSearch ~70% cheaper
+        4. Oversized Enterprise (MEDIUM) - <5000 docs → Developer ~30% savings
+        5. Dev/Test Always Running (LOW) - Non-prod 24/7 → Delete ~50% savings
+
+        Args:
+            region: AWS region to scan
+
+        Returns:
+            List of all Kendra indexes with cost optimization scenarios
+        """
+        resources: list[AllCloudResourceData] = []
+
+        try:
+            async with self.session.client("kendra", region_name=region) as kendra:
+                # List all Kendra indexes
+                paginator = kendra.get_paginator("list_indices")
+                async for page in paginator.paginate():
+                    for index_summary in page.get("IndexConfigurationSummaryItems", []):
+                        try:
+                            index_id = index_summary.get("Id")
+                            index_name = index_summary.get("Name", index_id)
+                            index_status = index_summary.get("Status", "UNKNOWN")
+                            edition = index_summary.get("Edition", "DEVELOPER_EDITION")
+                            created_at = index_summary.get("CreatedAt", datetime.now())
+                            updated_at = index_summary.get("UpdatedAt", created_at)
+
+                            # Get detailed index information
+                            index_details = await kendra.describe_index(Id=index_id)
+                            index_config = index_details.get("IndexStatistics", {})
+                            document_count = index_config.get("TextDocumentStatistics", {}).get(
+                                "IndexedTextDocumentsCount", 0
+                            )
+
+                            # Get tags
+                            tags_response = await kendra.list_tags_for_resource(
+                                ResourceARN=f"arn:aws:kendra:{region}:{self.session._session._config.get('aws_access_key_id', 'unknown')}:index/{index_id}"
+                            )
+                            tags = {tag["Key"]: tag["Value"] for tag in tags_response.get("Tags", [])}
+
+                            # Calculate monthly cost (assume always running = 730 hours/month)
+                            monthly_cost = self._calculate_kendra_monthly_cost(edition, 730, region)
+
+                            # Calculate optimization scenarios
+                            optimization_scenarios = self._calculate_kendra_optimization(
+                                index_id=index_id,
+                                index_name=index_name,
+                                index_status=index_status,
+                                edition=edition,
+                                created_at=created_at,
+                                updated_at=updated_at,
+                                document_count=document_count,
+                                region=region,
+                                tags=tags,
+                            )
+
+                            # Create resource data
+                            resource = AllCloudResourceData(
+                                resource_type="kendra_index",
+                                resource_id=index_id,
+                                resource_name=index_name,
+                                region=region,
+                                estimated_monthly_cost=monthly_cost,
+                                currency="USD",
+                                resource_metadata={
+                                    "index_id": index_id,
+                                    "index_name": index_name,
+                                    "status": index_status,
+                                    "edition": edition,
+                                    "document_count": document_count,
+                                    "created_at": created_at.isoformat() if isinstance(created_at, datetime) else str(created_at),
+                                    "updated_at": updated_at.isoformat() if isinstance(updated_at, datetime) else str(updated_at),
+                                    "days_since_update": (datetime.now() - updated_at).days if isinstance(updated_at, datetime) else 0,
+                                    "tags": tags,
+                                },
+                                optimization_scenarios=optimization_scenarios,
+                                is_optimizable=len(optimization_scenarios) > 0,
+                            )
+
+                            resources.append(resource)
+                            logger.info(
+                                "inventory.kendra_scanned",
+                                index_id=index_id,
+                                index_name=index_name,
+                                status=index_status,
+                                monthly_cost=monthly_cost,
+                                scenarios=len(optimization_scenarios),
+                            )
+
+                        except Exception as e:
+                            logger.warning(
+                                "inventory.kendra_scan_error",
+                                index_id=index_summary.get("Id", "unknown"),
+                                error=str(e),
+                            )
+                            continue
+
+        except Exception as e:
+            logger.error(
+                "inventory.kendra_scan_failed",
+                region=region,
+                error=str(e),
+            )
+
+        return resources
+
+    def _calculate_cloudformation_monthly_cost(
+        self, resource_count: int, region: str
+    ) -> float:
+        """
+        Calculate estimated monthly cost for AWS CloudFormation Stack.
+
+        CloudFormation itself is FREE - no charges for using the service.
+        Cost comes from the resources created and managed by the stack.
+
+        Args:
+            resource_count: Number of resources in the stack
+            region: AWS region
+
+        Returns:
+            Estimated monthly cost (always 0 for CloudFormation service itself)
+        """
+        # CloudFormation itself is FREE - only underlying resources have cost
+        # We return 0 here, but list resource count in metadata
+        return 0.0
+
+    def _calculate_cloudformation_optimization(
+        self,
+        stack_name: str,
+        stack_id: str,
+        stack_status: str,
+        creation_time: datetime,
+        last_updated_time: datetime | None,
+        resource_count: int,
+        tags: dict[str, str],
+        region: str,
+    ) -> list[OptimizationScenario]:
+        """
+        Calculate optimization scenarios for AWS CloudFormation Stack.
+
+        CloudFormation is Infrastructure-as-Code (IaC) service - FREE itself.
+        However, failed/abandoned stacks clutter the console and may retain resources
+        that continue to cost money.
+
+        5 Optimization Scenarios:
+        1. Stack in ROLLBACK_COMPLETE (CRITICAL) - Failed deployment cleanup
+        2. Stack with Zero Resources (HIGH) - Empty/deleted stack remnant
+        3. Stack Never Updated (MEDIUM) - Created >365 days, 0 updates (zombie)
+        4. Stack in DELETE_FAILED (MEDIUM) - Partial deletion (manual cleanup)
+        5. Dev/Test Stack Old (LOW) - Created >180 days, dev/test environment
+
+        Args:
+            stack_name: CloudFormation stack name
+            stack_id: Stack ID (ARN)
+            stack_status: Stack status (CREATE_COMPLETE, ROLLBACK_COMPLETE, etc.)
+            creation_time: Stack creation timestamp
+            last_updated_time: Last update timestamp (None if never updated)
+            resource_count: Number of resources in the stack
+            tags: Stack tags
+            region: AWS region
+
+        Returns:
+            List of optimization scenarios
+        """
+        scenarios: list[OptimizationScenario] = []
+
+        # Helper: Get environment tag
+        env = tags.get("Environment", tags.get("environment", "unknown")).lower()
+
+        # Helper: Calculate age
+        days_since_creation = (datetime.now() - creation_time).days
+        days_since_update = (
+            (datetime.now() - last_updated_time).days if last_updated_time else days_since_creation
+        )
+
+        # Scenario 1: Stack in ROLLBACK_COMPLETE (CRITICAL)
+        # Failed stack that should be cleaned up
+        if stack_status == "ROLLBACK_COMPLETE":
+            scenarios.append(
+                OptimizationScenario(
+                    priority="critical",
+                    optimization_score=95,
+                    estimated_monthly_savings=0.0,  # CloudFormation is free, but cleanup is important
+                    recommended_action=(
+                        f"Delete failed CloudFormation stack in ROLLBACK_COMPLETE state:\n"
+                        f"1. Stack Name: {stack_name}\n"
+                        f"2. Status: {stack_status}\n"
+                        f"3. aws cloudformation delete-stack --stack-name {stack_name} --region {region}\n\n"
+                        "⚠️ ROLLBACK_COMPLETE indicates deployment failed and rolled back.\n"
+                        "This stack is non-functional and should be deleted to clean up console.\n\n"
+                        "Before deletion:\n"
+                        "1. Review CloudFormation events to understand failure\n"
+                        "2. Verify no resources are retained (check Retain policy)\n"
+                        "3. Fix issues in template and redeploy"
+                    ),
+                    confidence_level="critical",
+                )
+            )
+
+        # Scenario 2: Stack with Zero Resources (HIGH)
+        # Empty stack (all resources deleted but stack remains)
+        if resource_count == 0 and stack_status != "DELETE_IN_PROGRESS":
+            scenarios.append(
+                OptimizationScenario(
+                    priority="high",
+                    optimization_score=85,
+                    estimated_monthly_savings=0.0,
+                    recommended_action=(
+                        f"Delete CloudFormation stack with zero resources:\n"
+                        f"1. Stack Name: {stack_name}\n"
+                        f"2. Resource Count: {resource_count}\n"
+                        f"3. aws cloudformation delete-stack --stack-name {stack_name} --region {region}\n\n"
+                        "This stack has no resources (likely already manually deleted).\n"
+                        "Clean up to avoid console clutter."
+                    ),
+                    confidence_level="high",
+                )
+            )
+
+        # Scenario 3: Stack Never Updated (MEDIUM)
+        # Created >365 days ago, never updated - likely abandoned
+        if (
+            days_since_creation > 365
+            and last_updated_time is None
+            and resource_count > 0
+            and stack_status == "CREATE_COMPLETE"
+        ):
+            scenarios.append(
+                OptimizationScenario(
+                    priority="medium",
+                    optimization_score=70,
+                    estimated_monthly_savings=0.0,
+                    recommended_action=(
+                        f"Review old CloudFormation stack never updated in {days_since_creation} days:\n"
+                        f"1. Stack Name: {stack_name}\n"
+                        f"2. Created: {days_since_creation} days ago\n"
+                        f"3. Resource Count: {resource_count}\n\n"
+                        "Actions:\n"
+                        "1. Verify stack is still needed (check with team)\n"
+                        "2. Review resources: aws cloudformation describe-stack-resources "
+                        f"--stack-name {stack_name} --region {region}\n"
+                        "3. If abandoned, delete: aws cloudformation delete-stack --stack-name "
+                        f"{stack_name} --region {region}\n\n"
+                        "⚠️ Stack unchanged for 1+ year may indicate abandoned resources."
+                    ),
+                    confidence_level="medium",
+                )
+            )
+
+        # Scenario 4: Stack in DELETE_FAILED (MEDIUM)
+        # Partial deletion - manual cleanup needed
+        if stack_status == "DELETE_FAILED":
+            scenarios.append(
+                OptimizationScenario(
+                    priority="medium",
+                    optimization_score=65,
+                    estimated_monthly_savings=0.0,
+                    recommended_action=(
+                        f"Fix CloudFormation stack in DELETE_FAILED state:\n"
+                        f"1. Stack Name: {stack_name}\n"
+                        f"2. aws cloudformation describe-stack-events --stack-name {stack_name} "
+                        f"--region {region}\n\n"
+                        "Common causes of DELETE_FAILED:\n"
+                        "- Resource has DeletionPolicy: Retain\n"
+                        "- Resource manually deleted outside CloudFormation\n"
+                        "- S3 bucket not empty\n"
+                        "- Security group in use\n\n"
+                        "Manual cleanup steps:\n"
+                        "1. Identify failed resource in events\n"
+                        "2. Manually delete blocking resource\n"
+                        "3. Retry: aws cloudformation delete-stack --stack-name {stack_name} "
+                        f"--region {region}"
+                    ),
+                    confidence_level="medium",
+                )
+            )
+
+        # Scenario 5: Dev/Test Stack Old (LOW)
+        # Dev/test stack created >180 days ago
+        if env in ["dev", "development", "test", "testing", "staging"] and days_since_creation > 180:
+            scenarios.append(
+                OptimizationScenario(
+                    priority="low",
+                    optimization_score=50,
+                    estimated_monthly_savings=0.0,
+                    recommended_action=(
+                        f"Review old dev/test CloudFormation stack ({days_since_creation} days):\n"
+                        f"1. Stack Name: {stack_name}\n"
+                        f"2. Environment: {env}\n"
+                        f"3. Resource Count: {resource_count}\n\n"
+                        "Actions:\n"
+                        "1. Verify stack still needed for testing\n"
+                        "2. List resources and check costs: aws cloudformation describe-stack-resources "
+                        f"--stack-name {stack_name} --region {region}\n"
+                        "3. If unused, delete: aws cloudformation delete-stack --stack-name "
+                        f"{stack_name} --region {region}\n\n"
+                        "💡 Tip: Use temporary dev/test stacks and clean up regularly."
+                    ),
+                    confidence_level="low",
+                )
+            )
+
+        return scenarios
+
+    async def scan_cloudformation_stacks(self, region: str) -> list[AllCloudResourceData]:
+        """
+        Scan ALL AWS CloudFormation Stacks for cost intelligence.
+
+        AWS CloudFormation is an Infrastructure as Code (IaC) service that allows
+        you to model and provision AWS resources using templates.
+
+        Pricing:
+        - CloudFormation itself is FREE (no charges)
+        - Only the resources created by stacks have costs
+        - Focus on cleanup of failed/abandoned stacks
+
+        CloudFormation doesn't have CloudWatch metrics.
+        We analyze stack status and metadata:
+        - Stack status (ROLLBACK_COMPLETE, DELETE_FAILED, etc.)
+        - Resource count
+        - Last update time
+        - Tags
+
+        Cost Optimization Scenarios:
+        1. Stack in ROLLBACK_COMPLETE (CRITICAL) - Failed deployment → Cleanup console
+        2. Stack with Zero Resources (HIGH) - Empty stack → Delete remnant
+        3. Stack Never Updated (MEDIUM) - Created >365 days, 0 updates → Review zombie
+        4. Stack in DELETE_FAILED (MEDIUM) - Partial deletion → Manual cleanup
+        5. Dev/Test Stack Old (LOW) - Created >180 days, dev/test → Review if needed
+
+        Args:
+            region: AWS region to scan
+
+        Returns:
+            List of all CloudFormation stacks with optimization scenarios
+        """
+        resources: list[AllCloudResourceData] = []
+
+        try:
+            async with self.session.client("cloudformation", region_name=region) as cfn:
+                # List all stacks (including deleted in last 90 days)
+                # We filter out DELETE_COMPLETE stacks as they're already cleaned up
+                paginator = cfn.get_paginator("list_stacks")
+                async for page in paginator.paginate():
+                    for stack_summary in page.get("StackSummaries", []):
+                        try:
+                            stack_status = stack_summary.get("StackStatus", "UNKNOWN")
+
+                            # Skip fully deleted stacks
+                            if stack_status == "DELETE_COMPLETE":
+                                continue
+
+                            stack_name = stack_summary.get("StackName")
+                            stack_id = stack_summary.get("StackId")
+                            creation_time = stack_summary.get("CreationTime", datetime.now())
+                            last_updated_time = stack_summary.get("LastUpdatedTime", None)
+
+                            # Get stack details including tags
+                            stack_details = await cfn.describe_stacks(StackName=stack_name)
+                            stack_info = stack_details["Stacks"][0]
+                            tags = {tag["Key"]: tag["Value"] for tag in stack_info.get("Tags", [])}
+
+                            # Get resource count
+                            try:
+                                resources_response = await cfn.list_stack_resources(StackName=stack_name)
+                                resource_count = len(resources_response.get("StackResourceSummaries", []))
+                            except Exception:
+                                # If stack is in failed state, might not be able to list resources
+                                resource_count = 0
+
+                            # CloudFormation itself is FREE - cost is 0
+                            monthly_cost = 0.0
+
+                            # Calculate optimization scenarios
+                            optimization_scenarios = self._calculate_cloudformation_optimization(
+                                stack_name=stack_name,
+                                stack_id=stack_id,
+                                stack_status=stack_status,
+                                creation_time=creation_time,
+                                last_updated_time=last_updated_time,
+                                resource_count=resource_count,
+                                tags=tags,
+                                region=region,
+                            )
+
+                            # Create resource data
+                            resource = AllCloudResourceData(
+                                resource_type="cloudformation_stack",
+                                resource_id=stack_id,
+                                resource_name=stack_name,
+                                region=region,
+                                estimated_monthly_cost=monthly_cost,  # CloudFormation is FREE
+                                currency="USD",
+                                resource_metadata={
+                                    "stack_name": stack_name,
+                                    "stack_id": stack_id,
+                                    "stack_status": stack_status,
+                                    "resource_count": resource_count,
+                                    "creation_time": creation_time.isoformat() if isinstance(creation_time, datetime) else str(creation_time),
+                                    "last_updated_time": last_updated_time.isoformat() if isinstance(last_updated_time, datetime) and last_updated_time else None,
+                                    "days_since_creation": (datetime.now() - creation_time).days if isinstance(creation_time, datetime) else 0,
+                                    "tags": tags,
+                                },
+                                optimization_scenarios=optimization_scenarios,
+                                is_optimizable=len(optimization_scenarios) > 0,
+                            )
+
+                            resources.append(resource)
+                            logger.info(
+                                "inventory.cloudformation_scanned",
+                                stack_name=stack_name,
+                                stack_status=stack_status,
+                                resource_count=resource_count,
+                                scenarios=len(optimization_scenarios),
+                            )
+
+                        except Exception as e:
+                            logger.warning(
+                                "inventory.cloudformation_scan_error",
+                                stack_name=stack_summary.get("StackName", "unknown"),
+                                error=str(e),
+                            )
+                            continue
+
+        except Exception as e:
+            logger.error(
+                "inventory.cloudformation_scan_failed",
+                region=region,
+                error=str(e),
+            )
+
+        return resources

@@ -48,6 +48,7 @@ import {
   Cpu,
   Package,
   Cable,
+  FileCode,
 } from "lucide-react";
 import {
   PieChart as RechartsPie,
@@ -107,6 +108,8 @@ const resourceIcons: Record<ResourceType, any> = {
   elastic_beanstalk_environment: Package,
   direct_connect_connection: Cable,
   mq_broker: MessageSquare,
+  kendra_index: Search,
+  cloudformation_stack: FileCode,
   // Azure - Cost Intelligence (Inventory mode)
   azure_vm: Server,
   azure_managed_disk: HardDrive,

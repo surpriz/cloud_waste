@@ -167,6 +167,8 @@ export type ResourceType =
   | "elastic_beanstalk_environment"
   | "direct_connect_connection"
   | "mq_broker"
+  | "kendra_index"
+  | "cloudformation_stack"
   | "s3_bucket"
   | "lambda_function"
   | "dynamodb_table"
