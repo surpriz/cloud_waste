@@ -37,6 +37,7 @@ import {
   Cable,
   MessageSquare,
   FileCode,
+  Search,
 } from "lucide-react";
 import type { ResourceStatus, ResourceType } from "@/types";
 import { ResourceChartsSection } from "@/components/dashboard/ResourceChartsSection";
