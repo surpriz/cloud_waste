@@ -572,6 +572,33 @@ async def _scan_cloud_account_async(
                             sqs_count=len(sqs_resources),
                         )
 
+                        # Scan Secrets Manager Secrets (all)
+                        secrets_resources = await inventory_scanner.scan_secrets_manager_secrets(region)
+                        all_inventory_resources.extend(secrets_resources)
+                        logger.info(
+                            "inventory.secrets_manager_scanned",
+                            region=region,
+                            secrets_count=len(secrets_resources),
+                        )
+
+                        # Scan AWS Backup Vaults (all)
+                        backup_vault_resources = await inventory_scanner.scan_backup_vaults_aws(region)
+                        all_inventory_resources.extend(backup_vault_resources)
+                        logger.info(
+                            "inventory.backup_vaults_aws_scanned",
+                            region=region,
+                            backup_vault_count=len(backup_vault_resources),
+                        )
+
+                        # Scan App Runner Services (all)
+                        app_runner_resources = await inventory_scanner.scan_app_runner_services(region)
+                        all_inventory_resources.extend(app_runner_resources)
+                        logger.info(
+                            "inventory.app_runner_scanned",
+                            region=region,
+                            app_runner_count=len(app_runner_resources),
+                        )
+
                     # Scan S3 buckets (global, only once)
                     if regions_to_scan:
                         s3_resources = await inventory_scanner.scan_s3_buckets()

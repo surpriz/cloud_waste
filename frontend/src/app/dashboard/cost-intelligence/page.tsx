@@ -43,6 +43,8 @@ import {
   Brain,
   Key,
   Bell,
+  Archive,
+  Boxes,
 } from "lucide-react";
 import {
   PieChart as RechartsPie,
@@ -93,6 +95,9 @@ const resourceIcons: Record<ResourceType, any> = {
   ecr_repository: Box,
   sns_topic: Bell,
   sqs_queue: Inbox,
+  secrets_manager_secret: Key,
+  backup_vault: Archive,
+  app_runner_service: Boxes,
   // Azure - Cost Intelligence (Inventory mode)
   azure_vm: Server,
   azure_managed_disk: HardDrive,

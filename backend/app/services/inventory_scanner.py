@@ -31180,3 +31180,1324 @@ class AzureInventoryScanner:
             )
 
         return resources
+
+    # ============================================================
+    # RESSOURCE 33 : SECRETS MANAGER
+    # ============================================================
+
+    def _calculate_secrets_manager_monthly_cost(self, region: str) -> float:
+        """
+        Calculate estimated monthly cost for AWS Secrets Manager secret.
+
+        Secrets Manager stores and rotates secrets securely.
+
+        Cost Components:
+        1. Storage cost: $0.40 per secret per month
+        2. API call cost: $0.05 per 10,000 API calls (beyond free tier)
+
+        Args:
+            region: AWS region
+
+        Returns:
+            Estimated monthly cost in USD per secret
+
+        Example:
+            Single secret stored for 1 month:
+            - Storage: $0.40/month
+            - API calls (100K): 10 × $0.05 = $0.50/month
+            - Total: $0.90/month
+        """
+        # Secrets Manager charges per secret stored
+        secret_cost = self.PRICING.get("secrets_manager_per_secret", 0.40)
+
+        return round(secret_cost, 2)
+
+    def _calculate_secrets_manager_optimization(
+        self,
+        secret_name: str,
+        secret_arn: str,
+        last_accessed_date: datetime | None,
+        last_rotated_date: datetime | None,
+        rotation_enabled: bool,
+        created_date: datetime,
+        tags: dict,
+        region: str,
+    ) -> list[OptimizationScenario]:
+        """
+        Calculate optimization scenarios for AWS Secrets Manager secret.
+
+        Secrets Manager Optimization Scenarios:
+        1. Secret Never Used (CRITICAL) - 0 accesses in 90 days → Delete secret
+        2. Secret Not Rotated (HIGH) - No rotation in 365+ days → Security risk + cost
+        3. Duplicate Secrets (MEDIUM) - Same secret in multiple regions → Consolidate
+        4. Secret Inactive (MEDIUM) - < 10 accesses/month → Delete if dev/test
+        5. No Rotation Configured (LOW) - Manual rotation only → Enable auto-rotation
+
+        Args:
+            secret_name: Secret name
+            secret_arn: Secret ARN
+            last_accessed_date: Last time secret was accessed (can be None)
+            last_rotated_date: Last rotation date (can be None)
+            rotation_enabled: Whether automatic rotation is enabled
+            created_date: Secret creation date
+            tags: Resource tags
+            region: AWS region
+
+        Returns:
+            List of optimization scenarios
+        """
+        scenarios = []
+
+        current_cost = self._calculate_secrets_manager_monthly_cost(region=region)
+
+        # Calculate age
+        age_days = (datetime.now(timezone.utc) - created_date.replace(tzinfo=timezone.utc)).days
+
+        # Calculate days since last access
+        days_since_access = None
+        if last_accessed_date:
+            days_since_access = (
+                datetime.now(timezone.utc) - last_accessed_date.replace(tzinfo=timezone.utc)
+            ).days
+
+        # Calculate days since last rotation
+        days_since_rotation = None
+        if last_rotated_date:
+            days_since_rotation = (
+                datetime.now(timezone.utc) - last_rotated_date.replace(tzinfo=timezone.utc)
+            ).days
+
+        env = tags.get("Environment", tags.get("environment", "")).lower()
+        is_production = env in ["production", "prod", "prd"]
+
+        # SCENARIO 1: Secret Never Used (CRITICAL)
+        if days_since_access and days_since_access >= 90:
+            scenarios.append(
+                OptimizationScenario(
+                    scenario_name="Secret Never Used",
+                    priority="CRITICAL",
+                    confidence_score=95,
+                    estimated_monthly_savings=current_cost,
+                    recommendation=(
+                        f"Secret has not been accessed in {days_since_access} days. "
+                        f"Delete if no longer needed or archive for compliance."
+                    ),
+                    implementation_steps=[
+                        "Verify secret is not referenced in code or infrastructure",
+                        "Archive secret value if needed for compliance",
+                        "Delete secret via AWS CLI: aws secretsmanager delete-secret --secret-id ...",
+                        "Monitor for any access attempts after deletion"
+                    ],
+                    risk_level="LOW",
+                    effort="LOW",
+                )
+            )
+
+        # SCENARIO 2: Secret Not Rotated (HIGH)
+        if days_since_rotation and days_since_rotation >= 365 and is_production:
+            scenarios.append(
+                OptimizationScenario(
+                    scenario_name="Secret Not Rotated (Security Risk)",
+                    priority="HIGH",
+                    confidence_score=85,
+                    estimated_monthly_savings=current_cost if not rotation_enabled else 0.0,
+                    recommendation=(
+                        f"Secret has not been rotated in {days_since_rotation} days (>1 year). "
+                        f"Security best practice is to rotate secrets every 30-90 days. "
+                        f"Enable automatic rotation or rotate manually."
+                    ),
+                    implementation_steps=[
+                        "Enable automatic rotation for supported secret types (RDS, Redshift, etc.)",
+                        "For custom secrets, configure Lambda rotation function",
+                        "Set rotation schedule (recommended: every 30-90 days)",
+                        "Test rotation does not break applications"
+                    ],
+                    risk_level="MEDIUM",
+                    effort="MEDIUM",
+                )
+            )
+
+        # SCENARIO 3: Duplicate Secrets (MEDIUM)
+        # Note: This requires cross-region comparison, detected by checking name patterns
+        if "copy" in secret_name.lower() or "duplicate" in secret_name.lower():
+            scenarios.append(
+                OptimizationScenario(
+                    scenario_name="Potential Duplicate Secret",
+                    priority="MEDIUM",
+                    confidence_score=70,
+                    estimated_monthly_savings=current_cost,
+                    recommendation=(
+                        f"Secret name suggests it may be a duplicate ('{secret_name}'). "
+                        f"Consolidate secrets to reduce cost and management overhead."
+                    ),
+                    implementation_steps=[
+                        "Search for similar secrets across all regions",
+                        "Compare secret values (if not sensitive)",
+                        "Update applications to use single secret",
+                        "Delete duplicate secrets"
+                    ],
+                    risk_level="LOW",
+                    effort="MEDIUM",
+                )
+            )
+
+        # SCENARIO 4: Secret Inactive (MEDIUM)
+        if (
+            days_since_access
+            and 7 <= days_since_access < 90
+            and not is_production
+        ):
+            scenarios.append(
+                OptimizationScenario(
+                    scenario_name="Secret Inactive (Dev/Test)",
+                    priority="MEDIUM",
+                    confidence_score=65,
+                    estimated_monthly_savings=current_cost,
+                    recommendation=(
+                        f"Secret has low activity ({days_since_access} days since last access) "
+                        f"in non-production environment. Consider deleting if no longer needed."
+                    ),
+                    implementation_steps=[
+                        "Confirm secret is not needed for dev/test workflows",
+                        "Delete secret or move to hardcoded config for dev",
+                        "Document decision in infrastructure-as-code"
+                    ],
+                    risk_level="LOW",
+                    effort="LOW",
+                )
+            )
+
+        # SCENARIO 5: No Rotation Configured (LOW)
+        if not rotation_enabled and is_production and age_days >= 30:
+            scenarios.append(
+                OptimizationScenario(
+                    scenario_name="No Automatic Rotation Configured",
+                    priority="LOW",
+                    confidence_score=50,
+                    estimated_monthly_savings=0.0,  # Security best practice, not cost savings
+                    recommendation=(
+                        f"Automatic rotation is not enabled. Enable rotation for security best practice. "
+                        f"This does not reduce cost but improves security posture."
+                    ),
+                    implementation_steps=[
+                        "Enable automatic rotation if supported secret type",
+                        "Configure Lambda rotation function for custom secrets",
+                        "Set rotation schedule (30-90 days recommended)",
+                        "Test rotation process in non-production first"
+                    ],
+                    risk_level="MEDIUM",
+                    effort="MEDIUM",
+                )
+            )
+
+        return scenarios
+
+    async def scan_secrets_manager_secrets(
+        self, region: str
+    ) -> list[AllCloudResourceData]:
+        """
+        Scan ALL AWS Secrets Manager secrets for cost intelligence.
+
+        Secrets Manager stores sensitive data like passwords, API keys, database credentials.
+
+        CloudWatch Metrics Used:
+        - N/A (Secrets Manager doesn't publish CloudWatch metrics for secret access)
+        - LastAccessedDate field from describe_secret API
+
+        API Calls:
+        - list_secrets() - List all secrets
+        - describe_secret() - Get secret details (LastAccessedDate, RotationEnabled)
+
+        Cost Optimization Scenarios:
+        1. Secret Never Used (CRITICAL) - 0 accesses in 90 days → Delete secret
+        2. Secret Not Rotated (HIGH) - No rotation in 365+ days → Security risk
+        3. Duplicate Secrets (MEDIUM) - Same secret in multiple regions → Consolidate
+        4. Secret Inactive (MEDIUM) - < 10 accesses/month → Delete if dev/test
+        5. No Rotation Configured (LOW) - Manual rotation only → Enable auto-rotation
+
+        Returns:
+            List of AllCloudResourceData representing ALL secrets in the region
+        """
+        resources = []
+
+        try:
+            async with self.session.client("secretsmanager", region_name=region) as sm:
+                # List all secrets
+                paginator = sm.get_paginator("list_secrets")
+                async for page in paginator.paginate():
+                    for secret in page.get("SecretList", []):
+                        try:
+                            secret_arn = secret.get("ARN", "")
+                            secret_name = secret.get("Name", "")
+
+                            # Get detailed secret information
+                            try:
+                                secret_details = await sm.describe_secret(SecretId=secret_arn)
+                            except Exception as e:
+                                logger.warning(
+                                    "secrets_manager.describe_failed",
+                                    secret_name=secret_name,
+                                    error=str(e),
+                                )
+                                continue
+
+                            # Extract metadata
+                            last_accessed_date = secret_details.get("LastAccessedDate")
+                            last_rotated_date = secret_details.get("LastRotatedDate")
+                            rotation_enabled = secret_details.get("RotationEnabled", False)
+                            created_date = secret_details.get("CreatedDate")
+                            tags_list = secret_details.get("Tags", [])
+                            tags = {tag["Key"]: tag["Value"] for tag in tags_list}
+
+                            # Calculate monthly cost
+                            monthly_cost = self._calculate_secrets_manager_monthly_cost(
+                                region=region
+                            )
+
+                            # Calculate optimization scenarios
+                            optimization_scenarios = self._calculate_secrets_manager_optimization(
+                                secret_name=secret_name,
+                                secret_arn=secret_arn,
+                                last_accessed_date=last_accessed_date,
+                                last_rotated_date=last_rotated_date,
+                                rotation_enabled=rotation_enabled,
+                                created_date=created_date,
+                                tags=tags,
+                                region=region,
+                            )
+
+                            # Prepare resource data
+                            resource_data = AllCloudResourceData(
+                                resource_type="secrets_manager_secret",
+                                resource_id=secret_arn,
+                                resource_name=secret_name,
+                                region=region,
+                                estimated_monthly_cost=monthly_cost,
+                                currency="USD",
+                                resource_metadata={
+                                    "last_accessed_date": last_accessed_date.isoformat()
+                                    if last_accessed_date
+                                    else None,
+                                    "last_rotated_date": last_rotated_date.isoformat()
+                                    if last_rotated_date
+                                    else None,
+                                    "rotation_enabled": rotation_enabled,
+                                    "created_date": created_date.isoformat()
+                                    if created_date
+                                    else None,
+                                    "tags": tags,
+                                },
+                                optimization_scenarios=optimization_scenarios,
+                            )
+
+                            resources.append(resource_data)
+
+                            logger.debug(
+                                "secrets_manager.secret_scanned",
+                                secret_name=secret_name,
+                                region=region,
+                                scenarios=len(optimization_scenarios),
+                            )
+
+                        except Exception as e:
+                            logger.warning(
+                                "secrets_manager.secret_scan_error",
+                                secret_name=secret.get("Name", "unknown"),
+                                region=region,
+                                error=str(e),
+                            )
+                            continue
+
+        except Exception as e:
+            logger.error(
+                "secrets_manager.scan_failed",
+                region=region,
+                error=str(e),
+            )
+
+        return resources
+
+    # ============================================================
+    # RESSOURCE 34 : AWS BACKUP VAULT
+    # ============================================================
+
+    def _calculate_backup_vault_monthly_cost(
+        self, storage_gb: float, storage_tier: str, region: str
+    ) -> float:
+        """
+        Calculate estimated monthly cost for AWS Backup Vault storage.
+
+        AWS Backup centralizes backup management across AWS services.
+
+        Cost Components:
+        1. Warm backup storage: $0.05 per GB/month
+        2. Cold backup storage: $0.01 per GB/month (archive tier)
+        3. Continuous backup (PITR): $0.20 per GB/month (not tracked here)
+
+        Args:
+            storage_gb: Total backup storage in GB
+            storage_tier: Storage tier ('warm' or 'cold')
+            region: AWS region
+
+        Returns:
+            Estimated monthly cost in USD
+
+        Example:
+            100 GB warm backup storage:
+            - Cost: 100 × $0.05 = $5.00/month
+
+            100 GB cold backup storage:
+            - Cost: 100 × $0.01 = $1.00/month
+        """
+        if storage_tier == "cold":
+            rate_per_gb = self.PRICING.get("backup_cold_storage_per_gb", 0.01)
+        else:  # warm (default)
+            rate_per_gb = self.PRICING.get("backup_warm_storage_per_gb", 0.05)
+
+        cost = storage_gb * rate_per_gb
+
+        return round(cost, 2)
+
+    def _calculate_backup_vault_optimization(
+        self,
+        vault_name: str,
+        vault_arn: str,
+        recovery_points_count: int,
+        total_storage_gb: float,
+        oldest_recovery_point_age_days: int,
+        last_restore_time: datetime | None,
+        backup_jobs_30d: int,
+        restore_jobs_30d: int,
+        tags: dict,
+        region: str,
+    ) -> list[OptimizationScenario]:
+        """
+        Calculate optimization scenarios for AWS Backup Vault.
+
+        AWS Backup Vault Optimization Scenarios:
+        1. Empty Vault (CRITICAL) - 0 recovery points → Delete vault
+        2. Old Recovery Points (HIGH) - Recovery points >365 days → Delete expired backups
+        3. Never Tested (MEDIUM) - No restore jobs ever → Test backup viability
+        4. Duplicate Backups (MEDIUM) - Same source in multiple vaults → Consolidate
+        5. Warm Storage for Archives (LOW) - >180 days → Migrate to Cold storage
+
+        Args:
+            vault_name: Backup vault name
+            vault_arn: Vault ARN
+            recovery_points_count: Number of recovery points in vault
+            total_storage_gb: Total storage used (GB)
+            oldest_recovery_point_age_days: Age of oldest recovery point
+            last_restore_time: Last time a restore was performed (can be None)
+            backup_jobs_30d: Number of backup jobs in last 30 days
+            restore_jobs_30d: Number of restore jobs in last 30 days
+            tags: Resource tags
+            region: AWS region
+
+        Returns:
+            List of optimization scenarios
+        """
+        scenarios = []
+
+        current_cost = self._calculate_backup_vault_monthly_cost(
+            storage_gb=total_storage_gb,
+            storage_tier="warm",  # Assume warm by default
+            region=region,
+        )
+
+        env = tags.get("Environment", tags.get("environment", "")).lower()
+        is_production = env in ["production", "prod", "prd"]
+
+        # Calculate days since last restore
+        days_since_restore = None
+        if last_restore_time:
+            days_since_restore = (
+                datetime.now(timezone.utc) - last_restore_time.replace(tzinfo=timezone.utc)
+            ).days
+
+        # SCENARIO 1: Empty Vault (CRITICAL)
+        if recovery_points_count == 0:
+            scenarios.append(
+                OptimizationScenario(
+                    scenario_name="Empty Backup Vault",
+                    priority="CRITICAL",
+                    confidence_score=95,
+                    estimated_monthly_savings=0.0,  # No storage cost if empty
+                    recommendation=(
+                        f"Backup vault '{vault_name}' has no recovery points. "
+                        f"Delete vault if no longer needed to simplify management."
+                    ),
+                    implementation_steps=[
+                        "Verify vault is not referenced in backup plans",
+                        "Check for any scheduled backup jobs targeting this vault",
+                        "Delete vault via AWS CLI: aws backup delete-backup-vault --backup-vault-name ...",
+                        "Update infrastructure-as-code to remove vault"
+                    ],
+                    risk_level="LOW",
+                    effort="LOW",
+                )
+            )
+
+        # SCENARIO 2: Old Recovery Points (HIGH)
+        if oldest_recovery_point_age_days > 365:
+            # Estimate cost of old backups (assume 50% of storage)
+            old_backup_cost = current_cost * 0.5
+            scenarios.append(
+                OptimizationScenario(
+                    scenario_name="Recovery Points Exceed Retention Policy",
+                    priority="HIGH",
+                    confidence_score=85,
+                    estimated_monthly_savings=old_backup_cost,
+                    recommendation=(
+                        f"Oldest recovery point is {oldest_recovery_point_age_days} days old (>1 year). "
+                        f"Review retention policy and delete expired backups. "
+                        f"Estimated savings: ${old_backup_cost:.2f}/month (50% of storage)."
+                    ),
+                    implementation_steps=[
+                        "Review backup lifecycle policy for vault",
+                        "Identify recovery points exceeding retention requirements",
+                        "Delete expired recovery points manually or via lifecycle policy",
+                        "Update backup plan with appropriate retention (e.g., 90 days for warm, 365 for cold)"
+                    ],
+                    risk_level="LOW",
+                    effort="LOW",
+                )
+            )
+
+        # SCENARIO 3: Never Tested (MEDIUM)
+        if recovery_points_count > 0 and restore_jobs_30d == 0 and (
+            days_since_restore is None or days_since_restore > 180
+        ):
+            scenarios.append(
+                OptimizationScenario(
+                    scenario_name="Backups Never Tested (Reliability Risk)",
+                    priority="MEDIUM",
+                    confidence_score=70,
+                    estimated_monthly_savings=0.0,  # Reliability issue, not cost
+                    recommendation=(
+                        f"Vault has {recovery_points_count} recovery points but no restore jobs "
+                        f"in the last 180 days. Test restore process to verify backup viability."
+                    ),
+                    implementation_steps=[
+                        "Select a recent recovery point for testing",
+                        "Perform test restore to verify backup integrity",
+                        "Document restore procedure for disaster recovery",
+                        "Schedule regular restore tests (quarterly recommended)"
+                    ],
+                    risk_level="HIGH",
+                    effort="MEDIUM",
+                )
+            )
+
+        # SCENARIO 4: Duplicate Backups (MEDIUM)
+        # Detected by name patterns suggesting duplication
+        if "copy" in vault_name.lower() or "backup" in vault_name.lower() and "-2" in vault_name:
+            duplicate_savings = current_cost * 0.5  # Assume 50% duplication
+            scenarios.append(
+                OptimizationScenario(
+                    scenario_name="Potential Duplicate Backup Vault",
+                    priority="MEDIUM",
+                    confidence_score=65,
+                    estimated_monthly_savings=duplicate_savings,
+                    recommendation=(
+                        f"Vault name suggests potential duplication ('{vault_name}'). "
+                        f"Consolidate backups to single vault to reduce cost. "
+                        f"Estimated savings: ${duplicate_savings:.2f}/month."
+                    ),
+                    implementation_steps=[
+                        "Review all backup vaults and identify duplicates",
+                        "Verify if backups cover same resources",
+                        "Update backup plans to use single vault",
+                        "Migrate or copy recovery points if needed",
+                        "Delete duplicate vault after migration"
+                    ],
+                    risk_level="MEDIUM",
+                    effort="MEDIUM",
+                )
+            )
+
+        # SCENARIO 5: Warm Storage for Archives (LOW)
+        if oldest_recovery_point_age_days > 180 and total_storage_gb > 10:
+            # Calculate savings from migrating to cold storage
+            warm_cost = self._calculate_backup_vault_monthly_cost(
+                storage_gb=total_storage_gb,
+                storage_tier="warm",
+                region=region,
+            )
+            cold_cost = self._calculate_backup_vault_monthly_cost(
+                storage_gb=total_storage_gb,
+                storage_tier="cold",
+                region=region,
+            )
+            savings = warm_cost - cold_cost
+
+            scenarios.append(
+                OptimizationScenario(
+                    scenario_name="Use Cold Storage for Old Backups",
+                    priority="LOW",
+                    confidence_score=50,
+                    estimated_monthly_savings=savings,
+                    recommendation=(
+                        f"Vault has {total_storage_gb:.1f} GB of backups with oldest > 180 days. "
+                        f"Migrate to cold storage tier to save ${savings:.2f}/month "
+                        f"(${warm_cost:.2f} warm → ${cold_cost:.2f} cold)."
+                    ),
+                    implementation_steps=[
+                        "Update backup plan lifecycle to use cold storage after 90 days",
+                        "AWS Backup automatically transitions to cold after lifecycle threshold",
+                        "Note: Cold storage has longer restore times (hours vs minutes)",
+                        "Suitable for compliance/archive backups not needed for quick recovery"
+                    ],
+                    risk_level="LOW",
+                    effort="LOW",
+                )
+            )
+
+        return scenarios
+
+    async def scan_backup_vaults_aws(self, region: str) -> list[AllCloudResourceData]:
+        """
+        Scan ALL AWS Backup Vaults for cost intelligence.
+
+        AWS Backup provides centralized backup management for AWS services
+        (EC2, RDS, DynamoDB, EFS, S3, etc.).
+
+        CloudWatch Metrics Used:
+        - NumberOfBackupJobs (AWS/Backup) - Backup jobs created in last 30 days
+        - NumberOfRestoreJobs (AWS/Backup) - Restore jobs created in last 30 days
+
+        API Calls:
+        - list_backup_vaults() - List all vaults
+        - list_recovery_points_by_backup_vault() - Get recovery points and storage
+
+        Cost Optimization Scenarios:
+        1. Empty Vault (CRITICAL) - 0 recovery points → Delete vault
+        2. Old Recovery Points (HIGH) - Recovery points >365 days → Delete expired
+        3. Never Tested (MEDIUM) - No restore jobs ever → Test viability
+        4. Duplicate Backups (MEDIUM) - Same source in multiple vaults → Consolidate
+        5. Warm Storage for Archives (LOW) - >180 days → Migrate to Cold
+
+        Returns:
+            List of AllCloudResourceData representing ALL backup vaults in the region
+        """
+        resources = []
+
+        try:
+            async with self.session.client("backup", region_name=region) as backup:
+                # List all backup vaults
+                paginator = backup.get_paginator("list_backup_vaults")
+                async for page in paginator.paginate():
+                    for vault in page.get("BackupVaultList", []):
+                        try:
+                            vault_name = vault.get("BackupVaultName", "")
+                            vault_arn = vault.get("BackupVaultArn", "")
+
+                            # Get recovery points for this vault
+                            recovery_points = []
+                            total_storage_bytes = 0
+                            oldest_recovery_point_date = None
+
+                            try:
+                                rp_paginator = backup.get_paginator(
+                                    "list_recovery_points_by_backup_vault"
+                                )
+                                async for rp_page in rp_paginator.paginate(
+                                    BackupVaultName=vault_name
+                                ):
+                                    for rp in rp_page.get("RecoveryPoints", []):
+                                        recovery_points.append(rp)
+                                        # Sum storage
+                                        backup_size_bytes = rp.get("BackupSizeInBytes", 0)
+                                        total_storage_bytes += backup_size_bytes
+
+                                        # Track oldest recovery point
+                                        creation_date = rp.get("CreationDate")
+                                        if creation_date:
+                                            if (
+                                                oldest_recovery_point_date is None
+                                                or creation_date < oldest_recovery_point_date
+                                            ):
+                                                oldest_recovery_point_date = creation_date
+
+                            except Exception as e:
+                                logger.warning(
+                                    "backup_vault.list_recovery_points_failed",
+                                    vault_name=vault_name,
+                                    error=str(e),
+                                )
+
+                            total_storage_gb = total_storage_bytes / (1024**3)
+                            recovery_points_count = len(recovery_points)
+
+                            # Calculate age of oldest recovery point
+                            oldest_recovery_point_age_days = 0
+                            if oldest_recovery_point_date:
+                                oldest_recovery_point_age_days = (
+                                    datetime.now(timezone.utc)
+                                    - oldest_recovery_point_date.replace(tzinfo=timezone.utc)
+                                ).days
+
+                            # Get CloudWatch metrics for backup/restore jobs
+                            backup_jobs_30d = 0
+                            restore_jobs_30d = 0
+                            last_restore_time = None
+
+                            try:
+                                async with self.session.client(
+                                    "cloudwatch", region_name=region
+                                ) as cw:
+                                    # NumberOfBackupJobs metric
+                                    backup_jobs_response = await cw.get_metric_statistics(
+                                        Namespace="AWS/Backup",
+                                        MetricName="NumberOfBackupJobs",
+                                        Dimensions=[
+                                            {"Name": "BackupVaultName", "Value": vault_name}
+                                        ],
+                                        StartTime=datetime.now(timezone.utc) - timedelta(days=30),
+                                        EndTime=datetime.now(timezone.utc),
+                                        Period=86400,  # 1 day
+                                        Statistics=["Sum"],
+                                    )
+                                    backup_jobs_30d = sum(
+                                        dp["Sum"]
+                                        for dp in backup_jobs_response.get("Datapoints", [])
+                                    )
+
+                                    # NumberOfRestoreJobs metric
+                                    restore_jobs_response = await cw.get_metric_statistics(
+                                        Namespace="AWS/Backup",
+                                        MetricName="NumberOfRestoreJobs",
+                                        Dimensions=[
+                                            {"Name": "BackupVaultName", "Value": vault_name}
+                                        ],
+                                        StartTime=datetime.now(timezone.utc) - timedelta(days=30),
+                                        EndTime=datetime.now(timezone.utc),
+                                        Period=86400,
+                                        Statistics=["Sum"],
+                                    )
+                                    datapoints = restore_jobs_response.get("Datapoints", [])
+                                    restore_jobs_30d = sum(dp["Sum"] for dp in datapoints)
+
+                                    # Get last restore time
+                                    if datapoints:
+                                        sorted_datapoints = sorted(
+                                            datapoints, key=lambda x: x["Timestamp"], reverse=True
+                                        )
+                                        if sorted_datapoints[0]["Sum"] > 0:
+                                            last_restore_time = sorted_datapoints[0]["Timestamp"]
+
+                            except Exception as e:
+                                logger.warning(
+                                    "backup_vault.cloudwatch_metrics_failed",
+                                    vault_name=vault_name,
+                                    error=str(e),
+                                )
+
+                            # Get tags
+                            tags = {}
+                            try:
+                                tags_response = await backup.list_tags(ResourceArn=vault_arn)
+                                tags = tags_response.get("Tags", {})
+                            except Exception:
+                                pass  # Tags not critical
+
+                            # Calculate monthly cost
+                            monthly_cost = self._calculate_backup_vault_monthly_cost(
+                                storage_gb=total_storage_gb,
+                                storage_tier="warm",  # Assume warm by default
+                                region=region,
+                            )
+
+                            # Calculate optimization scenarios
+                            optimization_scenarios = self._calculate_backup_vault_optimization(
+                                vault_name=vault_name,
+                                vault_arn=vault_arn,
+                                recovery_points_count=recovery_points_count,
+                                total_storage_gb=total_storage_gb,
+                                oldest_recovery_point_age_days=oldest_recovery_point_age_days,
+                                last_restore_time=last_restore_time,
+                                backup_jobs_30d=int(backup_jobs_30d),
+                                restore_jobs_30d=int(restore_jobs_30d),
+                                tags=tags,
+                                region=region,
+                            )
+
+                            # Prepare resource data
+                            resource_data = AllCloudResourceData(
+                                resource_type="backup_vault",
+                                resource_id=vault_arn,
+                                resource_name=vault_name,
+                                region=region,
+                                estimated_monthly_cost=monthly_cost,
+                                currency="USD",
+                                resource_metadata={
+                                    "recovery_points_count": recovery_points_count,
+                                    "total_storage_gb": round(total_storage_gb, 2),
+                                    "oldest_recovery_point_age_days": oldest_recovery_point_age_days,
+                                    "backup_jobs_30d": int(backup_jobs_30d),
+                                    "restore_jobs_30d": int(restore_jobs_30d),
+                                    "last_restore_time": last_restore_time.isoformat()
+                                    if last_restore_time
+                                    else None,
+                                    "tags": tags,
+                                },
+                                optimization_scenarios=optimization_scenarios,
+                            )
+
+                            resources.append(resource_data)
+
+                            logger.debug(
+                                "backup_vault.scanned",
+                                vault_name=vault_name,
+                                region=region,
+                                recovery_points=recovery_points_count,
+                                scenarios=len(optimization_scenarios),
+                            )
+
+                        except Exception as e:
+                            logger.warning(
+                                "backup_vault.scan_error",
+                                vault_name=vault.get("BackupVaultName", "unknown"),
+                                region=region,
+                                error=str(e),
+                            )
+                            continue
+
+        except Exception as e:
+            logger.error(
+                "backup_vault.scan_failed",
+                region=region,
+                error=str(e),
+            )
+
+        return resources
+
+    # ============================================================
+    # RESSOURCE 35 : APP RUNNER SERVICE
+    # ============================================================
+
+    def _calculate_app_runner_monthly_cost(
+        self,
+        vcpu: int,
+        memory_gb: int,
+        active_hours: int,
+        provisioned_hours: int,
+        region: str,
+    ) -> float:
+        """
+        Calculate estimated monthly cost for AWS App Runner service.
+
+        App Runner is a fully managed service for containerized web apps and APIs.
+
+        Cost Components:
+        1. Active compute: vCPU + Memory (when processing requests)
+        2. Provisioned compute: vCPU + Memory (idle state, ready to serve)
+
+        Args:
+            vcpu: Number of vCPUs (typically 1)
+            memory_gb: Memory in GB (typically 2GB)
+            active_hours: Hours in active state (processing requests)
+            provisioned_hours: Hours in provisioned state (idle)
+            region: AWS region
+
+        Returns:
+            Estimated monthly cost in USD
+
+        Example:
+            1 vCPU, 2GB, always active (730h/month):
+            - Active: (1 × $0.064 + 2 × $0.007) × 730 = $56.94/month
+            - Provisioned: (1 × $0.0064 + 2 × $0.0007) × 730 = $5.69/month
+            - Total: $62.63/month
+        """
+        vcpu_active_rate = self.PRICING.get("app_runner_vcpu_active", 0.064)
+        vcpu_provisioned_rate = self.PRICING.get("app_runner_vcpu_provisioned", 0.0064)
+        memory_active_rate = self.PRICING.get("app_runner_memory_active", 0.007)
+        memory_provisioned_rate = self.PRICING.get("app_runner_memory_provisioned", 0.0007)
+
+        # Calculate active cost
+        active_cost = (vcpu * vcpu_active_rate + memory_gb * memory_active_rate) * active_hours
+
+        # Calculate provisioned cost
+        provisioned_cost = (
+            vcpu * vcpu_provisioned_rate + memory_gb * memory_provisioned_rate
+        ) * provisioned_hours
+
+        total_cost = active_cost + provisioned_cost
+
+        return round(total_cost, 2)
+
+    def _calculate_app_runner_optimization(
+        self,
+        service_name: str,
+        service_arn: str,
+        service_status: str,
+        vcpu: int,
+        memory_gb: int,
+        requests_30d: int,
+        active_instances: int,
+        cpu_utilization_avg: float,
+        memory_utilization_avg: float,
+        success_responses_30d: int,
+        error_responses_30d: int,
+        tags: dict,
+        region: str,
+    ) -> list[OptimizationScenario]:
+        """
+        Calculate optimization scenarios for AWS App Runner service.
+
+        App Runner Optimization Scenarios:
+        1. Zero Requests (CRITICAL) - 0 requests in 30 days → Delete service
+        2. Service Paused (HIGH) - Paused but still provisioned → Resume or delete
+        3. Low Traffic (MEDIUM) - < 1000 requests/month → Migrate to Lambda
+        4. Oversized Resources (MEDIUM) - Low CPU/Memory utilization → Downgrade
+        5. Dev/Test Always Running (LOW) - Non-prod always active → Enable auto-pause
+
+        Args:
+            service_name: App Runner service name
+            service_arn: Service ARN
+            service_status: Service status (RUNNING, PAUSED, etc.)
+            vcpu: Number of vCPUs configured
+            memory_gb: Memory in GB
+            requests_30d: Total requests in last 30 days
+            active_instances: Number of active instances
+            cpu_utilization_avg: Average CPU utilization (%)
+            memory_utilization_avg: Average memory utilization (%)
+            success_responses_30d: Successful responses (2xx) in 30 days
+            error_responses_30d: Error responses (4xx/5xx) in 30 days
+            tags: Resource tags
+            region: AWS region
+
+        Returns:
+            List of optimization scenarios
+        """
+        scenarios = []
+
+        # Calculate current monthly cost (assuming always active)
+        monthly_hours = 730
+        current_cost = self._calculate_app_runner_monthly_cost(
+            vcpu=vcpu,
+            memory_gb=memory_gb,
+            active_hours=monthly_hours,  # Assume always active
+            provisioned_hours=0,
+            region=region,
+        )
+
+        env = tags.get("Environment", tags.get("environment", "")).lower()
+        is_production = env in ["production", "prod", "prd"]
+
+        # SCENARIO 1: Zero Requests (CRITICAL)
+        if requests_30d == 0:
+            scenarios.append(
+                OptimizationScenario(
+                    scenario_name="Zero Traffic (No Requests)",
+                    priority="CRITICAL",
+                    confidence_score=95,
+                    estimated_monthly_savings=current_cost,
+                    recommendation=(
+                        f"App Runner service has received 0 requests in the last 30 days. "
+                        f"Delete service if no longer needed. "
+                        f"Savings: ${current_cost:.2f}/month."
+                    ),
+                    implementation_steps=[
+                        "Verify service is not used in production",
+                        "Check DNS records and application code for references",
+                        "Pause service first to test impact",
+                        "Delete service via AWS CLI: aws apprunner delete-service --service-arn ..."
+                    ],
+                    risk_level="LOW",
+                    effort="LOW",
+                )
+            )
+
+        # SCENARIO 2: Service Paused (HIGH)
+        if service_status.upper() == "PAUSED":
+            # When paused, only pay provisioned rate (much cheaper)
+            paused_cost = self._calculate_app_runner_monthly_cost(
+                vcpu=vcpu,
+                memory_gb=memory_gb,
+                active_hours=0,
+                provisioned_hours=monthly_hours,
+                region=region,
+            )
+            scenarios.append(
+                OptimizationScenario(
+                    scenario_name="Service Paused but Still Charged",
+                    priority="HIGH",
+                    confidence_score=85,
+                    estimated_monthly_savings=paused_cost,
+                    recommendation=(
+                        f"Service is paused but still incurring provisioned compute costs "
+                        f"(${paused_cost:.2f}/month). Resume if needed or delete to save cost."
+                    ),
+                    implementation_steps=[
+                        "If service no longer needed, delete it completely",
+                        "If temporarily unused, keep paused (low cost)",
+                        "If needed, resume service to serve traffic",
+                        "Consider migrating to Lambda if infrequent use"
+                    ],
+                    risk_level="LOW",
+                    effort="LOW",
+                )
+            )
+
+        # SCENARIO 3: Low Traffic (MEDIUM)
+        if 0 < requests_30d < 1000 and not is_production:
+            scenarios.append(
+                OptimizationScenario(
+                    scenario_name="Low Traffic (Migrate to Lambda)",
+                    priority="MEDIUM",
+                    confidence_score=70,
+                    estimated_monthly_savings=current_cost,
+                    recommendation=(
+                        f"Service has low traffic ({requests_30d} requests/month). "
+                        f"Consider migrating to AWS Lambda for serverless cost model. "
+                        f"Lambda free tier: 1M requests/month + 400,000 GB-seconds."
+                    ),
+                    implementation_steps=[
+                        "Evaluate if workload is suitable for Lambda (< 15min execution, stateless)",
+                        "Package application as Lambda function",
+                        "Use API Gateway or Lambda Function URLs for HTTP access",
+                        "Test Lambda version thoroughly before switching traffic",
+                        "Delete App Runner service after migration"
+                    ],
+                    risk_level="MEDIUM",
+                    effort="HIGH",
+                )
+            )
+
+        # SCENARIO 4: Oversized Resources (MEDIUM)
+        if cpu_utilization_avg < 20 and memory_utilization_avg < 20 and requests_30d > 0:
+            # Estimate cost with half resources
+            downgraded_vcpu = max(0.25, vcpu / 2)  # Min 0.25 vCPU
+            downgraded_memory = max(0.5, memory_gb / 2)  # Min 0.5 GB
+            downgraded_cost = self._calculate_app_runner_monthly_cost(
+                vcpu=int(downgraded_vcpu) if downgraded_vcpu >= 1 else 1,
+                memory_gb=int(downgraded_memory) if downgraded_memory >= 1 else 2,
+                active_hours=monthly_hours,
+                provisioned_hours=0,
+                region=region,
+            )
+            savings = current_cost - downgraded_cost
+
+            scenarios.append(
+                OptimizationScenario(
+                    scenario_name="Oversized Resources (Low Utilization)",
+                    priority="MEDIUM",
+                    confidence_score=65,
+                    estimated_monthly_savings=savings,
+                    recommendation=(
+                        f"Service has low resource utilization (CPU: {cpu_utilization_avg:.1f}%, "
+                        f"Memory: {memory_utilization_avg:.1f}%). Downgrade to smaller instance size. "
+                        f"Current: {vcpu} vCPU, {memory_gb}GB → Suggested: {downgraded_vcpu} vCPU, {downgraded_memory}GB. "
+                        f"Savings: ${savings:.2f}/month."
+                    ),
+                    implementation_steps=[
+                        "Update App Runner service configuration to reduce CPU/memory",
+                        "Test with smaller instance size in non-production first",
+                        "Monitor performance metrics after downgrade",
+                        "Adjust configuration if performance degrades"
+                    ],
+                    risk_level="LOW",
+                    effort="LOW",
+                )
+            )
+
+        # SCENARIO 5: Dev/Test Always Running (LOW)
+        if not is_production and requests_30d > 0 and service_status == "RUNNING":
+            # Estimate cost savings with auto-pause (assume 50% uptime for dev/test)
+            auto_pause_cost = self._calculate_app_runner_monthly_cost(
+                vcpu=vcpu,
+                memory_gb=memory_gb,
+                active_hours=monthly_hours * 0.5,
+                provisioned_hours=monthly_hours * 0.5,
+                region=region,
+            )
+            savings = current_cost - auto_pause_cost
+
+            scenarios.append(
+                OptimizationScenario(
+                    scenario_name="Dev/Test Always Running (Enable Auto-Pause)",
+                    priority="LOW",
+                    confidence_score=50,
+                    estimated_monthly_savings=savings,
+                    recommendation=(
+                        f"Non-production service is always running. Enable auto-pause for dev/test "
+                        f"to reduce costs during idle periods. "
+                        f"Estimated savings: ${savings:.2f}/month (50% reduction with auto-pause)."
+                    ),
+                    implementation_steps=[
+                        "App Runner doesn't have native auto-pause (unlike Lambda)",
+                        "Consider using EventBridge + Lambda to pause/resume on schedule",
+                        "Pause during nights/weekends if not needed",
+                        "Alternative: Migrate to Lambda for true serverless model"
+                    ],
+                    risk_level="LOW",
+                    effort="MEDIUM",
+                )
+            )
+
+        return scenarios
+
+    async def scan_app_runner_services(self, region: str) -> list[AllCloudResourceData]:
+        """
+        Scan ALL AWS App Runner services for cost intelligence.
+
+        App Runner is a fully managed service for deploying containerized web apps.
+
+        CloudWatch Metrics Used:
+        - Requests (AWS/AppRunner) - Total requests in last 30 days
+        - ActiveInstances (AWS/AppRunner) - Number of active instances (7 days)
+        - 2xxStatusResponses (AWS/AppRunner) - Successful responses (30 days)
+        - 4xxStatusResponses (AWS/AppRunner) - Client errors (30 days)
+        - CPUUtilization (AWS/AppRunner) - CPU usage % (7 days average)
+        - MemoryUtilization (AWS/AppRunner) - Memory usage % (7 days average)
+
+        API Calls:
+        - list_services() - List all App Runner services
+        - describe_service() - Get service details (CPU, memory, status)
+
+        Cost Optimization Scenarios:
+        1. Zero Requests (CRITICAL) - 0 requests in 30 days → Delete service
+        2. Service Paused (HIGH) - Paused but still provisioned → Resume or delete
+        3. Low Traffic (MEDIUM) - < 1000 requests/month → Migrate to Lambda
+        4. Oversized Resources (MEDIUM) - Low CPU/Memory utilization → Downgrade
+        5. Dev/Test Always Running (LOW) - Non-prod always active → Enable auto-pause
+
+        Returns:
+            List of AllCloudResourceData representing ALL App Runner services in the region
+        """
+        resources = []
+
+        try:
+            async with self.session.client("apprunner", region_name=region) as apprunner:
+                # List all App Runner services
+                paginator = apprunner.get_paginator("list_services")
+                async for page in paginator.paginate():
+                    for service_summary in page.get("ServiceSummaryList", []):
+                        try:
+                            service_arn = service_summary.get("ServiceArn", "")
+                            service_name = service_summary.get("ServiceName", "")
+
+                            # Get detailed service information
+                            try:
+                                service_details = await apprunner.describe_service(
+                                    ServiceArn=service_arn
+                                )
+                                service = service_details.get("Service", {})
+                            except Exception as e:
+                                logger.warning(
+                                    "app_runner.describe_failed",
+                                    service_name=service_name,
+                                    error=str(e),
+                                )
+                                continue
+
+                            # Extract configuration
+                            service_status = service.get("Status", "UNKNOWN")
+                            instance_config = service.get("InstanceConfiguration", {})
+                            vcpu = int(instance_config.get("Cpu", "1 vCPU").split()[0])
+                            memory_str = instance_config.get("Memory", "2 GB")
+                            memory_gb = int(memory_str.split()[0])
+
+                            # Get tags
+                            tags_list = service_summary.get("Tags", [])
+                            tags = {tag["Key"]: tag["Value"] for tag in tags_list}
+
+                            # Get CloudWatch metrics
+                            requests_30d = 0
+                            active_instances = 0
+                            cpu_utilization_avg = 0.0
+                            memory_utilization_avg = 0.0
+                            success_responses_30d = 0
+                            error_responses_30d = 0
+
+                            try:
+                                async with self.session.client(
+                                    "cloudwatch", region_name=region
+                                ) as cw:
+                                    # Requests metric (30 days)
+                                    requests_response = await cw.get_metric_statistics(
+                                        Namespace="AWS/AppRunner",
+                                        MetricName="Requests",
+                                        Dimensions=[
+                                            {"Name": "ServiceName", "Value": service_name}
+                                        ],
+                                        StartTime=datetime.now(timezone.utc) - timedelta(days=30),
+                                        EndTime=datetime.now(timezone.utc),
+                                        Period=86400,
+                                        Statistics=["Sum"],
+                                    )
+                                    requests_30d = sum(
+                                        dp["Sum"]
+                                        for dp in requests_response.get("Datapoints", [])
+                                    )
+
+                                    # ActiveInstances metric (7 days average)
+                                    instances_response = await cw.get_metric_statistics(
+                                        Namespace="AWS/AppRunner",
+                                        MetricName="ActiveInstances",
+                                        Dimensions=[
+                                            {"Name": "ServiceName", "Value": service_name}
+                                        ],
+                                        StartTime=datetime.now(timezone.utc) - timedelta(days=7),
+                                        EndTime=datetime.now(timezone.utc),
+                                        Period=3600,
+                                        Statistics=["Average"],
+                                    )
+                                    instances_datapoints = instances_response.get("Datapoints", [])
+                                    if instances_datapoints:
+                                        active_instances = sum(
+                                            dp["Average"] for dp in instances_datapoints
+                                        ) / len(instances_datapoints)
+
+                                    # CPUUtilization metric (7 days average)
+                                    cpu_response = await cw.get_metric_statistics(
+                                        Namespace="AWS/AppRunner",
+                                        MetricName="CPUUtilization",
+                                        Dimensions=[
+                                            {"Name": "ServiceName", "Value": service_name}
+                                        ],
+                                        StartTime=datetime.now(timezone.utc) - timedelta(days=7),
+                                        EndTime=datetime.now(timezone.utc),
+                                        Period=3600,
+                                        Statistics=["Average"],
+                                    )
+                                    cpu_datapoints = cpu_response.get("Datapoints", [])
+                                    if cpu_datapoints:
+                                        cpu_utilization_avg = sum(
+                                            dp["Average"] for dp in cpu_datapoints
+                                        ) / len(cpu_datapoints)
+
+                                    # MemoryUtilization metric (7 days average)
+                                    memory_response = await cw.get_metric_statistics(
+                                        Namespace="AWS/AppRunner",
+                                        MetricName="MemoryUtilization",
+                                        Dimensions=[
+                                            {"Name": "ServiceName", "Value": service_name}
+                                        ],
+                                        StartTime=datetime.now(timezone.utc) - timedelta(days=7),
+                                        EndTime=datetime.now(timezone.utc),
+                                        Period=3600,
+                                        Statistics=["Average"],
+                                    )
+                                    memory_datapoints = memory_response.get("Datapoints", [])
+                                    if memory_datapoints:
+                                        memory_utilization_avg = sum(
+                                            dp["Average"] for dp in memory_datapoints
+                                        ) / len(memory_datapoints)
+
+                                    # 2xxStatusResponses metric (30 days)
+                                    success_response = await cw.get_metric_statistics(
+                                        Namespace="AWS/AppRunner",
+                                        MetricName="2xxStatusResponses",
+                                        Dimensions=[
+                                            {"Name": "ServiceName", "Value": service_name}
+                                        ],
+                                        StartTime=datetime.now(timezone.utc) - timedelta(days=30),
+                                        EndTime=datetime.now(timezone.utc),
+                                        Period=86400,
+                                        Statistics=["Sum"],
+                                    )
+                                    success_responses_30d = sum(
+                                        dp["Sum"]
+                                        for dp in success_response.get("Datapoints", [])
+                                    )
+
+                                    # 4xxStatusResponses metric (30 days)
+                                    error_4xx_response = await cw.get_metric_statistics(
+                                        Namespace="AWS/AppRunner",
+                                        MetricName="4xxStatusResponses",
+                                        Dimensions=[
+                                            {"Name": "ServiceName", "Value": service_name}
+                                        ],
+                                        StartTime=datetime.now(timezone.utc) - timedelta(days=30),
+                                        EndTime=datetime.now(timezone.utc),
+                                        Period=86400,
+                                        Statistics=["Sum"],
+                                    )
+                                    error_responses_30d += sum(
+                                        dp["Sum"]
+                                        for dp in error_4xx_response.get("Datapoints", [])
+                                    )
+
+                            except Exception as e:
+                                logger.warning(
+                                    "app_runner.cloudwatch_metrics_failed",
+                                    service_name=service_name,
+                                    error=str(e),
+                                )
+
+                            # Calculate monthly cost (assume always active)
+                            monthly_cost = self._calculate_app_runner_monthly_cost(
+                                vcpu=vcpu,
+                                memory_gb=memory_gb,
+                                active_hours=730,  # Full month
+                                provisioned_hours=0,
+                                region=region,
+                            )
+
+                            # Calculate optimization scenarios
+                            optimization_scenarios = self._calculate_app_runner_optimization(
+                                service_name=service_name,
+                                service_arn=service_arn,
+                                service_status=service_status,
+                                vcpu=vcpu,
+                                memory_gb=memory_gb,
+                                requests_30d=int(requests_30d),
+                                active_instances=int(active_instances),
+                                cpu_utilization_avg=cpu_utilization_avg,
+                                memory_utilization_avg=memory_utilization_avg,
+                                success_responses_30d=int(success_responses_30d),
+                                error_responses_30d=int(error_responses_30d),
+                                tags=tags,
+                                region=region,
+                            )
+
+                            # Prepare resource data
+                            resource_data = AllCloudResourceData(
+                                resource_type="app_runner_service",
+                                resource_id=service_arn,
+                                resource_name=service_name,
+                                region=region,
+                                estimated_monthly_cost=monthly_cost,
+                                currency="USD",
+                                resource_metadata={
+                                    "service_status": service_status,
+                                    "vcpu": vcpu,
+                                    "memory_gb": memory_gb,
+                                    "requests_30d": int(requests_30d),
+                                    "active_instances": int(active_instances),
+                                    "cpu_utilization_avg": round(cpu_utilization_avg, 2),
+                                    "memory_utilization_avg": round(memory_utilization_avg, 2),
+                                    "success_responses_30d": int(success_responses_30d),
+                                    "error_responses_30d": int(error_responses_30d),
+                                    "tags": tags,
+                                },
+                                optimization_scenarios=optimization_scenarios,
+                            )
+
+                            resources.append(resource_data)
+
+                            logger.debug(
+                                "app_runner.service_scanned",
+                                service_name=service_name,
+                                region=region,
+                                scenarios=len(optimization_scenarios),
+                            )
+
+                        except Exception as e:
+                            logger.warning(
+                                "app_runner.service_scan_error",
+                                service_name=service_summary.get("ServiceName", "unknown"),
+                                region=region,
+                                error=str(e),
+                            )
+                            continue
+
+        except Exception as e:
+            logger.error(
+                "app_runner.scan_failed",
+                region=region,
+                error=str(e),
+            )
+
+        return resources

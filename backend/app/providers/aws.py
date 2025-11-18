@@ -175,6 +175,17 @@ class AWSProvider(CloudProviderBase):
         # SQS (Simple Queue Service) pricing
         "sqs_standard_per_million": 0.40,  # $0.40 per million requests (after 1M free)
         "sqs_fifo_per_million": 0.50,  # $0.50 per million requests (FIFO queues)
+        # Secrets Manager pricing
+        "secrets_manager_per_secret": 0.40,  # $0.40 per secret/month
+        "secrets_manager_per_10k_api_calls": 0.05,  # $0.05 per 10K API calls
+        # AWS Backup pricing (storage costs)
+        "backup_warm_storage_per_gb": 0.05,  # Warm backup $0.05/GB/month
+        "backup_cold_storage_per_gb": 0.01,  # Cold backup (archive) $0.01/GB/month
+        # App Runner pricing
+        "app_runner_vcpu_active": 0.064,  # $0.064 per vCPU-hour (active)
+        "app_runner_vcpu_provisioned": 0.0064,  # $0.0064 per vCPU-hour (provisioned)
+        "app_runner_memory_active": 0.007,  # $0.007 per GB-hour (active)
+        "app_runner_memory_provisioned": 0.0007,  # $0.0007 per GB-hour (provisioned)
     }
 
     def __init__(
