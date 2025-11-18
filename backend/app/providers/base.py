@@ -57,6 +57,7 @@ class AllCloudResourceData:
         optimization_score: int = 0,
         potential_monthly_savings: float = 0.0,
         optimization_recommendations: list[dict[str, Any]] | None = None,
+        optimization_scenarios: list[Any] | None = None,
         tags: dict[str, str] | None = None,
         resource_status: str | None = None,
         is_orphan: bool = False,
@@ -107,6 +108,7 @@ class AllCloudResourceData:
         self.optimization_score = optimization_score
         self.potential_monthly_savings = potential_monthly_savings
         self.optimization_recommendations = optimization_recommendations or []
+        self.optimization_scenarios = optimization_scenarios or []
         self.tags = tags or {}
         self.resource_status = resource_status
         self.is_orphan = is_orphan
