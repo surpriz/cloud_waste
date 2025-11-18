@@ -186,6 +186,19 @@ class AWSProvider(CloudProviderBase):
         "app_runner_vcpu_provisioned": 0.0064,  # $0.0064 per vCPU-hour (provisioned)
         "app_runner_memory_active": 0.007,  # $0.007 per GB-hour (active)
         "app_runner_memory_provisioned": 0.0007,  # $0.0007 per GB-hour (provisioned)
+        # Lightsail pricing (fixed monthly plans)
+        "lightsail_nano": 3.50,  # 512MB RAM, 1 vCPU
+        "lightsail_micro": 5.00,  # 1GB RAM, 1 vCPU
+        "lightsail_small": 10.00,  # 2GB RAM, 1 vCPU
+        "lightsail_medium": 20.00,  # 4GB RAM, 2 vCPU
+        "lightsail_large": 40.00,  # 8GB RAM, 2 vCPU
+        # WorkSpaces pricing (Always-On monthly)
+        "workspaces_value": 25.00,  # 1 vCPU, 2GB RAM
+        "workspaces_standard": 35.00,  # 2 vCPU, 4GB RAM
+        "workspaces_performance": 60.00,  # 2 vCPU, 8GB RAM
+        "workspaces_power": 80.00,  # 4 vCPU, 16GB RAM
+        # Glue Crawler pricing
+        "glue_dpu_per_hour": 0.44,  # $0.44 per DPU-Hour (minimum 2 DPUs)
     }
 
     def __init__(

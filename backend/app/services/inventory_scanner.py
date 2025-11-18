@@ -32501,3 +32501,826 @@ class AzureInventoryScanner:
             )
 
         return resources
+
+    # ============================================================
+    # RESSOURCE 36 : LIGHTSAIL INSTANCE
+    # ============================================================
+
+    def _calculate_lightsail_monthly_cost(self, bundle_id: str, region: str) -> float:
+        """
+        Calculate estimated monthly cost for AWS Lightsail instance.
+
+        Lightsail offers simple, fixed-price VPS instances with predictable pricing.
+
+        Cost Components:
+        - Fixed monthly price based on bundle (nano, micro, small, medium, large)
+        - Includes: compute, storage (SSD), data transfer (1TB-7TB depending on plan)
+
+        Args:
+            bundle_id: Bundle identifier (e.g., 'nano_2_0', 'micro_2_0', 'small_2_0')
+            region: AWS region
+
+        Returns:
+            Estimated monthly cost in USD
+
+        Example:
+            Micro bundle (1GB RAM, 1 vCPU): $5.00/month
+            Medium bundle (4GB RAM, 2 vCPU): $20.00/month
+        """
+        # Extract bundle size from bundle_id (e.g., 'nano_2_0' → 'nano')
+        bundle_size = bundle_id.split("_")[0] if "_" in bundle_id else bundle_id.lower()
+
+        # Map bundle to pricing
+        pricing_map = {
+            "nano": self.PRICING.get("lightsail_nano", 3.50),
+            "micro": self.PRICING.get("lightsail_micro", 5.00),
+            "small": self.PRICING.get("lightsail_small", 10.00),
+            "medium": self.PRICING.get("lightsail_medium", 20.00),
+            "large": self.PRICING.get("lightsail_large", 40.00),
+            "xlarge": 80.00,  # Not in PRICING yet
+            "2xlarge": 160.00,  # Not in PRICING yet
+        }
+
+        cost = pricing_map.get(bundle_size, 10.00)  # Default to small if unknown
+
+        return round(cost, 2)
+
+    def _calculate_lightsail_optimization(
+        self,
+        instance_name: str,
+        instance_arn: str,
+        bundle_id: str,
+        instance_state: str,
+        created_at: datetime,
+        cpu_utilization_avg: float,
+        network_in_30d: float,
+        network_out_30d: float,
+        tags: dict,
+        region: str,
+    ) -> list[OptimizationScenario]:
+        """
+        Calculate optimization scenarios for AWS Lightsail instance.
+
+        Lightsail Optimization Scenarios:
+        1. Instance Stopped Long-Term (CRITICAL) - Stopped >30 days → Still charged!
+        2. Very Low CPU (<5% for 7 days) (HIGH) - Unused instance → Delete or downgrade
+        3. Oversized Bundle (MEDIUM) - <20% CPU+RAM usage → Downgrade bundle
+        4. No Network Traffic (MEDIUM) - 0 bytes in/out for 30 days → Delete unused
+        5. Dev/Test Not Needed 24/7 (LOW) - Non-prod → Migrate to EC2 with scheduling
+
+        Args:
+            instance_name: Lightsail instance name
+            instance_arn: Instance ARN
+            bundle_id: Bundle type (nano, micro, small, etc.)
+            instance_state: Instance state (running, stopped, pending, etc.)
+            created_at: Instance creation time
+            cpu_utilization_avg: Average CPU utilization (%) over 7 days
+            network_in_30d: Network bytes received in last 30 days
+            network_out_30d: Network bytes sent in last 30 days
+            tags: Resource tags
+            region: AWS region
+
+        Returns:
+            List of optimization scenarios
+        """
+        scenarios = []
+
+        current_cost = self._calculate_lightsail_monthly_cost(
+            bundle_id=bundle_id, region=region
+        )
+
+        # Calculate age
+        age_days = (datetime.now(timezone.utc) - created_at.replace(tzinfo=timezone.utc)).days
+
+        env = tags.get("Environment", tags.get("environment", "")).lower()
+        is_production = env in ["production", "prod", "prd"]
+
+        # SCENARIO 1: Instance Stopped Long-Term (CRITICAL)
+        # IMPORTANT: Lightsail charges even when stopped (unlike EC2)
+        if instance_state.lower() == "stopped" and age_days >= 30:
+            scenarios.append(
+                OptimizationScenario(
+                    scenario_name="Instance Stopped but Still Charged",
+                    priority="CRITICAL",
+                    confidence_score=95,
+                    estimated_monthly_savings=current_cost,
+                    recommendation=(
+                        f"Lightsail instance '{instance_name}' has been stopped for {age_days} days "
+                        f"but is still charged ${current_cost}/month. Lightsail charges even when stopped. "
+                        f"Delete instance if no longer needed."
+                    ),
+                    implementation_steps=[
+                        "Take snapshot of instance for backup if needed",
+                        "Verify instance is not needed for production",
+                        "Delete instance via AWS CLI: aws lightsail delete-instance --instance-name ...",
+                        "Consider EC2 if need stop/start functionality without charges"
+                    ],
+                    risk_level="LOW",
+                    effort="LOW",
+                )
+            )
+
+        # SCENARIO 2: Very Low CPU Utilization (HIGH)
+        if cpu_utilization_avg < 5 and instance_state.lower() == "running":
+            scenarios.append(
+                OptimizationScenario(
+                    scenario_name="Very Low CPU Utilization",
+                    priority="HIGH",
+                    confidence_score=85,
+                    estimated_monthly_savings=current_cost,
+                    recommendation=(
+                        f"Instance has very low CPU utilization ({cpu_utilization_avg:.1f}% over 7 days). "
+                        f"Consider deleting if unused or downgrading to smaller bundle. "
+                        f"Savings: ${current_cost:.2f}/month if deleted."
+                    ),
+                    implementation_steps=[
+                        "Verify application is not running or has minimal load",
+                        "Check if instance can be deleted or consolidated",
+                        "If needed, downgrade to nano bundle ($3.50/month)",
+                        "Delete instance if completely unused"
+                    ],
+                    risk_level="LOW",
+                    effort="LOW",
+                )
+            )
+
+        # SCENARIO 3: Oversized Bundle (MEDIUM)
+        if (
+            cpu_utilization_avg < 20
+            and instance_state.lower() == "running"
+            and "large" in bundle_id.lower()
+        ):
+            # Estimate savings from downgrading (e.g., large → medium or small)
+            downgrade_cost = current_cost * 0.5  # Assume 50% cost reduction
+            savings = current_cost - downgrade_cost
+
+            scenarios.append(
+                OptimizationScenario(
+                    scenario_name="Oversized Bundle (Underutilized)",
+                    priority="MEDIUM",
+                    confidence_score=70,
+                    estimated_monthly_savings=savings,
+                    recommendation=(
+                        f"Instance is on '{bundle_id}' bundle (${current_cost}/month) "
+                        f"but has low CPU utilization ({cpu_utilization_avg:.1f}%). "
+                        f"Downgrade to smaller bundle to save ~${savings:.2f}/month."
+                    ),
+                    implementation_steps=[
+                        "Create snapshot of current instance",
+                        "Create new instance with smaller bundle",
+                        "Migrate data and applications",
+                        "Update DNS/load balancer to point to new instance",
+                        "Delete old instance after verification"
+                    ],
+                    risk_level="MEDIUM",
+                    effort="MEDIUM",
+                )
+            )
+
+        # SCENARIO 4: No Network Traffic (MEDIUM)
+        if (
+            network_in_30d == 0
+            and network_out_30d == 0
+            and instance_state.lower() == "running"
+        ):
+            scenarios.append(
+                OptimizationScenario(
+                    scenario_name="No Network Traffic (Unused Service)",
+                    priority="MEDIUM",
+                    confidence_score=65,
+                    estimated_monthly_savings=current_cost,
+                    recommendation=(
+                        f"Instance has 0 bytes network traffic in/out over last 30 days. "
+                        f"Service appears unused. Delete instance to save ${current_cost:.2f}/month."
+                    ),
+                    implementation_steps=[
+                        "Verify no services are actively using this instance",
+                        "Check application logs for activity",
+                        "Take snapshot for backup before deletion",
+                        "Delete instance if truly unused"
+                    ],
+                    risk_level="LOW",
+                    effort="LOW",
+                )
+            )
+
+        # SCENARIO 5: Dev/Test Not Needed 24/7 (LOW)
+        if not is_production and instance_state.lower() == "running" and age_days >= 7:
+            # Lightsail doesn't support stop/start without charges
+            # Suggest migration to EC2 for better cost control
+            scenarios.append(
+                OptimizationScenario(
+                    scenario_name="Dev/Test Instance Always Running",
+                    priority="LOW",
+                    confidence_score=50,
+                    estimated_monthly_savings=current_cost * 0.5,  # Estimate 50% savings with scheduling
+                    recommendation=(
+                        f"Non-production instance running 24/7 (${current_cost}/month). "
+                        f"Lightsail charges even when stopped. Consider migrating to EC2 "
+                        f"for stop/start scheduling to save ~50% on nights/weekends."
+                    ),
+                    implementation_steps=[
+                        "Evaluate if workload is suitable for EC2 migration",
+                        "Create EC2 instance with equivalent specs",
+                        "Set up EventBridge + Lambda for start/stop scheduling",
+                        "Migrate application to EC2 instance",
+                        "Delete Lightsail instance after migration"
+                    ],
+                    risk_level="MEDIUM",
+                    effort="HIGH",
+                )
+            )
+
+        return scenarios
+
+    async def scan_lightsail_instances(self, region: str) -> list[AllCloudResourceData]:
+        """
+        Scan ALL AWS Lightsail instances for cost intelligence.
+
+        Lightsail provides simple, fixed-price VPS instances for developers.
+
+        CloudWatch Metrics Used:
+        - CPUUtilization (Lightsail) - CPU usage % over 7 days
+        - NetworkIn (Lightsail) - Bytes received over 30 days
+        - NetworkOut (Lightsail) - Bytes sent over 30 days
+
+        API Calls:
+        - get_instances() - List all Lightsail instances
+        - get_instance_metric_data() - Get CloudWatch metrics via Lightsail API
+
+        Cost Optimization Scenarios:
+        1. Instance Stopped Long-Term (CRITICAL) - Stopped >30 days → Still charged!
+        2. Very Low CPU (<5%) (HIGH) - Unused instance → Delete or downgrade
+        3. Oversized Bundle (MEDIUM) - <20% CPU usage → Downgrade bundle
+        4. No Network Traffic (MEDIUM) - 0 bytes in/out for 30 days → Delete
+        5. Dev/Test Always Running (LOW) - Non-prod → Migrate to EC2 with scheduling
+
+        Returns:
+            List of AllCloudResourceData representing ALL Lightsail instances in the region
+        """
+        resources = []
+
+        try:
+            async with self.session.client("lightsail", region_name=region) as lightsail:
+                # Get all Lightsail instances
+                response = await lightsail.get_instances()
+                instances = response.get("instances", [])
+
+                for instance in instances:
+                    try:
+                        instance_name = instance.get("name", "")
+                        instance_arn = instance.get("arn", "")
+                        bundle_id = instance.get("bundleId", "")
+                        instance_state = instance.get("state", {}).get("name", "unknown")
+                        created_at = instance.get("createdAt")
+                        tags_list = instance.get("tags", [])
+                        tags = {tag["key"]: tag.get("value", "") for tag in tags_list}
+
+                        # Get CloudWatch metrics
+                        cpu_utilization_avg = 0.0
+                        network_in_30d = 0.0
+                        network_out_30d = 0.0
+
+                        try:
+                            # CPUUtilization metric (7 days average)
+                            cpu_response = await lightsail.get_instance_metric_data(
+                                instanceName=instance_name,
+                                metricName="CPUUtilization",
+                                period=3600,  # 1 hour
+                                startTime=datetime.now(timezone.utc) - timedelta(days=7),
+                                endTime=datetime.now(timezone.utc),
+                                unit="Percent",
+                                statistics=["Average"],
+                            )
+                            cpu_datapoints = cpu_response.get("metricData", [])
+                            if cpu_datapoints:
+                                cpu_utilization_avg = sum(
+                                    dp["average"] for dp in cpu_datapoints
+                                ) / len(cpu_datapoints)
+
+                            # NetworkIn metric (30 days total)
+                            network_in_response = await lightsail.get_instance_metric_data(
+                                instanceName=instance_name,
+                                metricName="NetworkIn",
+                                period=86400,  # 1 day
+                                startTime=datetime.now(timezone.utc) - timedelta(days=30),
+                                endTime=datetime.now(timezone.utc),
+                                unit="Bytes",
+                                statistics=["Sum"],
+                            )
+                            network_in_datapoints = network_in_response.get("metricData", [])
+                            network_in_30d = sum(dp["sum"] for dp in network_in_datapoints)
+
+                            # NetworkOut metric (30 days total)
+                            network_out_response = await lightsail.get_instance_metric_data(
+                                instanceName=instance_name,
+                                metricName="NetworkOut",
+                                period=86400,
+                                startTime=datetime.now(timezone.utc) - timedelta(days=30),
+                                endTime=datetime.now(timezone.utc),
+                                unit="Bytes",
+                                statistics=["Sum"],
+                            )
+                            network_out_datapoints = network_out_response.get("metricData", [])
+                            network_out_30d = sum(dp["sum"] for dp in network_out_datapoints)
+
+                        except Exception as e:
+                            logger.warning(
+                                "lightsail.metrics_failed",
+                                instance_name=instance_name,
+                                error=str(e),
+                            )
+
+                        # Calculate monthly cost
+                        monthly_cost = self._calculate_lightsail_monthly_cost(
+                            bundle_id=bundle_id, region=region
+                        )
+
+                        # Calculate optimization scenarios
+                        optimization_scenarios = self._calculate_lightsail_optimization(
+                            instance_name=instance_name,
+                            instance_arn=instance_arn,
+                            bundle_id=bundle_id,
+                            instance_state=instance_state,
+                            created_at=created_at,
+                            cpu_utilization_avg=cpu_utilization_avg,
+                            network_in_30d=network_in_30d,
+                            network_out_30d=network_out_30d,
+                            tags=tags,
+                            region=region,
+                        )
+
+                        # Prepare resource data
+                        resource_data = AllCloudResourceData(
+                            resource_type="lightsail_instance",
+                            resource_id=instance_arn,
+                            resource_name=instance_name,
+                            region=region,
+                            estimated_monthly_cost=monthly_cost,
+                            currency="USD",
+                            resource_metadata={
+                                "bundle_id": bundle_id,
+                                "instance_state": instance_state,
+                                "created_at": created_at.isoformat() if created_at else None,
+                                "cpu_utilization_avg": round(cpu_utilization_avg, 2),
+                                "network_in_30d_gb": round(network_in_30d / (1024**3), 2),
+                                "network_out_30d_gb": round(network_out_30d / (1024**3), 2),
+                                "tags": tags,
+                            },
+                            optimization_scenarios=optimization_scenarios,
+                        )
+
+                        resources.append(resource_data)
+
+                        logger.debug(
+                            "lightsail.instance_scanned",
+                            instance_name=instance_name,
+                            region=region,
+                            scenarios=len(optimization_scenarios),
+                        )
+
+                    except Exception as e:
+                        logger.warning(
+                            "lightsail.instance_scan_error",
+                            instance_name=instance.get("name", "unknown"),
+                            region=region,
+                            error=str(e),
+                        )
+                        continue
+
+        except Exception as e:
+            logger.error(
+                "lightsail.scan_failed",
+                region=region,
+                error=str(e),
+            )
+
+        return resources
+
+    # ============================================================
+    # RESSOURCE 37 : WORKSPACES (DESKTOP AS A SERVICE)
+    # ============================================================
+
+    def _calculate_workspaces_monthly_cost(
+        self, compute_type: str, running_mode: str, region: str
+    ) -> float:
+        """
+        Calculate estimated monthly cost for Amazon WorkSpaces.
+
+        WorkSpaces provides managed, secure cloud desktops (Desktop-as-a-Service).
+
+        Cost Components:
+        - Always-On mode: Fixed monthly fee (VALUE: $25, STANDARD: $35, PERFORMANCE: $60, POWER: $80)
+        - AutoStop mode: Monthly fee + hourly usage fee (less predictable)
+
+        Args:
+            compute_type: WorkSpace compute type (VALUE, STANDARD, PERFORMANCE, POWER)
+            running_mode: Running mode (ALWAYS_ON or AUTO_STOP)
+            region: AWS region
+
+        Returns:
+            Estimated monthly cost in USD (Always-On pricing)
+
+        Example:
+            STANDARD Always-On: $35/month
+            POWER Always-On: $80/month
+        """
+        # Map compute type to Always-On pricing
+        pricing_map = {
+            "VALUE": self.PRICING.get("workspaces_value", 25.00),
+            "STANDARD": self.PRICING.get("workspaces_standard", 35.00),
+            "PERFORMANCE": self.PRICING.get("workspaces_performance", 60.00),
+            "POWER": self.PRICING.get("workspaces_power", 80.00),
+            "POWERPRO": 120.00,  # Not in PRICING yet
+            "GRAPHICS": 145.00,  # Not in PRICING yet
+        }
+
+        cost = pricing_map.get(compute_type.upper(), 35.00)  # Default to STANDARD
+
+        # Note: AutoStop pricing is complex (base fee + hourly), we estimate Always-On
+        # For optimization, we suggest AutoStop when appropriate
+
+        return round(cost, 2)
+
+    def _calculate_workspaces_optimization(
+        self,
+        workspace_id: str,
+        workspace_state: str,
+        compute_type: str,
+        running_mode: str,
+        last_known_user_connection_timestamp: datetime | None,
+        user_connected_time_hours: float,
+        created_time: datetime,
+        tags: dict,
+        region: str,
+    ) -> list[OptimizationScenario]:
+        """
+        Calculate optimization scenarios for Amazon WorkSpaces.
+
+        WorkSpaces Optimization Scenarios:
+        1. WorkSpace Stopped Long-Term (CRITICAL) - Stopped >30 days → Still charged (Always-On)
+        2. Never Connected (HIGH) - 0 sessions in 30 days → Delete unused WorkSpace
+        3. Low Usage AutoStop Better (MEDIUM) - <10h/month → AutoStop cheaper
+        4. High Usage Always-On Optimal (MEDIUM) - >40h/week → Confirm Always-On needed
+        5. Oversized Compute Type (LOW) - VALUE sufficient → Downgrade
+
+        Args:
+            workspace_id: WorkSpace ID
+            workspace_state: State (AVAILABLE, STOPPED, ERROR, etc.)
+            compute_type: Compute type (VALUE, STANDARD, PERFORMANCE, POWER)
+            running_mode: Running mode (ALWAYS_ON or AUTO_STOP)
+            last_known_user_connection_timestamp: Last user connection time
+            user_connected_time_hours: Total connected hours in last 30 days
+            created_time: WorkSpace creation time
+            tags: Resource tags
+            region: AWS region
+
+        Returns:
+            List of optimization scenarios
+        """
+        scenarios = []
+
+        current_cost = self._calculate_workspaces_monthly_cost(
+            compute_type=compute_type, running_mode=running_mode, region=region
+        )
+
+        # Calculate days since creation
+        age_days = (datetime.now(timezone.utc) - created_time.replace(tzinfo=timezone.utc)).days
+
+        # Calculate days since last connection
+        days_since_connection = None
+        if last_known_user_connection_timestamp:
+            days_since_connection = (
+                datetime.now(timezone.utc)
+                - last_known_user_connection_timestamp.replace(tzinfo=timezone.utc)
+            ).days
+
+        env = tags.get("Environment", tags.get("environment", "")).lower()
+        is_production = env in ["production", "prod", "prd"]
+
+        # SCENARIO 1: WorkSpace Stopped Long-Term (CRITICAL)
+        if workspace_state == "STOPPED" and age_days >= 30 and running_mode == "ALWAYS_ON":
+            scenarios.append(
+                OptimizationScenario(
+                    scenario_name="WorkSpace Stopped but Still Charged",
+                    priority="CRITICAL",
+                    confidence_score=95,
+                    estimated_monthly_savings=current_cost,
+                    recommendation=(
+                        f"WorkSpace '{workspace_id}' has been stopped for {age_days} days "
+                        f"but Always-On mode still charges ${current_cost}/month. "
+                        f"Delete WorkSpace if no longer needed."
+                    ),
+                    implementation_steps=[
+                        "Verify WorkSpace is not needed by user",
+                        "Contact user to confirm before deletion",
+                        "Take snapshot/image if data preservation needed",
+                        "Delete WorkSpace via AWS CLI: aws workspaces terminate-workspaces --workspace-ids ..."
+                    ],
+                    risk_level="LOW",
+                    effort="LOW",
+                )
+            )
+
+        # SCENARIO 2: Never Connected (HIGH)
+        if days_since_connection and days_since_connection >= 30:
+            scenarios.append(
+                OptimizationScenario(
+                    scenario_name="WorkSpace Never Used (No Connections)",
+                    priority="HIGH",
+                    confidence_score=85,
+                    estimated_monthly_savings=current_cost,
+                    recommendation=(
+                        f"WorkSpace has not been connected in {days_since_connection} days. "
+                        f"User may no longer need this desktop. "
+                        f"Savings: ${current_cost:.2f}/month if deleted."
+                    ),
+                    implementation_steps=[
+                        "Contact user to verify if WorkSpace still needed",
+                        "If user left company, delete immediately",
+                        "If user doesn't remember, delete after 7-day warning",
+                        "Terminate WorkSpace to stop charges"
+                    ],
+                    risk_level="LOW",
+                    effort="LOW",
+                )
+            )
+
+        # SCENARIO 3: Low Usage - AutoStop Better (MEDIUM)
+        if (
+            running_mode == "ALWAYS_ON"
+            and user_connected_time_hours < 10
+            and age_days >= 7
+        ):
+            # AutoStop pricing example (STANDARD): $9.75/month + $0.36/hour
+            # 10h usage: $9.75 + (10 × $0.36) = $13.35 vs $35 Always-On
+            autostop_estimate = current_cost * 0.4  # Rough estimate (40% of Always-On)
+            savings = current_cost - autostop_estimate
+
+            scenarios.append(
+                OptimizationScenario(
+                    scenario_name="Low Usage (AutoStop Mode Better)",
+                    priority="MEDIUM",
+                    confidence_score=70,
+                    estimated_monthly_savings=savings,
+                    recommendation=(
+                        f"WorkSpace has low usage ({user_connected_time_hours:.1f}h in last 30 days). "
+                        f"Switching to AutoStop mode would save ~${savings:.2f}/month. "
+                        f"AutoStop recommended for <40h/month usage."
+                    ),
+                    implementation_steps=[
+                        "Review user's typical usage pattern (is low usage temporary?)",
+                        "Switch WorkSpace to AutoStop mode if usage remains low",
+                        "Notify user that WorkSpace will auto-stop after inactivity",
+                        "Monitor costs after switching to verify savings"
+                    ],
+                    risk_level="LOW",
+                    effort="LOW",
+                )
+            )
+
+        # SCENARIO 4: High Usage - Always-On Optimal (MEDIUM)
+        if (
+            running_mode == "ALWAYS_ON"
+            and user_connected_time_hours > 160
+            and not is_production
+        ):
+            # 160h/month = 40h/week (full-time usage)
+            # This is expected for production, but verify for non-production
+            scenarios.append(
+                OptimizationScenario(
+                    scenario_name="High Usage Non-Production (Verify Need)",
+                    priority="MEDIUM",
+                    confidence_score=65,
+                    estimated_monthly_savings=0.0,  # Informational only
+                    recommendation=(
+                        f"Non-production WorkSpace has high usage ({user_connected_time_hours:.1f}h/month). "
+                        f"Always-On mode (${current_cost}/month) is optimal for this usage. "
+                        f"Verify if WorkSpace is still needed for dev/test purposes."
+                    ),
+                    implementation_steps=[
+                        "Confirm WorkSpace is actively used for development/testing",
+                        "Consider if user needs WorkSpace 24/7 or only during work hours",
+                        "If only business hours, AutoStop may still save money",
+                        "No action needed if usage is legitimate"
+                    ],
+                    risk_level="LOW",
+                    effort="LOW",
+                )
+            )
+
+        # SCENARIO 5: Oversized Compute Type (LOW)
+        if compute_type in ["PERFORMANCE", "POWER", "POWERPRO"] and user_connected_time_hours < 40:
+            # High-performance bundles for low usage users
+            value_cost = self._calculate_workspaces_monthly_cost(
+                compute_type="VALUE", running_mode=running_mode, region=region
+            )
+            savings = current_cost - value_cost
+
+            scenarios.append(
+                OptimizationScenario(
+                    scenario_name="Oversized Compute Type (Downgrade)",
+                    priority="LOW",
+                    confidence_score=50,
+                    estimated_monthly_savings=savings,
+                    recommendation=(
+                        f"WorkSpace uses high-performance bundle ({compute_type}, ${current_cost}/month) "
+                        f"but has low usage ({user_connected_time_hours:.1f}h/month). "
+                        f"Downgrade to VALUE bundle to save ${savings:.2f}/month."
+                    ),
+                    implementation_steps=[
+                        "Verify user's workload requirements (CPU, RAM needs)",
+                        "If user only needs web browsing/Office, VALUE bundle sufficient",
+                        "Create new WorkSpace with VALUE bundle",
+                        "Migrate user data and applications",
+                        "Delete old WorkSpace after user confirms satisfaction"
+                    ],
+                    risk_level="MEDIUM",
+                    effort="MEDIUM",
+                )
+            )
+
+        return scenarios
+
+    async def scan_workspaces(self, region: str) -> list[AllCloudResourceData]:
+        """
+        Scan ALL Amazon WorkSpaces for cost intelligence.
+
+        WorkSpaces provides managed, secure cloud desktops (Desktop-as-a-Service).
+
+        CloudWatch Metrics Used:
+        - UserConnected (AWS/WorkSpaces) - User connection sessions (30 days)
+        - N/A for detailed usage metrics (requires WorkSpaces API)
+
+        API Calls:
+        - describe_workspaces() - List all WorkSpaces
+        - describe_workspaces_connection_status() - Last connection timestamp
+
+        Cost Optimization Scenarios:
+        1. WorkSpace Stopped Long-Term (CRITICAL) - Stopped >30 days → Still charged
+        2. Never Connected (HIGH) - 0 sessions in 30 days → Delete unused
+        3. Low Usage AutoStop Better (MEDIUM) - <10h/month → AutoStop cheaper
+        4. High Usage Always-On Optimal (MEDIUM) - >40h/week → Confirm needed
+        5. Oversized Compute Type (LOW) - VALUE sufficient → Downgrade
+
+        Returns:
+            List of AllCloudResourceData representing ALL WorkSpaces in the region
+        """
+        resources = []
+
+        try:
+            async with self.session.client("workspaces", region_name=region) as ws:
+                # List all WorkSpaces
+                paginator = ws.get_paginator("describe_workspaces")
+                async for page in paginator.paginate():
+                    for workspace in page.get("Workspaces", []):
+                        try:
+                            workspace_id = workspace.get("WorkspaceId", "")
+                            workspace_state = workspace.get("State", "UNKNOWN")
+                            compute_type = workspace.get("WorkspaceProperties", {}).get(
+                                "ComputeTypeName", "STANDARD"
+                            )
+                            running_mode = workspace.get("WorkspaceProperties", {}).get(
+                                "RunningMode", "ALWAYS_ON"
+                            )
+                            user_name = workspace.get("UserName", "")
+                            bundle_id = workspace.get("BundleId", "")
+
+                            # Get creation time (use directory creation as proxy if not available)
+                            created_time = workspace.get("WorkspaceProperties", {}).get(
+                                "LastKnownUserConnectionTimestamp"
+                            )
+                            if not created_time:
+                                created_time = datetime.now(timezone.utc) - timedelta(days=30)
+
+                            # Get tags
+                            tags = {}
+                            if "Tags" in workspace:
+                                tags = {tag["Key"]: tag.get("Value", "") for tag in workspace["Tags"]}
+
+                            # Get connection status
+                            last_known_user_connection_timestamp = None
+                            user_connected_time_hours = 0.0
+
+                            try:
+                                conn_status_response = await ws.describe_workspaces_connection_status(
+                                    WorkspaceIds=[workspace_id]
+                                )
+                                for conn_status in conn_status_response.get(
+                                    "WorkspacesConnectionStatus", []
+                                ):
+                                    last_known_user_connection_timestamp = conn_status.get(
+                                        "LastKnownUserConnectionTimestamp"
+                                    )
+                                    # Note: ConnectionState only shows current state, not historical usage
+                                    # Would need CloudWatch metrics for accurate usage hours
+
+                            except Exception as e:
+                                logger.warning(
+                                    "workspaces.connection_status_failed",
+                                    workspace_id=workspace_id,
+                                    error=str(e),
+                                )
+
+                            # Get CloudWatch metrics for user connected time
+                            try:
+                                async with self.session.client(
+                                    "cloudwatch", region_name=region
+                                ) as cw:
+                                    # UserConnected metric (30 days)
+                                    # Note: This metric may not be available for all WorkSpaces
+                                    user_connected_response = await cw.get_metric_statistics(
+                                        Namespace="AWS/WorkSpaces",
+                                        MetricName="UserConnected",
+                                        Dimensions=[
+                                            {"Name": "WorkspaceId", "Value": workspace_id}
+                                        ],
+                                        StartTime=datetime.now(timezone.utc) - timedelta(days=30),
+                                        EndTime=datetime.now(timezone.utc),
+                                        Period=3600,  # 1 hour
+                                        Statistics=["Sum"],
+                                    )
+                                    datapoints = user_connected_response.get("Datapoints", [])
+                                    # Sum hours where user was connected
+                                    user_connected_time_hours = sum(
+                                        dp["Sum"] for dp in datapoints if dp["Sum"] > 0
+                                    )
+
+                            except Exception as e:
+                                logger.warning(
+                                    "workspaces.cloudwatch_metrics_failed",
+                                    workspace_id=workspace_id,
+                                    error=str(e),
+                                )
+
+                            # Calculate monthly cost
+                            monthly_cost = self._calculate_workspaces_monthly_cost(
+                                compute_type=compute_type,
+                                running_mode=running_mode,
+                                region=region,
+                            )
+
+                            # Calculate optimization scenarios
+                            optimization_scenarios = self._calculate_workspaces_optimization(
+                                workspace_id=workspace_id,
+                                workspace_state=workspace_state,
+                                compute_type=compute_type,
+                                running_mode=running_mode,
+                                last_known_user_connection_timestamp=last_known_user_connection_timestamp,
+                                user_connected_time_hours=user_connected_time_hours,
+                                created_time=created_time,
+                                tags=tags,
+                                region=region,
+                            )
+
+                            # Prepare resource data
+                            resource_data = AllCloudResourceData(
+                                resource_type="workspaces_workspace",
+                                resource_id=workspace_id,
+                                resource_name=f"{user_name}-{workspace_id}",
+                                region=region,
+                                estimated_monthly_cost=monthly_cost,
+                                currency="USD",
+                                resource_metadata={
+                                    "workspace_state": workspace_state,
+                                    "compute_type": compute_type,
+                                    "running_mode": running_mode,
+                                    "user_name": user_name,
+                                    "bundle_id": bundle_id,
+                                    "last_connection": last_known_user_connection_timestamp.isoformat()
+                                    if last_known_user_connection_timestamp
+                                    else None,
+                                    "user_connected_time_hours": round(
+                                        user_connected_time_hours, 2
+                                    ),
+                                    "tags": tags,
+                                },
+                                optimization_scenarios=optimization_scenarios,
+                            )
+
+                            resources.append(resource_data)
+
+                            logger.debug(
+                                "workspaces.scanned",
+                                workspace_id=workspace_id,
+                                region=region,
+                                scenarios=len(optimization_scenarios),
+                            )
+
+                        except Exception as e:
+                            logger.warning(
+                                "workspaces.scan_error",
+                                workspace_id=workspace.get("WorkspaceId", "unknown"),
+                                region=region,
+                                error=str(e),
+                            )
+                            continue
+
+        except Exception as e:
+            logger.error(
+                "workspaces.scan_failed",
+                region=region,
+                error=str(e),
+            )
+
+        return resources
