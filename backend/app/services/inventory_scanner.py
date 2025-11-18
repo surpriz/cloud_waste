@@ -8,7 +8,7 @@ import structlog
 from datetime import datetime, timedelta
 from typing import Any
 
-from app.providers.base import AllCloudResourceData
+from app.providers.base import AllCloudResourceData, OptimizationScenario
 
 logger = structlog.get_logger()
 

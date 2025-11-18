@@ -1,7 +1,37 @@
 """Base abstract class for cloud provider implementations."""
 
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from typing import Any
+
+
+@dataclass
+class OptimizationScenario:
+    """
+    Data class for optimization scenario information.
+
+    Supports two formats:
+    1. Neptune/MSK format (scenario_name, description, recommendation, etc.)
+    2. Kendra/CloudFormation format (optimization_score, recommended_action)
+    """
+    # Required fields
+    priority: str  # "critical", "high", "medium", "low"
+    estimated_monthly_savings: float
+    confidence_level: str  # "critical", "high", "medium", "low"
+
+    # Optional - Neptune/MSK format
+    scenario_name: str | None = None
+    current_monthly_cost: float | None = None
+    optimized_monthly_cost: float | None = None
+    description: str | None = None
+    recommendation: str | None = None
+    action_complexity: str | None = None
+    risk_level: str | None = None
+    implementation_time: str | None = None
+
+    # Optional - Kendra/CloudFormation format
+    optimization_score: int | None = None
+    recommended_action: str | None = None
 
 
 class OrphanResourceData:
