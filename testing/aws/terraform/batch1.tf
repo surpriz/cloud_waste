@@ -134,7 +134,7 @@ resource "aws_db_instance" "stopped" {
   allocated_storage      = 20
   storage_type           = "gp3"
   db_name                = "testdb"
-  username               = "admin"
+  username               = "dbadmin"
   password               = "ChangeMeL8ter!"
   db_subnet_group_name   = aws_db_subnet_group.rds[0].name
   vpc_security_group_ids = [aws_security_group.default.id]

@@ -1128,7 +1128,7 @@ class CloudProviderBase(ABC):
 
         # EC2 Instance scanning - 10 waste scenarios (100% coverage)
         # SCENARIO 1: Stopped instances >30 days
-        results.extend(await self.scan_stopped_instances(region, rules.get("ec2_instance")))
+        results.extend(await self.scan_stopped_instances(region, rules.get("ec2_instance_stopped")))
 
         # SCENARIO 2: Over-provisioned instances (CPU <30%)
         results.extend(await self.scan_oversized_instances(region, rules.get("ec2_instance")))

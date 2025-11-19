@@ -5,6 +5,7 @@ from typing import Annotated
 
 from celery.result import AsyncResult
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
+from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_active_user, get_db
@@ -53,6 +54,74 @@ async def create_scan(
         )
 
     # Create scan record
+    scan = await scan_crud.create_scan(db, scan_in)
+
+    # Ensure database transaction is fully committed before queuing task
+    await db.commit()
+
+    # Queue background task and store task ID
+    task = scan_cloud_account.delay(str(scan.id), str(account.id))
+    scan.celery_task_id = task.id
+    await db.commit()
+
+    return scan
+
+
+class InventoryScanRequest(BaseModel):
+    """Request schema for inventory scan."""
+    cloud_account_id: uuid.UUID
+
+
+@router.post("/inventory", response_model=Scan, status_code=status.HTTP_201_CREATED)
+@scan_limit
+async def create_inventory_scan(
+    request: Request,
+    response: Response,
+    scan_request: InventoryScanRequest,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_active_user)],
+) -> Scan:
+    """
+    Create a new inventory scan job for Cost Optimization Hub.
+
+    This endpoint triggers a comprehensive inventory scan that collects
+    ALL cloud resources (not just orphaned ones) for cost optimization analysis.
+
+    Difference from regular scan:
+    - Regular scan: Detects orphaned/wasted resources → Waste Detection tab
+    - Inventory scan: Scans ALL resources → Cost Optimization Hub tab
+
+    Args:
+        cloud_account_id: UUID of the cloud account to scan
+
+    Returns:
+        Scan object with scan_type='inventory'
+    """
+    # Verify account belongs to user
+    account = await cloud_account_crud.get_cloud_account_by_id(
+        db, scan_request.cloud_account_id, current_user.id
+    )
+
+    if not account:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Cloud account not found or you don't have permission to access it",
+        )
+
+    if not account.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cloud account is inactive",
+        )
+
+    # Create inventory scan record
+    from app.schemas.scan import ScanCreate
+
+    scan_in = ScanCreate(
+        cloud_account_id=scan_request.cloud_account_id,
+        scan_type=ScanType.INVENTORY  # Key difference: INVENTORY type
+    )
+
     scan = await scan_crud.create_scan(db, scan_in)
 
     # Ensure database transaction is fully committed before queuing task
