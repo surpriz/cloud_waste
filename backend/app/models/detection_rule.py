@@ -3916,6 +3916,226 @@ DEFAULT_DETECTION_RULES = {
         "disk_size_buffer_factor": 1.5,
         "description": "Notebook oversized disk <20% usage - reduce size ($127.50/month) 💰💰 P2 [3-5% impact]",
     },
+    # ============================================================================
+    # COST INTELLIGENCE HUB - GENERIC RESOURCE TYPES
+    # These are simplified rules for Cost Intelligence Hub which scans ALL resources
+    # (not just orphans) and uses generic resource types instead of granular scenarios.
+    # ============================================================================
+    "kendra_index": {
+        "enabled": True,
+        "min_age_days": 3,
+        "description": "Amazon Kendra intelligent search index - Cost Intelligence Hub scan all indexes",
+    },
+    "cloudformation_stack": {
+        "enabled": True,
+        "min_age_days": 3,
+        "description": "AWS CloudFormation infrastructure as code stack - Cost Intelligence Hub scan all stacks",
+    },
+    "ec2_instance": {
+        "enabled": True,
+        "min_age_days": 3,
+        "description": "EC2 compute instances - Cost Intelligence Hub scan all instances (running, stopped, etc.)",
+    },
+    "ebs_volume": {
+        "enabled": True,
+        "min_age_days": 3,
+        "description": "EBS storage volumes - Cost Intelligence Hub scan all volumes (attached, unattached, etc.)",
+    },
+    "elastic_ip": {
+        "enabled": True,
+        "min_age_days": 3,
+        "description": "Elastic IP addresses - Cost Intelligence Hub scan all IPs (associated, unassociated)",
+    },
+    "rds_instance": {
+        "enabled": True,
+        "min_age_days": 3,
+        "description": "RDS database instances - Cost Intelligence Hub scan all databases",
+    },
+    "load_balancer": {
+        "enabled": True,
+        "min_age_days": 3,
+        "description": "AWS Load Balancers (ALB, NLB, CLB, GLB) - Cost Intelligence Hub scan all load balancers",
+    },
+    "nat_gateway": {
+        "enabled": True,
+        "min_age_days": 3,
+        "description": "NAT Gateways - Cost Intelligence Hub scan all NAT gateways",
+    },
+    "snapshot": {
+        "enabled": True,
+        "min_age_days": 3,
+        "description": "EBS snapshots - Cost Intelligence Hub scan all snapshots",
+    },
+    "eks_cluster": {
+        "enabled": True,
+        "min_age_days": 3,
+        "description": "Amazon EKS Kubernetes clusters - Cost Intelligence Hub scan all clusters",
+    },
+    "lambda_function": {
+        "enabled": True,
+        "min_age_days": 3,
+        "description": "AWS Lambda serverless functions - Cost Intelligence Hub scan all functions",
+    },
+    "dynamodb_table": {
+        "enabled": True,
+        "min_age_days": 3,
+        "description": "DynamoDB NoSQL tables - Cost Intelligence Hub scan all tables",
+    },
+    "s3_bucket": {
+        "enabled": True,
+        "min_age_days": 3,
+        "description": "Amazon S3 storage buckets - Cost Intelligence Hub scan all buckets",
+    },
+    "neptune_cluster": {
+        "enabled": True,
+        "min_age_days": 3,
+        "description": "Amazon Neptune graph database clusters - Cost Intelligence Hub scan all clusters",
+    },
+    "msk_cluster": {
+        "enabled": True,
+        "min_age_days": 3,
+        "description": "Amazon MSK (Kafka) clusters - Cost Intelligence Hub scan all clusters",
+    },
+    "sagemaker_endpoint": {
+        "enabled": True,
+        "min_age_days": 3,
+        "description": "SageMaker ML model endpoints - Cost Intelligence Hub scan all endpoints",
+    },
+    "redshift_cluster": {
+        "enabled": True,
+        "min_age_days": 3,
+        "description": "Amazon Redshift data warehouse clusters - Cost Intelligence Hub scan all clusters",
+    },
+    "elasticache_cluster": {
+        "enabled": True,
+        "min_age_days": 3,
+        "description": "ElastiCache (Redis/Memcached) clusters - Cost Intelligence Hub scan all clusters",
+    },
+    "vpn_connection": {
+        "enabled": True,
+        "min_age_days": 3,
+        "description": "AWS VPN connections - Cost Intelligence Hub scan all VPN connections",
+    },
+    "fargate_task": {
+        "enabled": True,
+        "min_age_days": 3,
+        "description": "AWS Fargate serverless container tasks - Cost Intelligence Hub scan all tasks",
+    },
+    "kinesis_stream": {
+        "enabled": True,
+        "min_age_days": 3,
+        "description": "Amazon Kinesis data streams - Cost Intelligence Hub scan all streams",
+    },
+    "fsx_file_system": {
+        "enabled": True,
+        "min_age_days": 3,
+        "description": "Amazon FSx file systems (Lustre, Windows, NetApp, OpenZFS) - Cost Intelligence Hub",
+    },
+    "opensearch_domain": {
+        "enabled": True,
+        "min_age_days": 3,
+        "description": "Amazon OpenSearch Service domains (Elasticsearch) - Cost Intelligence Hub",
+    },
+    "api_gateway": {
+        "enabled": True,
+        "min_age_days": 3,
+        "description": "AWS API Gateway REST/HTTP/WebSocket APIs - Cost Intelligence Hub",
+    },
+    "ecs_cluster": {
+        "enabled": True,
+        "min_age_days": 3,
+        "description": "Amazon ECS container orchestration clusters - Cost Intelligence Hub",
+    },
+    "cloudwatch_log_group": {
+        "enabled": True,
+        "min_age_days": 3,
+        "description": "CloudWatch Logs log groups - Cost Intelligence Hub scan all log groups",
+    },
+    "vpc_endpoint": {
+        "enabled": True,
+        "min_age_days": 3,
+        "description": "VPC endpoints (Interface, Gateway, Gateway Load Balancer) - Cost Intelligence Hub",
+    },
+    "transit_gateway_attachment": {
+        "enabled": True,
+        "min_age_days": 3,
+        "description": "AWS Transit Gateway attachments - Cost Intelligence Hub scan all attachments",
+    },
+    "global_accelerator": {
+        "enabled": True,
+        "min_age_days": 3,
+        "description": "AWS Global Accelerator instances - Cost Intelligence Hub scan all accelerators",
+    },
+    "documentdb_cluster": {
+        "enabled": True,
+        "min_age_days": 3,
+        "description": "Amazon DocumentDB (MongoDB-compatible) clusters - Cost Intelligence Hub",
+    },
+    "ecr_repository": {
+        "enabled": True,
+        "min_age_days": 3,
+        "description": "Amazon ECR (Elastic Container Registry) repositories - Cost Intelligence Hub",
+    },
+    "sns_topic": {
+        "enabled": True,
+        "min_age_days": 3,
+        "description": "Amazon SNS (Simple Notification Service) topics - Cost Intelligence Hub",
+    },
+    "sqs_queue": {
+        "enabled": True,
+        "min_age_days": 3,
+        "description": "Amazon SQS (Simple Queue Service) queues - Cost Intelligence Hub",
+    },
+    "secrets_manager_secret": {
+        "enabled": True,
+        "min_age_days": 3,
+        "description": "AWS Secrets Manager secrets - Cost Intelligence Hub scan all secrets",
+    },
+    "backup_vault": {
+        "enabled": True,
+        "min_age_days": 3,
+        "description": "AWS Backup vaults - Cost Intelligence Hub scan all backup vaults",
+    },
+    "app_runner_service": {
+        "enabled": True,
+        "min_age_days": 3,
+        "description": "AWS App Runner container services - Cost Intelligence Hub scan all services",
+    },
+    "emr_cluster": {
+        "enabled": True,
+        "min_age_days": 3,
+        "description": "Amazon EMR (Elastic MapReduce) big data clusters - Cost Intelligence Hub",
+    },
+    "sagemaker_notebook": {
+        "enabled": True,
+        "min_age_days": 3,
+        "description": "Amazon SageMaker notebook instances - Cost Intelligence Hub scan all notebooks",
+    },
+    "transfer_family_server": {
+        "enabled": True,
+        "min_age_days": 3,
+        "description": "AWS Transfer Family SFTP/FTPS/FTP servers - Cost Intelligence Hub",
+    },
+    "elastic_beanstalk_environment": {
+        "enabled": True,
+        "min_age_days": 3,
+        "description": "AWS Elastic Beanstalk application environments - Cost Intelligence Hub",
+    },
+    "direct_connect_connection": {
+        "enabled": True,
+        "min_age_days": 3,
+        "description": "AWS Direct Connect dedicated network connections - Cost Intelligence Hub",
+    },
+    "mq_broker": {
+        "enabled": True,
+        "min_age_days": 3,
+        "description": "Amazon MQ message broker instances (ActiveMQ, RabbitMQ) - Cost Intelligence Hub",
+    },
+    "cloudfront_distribution": {
+        "enabled": True,
+        "min_age_days": 3,
+        "description": "Amazon CloudFront CDN distributions - Cost Intelligence Hub scan all distributions",
+    },
 }
 
 

@@ -4,11 +4,16 @@ This service scans ALL cloud resources (not just orphans) to provide
 cost intelligence and optimization recommendations.
 """
 
+import uuid
 import structlog
 from datetime import datetime, timedelta
-from typing import Any
+from typing import Any, Optional
+
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.providers.base import AllCloudResourceData, OptimizationScenario
+from app.models.detection_rule import DEFAULT_DETECTION_RULES
+from app.crud import detection_rule as detection_rule_crud
 
 logger = structlog.get_logger()
 
@@ -43,15 +48,97 @@ def safe_get_value(obj: Any, default: Any = None) -> Any:
 class AWSInventoryScanner:
     """AWS-specific inventory scanner for cost intelligence."""
 
-    def __init__(self, provider: Any) -> None:
+    def __init__(
+        self,
+        provider: Any,
+        user_id: Optional[uuid.UUID] = None,
+        db: Optional[AsyncSession] = None,
+    ) -> None:
         """
         Initialize AWS inventory scanner.
 
         Args:
             provider: AWS provider instance with authenticated session
+            user_id: Optional user UUID for loading custom detection rules
+            db: Optional database session for loading detection rules
         """
         self.provider = provider
         self.session = provider.session
+        self.user_id = user_id
+        self.db = db
+        self.user_detection_rules: dict[str, dict] = {}  # Will be loaded async
+
+    async def _load_detection_rules(self) -> None:
+        """
+        Load user's custom detection rules from database.
+
+        This method loads all detection rules for the user if user_id and db are provided.
+        Rules are stored in self.user_detection_rules for quick access during scanning.
+        """
+        if not self.user_id or not self.db:
+            logger.info("inventory.detection_rules_skip", reason="no_user_or_db")
+            return
+
+        try:
+            # Load all user rules from database
+            rules = await detection_rule_crud.get_user_rules(self.db, self.user_id)
+
+            # Convert to dict for quick lookup
+            for rule in rules:
+                self.user_detection_rules[rule.resource_type] = rule.rules
+
+            logger.info(
+                "inventory.detection_rules_loaded",
+                user_id=str(self.user_id),
+                rules_count=len(self.user_detection_rules),
+            )
+        except Exception as e:
+            logger.error(
+                "inventory.detection_rules_load_error",
+                error=str(e),
+                user_id=str(self.user_id),
+            )
+
+    def _should_include_resource(
+        self,
+        resource_type: str,
+        resource_age_days: Optional[float],
+    ) -> bool:
+        """
+        Determine if a resource should be included based on detection rules.
+
+        Args:
+            resource_type: Type of resource (e.g., 'ec2_instance', 'ebs_volume')
+            resource_age_days: Age of resource in days (None if unknown)
+
+        Returns:
+            True if resource should be included, False otherwise
+        """
+        # Get effective rules (user custom or default)
+        effective_rules = self.user_detection_rules.get(
+            resource_type, DEFAULT_DETECTION_RULES.get(resource_type, {})
+        )
+
+        # Check if detection is enabled
+        if not effective_rules.get("enabled", True):
+            logger.debug(
+                "inventory.resource_filtered_disabled",
+                resource_type=resource_type,
+            )
+            return False
+
+        # Check min_age_days requirement
+        min_age_days = effective_rules.get("min_age_days", 0)
+        if resource_age_days is not None and resource_age_days < min_age_days:
+            logger.debug(
+                "inventory.resource_filtered_age",
+                resource_type=resource_type,
+                resource_age_days=resource_age_days,
+                min_age_days=min_age_days,
+            )
+            return False
+
+        return True
 
     async def scan_ec2_instances(self, region: str) -> list[AllCloudResourceData]:
         """
@@ -22032,6 +22119,15 @@ class AzureInventoryScanner:
                                         "avg_memory_utilization": round(avg_memory_utilization, 2),
                                     }
 
+                                    # Apply detection rules filtering
+                                    resource_age_days = None
+                                    if created_at:
+                                        resource_age_days = (datetime.utcnow() - created_at.replace(tzinfo=None)).days
+
+                                    if not self._should_include_resource("fargate_task", resource_age_days):
+                                        logger.debug("inventory.fargate_filtered", task_id=task_id, age=resource_age_days)
+                                        continue
+
                                     # Create resource entry
                                     resource = AllCloudResourceData(
                                         resource_id=task_arn,
@@ -22820,6 +22916,15 @@ class AzureInventoryScanner:
                                 },
                             }
 
+                            # Apply detection rules filtering
+                            resource_age_days = None
+                            if created_timestamp:
+                                resource_age_days = (datetime.utcnow() - created_timestamp.replace(tzinfo=None)).days
+
+                            if not self._should_include_resource("kinesis_stream", resource_age_days):
+                                logger.debug("inventory.kinesis_filtered", stream=stream_name, age=resource_age_days)
+                                continue
+
                             # Create resource entry
                             resource = AllCloudResourceData(
                                 resource_id=stream_arn,
@@ -23309,6 +23414,15 @@ class AzureInventoryScanner:
                                 },
                             }
 
+                            # Apply detection rules filtering
+                            resource_age_days = None
+                            if isinstance(created_time, datetime):
+                                resource_age_days = (datetime.utcnow() - created_time.replace(tzinfo=None)).days
+
+                            if not self._should_include_resource("fsx_file_system", resource_age_days):
+                                logger.debug("inventory.fsx_filtered", filesystem_id=filesystem_id, age=resource_age_days)
+                                continue
+
                             # Create resource entry
                             resource = AllCloudResourceData(
                                 resource_id=filesystem_id,
@@ -23770,6 +23884,15 @@ class AzureInventoryScanner:
                                 },
                             }
 
+                            # Apply detection rules filtering
+                            resource_age_days = None
+                            if isinstance(created_at, datetime):
+                                resource_age_days = (datetime.utcnow() - created_at.replace(tzinfo=None)).days
+
+                            if not self._should_include_resource("opensearch_domain", resource_age_days):
+                                logger.debug("inventory.opensearch_filtered", domain_name=domain_name, age=resource_age_days)
+                                continue
+
                             # Create resource entry
                             resource = AllCloudResourceData(
                                 resource_id=domain_arn,
@@ -24208,6 +24331,15 @@ class AzureInventoryScanner:
                                 },
                             }
 
+                            # Apply detection rules filtering
+                            resource_age_days = None
+                            if isinstance(created_date, datetime):
+                                resource_age_days = (datetime.utcnow() - created_date.replace(tzinfo=None)).days
+
+                            if not self._should_include_resource("api_gateway", resource_age_days):
+                                logger.debug("inventory.apigateway_filtered", api_id=api_id, api_name=api_name, age=resource_age_days)
+                                continue
+
                             # Create resource entry
                             resource = AllCloudResourceData(
                                 resource_id=api_id,
@@ -24365,6 +24497,15 @@ class AzureInventoryScanner:
                                     "error_5xx_count_7d": error_5xx_count,
                                 },
                             }
+
+                            # Apply detection rules filtering (v2 APIs)
+                            resource_age_days = None
+                            if isinstance(created_date, datetime):
+                                resource_age_days = (datetime.utcnow() - created_date.replace(tzinfo=None)).days
+
+                            if not self._should_include_resource("api_gateway", resource_age_days):
+                                logger.debug("inventory.apigateway_v2_filtered", api_id=api_id, api_name=api_name, age=resource_age_days)
+                                continue
 
                             # Create resource entry
                             resource = AllCloudResourceData(
@@ -24805,6 +24946,15 @@ class AzureInventoryScanner:
                                 },
                             }
 
+                            # Apply detection rules filtering
+                            resource_age_days = None
+                            if isinstance(created_at, datetime):
+                                resource_age_days = (datetime.utcnow() - created_at.replace(tzinfo=None)).days
+
+                            if not self._should_include_resource("cloudfront_distribution", resource_age_days):
+                                logger.debug("inventory.cloudfront_filtered", dist_id=dist_id, age=resource_age_days)
+                                continue
+
                             # Create resource entry (region = "global" for CloudFront)
                             resource = AllCloudResourceData(
                                 resource_id=dist_id,
@@ -25220,6 +25370,14 @@ class AzureInventoryScanner:
                                 "service_connect_enabled": service_connect_enabled,
                             }
 
+                            # Apply detection rules filtering
+                            # Note: ECS clusters don't have creation timestamp in API, so age is always None
+                            resource_age_days = None
+
+                            if not self._should_include_resource("ecs_cluster", resource_age_days):
+                                logger.debug("inventory.ecs_filtered", cluster_name=cluster_name, age=resource_age_days)
+                                continue
+
                             # Create resource
                             resource = AllCloudResourceData(
                                 resource_type="ecs_cluster",
@@ -25577,6 +25735,15 @@ class AzureInventoryScanner:
                                     "ingestion_gb_per_day": ingestion_gb_per_month / 30,
                                 }
 
+                                # Apply detection rules filtering
+                                resource_age_days = None
+                                if creation_time > 0:
+                                    resource_age_days = (datetime.utcnow() - datetime.fromtimestamp(creation_time)).days
+
+                                if not self._should_include_resource("cloudwatch_log_group", resource_age_days):
+                                    logger.debug("inventory.cloudwatch_log_filtered", log_group_name=log_group_name, age=resource_age_days)
+                                    continue
+
                                 # Create resource
                                 resource = AllCloudResourceData(
                                     resource_type="cloudwatch_log_group",
@@ -25871,6 +26038,15 @@ class AzureInventoryScanner:
                             "private_dns_enabled": endpoint.get("PrivateDnsEnabled", False),
                             "route_table_ids": endpoint.get("RouteTableIds", []),
                         }
+
+                        # Apply detection rules filtering
+                        resource_age_days = None
+                        if isinstance(created_at, datetime):
+                            resource_age_days = (datetime.utcnow() - created_at.replace(tzinfo=None)).days
+
+                        if not self._should_include_resource("vpc_endpoint", resource_age_days):
+                            logger.debug("inventory.vpc_endpoint_filtered", endpoint_id=endpoint_id, age=resource_age_days)
+                            continue
 
                         # Create resource
                         resource = AllCloudResourceData(
@@ -28805,6 +28981,16 @@ class AzureInventoryScanner:
                                 and attachment_state == "available"
                             )
 
+                            # Apply detection rules filtering
+                            creation_time = attachment.get("CreationTime")
+                            resource_age_days = None
+                            if isinstance(creation_time, datetime):
+                                resource_age_days = (datetime.utcnow() - creation_time.replace(tzinfo=None)).days
+
+                            if not self._should_include_resource("transit_gateway_attachment", resource_age_days):
+                                logger.debug("inventory.transit_gateway_filtered", attachment_id=attachment_id, age=resource_age_days)
+                                continue
+
                             # ====================================
                             # CREATE RESOURCE DATA
                             # ====================================
@@ -29298,6 +29484,16 @@ class AzureInventoryScanner:
                                 or (total_bytes_in_30d == 0 and endpoint_count > 0)
                             )
 
+                            # Apply detection rules filtering
+                            created_time = accelerator.get("CreatedTime")
+                            resource_age_days = None
+                            if isinstance(created_time, datetime):
+                                resource_age_days = (datetime.utcnow() - created_time.replace(tzinfo=None)).days
+
+                            if not self._should_include_resource("global_accelerator", resource_age_days):
+                                logger.debug("inventory.global_accelerator_filtered", accelerator_arn=accelerator_arn, age=resource_age_days)
+                                continue
+
                             # ====================================
                             # CREATE RESOURCE DATA
                             # ====================================
@@ -29777,6 +29973,16 @@ class AzureInventoryScanner:
                             # ORPHAN DETECTION
                             # ====================================
                             is_orphan = avg_connections_7d < 0.1 and cluster_status == "available"
+
+                            # Apply detection rules filtering
+                            cluster_create_time = cluster.get("ClusterCreateTime")
+                            resource_age_days = None
+                            if isinstance(cluster_create_time, datetime):
+                                resource_age_days = (datetime.utcnow() - cluster_create_time.replace(tzinfo=None)).days
+
+                            if not self._should_include_resource("documentdb_cluster", resource_age_days):
+                                logger.debug("inventory.documentdb_filtered", cluster_id=cluster_id, age=resource_age_days)
+                                continue
 
                             # ====================================
                             # CREATE RESOURCE DATA
@@ -30288,6 +30494,15 @@ class AzureInventoryScanner:
                                 image_count == 0 and newest_image_days > 90
                             ) or (pull_count_90d == 0 and image_count > 0)
 
+                            # Apply detection rules filtering
+                            resource_age_days = None
+                            if isinstance(created_at, datetime):
+                                resource_age_days = (datetime.utcnow() - created_at.replace(tzinfo=None)).days
+
+                            if not self._should_include_resource("ecr_repository", resource_age_days):
+                                logger.debug("inventory.ecr_filtered", repository_name=repository_name, age=resource_age_days)
+                                continue
+
                             # ====================================
                             # CREATE RESOURCE DATA
                             # ====================================
@@ -30709,6 +30924,14 @@ class AzureInventoryScanner:
                             # Orphan detection
                             is_orphan = subscription_count == 0 or publishes_30d == 0
 
+                            # Apply detection rules filtering
+                            # Note: SNS topics don't have creation timestamp in API, so age is always None
+                            resource_age_days = None
+
+                            if not self._should_include_resource("sns_topic", resource_age_days):
+                                logger.debug("inventory.sns_filtered", topic_arn=topic_arn, age=resource_age_days)
+                                continue
+
                             # Create resource data
                             resource = AllCloudResourceData(
                                 resource_type="sns_topic",
@@ -31124,6 +31347,14 @@ class AzureInventoryScanner:
                             # Orphan detection
                             is_orphan = messages_sent_30d == 0 and messages_received_30d == 0
 
+                            # Apply detection rules filtering
+                            # Note: SQS queues don't have creation timestamp in API, so age is always None
+                            resource_age_days = None
+
+                            if not self._should_include_resource("sqs_queue", resource_age_days):
+                                logger.debug("inventory.sqs_filtered", queue_url=queue_url, age=resource_age_days)
+                                continue
+
                             # Create resource data
                             resource = AllCloudResourceData(
                                 resource_type="sqs_queue",
@@ -31465,6 +31696,15 @@ class AzureInventoryScanner:
                                 tags=tags,
                                 region=region,
                             )
+
+                            # Apply detection rules filtering
+                            resource_age_days = None
+                            if isinstance(created_date, datetime):
+                                resource_age_days = (datetime.utcnow() - created_date.replace(tzinfo=None)).days
+
+                            if not self._should_include_resource("secrets_manager_secret", resource_age_days):
+                                logger.debug("inventory.secrets_manager_filtered", secret_name=secret_name, age=resource_age_days)
+                                continue
 
                             # Prepare resource data
                             resource_data = AllCloudResourceData(
@@ -31920,6 +32160,16 @@ class AzureInventoryScanner:
                                 tags=tags,
                                 region=region,
                             )
+
+                            # Apply detection rules filtering
+                            vault_creation_date = vault.get("CreationDate")
+                            resource_age_days = None
+                            if isinstance(vault_creation_date, datetime):
+                                resource_age_days = (datetime.utcnow() - vault_creation_date.replace(tzinfo=None)).days
+
+                            if not self._should_include_resource("backup_vault", resource_age_days):
+                                logger.debug("inventory.backup_vault_filtered", vault_name=vault_name, age=resource_age_days)
+                                continue
 
                             # Prepare resource data
                             resource_data = AllCloudResourceData(
@@ -32451,6 +32701,15 @@ class AzureInventoryScanner:
                                 tags=tags,
                                 region=region,
                             )
+
+                            # Apply detection rules filtering
+                            resource_age_days = None
+                            if isinstance(creation_time, datetime):
+                                resource_age_days = (datetime.utcnow() - creation_time.replace(tzinfo=None)).days
+
+                            if not self._should_include_resource("app_runner_service", resource_age_days):
+                                logger.debug("inventory.app_runner_filtered", service_name=service_name, age=resource_age_days)
+                                continue
 
                             # Prepare resource data
                             resource_data = AllCloudResourceData(
@@ -33708,6 +33967,15 @@ class AzureInventoryScanner:
                             # Get tags
                             tags = {tag["Key"]: tag["Value"] for tag in cluster.get("Tags", [])}
 
+                            # Apply detection rules filtering
+                            resource_age_days = None
+                            if isinstance(creation_time, datetime):
+                                resource_age_days = (datetime.utcnow() - creation_time.replace(tzinfo=None)).days
+
+                            if not self._should_include_resource("emr_cluster", resource_age_days):
+                                logger.debug("inventory.emr_filtered", cluster_id=cluster_id, age=resource_age_days)
+                                continue
+
                             resources.append(
                                 AllCloudResourceData(
                                     provider="aws",
@@ -34112,6 +34380,15 @@ class AzureInventoryScanner:
                             subnet_id = notebook.get("SubnetId", "")
                             volume_size_gb = notebook.get("VolumeSizeInGB", 0)
 
+                            # Apply detection rules filtering
+                            resource_age_days = None
+                            if isinstance(creation_time, datetime):
+                                resource_age_days = (datetime.utcnow() - creation_time.replace(tzinfo=None)).days
+
+                            if not self._should_include_resource("sagemaker_notebook", resource_age_days):
+                                logger.debug("inventory.sagemaker_notebook_filtered", notebook_name=notebook_name, age=resource_age_days)
+                                continue
+
                             resources.append(
                                 AllCloudResourceData(
                                     provider="aws",
@@ -34506,6 +34783,15 @@ class AzureInventoryScanner:
                                 creation_time=creation_time,
                                 region=region,
                             )
+
+                            # Apply detection rules filtering
+                            resource_age_days = None
+                            if isinstance(creation_time, datetime):
+                                resource_age_days = (datetime.utcnow() - creation_time.replace(tzinfo=None)).days
+
+                            if not self._should_include_resource("transfer_family_server", resource_age_days):
+                                logger.debug("inventory.transfer_family_filtered", server_id=server_id, age=resource_age_days)
+                                continue
 
                             resources.append(
                                 AllCloudResourceData(
@@ -34946,6 +35232,15 @@ class AzureInventoryScanner:
                         application_name = environment.get("ApplicationName", "")
                         platform_arn = environment.get("PlatformArn", "")
 
+                        # Apply detection rules filtering
+                        resource_age_days = None
+                        if isinstance(creation_time, datetime):
+                            resource_age_days = (datetime.utcnow() - creation_time.replace(tzinfo=None)).days
+
+                        if not self._should_include_resource("elastic_beanstalk_environment", resource_age_days):
+                            logger.debug("inventory.elastic_beanstalk_filtered", environment_name=environment_name, age=resource_age_days)
+                            continue
+
                         resources.append(
                             AllCloudResourceData(
                                 provider="aws",
@@ -35354,6 +35649,15 @@ class AzureInventoryScanner:
                             creation_time=creation_time,
                             region=region,
                         )
+
+                        # Apply detection rules filtering
+                        resource_age_days = None
+                        if isinstance(creation_time, datetime):
+                            resource_age_days = (datetime.utcnow() - creation_time.replace(tzinfo=None)).days
+
+                        if not self._should_include_resource("direct_connect_connection", resource_age_days):
+                            logger.debug("inventory.direct_connect_filtered", connection_id=connection_id, age=resource_age_days)
+                            continue
 
                         resources.append(
                             AllCloudResourceData(
@@ -35813,6 +36117,15 @@ class AzureInventoryScanner:
                         engine_type = broker.get("EngineType", "ACTIVEMQ")
                         engine_version = broker.get("EngineVersion", "")
 
+                        # Apply detection rules filtering
+                        resource_age_days = None
+                        if isinstance(creation_time, datetime):
+                            resource_age_days = (datetime.utcnow() - creation_time.replace(tzinfo=None)).days
+
+                        if not self._should_include_resource("mq_broker", resource_age_days):
+                            logger.debug("inventory.mq_broker_filtered", broker_id=broker_id, age=resource_age_days)
+                            continue
+
                         resources.append(
                             AllCloudResourceData(
                                 provider="aws",
@@ -36147,6 +36460,20 @@ class AzureInventoryScanner:
                                 region=region,
                                 tags=tags,
                             )
+
+                            # Calculate resource age for detection rules filtering
+                            resource_age_days = None
+                            if isinstance(created_at, datetime):
+                                resource_age_days = (datetime.now() - created_at).days
+
+                            # Apply detection rules filtering
+                            if not self._should_include_resource("kendra_index", resource_age_days):
+                                logger.debug(
+                                    "inventory.kendra_filtered",
+                                    index_id=index_id,
+                                    resource_age_days=resource_age_days,
+                                )
+                                continue
 
                             # Create resource data
                             resource = AllCloudResourceData(

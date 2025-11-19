@@ -289,8 +289,16 @@ async def _scan_cloud_account_async(
                         regions=regions_to_scan,
                     )
 
-                    # Create inventory scanner
-                    inventory_scanner = AWSInventoryScanner(provider)
+                    # Create inventory scanner with user_id and db for detection rules
+                    inventory_scanner = AWSInventoryScanner(
+                        provider=provider,
+                        user_id=account.user_id,
+                        db=db,
+                    )
+
+                    # Load user's detection rules
+                    await inventory_scanner._load_detection_rules()
+
                     all_inventory_resources = []
 
                     # Scan all regions for complete inventory

@@ -76,6 +76,28 @@ RESOURCE_FAMILIES: Dict[str, List[str]] = {
     "s3_bucket": ["s3_bucket"],
     "lambda_function": ["lambda_function"],
     "dynamodb_table": ["dynamodb_table"],
+    # Cost Intelligence Hub - Additional AWS resources (17 new)
+    "fargate_task": ["fargate_task"],
+    "api_gateway": ["api_gateway"],
+    "ecs_cluster": ["ecs_cluster"],
+    "cloudwatch_log_group": ["cloudwatch_log_group"],
+    "ecr_repository": ["ecr_repository"],
+    "sns_topic": ["sns_topic"],
+    "sqs_queue": ["sqs_queue"],
+    "secrets_manager_secret": ["secrets_manager_secret"],
+    "backup_vault": ["backup_vault"],
+    "app_runner_service": ["app_runner_service"],
+    "emr_cluster": ["emr_cluster"],
+    "sagemaker_notebook": ["sagemaker_notebook"],
+    "transfer_family_server": ["transfer_family_server"],
+    "elastic_beanstalk_environment": ["elastic_beanstalk_environment"],
+    "direct_connect_connection": ["direct_connect_connection"],
+    "mq_broker": ["mq_broker"],
+    "cloudfront_distribution": ["cloudfront_distribution"],
+    "kendra_index": ["kendra_index"],
+    "cloudformation_stack": ["cloudformation_stack"],
+    # Note: fsx_file_system, vpc_endpoint, transit_gateway_attachment, opensearch_domain,
+    # global_accelerator, kinesis_stream, documentdb_cluster already existed above (lines 62-75)
 }
 
 # Azure Resource Families (logically grouped)
