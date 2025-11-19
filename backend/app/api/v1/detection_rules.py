@@ -250,12 +250,19 @@ async def set_all_to_zero_days(
             detail="Only administrators can set all rules to 0 days",
         )
 
-    # Update all resource types to have min_age_days = 0
+    # Update all resource types to have all threshold parameters = 0
     updated_count = 0
     for resource_type, default_rules in DEFAULT_DETECTION_RULES.items():
-        # Create new rules with min_age_days = 0
+        # Create new rules with all thresholds set to 0 for immediate testing
         new_rules = {**default_rules}
-        new_rules["min_age_days"] = 0
+
+        # Set ALL threshold parameters to 0 for immediate detection
+        if "min_age_days" in new_rules:
+            new_rules["min_age_days"] = 0
+        if "min_stopped_days" in new_rules:
+            new_rules["min_stopped_days"] = 0
+        if "confidence_threshold_days" in new_rules:
+            new_rules["confidence_threshold_days"] = 0
 
         # Update or create the rule
         await detection_rule_crud.create_or_update_rule(

@@ -7,22 +7,26 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
+# Get the directory where this script is located
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+
 echo "=========================================="
 echo "CutCosts AWS Testing Infrastructure Setup"
 echo "=========================================="
 echo ""
 
 # Check if .env exists
-if [ ! -f "../.env" ]; then
+if [ ! -f "$PROJECT_DIR/.env" ]; then
     echo -e "${RED}✗ Error: .env file not found${NC}"
     echo "Please copy .env.example to .env and fill in your credentials:"
-    echo "  cp .env.example .env"
-    echo "  vim .env"
+    echo "  cp $PROJECT_DIR/.env.example $PROJECT_DIR/.env"
+    echo "  vim $PROJECT_DIR/.env"
     exit 1
 fi
 
 # Source .env
-source ../.env
+source "$PROJECT_DIR/.env"
 
 # Check AWS CLI
 echo -n "Checking AWS CLI... "
@@ -40,7 +44,7 @@ if ! command -v terraform &> /dev/null; then
     echo "Please install Terraform: https://www.terraform.io/downloads"
     exit 1
 fi
-TERRAFORM_VERSION=$(terraform version -json | grep -o '"terraform_version":"[^"]*' | cut -d'"' -f4)
+TERRAFORM_VERSION=$(terraform version -json | grep '"terraform_version"' | cut -d'"' -f4)
 echo -e "${GREEN}✓ Installed (v${TERRAFORM_VERSION})${NC}"
 
 # Check Terraform version
@@ -111,7 +115,7 @@ fi
 # Initialize Terraform
 echo ""
 echo "Initializing Terraform..."
-cd ../terraform
+cd "$PROJECT_DIR/terraform"
 if terraform init; then
     echo -e "${GREEN}✓ Terraform initialized successfully${NC}"
 else

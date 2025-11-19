@@ -7,19 +7,23 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
+# Get the directory where this script is located
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+
 echo "=========================================="
 echo "CutCosts AWS Resource Destruction"
 echo "=========================================="
 echo ""
 
 # Check if .env exists
-if [ ! -f "../.env" ]; then
+if [ ! -f "$PROJECT_DIR/.env" ]; then
     echo -e "${RED}✗ Error: .env file not found${NC}"
     exit 1
 fi
 
 # Source .env
-source ../.env
+source "$PROJECT_DIR/.env"
 
 # Parse command line arguments
 AUTO_APPROVE=""
@@ -44,7 +48,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 # Change to terraform directory
-cd ../terraform
+cd "$PROJECT_DIR/terraform"
 
 # Check if terraform state exists
 if [ ! -f "terraform.tfstate" ]; then

@@ -70,7 +70,7 @@ resource "null_resource" "stop_instance" {
 # 5. Application Load Balancer - Zero traffic ($16/month)
 resource "aws_lb" "zero_traffic" {
   count              = var.enable_batch_1 ? 1 : 0
-  name               = "${var.project_name}-zero-traffic-alb"
+  name               = "cutcosts-zero-traffic-alb"
   internal           = false
   load_balancer_type = "application"
   security_groups    = [aws_security_group.default.id]
@@ -79,7 +79,7 @@ resource "aws_lb" "zero_traffic" {
   enable_deletion_protection = false
 
   tags = {
-    Name         = "${var.project_name}-zero-traffic-alb"
+    Name         = "cutcosts-zero-traffic-alb"
     TestScenario = "Load Balancer with Zero Traffic"
   }
 }
@@ -129,7 +129,7 @@ resource "aws_db_instance" "stopped" {
   count                  = var.enable_batch_1 ? 1 : 0
   identifier             = "${var.project_name}-stopped-db"
   engine                 = "postgres"
-  engine_version         = "15.4"
+  engine_version         = "15.15"
   instance_class         = "db.t3.micro"
   allocated_storage      = 20
   storage_type           = "gp3"
