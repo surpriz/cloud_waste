@@ -597,6 +597,16 @@ export const adminAPI = {
   async getSESIdentities(): Promise<import("@/types").SESIdentityMetrics[]> {
     return fetchAPI<import("@/types").SESIdentityMetrics[]>("/api/v1/admin/ses-identities");
   },
+
+  // Detection Rules - Admin
+  async setAllDetectionRulesToZero(): Promise<{ message: string; resources_updated: number; total_resources: number }> {
+    return fetchAPI<{ message: string; resources_updated: number; total_resources: number }>(
+      "/api/v1/detection-rules/admin/set-all-to-zero",
+      {
+        method: "POST",
+      }
+    );
+  },
 };
 
 export { APIError, clearAuthTokens, getAuthToken, setAuthTokens };

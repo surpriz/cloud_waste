@@ -1373,6 +1373,7 @@ export default function SettingsPage() {
   const [selectedProvider, setSelectedProvider] = useState<"aws" | "azure" | "gcp" | "microsoft365" | "all">("all");
   const [selectedCategory, setSelectedCategory] = useState<string>("all");
   const [searchQuery, setSearchQuery] = useState<string>("");
+  const [isAdmin, setIsAdmin] = useState(false);
   const [viewMode, setViewMode] = useState<"basic" | "expert">(() => {
     // Load from localStorage on initial render
     if (typeof window !== "undefined") {
@@ -1391,6 +1392,29 @@ export default function SettingsPage() {
       localStorage.setItem("detection_view_mode", viewMode);
     }
   }, [viewMode]);
+
+  useEffect(() => {
+    // Fetch current user to check if admin
+    const fetchCurrentUser = async () => {
+      try {
+        const token = localStorage.getItem("access_token");
+        const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+        const response = await fetch(`${API_URL}/api/v1/auth/me`, {
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+        });
+        if (response.ok) {
+          const user = await response.json();
+          setIsAdmin(user.is_superuser || false);
+        }
+      } catch (error) {
+        console.error("Failed to fetch user:", error);
+      }
+    };
+
+    fetchCurrentUser();
+  }, []);
 
   useEffect(() => {
     if (activeTab === "detection") {
@@ -1505,6 +1529,33 @@ export default function SettingsPage() {
     }
   };
 
+  const setAllToZeroDays = async () => {
+    if (!confirm("🔧 [ADMIN] Set ALL min_age_days to 0 for immediate testing?\n\nThis will allow newly created resources to be detected immediately without waiting 3 days.\n\nThis is useful for testing AWS resource deployment.")) return;
+
+    try {
+      const token = localStorage.getItem("access_token");
+      const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+      const response = await fetch(`${API_URL}/api/v1/detection-rules/admin/set-all-to-zero`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      });
+
+      if (response.ok) {
+        const result = await response.json();
+        await fetchDetectionRules();
+        showSuccess(`✅ All ${result.resources_updated} resources set to 0 days for immediate testing!`);
+      } else {
+        const error = await response.json();
+        showError(error.detail || "Failed to set rules to 0 days");
+      }
+    } catch (error) {
+      console.error("Failed to set all to 0 days:", error);
+      showError("Failed to set rules to 0 days");
+    }
+  };
+
   const handleRuleChange = (resourceType: string, field: string, value: any) => {
     setDetectionRules((prev) =>
       prev.map((rule) =>
@@ -1609,15 +1660,28 @@ export default function SettingsPage() {
                       Adjust age thresholds and confidence levels to match your workflow.
                     </p>
                   </div>
-                  <button
-                    onClick={resetAllRules}
-                    className="w-full sm:w-auto flex items-center justify-center gap-2 rounded-lg border-2 border-orange-400 bg-orange-50 px-4 py-2 text-sm font-semibold text-orange-700 hover:bg-orange-100 transition-colors whitespace-nowrap"
-                    title="Reset all detection rules to default values"
-                  >
-                    <RotateCcw className="h-4 w-4" />
-                    <span className="hidden md:inline">Reset All to Defaults</span>
-                    <span className="md:hidden">Reset All</span>
-                  </button>
+                  <div className="flex flex-col sm:flex-row gap-2">
+                    <button
+                      onClick={resetAllRules}
+                      className="w-full sm:w-auto flex items-center justify-center gap-2 rounded-lg border-2 border-orange-400 bg-orange-50 px-4 py-2 text-sm font-semibold text-orange-700 hover:bg-orange-100 transition-colors whitespace-nowrap"
+                      title="Reset all detection rules to default values"
+                    >
+                      <RotateCcw className="h-4 w-4" />
+                      <span className="hidden md:inline">Reset All to Defaults</span>
+                      <span className="md:hidden">Reset All</span>
+                    </button>
+                    {isAdmin && (
+                      <button
+                        onClick={setAllToZeroDays}
+                        className="w-full sm:w-auto flex items-center justify-center gap-2 rounded-lg border-2 border-yellow-400 bg-yellow-50 px-4 py-2 text-sm font-semibold text-yellow-700 hover:bg-yellow-100 transition-colors whitespace-nowrap"
+                        title="[ADMIN] Set all min_age_days to 0 for immediate testing"
+                      >
+                        <TestTube className="h-4 w-4" />
+                        <span className="hidden md:inline">Set All to 0 Days (Admin)</span>
+                        <span className="md:hidden">Set to 0</span>
+                      </button>
+                    )}
+                  </div>
                 </div>
 
                 {/* Basic/Expert Mode Toggle */}

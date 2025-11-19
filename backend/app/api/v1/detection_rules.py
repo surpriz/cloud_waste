@@ -226,6 +226,50 @@ async def reset_all_detection_rules(
     await detection_rule_crud.reset_to_defaults(db, current_user.id)
 
 
+@router.post("/admin/set-all-to-zero", status_code=status.HTTP_200_OK)
+async def set_all_to_zero_days(
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_active_user)],
+) -> dict:
+    """
+    Admin-only: Set all min_age_days to 0 for immediate testing.
+
+    This endpoint allows administrators to bypass the min_age_days threshold
+    for all resource types, enabling immediate detection of newly created resources.
+
+    Raises:
+        HTTPException 403: If user is not a superuser
+
+    Returns:
+        Summary of updated resource types
+    """
+    # Check if user is admin
+    if not current_user.is_superuser:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only administrators can set all rules to 0 days",
+        )
+
+    # Update all resource types to have min_age_days = 0
+    updated_count = 0
+    for resource_type, default_rules in DEFAULT_DETECTION_RULES.items():
+        # Create new rules with min_age_days = 0
+        new_rules = {**default_rules}
+        new_rules["min_age_days"] = 0
+
+        # Update or create the rule
+        await detection_rule_crud.create_or_update_rule(
+            db, current_user.id, resource_type, new_rules
+        )
+        updated_count += 1
+
+    return {
+        "message": "All detection rules set to 0 days for immediate testing",
+        "resources_updated": updated_count,
+        "total_resources": len(DEFAULT_DETECTION_RULES),
+    }
+
+
 @router.get("/{resource_type}", response_model=DetectionRuleWithDefaults)
 async def get_detection_rule(
     resource_type: str,
