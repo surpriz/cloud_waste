@@ -241,7 +241,7 @@ class AWSInventoryScanner:
                             tags=tags,
                             resource_status=state,
                             is_orphan=is_orphan,
-                            created_at_cloud=instance.get("LaunchTime"),
+                            created_at_cloud=instance.get("LaunchTime").replace(tzinfo=None) if instance.get("LaunchTime") else None,
                             last_used_at=None,  # TODO: Estimate from CloudWatch
                         )
 
@@ -381,7 +381,7 @@ class AWSInventoryScanner:
                         tags=tags,
                         resource_status=state,
                         is_orphan=is_orphan,
-                        created_at_cloud=volume.get("CreateTime"),
+                        created_at_cloud=volume.get("CreateTime").replace(tzinfo=None) if volume.get("CreateTime") else None,
                         last_used_at=None,  # TODO: Estimate from CloudWatch metrics
                     )
 
@@ -697,7 +697,7 @@ class AWSInventoryScanner:
                         tags=tags,
                         resource_status=lb_state,
                         is_orphan=is_orphan,
-                        created_at_cloud=created_at,
+                        created_at_cloud=created_at.replace(tzinfo=None) if created_at else None,
                         last_used_at=None,
                     )
 
@@ -972,7 +972,7 @@ class AWSInventoryScanner:
                         tags=tags,
                         resource_status=state,
                         is_orphan=is_orphaned,
-                        created_at_cloud=start_time,
+                        created_at_cloud=start_time.replace(tzinfo=None) if start_time else None,
                         last_used_at=None,
                     )
 
@@ -1146,7 +1146,7 @@ class AWSInventoryScanner:
                             tags=tags,
                             resource_status=state,
                             is_orphan=is_orphan,
-                            created_at_cloud=created_at,
+                            created_at_cloud=created_at.replace(tzinfo=None) if created_at else None,
                             last_used_at=None,
                         )
 
@@ -1269,7 +1269,7 @@ class AWSInventoryScanner:
                         tags=tags,
                         resource_status=status,
                         is_orphan=is_orphan,
-                        created_at_cloud=db_instance.get("InstanceCreateTime"),
+                        created_at_cloud=db_instance.get("InstanceCreateTime").replace(tzinfo=None) if db_instance.get("InstanceCreateTime") else None,
                         last_used_at=None,
                     )
 
@@ -1387,7 +1387,7 @@ class AWSInventoryScanner:
                         tags=tags,
                         resource_status="active",
                         is_orphan=is_orphan,
-                        created_at_cloud=bucket.get("CreationDate"),
+                        created_at_cloud=bucket.get("CreationDate").replace(tzinfo=None) if bucket.get("CreationDate") else None,
                         last_used_at=None,
                     )
 
@@ -2304,6 +2304,93 @@ class AWSInventoryScanner:
                     {"name": "S3 Glacier", "cost": bucket_size_gb * 0.004, "savings": potential_savings},
                 ],
                 "priority": "medium",
+            })
+
+        return is_optimizable, optimization_score, priority, potential_savings, recommendations
+
+    def _calculate_snapshot_optimization(
+        self,
+        snap,
+        age_days: int,
+        disk_size_gb: int,
+        is_orphaned: bool,
+        snapshot_count_for_disk: int,
+        incremental: bool,
+        monthly_cost: float
+    ) -> tuple[bool, int, str, float, list[dict]]:
+        """
+        Calculate EBS Snapshot optimization opportunities.
+
+        Returns:
+            (is_optimizable, optimization_score, priority, potential_savings, recommendations)
+        """
+        is_optimizable = False
+        optimization_score = 0
+        priority = "low"
+        potential_savings = 0.0
+        recommendations = []
+
+        # Scenario 1: Snapshot très ancien (>365 jours) - CRITICAL (90 score)
+        if age_days > 365:
+            is_optimizable = True
+            optimization_score = 90
+            priority = "critical"
+            potential_savings = monthly_cost
+            recommendations.append({
+                "action": "Delete old snapshot (>1 year old)",
+                "details": f"Snapshot is {age_days} days old ({disk_size_gb}GB). Consider deleting if no longer needed. Saving ${monthly_cost}/month.",
+                "alternatives": [
+                    {"name": "Delete snapshot", "cost": 0, "savings": monthly_cost},
+                ],
+                "priority": "critical",
+            })
+
+        # Scenario 2: Snapshot orphelin (volume source supprimé) - HIGH (75 score)
+        elif is_orphaned:
+            is_optimizable = True
+            optimization_score = 75
+            priority = "high"
+            potential_savings = monthly_cost
+            recommendations.append({
+                "action": "Delete orphaned snapshot (source volume deleted)",
+                "details": f"Source volume no longer exists. Snapshot is orphaned ({disk_size_gb}GB). Delete to save ${monthly_cost}/month.",
+                "alternatives": [
+                    {"name": "Delete orphaned snapshot", "cost": 0, "savings": monthly_cost},
+                ],
+                "priority": "high",
+            })
+
+        # Scenario 3: Snapshots multiples du même volume (>10) - MEDIUM (50 score)
+        elif snapshot_count_for_disk > 10:
+            is_optimizable = True
+            optimization_score = 50
+            priority = "medium"
+            # Estimate savings: delete oldest 50% of snapshots
+            potential_savings = monthly_cost * 0.5
+            recommendations.append({
+                "action": f"Reduce number of snapshots ({snapshot_count_for_disk} snapshots)",
+                "details": f"Source volume has {snapshot_count_for_disk} snapshots. Consider retention policy to delete old snapshots. Save ~${potential_savings}/month.",
+                "alternatives": [
+                    {"name": "Delete oldest 50% of snapshots", "cost": round(monthly_cost * 0.5, 2), "savings": round(potential_savings, 2)},
+                ],
+                "priority": "medium",
+            })
+
+        # Scenario 4: Snapshot non incrémentiel (LOW - 30 score)
+        # Note: AWS EBS snapshots are always incremental, so this scenario rarely applies
+        elif not incremental and disk_size_gb > 128:
+            is_optimizable = True
+            optimization_score = 30
+            priority = "low"
+            # Savings: incremental snapshots are ~80% cheaper
+            potential_savings = monthly_cost * 0.8
+            recommendations.append({
+                "action": "Switch to incremental snapshots",
+                "details": f"Using full snapshot ({disk_size_gb}GB). Incremental snapshots could save ~${potential_savings}/month (80% reduction).",
+                "alternatives": [
+                    {"name": "Use incremental snapshots", "cost": round(monthly_cost * 0.2, 2), "savings": round(potential_savings, 2)},
+                ],
+                "priority": "low",
             })
 
         return is_optimizable, optimization_score, priority, potential_savings, recommendations
