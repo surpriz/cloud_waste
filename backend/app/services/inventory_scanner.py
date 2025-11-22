@@ -167,6 +167,16 @@ class AWSInventoryScanner:
                         instance_type = instance["InstanceType"]
                         state = instance["State"]["Name"]
 
+                        # Skip EC2 instances that are terminated or shutting-down
+                        if state in ["terminated", "shutting-down"]:
+                            logger.debug(
+                                "inventory.ec2_instance_skipped",
+                                instance_id=instance_id,
+                                state=state,
+                                reason="Resource is in terminated/shutting-down state"
+                            )
+                            continue
+
                         # Extract instance name from tags
                         instance_name = None
                         tags = {}
@@ -1021,6 +1031,17 @@ class AWSInventoryScanner:
                     for nat in nat_gateways:
                         nat_gateway_id = nat["NatGatewayId"]
                         state = nat["State"]  # 'pending', 'available', 'deleting', 'deleted', 'failed'
+
+                        # Skip NAT Gateways that are deleted, deleting, or failed
+                        if state in ["deleted", "deleting", "failed"]:
+                            logger.debug(
+                                "inventory.nat_gateway_skipped",
+                                nat_gateway_id=nat_gateway_id,
+                                state=state,
+                                reason="Resource is in deleted/deleting/failed state"
+                            )
+                            continue
+
                         vpc_id = nat.get("VpcId")
                         subnet_id = nat.get("SubnetId")
                         created_at = nat.get("CreateTime")
@@ -3934,6 +3955,185 @@ class AWSInventoryScanner:
                 ),
                 "impact": f"Wasting {100 - memory_usage_percent:.1f}% of memory capacity",
                 "action": "Downgrade to smaller node type (e.g., t3.small → t3.micro)",
+            })
+            return is_optimizable, optimization_score, priority, potential_savings, recommendations
+
+        # No optimization opportunities found
+        return is_optimizable, optimization_score, priority, potential_savings, recommendations
+
+    def _calculate_eks_monthly_cost(
+        self,
+        node_group_costs: float,
+        fargate_costs: float,
+        region: str,
+    ) -> float:
+        """
+        Calculate estimated monthly cost for AWS EKS Cluster.
+
+        Cost structure:
+        - Control plane: $73/month (0.10/hour * 730 hours)
+        - Node groups: Sum of EC2 instance costs
+        - Fargate pods: vCPU + memory costs
+
+        Args:
+            node_group_costs: Total monthly cost of all node groups (EC2 instances)
+            fargate_costs: Total monthly cost of Fargate pods
+            region: AWS region
+
+        Returns:
+            Total estimated monthly cost
+        """
+        # EKS control plane cost (fixed)
+        control_plane_cost = 73.0  # $0.10/hour * 730 hours/month
+
+        total_cost = control_plane_cost + node_group_costs + fargate_costs
+
+        return total_cost
+
+    def _calculate_eks_optimization(
+        self,
+        cluster: dict[str, Any],
+        node_groups: list[dict[str, Any]],
+        fargate_profiles: list[dict[str, Any]],
+        monthly_cost: float,
+        avg_cpu_utilization: float,
+        node_instance_types: list[str],
+    ) -> tuple[bool, int, str, float, list[dict[str, Any]]]:
+        """
+        Calculate AWS EKS Cluster optimization metrics.
+
+        Optimization scenarios (5):
+        1. No worker nodes - Cluster with 0 nodes (paying control plane only)
+        2. All nodes unhealthy - All nodes in degraded/failed state
+        3. Over-provisioned nodes - All nodes with CPU <20% (right-sizing opportunity)
+        4. Old generation nodes - Using t2/m4/c4/r4 instance types
+        5. Spot instances not used - 100% On-Demand nodes (Spot 70% cheaper)
+
+        Args:
+            cluster: EKS cluster details
+            node_groups: List of node groups
+            fargate_profiles: List of Fargate profiles
+            monthly_cost: Total monthly cost
+            avg_cpu_utilization: Average CPU utilization across all nodes
+            node_instance_types: List of instance types used by nodes
+
+        Returns:
+            Tuple of (is_optimizable, optimization_score, priority, potential_savings, recommendations)
+        """
+        is_optimizable = False
+        optimization_score = 0
+        priority = "none"
+        potential_savings = 0.0
+        recommendations: list[dict[str, Any]] = []
+
+        cluster_name = cluster.get("name", "Unknown")
+        total_node_count = sum(ng.get("scalingConfig", {}).get("desiredSize", 0) for ng in node_groups)
+
+        # Scenario 1: CRITICAL - No worker nodes (paying control plane only)
+        if total_node_count == 0 and not fargate_profiles:
+            is_optimizable = True
+            optimization_score = 95
+            priority = "critical"
+            potential_savings = monthly_cost  # Full cluster cost is waste
+            recommendations.append({
+                "type": "no_nodes",
+                "severity": "critical",
+                "message": (
+                    f"CRITICAL: EKS cluster '{cluster_name}' has NO worker nodes or Fargate profiles (costs ${monthly_cost:.2f}/month). "
+                    f"You're paying ${73:.2f}/month for control plane with no compute resources. "
+                    "Delete this cluster immediately or add node groups/Fargate profiles if needed."
+                ),
+                "impact": "Paying full EKS costs with zero workload capacity",
+                "action": "Delete cluster or add worker nodes/Fargate profiles",
+            })
+            return is_optimizable, optimization_score, priority, potential_savings, recommendations
+
+        # Scenario 2: HIGH - All nodes unhealthy (dead cluster)
+        unhealthy_nodes = sum(
+            1 for ng in node_groups
+            if ng.get("health", {}).get("issues", [])
+        )
+        if total_node_count > 0 and unhealthy_nodes == len(node_groups):
+            is_optimizable = True
+            optimization_score = 90
+            priority = "high"
+            potential_savings = monthly_cost  # Entire cluster is waste
+            recommendations.append({
+                "type": "all_unhealthy",
+                "severity": "high",
+                "message": (
+                    f"HIGH: EKS cluster '{cluster_name}' has ALL node groups unhealthy (costs ${monthly_cost:.2f}/month). "
+                    f"All {len(node_groups)} node groups are in degraded/failed state. "
+                    "This cluster is not serving any workloads. Investigate node group health or delete cluster."
+                ),
+                "impact": "Cluster not operational, all costs are waste",
+                "action": "Fix node group health issues or delete cluster",
+            })
+            return is_optimizable, optimization_score, priority, potential_savings, recommendations
+
+        # Scenario 3: MEDIUM - Over-provisioned nodes (CPU <20%)
+        if avg_cpu_utilization > 0 and avg_cpu_utilization < 20.0:
+            is_optimizable = True
+            optimization_score = 70
+            priority = "medium"
+            # Assume 30% savings from right-sizing (reduce node count or instance types)
+            potential_savings = monthly_cost * 0.30
+            recommendations.append({
+                "type": "over_provisioned",
+                "severity": "medium",
+                "message": (
+                    f"MEDIUM: EKS cluster '{cluster_name}' has very low CPU utilization ({avg_cpu_utilization:.1f}%, costs ${monthly_cost:.2f}/month). "
+                    f"Nodes are under-utilized. Right-size node groups: reduce node count or use smaller instance types. "
+                    f"Potential savings: ${potential_savings:.2f}/month (30% reduction)."
+                ),
+                "impact": f"Wasting {100 - avg_cpu_utilization:.1f}% of node capacity",
+                "action": "Reduce node count or downgrade instance types",
+            })
+            return is_optimizable, optimization_score, priority, potential_savings, recommendations
+
+        # Scenario 4: MEDIUM - Old generation nodes (t2/m4/c4/r4)
+        old_generation_types = ["t2", "m4", "c4", "r4"]
+        old_instances = [it for it in node_instance_types if any(it.startswith(old) for old in old_generation_types)]
+        if old_instances:
+            is_optimizable = True
+            optimization_score = 65
+            priority = "medium"
+            # Assume 15% savings from upgrading to newer generation
+            potential_savings = monthly_cost * 0.15
+            recommendations.append({
+                "type": "old_generation",
+                "severity": "medium",
+                "message": (
+                    f"MEDIUM: EKS cluster '{cluster_name}' uses old generation instance types (costs ${monthly_cost:.2f}/month). "
+                    f"Found: {', '.join(set(old_instances))}. "
+                    "Upgrade to newer generations (t3, m5, c5, r5) for 15% cost savings and better performance."
+                ),
+                "impact": "Missing out on 15% cost savings and improved performance",
+                "action": f"Upgrade to newer generation: {', '.join(set(old_instances)).replace('t2', 't3').replace('m4', 'm5').replace('c4', 'c5').replace('r4', 'r5')}",
+            })
+            return is_optimizable, optimization_score, priority, potential_savings, recommendations
+
+        # Scenario 5: MEDIUM - Spot instances not used (100% On-Demand)
+        # Check if any node group uses Spot instances
+        has_spot = any(ng.get("capacityType", "ON_DEMAND") == "SPOT" for ng in node_groups)
+        if not has_spot and total_node_count >= 3:
+            is_optimizable = True
+            optimization_score = 60
+            priority = "medium"
+            # Spot instances are typically 70% cheaper
+            # Recommend 60% of nodes on Spot (conservative mix)
+            potential_savings = monthly_cost * 0.60 * 0.70
+            recommendations.append({
+                "type": "no_spot",
+                "severity": "medium",
+                "message": (
+                    f"MEDIUM: EKS cluster '{cluster_name}' uses 100% On-Demand nodes (costs ${monthly_cost:.2f}/month). "
+                    f"Cluster has {total_node_count} nodes. "
+                    "Use Spot instances for 60% of nodes to save 70% on those nodes. "
+                    f"Potential savings: ${potential_savings:.2f}/month (42% total reduction)."
+                ),
+                "impact": "Missing out on 42% cost savings from Spot instances",
+                "action": "Create Spot node groups for stateless/fault-tolerant workloads",
             })
             return is_optimizable, optimization_score, priority, potential_savings, recommendations
 
@@ -22245,185 +22445,6 @@ class AzureInventoryScanner:
     # ============================================================================
     # AWS - EKS CLUSTER (Cost Intelligence / Inventory Mode)
     # ============================================================================
-
-    def _calculate_eks_monthly_cost(
-        self,
-        node_group_costs: float,
-        fargate_costs: float,
-        region: str,
-    ) -> float:
-        """
-        Calculate estimated monthly cost for AWS EKS Cluster.
-
-        Cost structure:
-        - Control plane: $73/month (0.10/hour * 730 hours)
-        - Node groups: Sum of EC2 instance costs
-        - Fargate pods: vCPU + memory costs
-
-        Args:
-            node_group_costs: Total monthly cost of all node groups (EC2 instances)
-            fargate_costs: Total monthly cost of Fargate pods
-            region: AWS region
-
-        Returns:
-            Total estimated monthly cost
-        """
-        # EKS control plane cost (fixed)
-        control_plane_cost = 73.0  # $0.10/hour * 730 hours/month
-
-        total_cost = control_plane_cost + node_group_costs + fargate_costs
-
-        return total_cost
-
-    def _calculate_eks_optimization(
-        self,
-        cluster: dict[str, Any],
-        node_groups: list[dict[str, Any]],
-        fargate_profiles: list[dict[str, Any]],
-        monthly_cost: float,
-        avg_cpu_utilization: float,
-        node_instance_types: list[str],
-    ) -> tuple[bool, int, str, float, list[dict[str, Any]]]:
-        """
-        Calculate AWS EKS Cluster optimization metrics.
-
-        Optimization scenarios (5):
-        1. No worker nodes - Cluster with 0 nodes (paying control plane only)
-        2. All nodes unhealthy - All nodes in degraded/failed state
-        3. Over-provisioned nodes - All nodes with CPU <20% (right-sizing opportunity)
-        4. Old generation nodes - Using t2/m4/c4/r4 instance types
-        5. Spot instances not used - 100% On-Demand nodes (Spot 70% cheaper)
-
-        Args:
-            cluster: EKS cluster details
-            node_groups: List of node groups
-            fargate_profiles: List of Fargate profiles
-            monthly_cost: Total monthly cost
-            avg_cpu_utilization: Average CPU utilization across all nodes
-            node_instance_types: List of instance types used by nodes
-
-        Returns:
-            Tuple of (is_optimizable, optimization_score, priority, potential_savings, recommendations)
-        """
-        is_optimizable = False
-        optimization_score = 0
-        priority = "none"
-        potential_savings = 0.0
-        recommendations: list[dict[str, Any]] = []
-
-        cluster_name = cluster.get("name", "Unknown")
-        total_node_count = sum(ng.get("scalingConfig", {}).get("desiredSize", 0) for ng in node_groups)
-
-        # Scenario 1: CRITICAL - No worker nodes (paying control plane only)
-        if total_node_count == 0 and not fargate_profiles:
-            is_optimizable = True
-            optimization_score = 95
-            priority = "critical"
-            potential_savings = monthly_cost  # Full cluster cost is waste
-            recommendations.append({
-                "type": "no_nodes",
-                "severity": "critical",
-                "message": (
-                    f"CRITICAL: EKS cluster '{cluster_name}' has NO worker nodes or Fargate profiles (costs ${monthly_cost:.2f}/month). "
-                    f"You're paying ${73:.2f}/month for control plane with no compute resources. "
-                    "Delete this cluster immediately or add node groups/Fargate profiles if needed."
-                ),
-                "impact": "Paying full EKS costs with zero workload capacity",
-                "action": "Delete cluster or add worker nodes/Fargate profiles",
-            })
-            return is_optimizable, optimization_score, priority, potential_savings, recommendations
-
-        # Scenario 2: HIGH - All nodes unhealthy (dead cluster)
-        unhealthy_nodes = sum(
-            1 for ng in node_groups
-            if ng.get("health", {}).get("issues", [])
-        )
-        if total_node_count > 0 and unhealthy_nodes == len(node_groups):
-            is_optimizable = True
-            optimization_score = 90
-            priority = "high"
-            potential_savings = monthly_cost  # Entire cluster is waste
-            recommendations.append({
-                "type": "all_unhealthy",
-                "severity": "high",
-                "message": (
-                    f"HIGH: EKS cluster '{cluster_name}' has ALL node groups unhealthy (costs ${monthly_cost:.2f}/month). "
-                    f"All {len(node_groups)} node groups are in degraded/failed state. "
-                    "This cluster is not serving any workloads. Investigate node group health or delete cluster."
-                ),
-                "impact": "Cluster not operational, all costs are waste",
-                "action": "Fix node group health issues or delete cluster",
-            })
-            return is_optimizable, optimization_score, priority, potential_savings, recommendations
-
-        # Scenario 3: MEDIUM - Over-provisioned nodes (CPU <20%)
-        if avg_cpu_utilization > 0 and avg_cpu_utilization < 20.0:
-            is_optimizable = True
-            optimization_score = 70
-            priority = "medium"
-            # Assume 30% savings from right-sizing (reduce node count or instance types)
-            potential_savings = monthly_cost * 0.30
-            recommendations.append({
-                "type": "over_provisioned",
-                "severity": "medium",
-                "message": (
-                    f"MEDIUM: EKS cluster '{cluster_name}' has very low CPU utilization ({avg_cpu_utilization:.1f}%, costs ${monthly_cost:.2f}/month). "
-                    f"Nodes are under-utilized. Right-size node groups: reduce node count or use smaller instance types. "
-                    f"Potential savings: ${potential_savings:.2f}/month (30% reduction)."
-                ),
-                "impact": f"Wasting {100 - avg_cpu_utilization:.1f}% of node capacity",
-                "action": "Reduce node count or downgrade instance types",
-            })
-            return is_optimizable, optimization_score, priority, potential_savings, recommendations
-
-        # Scenario 4: MEDIUM - Old generation nodes (t2/m4/c4/r4)
-        old_generation_types = ["t2", "m4", "c4", "r4"]
-        old_instances = [it for it in node_instance_types if any(it.startswith(old) for old in old_generation_types)]
-        if old_instances:
-            is_optimizable = True
-            optimization_score = 65
-            priority = "medium"
-            # Assume 15% savings from upgrading to newer generation
-            potential_savings = monthly_cost * 0.15
-            recommendations.append({
-                "type": "old_generation",
-                "severity": "medium",
-                "message": (
-                    f"MEDIUM: EKS cluster '{cluster_name}' uses old generation instance types (costs ${monthly_cost:.2f}/month). "
-                    f"Found: {', '.join(set(old_instances))}. "
-                    "Upgrade to newer generations (t3, m5, c5, r5) for 15% cost savings and better performance."
-                ),
-                "impact": "Missing out on 15% cost savings and improved performance",
-                "action": f"Upgrade to newer generation: {', '.join(set(old_instances)).replace('t2', 't3').replace('m4', 'm5').replace('c4', 'c5').replace('r4', 'r5')}",
-            })
-            return is_optimizable, optimization_score, priority, potential_savings, recommendations
-
-        # Scenario 5: MEDIUM - Spot instances not used (100% On-Demand)
-        # Check if any node group uses Spot instances
-        has_spot = any(ng.get("capacityType", "ON_DEMAND") == "SPOT" for ng in node_groups)
-        if not has_spot and total_node_count >= 3:
-            is_optimizable = True
-            optimization_score = 60
-            priority = "medium"
-            # Spot instances are typically 70% cheaper
-            # Recommend 60% of nodes on Spot (conservative mix)
-            potential_savings = monthly_cost * 0.60 * 0.70
-            recommendations.append({
-                "type": "no_spot",
-                "severity": "medium",
-                "message": (
-                    f"MEDIUM: EKS cluster '{cluster_name}' uses 100% On-Demand nodes (costs ${monthly_cost:.2f}/month). "
-                    f"Cluster has {total_node_count} nodes. "
-                    "Use Spot instances for 60% of nodes to save 70% on those nodes. "
-                    f"Potential savings: ${potential_savings:.2f}/month (42% total reduction)."
-                ),
-                "impact": "Missing out on 42% cost savings from Spot instances",
-                "action": "Create Spot node groups for stateless/fault-tolerant workloads",
-            })
-            return is_optimizable, optimization_score, priority, potential_savings, recommendations
-
-        # No optimization opportunities found
-        return is_optimizable, optimization_score, priority, potential_savings, recommendations
 
     async def scan_elasticache_clusters(self, region: str) -> list[AllCloudResourceData]:
         """

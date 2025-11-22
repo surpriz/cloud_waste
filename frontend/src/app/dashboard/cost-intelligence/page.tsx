@@ -12,7 +12,6 @@ import {
   BarChart3,
   PieChart,
   Sparkles,
-  RefreshCw,
   Filter,
   Download,
   HardDrive,
@@ -214,7 +213,6 @@ export default function CostIntelligencePage() {
     fetchCostBreakdown,
     fetchHighCostResources,
     fetchAllResources,
-    runInventoryScan,
   } = useInventoryStore();
 
   const [selectedAccountId, setSelectedAccountId] = useState<string>("");
@@ -262,88 +260,6 @@ export default function CostIntelligencePage() {
     fetchHighCostResources,
     fetchAllResources,
   ]);
-
-  // Helper function to poll scan status until completion
-  const waitForScanCompletion = async (scanId: string): Promise<void> => {
-    const maxAttempts = 120; // 10 minutes max (5s intervals)
-    const pollInterval = 5000; // 5 seconds
-
-    for (let attempt = 0; attempt < maxAttempts; attempt++) {
-      try {
-        const response = await fetch(
-          `${process.env.NEXT_PUBLIC_API_URL}/api/v1/scans/${scanId}/progress`,
-          {
-            headers: {
-              Authorization: `Bearer ${localStorage.getItem("access_token")}`,
-            },
-          }
-        );
-
-        if (!response.ok) {
-          throw new Error("Failed to check scan status");
-        }
-
-        const progress = await response.json();
-
-        // Check if scan completed
-        if (progress.state === "SUCCESS" || progress.state === "COMPLETED") {
-          console.log("Inventory scan completed successfully");
-          return;
-        }
-
-        // Check if scan failed
-        if (progress.state === "FAILURE" || progress.state === "FAILED") {
-          throw new Error("Inventory scan failed");
-        }
-
-        // Still in progress, wait before next poll
-        await new Promise(resolve => setTimeout(resolve, pollInterval));
-      } catch (error) {
-        console.error("Error polling scan status:", error);
-        throw error;
-      }
-    }
-
-    throw new Error("Scan timeout: exceeded maximum wait time");
-  };
-
-  const handleRefresh = async () => {
-    if (!selectedAccountId) return;
-
-    try {
-      console.log("Starting inventory scan for account:", selectedAccountId);
-
-      // 1. Launch inventory scan
-      const scan: any = await runInventoryScan(selectedAccountId);
-      const scanId = scan.id || scan.scan_id; // Handle both possible response formats
-      console.log("Inventory scan started with ID:", scanId);
-
-      // 2. Wait for scan to complete
-      await waitForScanCompletion(scanId);
-      console.log("Inventory scan completed, fetching new data...");
-
-      // 3. Fetch updated data
-      await fetchStats(selectedAccountId);
-      await fetchCostBreakdown(selectedAccountId);
-      await fetchHighCostResources(selectedAccountId, minCostFilter, 10);
-      await fetchAllResources({
-        cloud_account_id: selectedAccountId,
-        limit: 100,
-      });
-
-      console.log("Inventory data refreshed successfully");
-    } catch (error) {
-      console.error("Failed to run inventory scan:", error);
-      // Still try to fetch data even if scan fails
-      fetchStats(selectedAccountId);
-      fetchCostBreakdown(selectedAccountId);
-      fetchHighCostResources(selectedAccountId, minCostFilter, 10);
-      fetchAllResources({
-        cloud_account_id: selectedAccountId,
-        limit: 100,
-      });
-    }
-  };
 
   // Get resource color based on status
   const getResourceColor = (resource: any) => {
@@ -447,14 +363,6 @@ export default function CostIntelligencePage() {
           >
             <Filter className="h-5 w-5" />
             Filters
-          </button>
-          <button
-            onClick={handleRefresh}
-            disabled={isLoading}
-            className="flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-white hover:bg-blue-700 disabled:opacity-50"
-          >
-            <RefreshCw className={`h-4 w-4 ${isLoading ? "animate-spin" : ""}`} />
-            Refresh
           </button>
         </div>
       </div>

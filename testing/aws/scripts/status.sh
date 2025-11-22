@@ -8,22 +8,27 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
+# Get script directory (works from anywhere)
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+
 echo "=========================================="
 echo "CutCosts AWS Resources Status"
 echo "=========================================="
 echo ""
 
 # Check if .env exists
-if [ ! -f "../.env" ]; then
+if [ ! -f "$PROJECT_DIR/.env" ]; then
     echo -e "${RED}✗ Error: .env file not found${NC}"
+    echo "Expected location: $PROJECT_DIR/.env"
     exit 1
 fi
 
 # Source .env
-source ../.env
+source "$PROJECT_DIR/.env"
 
 # Change to terraform directory
-cd ../terraform
+cd "$PROJECT_DIR/terraform"
 
 # Check if terraform state exists
 if [ ! -f "terraform.tfstate" ]; then
@@ -110,6 +115,6 @@ echo "Estimated Total Cost: ~\$${TOTAL_COST}/month"
 echo "==========================================${NC}"
 echo ""
 echo "Commands:"
-echo "  View detailed costs: terraform -chdir=../terraform show"
-echo "  Destroy resources: ./scripts/destroy.sh"
+echo "  View detailed costs: terraform -chdir=$PROJECT_DIR/terraform show"
+echo "  Destroy resources: $PROJECT_DIR/scripts/destroy.sh"
 echo ""
