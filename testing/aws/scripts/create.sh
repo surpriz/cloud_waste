@@ -24,8 +24,10 @@ if [ ! -f "$PROJECT_DIR/.env" ]; then
     exit 1
 fi
 
-# Source .env
+# Source .env and export all variables for Terraform
+set -a  # Enable automatic export of all variables
 source "$PROJECT_DIR/.env"
+set +a  # Disable automatic export
 
 # Parse command line arguments
 BATCH_ARG=""

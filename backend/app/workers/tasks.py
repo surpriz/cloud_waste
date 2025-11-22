@@ -383,6 +383,58 @@ async def _scan_cloud_account_async(
                             s3_count=len(s3_resources),
                         )
 
+                    # Scan EKS Clusters (all) - BATCH 2
+                    try:
+                        for region in regions_to_scan:
+                            eks_resources = await inventory_scanner.scan_eks_clusters(region)
+                            all_inventory_resources.extend(eks_resources)
+                            logger.info(
+                                "inventory.eks_scanned",
+                                region=region,
+                                eks_count=len(eks_resources),
+                            )
+                    except Exception as e:
+                        logger.warning("inventory.eks_scan_skipped", error=str(e))
+
+                    # Scan Lambda Functions (all) - BATCH 2
+                    try:
+                        for region in regions_to_scan:
+                            lambda_resources = await inventory_scanner.scan_lambda_functions(region)
+                            all_inventory_resources.extend(lambda_resources)
+                            logger.info(
+                                "inventory.lambda_scanned",
+                                region=region,
+                                lambda_count=len(lambda_resources),
+                            )
+                    except Exception as e:
+                        logger.warning("inventory.lambda_scan_skipped", error=str(e))
+
+                    # Scan DynamoDB Tables (all) - BATCH 2
+                    try:
+                        for region in regions_to_scan:
+                            dynamodb_resources = await inventory_scanner.scan_dynamodb_tables(region)
+                            all_inventory_resources.extend(dynamodb_resources)
+                            logger.info(
+                                "inventory.dynamodb_scanned",
+                                region=region,
+                                dynamodb_count=len(dynamodb_resources),
+                            )
+                    except Exception as e:
+                        logger.warning("inventory.dynamodb_scan_skipped", error=str(e))
+
+                    # Scan Fargate Tasks (all) - BATCH 2
+                    try:
+                        for region in regions_to_scan:
+                            fargate_resources = await inventory_scanner.scan_fargate_tasks(region)
+                            all_inventory_resources.extend(fargate_resources)
+                            logger.info(
+                                "inventory.fargate_scanned",
+                                region=region,
+                                fargate_count=len(fargate_resources),
+                            )
+                    except Exception as e:
+                        logger.warning("inventory.fargate_scan_skipped", error=str(e))
+
                     # Save all inventory resources to database
                     for resource in all_inventory_resources:
                         all_cloud_resource = AllCloudResource(
