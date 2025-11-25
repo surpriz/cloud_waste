@@ -47,7 +47,7 @@ variable "enable_batch_3" {
 }
 
 variable "enable_batch_4" {
-  description = "Enable Batch 4 resources (Platform/Messaging - $243/month)"
+  description = "Enable Batch 4 resources (Advanced Services - VPC Endpoint, Neptune, MSK, Redshift, VPN, Transit Gateway, ALB, Global Accelerator, DocumentDB - $1,166/month)"
   type        = bool
   default     = false
 }

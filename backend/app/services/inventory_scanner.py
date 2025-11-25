@@ -6,7 +6,7 @@ cost intelligence and optimization recommendations.
 
 import uuid
 import structlog
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -139,6 +139,47 @@ class AWSInventoryScanner:
             return False
 
         return True
+
+    def _safe_datetime_age(
+        self,
+        created_at: Any,
+        reference_time: Optional[datetime] = None
+    ) -> int:
+        """
+        Safely calculate age in days from a datetime, handling invalid values.
+
+        This prevents "unsupported operand type(s) for -: 'datetime.datetime' and 'bool'"
+        errors when cloud APIs return False/None/invalid values instead of datetime.
+
+        Args:
+            created_at: Datetime value from cloud API (can be datetime, None, False, str, etc.)
+            reference_time: Reference datetime (defaults to utcnow())
+
+        Returns:
+            Age in days, or 0 if created_at is invalid
+        """
+        # Handle None, False, 0, "", [], {}
+        if not created_at:
+            return 0
+
+        # Not a datetime object
+        if not isinstance(created_at, datetime):
+            return 0
+
+        ref_time = reference_time or datetime.utcnow()
+
+        try:
+            # Handle timezone-aware datetimes
+            created_naive = created_at.replace(tzinfo=None) if created_at.tzinfo else created_at
+            age_delta = ref_time - created_naive
+            return max(0, age_delta.days)  # Never negative
+        except Exception as e:
+            logger.warning(
+                "inventory.datetime_age_calculation_failed",
+                created_at=str(created_at),
+                error=str(e),
+            )
+            return 0
 
     async def scan_ec2_instances(self, region: str) -> list[AllCloudResourceData]:
         """
@@ -1212,6 +1253,10 @@ class AWSInventoryScanner:
                     db_instance_class = db_instance["DBInstanceClass"]
                     db_engine = db_instance["Engine"]
                     status = db_instance["DBInstanceStatus"]
+
+                    # Skip DocumentDB and Neptune instances (handled by their dedicated cluster scanners)
+                    if db_engine in ["docdb", "neptune"]:
+                        continue
 
                     # Get CloudWatch metrics
                     cpu_util = await self._get_rds_cpu_utilization(
@@ -3649,7 +3694,7 @@ class AWSInventoryScanner:
 
                                     # Calculate hours running (estimate from creation time)
                                     hours_running_monthly = 0.0
-                                    if created_at:
+                                    if created_at and isinstance(created_at, datetime):
                                         age = datetime.utcnow() - created_at.replace(tzinfo=None)
                                         hours_running_monthly = min(age.total_seconds() / 3600, 730)
 
@@ -3745,7 +3790,7 @@ class AWSInventoryScanner:
                                     # Apply detection rules filtering
                                     resource_age_days = None
                                     if created_at:
-                                        resource_age_days = (datetime.utcnow() - created_at.replace(tzinfo=None)).days
+                                        resource_age_days = self._safe_datetime_age(created_at)
 
                                     if not self._should_include_resource("fargate_task", resource_age_days):
                                         logger.debug("inventory.fargate_filtered", task_id=task_id, age=resource_age_days)
@@ -3831,7 +3876,7 @@ class AWSInventoryScanner:
         pricing_key = f"elasticache_{node_type.replace('cache.', '').replace('.', '_')}"
 
         # Get hourly cost from pricing dict, fallback to m5.large if not found
-        hourly_cost = self.PRICING.get(pricing_key, 0.126)
+        hourly_cost = self.provider.PRICING.get(pricing_key, 0.126)
 
         # Calculate monthly cost (730 hours/month)
         monthly_cost = hourly_cost * 730 * num_nodes
@@ -4141,7 +4186,7233 @@ class AWSInventoryScanner:
         return is_optimizable, optimization_score, priority, potential_savings, recommendations
 
 
+    async def scan_opensearch_domains(self, region: str) -> list[AllCloudResourceData]:
+        """
+        Scan ALL AWS OpenSearch Domains in a region for cost intelligence.
 
+        For each domain:
+        - Calculate monthly cost (instance + storage)
+        - Fetch CloudWatch metrics (SearchRate, IndexingRate, CPU, JVM, Storage)
+        - Analyze optimization opportunities (5 scenarios)
+
+        Returns:
+            List of AllCloudResourceData entries for all OpenSearch Domains
+        """
+        resources: list[AllCloudResourceData] = []
+
+        try:
+            async with self.session.client("opensearch", region_name=region) as opensearch:
+                async with self.session.client("cloudwatch", region_name=region) as cloudwatch:
+                    # List all domains
+                    response = await opensearch.list_domain_names()
+                    domain_names = [d["DomainName"] for d in response.get("DomainNames", [])]
+
+                    logger.info(
+                        "inventory.opensearch.domains_found",
+                        region=region,
+                        count=len(domain_names),
+                    )
+
+                    # Process each domain
+                    for domain_name in domain_names:
+                        try:
+                            # Get domain details
+                            domain_response = await opensearch.describe_domain(DomainName=domain_name)
+                            domain = domain_response.get("DomainStatus", {})
+
+                            domain_arn = domain.get("ARN", "")
+                            domain_status = domain.get("Processing", False)  # Processing = updating
+                            created_at = domain.get("Created")
+
+                            # Get cluster config
+                            cluster_config = domain.get("ClusterConfig", {})
+                            instance_type = cluster_config.get("InstanceType", "m5.large.search")
+                            instance_count = cluster_config.get("InstanceCount", 1)
+
+                            # Get EBS storage
+                            ebs_options = domain.get("EBSOptions", {})
+                            ebs_enabled = ebs_options.get("EBSEnabled", False)
+                            storage_size_gb = ebs_options.get("VolumeSize", 0) if ebs_enabled else 0
+
+                            # Get CloudWatch metrics (7 days)
+                            end_time = datetime.utcnow()
+                            start_time = end_time - timedelta(days=7)
+
+                            # Metric 1: SearchRate (sum over 7 days)
+                            search_rate_response = await cloudwatch.get_metric_statistics(
+                                Namespace="AWS/ES",
+                                MetricName="SearchRate",
+                                Dimensions=[
+                                    {"Name": "DomainName", "Value": domain_name},
+                                    {"Name": "ClientId", "Value": domain_arn.split(":")[4]},
+                                ],
+                                StartTime=start_time,
+                                EndTime=end_time,
+                                Period=604800,  # 7 days
+                                Statistics=["Sum"],
+                            )
+                            search_rate = (
+                                search_rate_response["Datapoints"][0]["Sum"]
+                                if search_rate_response.get("Datapoints")
+                                else 0.0
+                            )
+
+                            # Metric 2: IndexingRate (sum over 7 days)
+                            indexing_rate_response = await cloudwatch.get_metric_statistics(
+                                Namespace="AWS/ES",
+                                MetricName="IndexingRate",
+                                Dimensions=[
+                                    {"Name": "DomainName", "Value": domain_name},
+                                    {"Name": "ClientId", "Value": domain_arn.split(":")[4]},
+                                ],
+                                StartTime=start_time,
+                                EndTime=end_time,
+                                Period=604800,
+                                Statistics=["Sum"],
+                            )
+                            indexing_rate = (
+                                indexing_rate_response["Datapoints"][0]["Sum"]
+                                if indexing_rate_response.get("Datapoints")
+                                else 0.0
+                            )
+
+                            # Metric 3: CPUUtilization (average over 7 days)
+                            cpu_response = await cloudwatch.get_metric_statistics(
+                                Namespace="AWS/ES",
+                                MetricName="CPUUtilization",
+                                Dimensions=[
+                                    {"Name": "DomainName", "Value": domain_name},
+                                    {"Name": "ClientId", "Value": domain_arn.split(":")[4]},
+                                ],
+                                StartTime=start_time,
+                                EndTime=end_time,
+                                Period=604800,
+                                Statistics=["Average"],
+                            )
+                            cpu_utilization = (
+                                cpu_response["Datapoints"][0]["Average"]
+                                if cpu_response.get("Datapoints")
+                                else 0.0
+                            )
+
+                            # Metric 4: JVMMemoryPressure (average)
+                            jvm_response = await cloudwatch.get_metric_statistics(
+                                Namespace="AWS/ES",
+                                MetricName="JVMMemoryPressure",
+                                Dimensions=[
+                                    {"Name": "DomainName", "Value": domain_name},
+                                    {"Name": "ClientId", "Value": domain_arn.split(":")[4]},
+                                ],
+                                StartTime=start_time,
+                                EndTime=end_time,
+                                Period=604800,
+                                Statistics=["Average"],
+                            )
+                            jvm_memory_pressure = (
+                                jvm_response["Datapoints"][0]["Average"]
+                                if jvm_response.get("Datapoints")
+                                else 0.0
+                            )
+
+                            # Metric 5: FreeStorageSpace (minimum, to detect low storage)
+                            storage_response = await cloudwatch.get_metric_statistics(
+                                Namespace="AWS/ES",
+                                MetricName="FreeStorageSpace",
+                                Dimensions=[
+                                    {"Name": "DomainName", "Value": domain_name},
+                                    {"Name": "ClientId", "Value": domain_arn.split(":")[4]},
+                                ],
+                                StartTime=start_time,
+                                EndTime=end_time,
+                                Period=604800,
+                                Statistics=["Average"],
+                            )
+                            free_storage_mb = (
+                                storage_response["Datapoints"][0]["Average"]
+                                if storage_response.get("Datapoints")
+                                else 0.0
+                            )
+                            free_storage_gb = free_storage_mb / 1024  # Convert MB to GB
+
+                            # Calculate cost
+                            monthly_cost = self._calculate_opensearch_monthly_cost(
+                                instance_type=instance_type,
+                                instance_count=instance_count,
+                                storage_size_gb=storage_size_gb,
+                                region=region,
+                            )
+
+                            # Calculate optimization
+                            (
+                                is_optimizable,
+                                optimization_score,
+                                priority,
+                                potential_savings,
+                                recommendations,
+                            ) = self._calculate_opensearch_optimization(
+                                domain=domain,
+                                search_rate=search_rate,
+                                indexing_rate=indexing_rate,
+                                cpu_utilization=cpu_utilization,
+                                jvm_memory_pressure=jvm_memory_pressure,
+                                free_storage_gb=free_storage_gb,
+                                total_storage_gb=storage_size_gb,
+                                instance_type=instance_type,
+                                instance_count=instance_count,
+                                monthly_cost=monthly_cost,
+                            )
+
+                            # Build metadata
+                            resource_metadata = {
+                                "domain_name": domain_name,
+                                "domain_arn": domain_arn,
+                                "instance_type": instance_type,
+                                "instance_count": instance_count,
+                                "storage_size_gb": storage_size_gb,
+                                "engine_version": domain.get("EngineVersion", "Unknown"),
+                                "processing": domain_status,
+                                "created_at": created_at.isoformat() if (created_at and isinstance(created_at, datetime)) else None,
+                                "metrics": {
+                                    "search_rate_7d": search_rate,
+                                    "indexing_rate_7d": indexing_rate,
+                                    "cpu_utilization_avg": cpu_utilization,
+                                    "jvm_memory_pressure_avg": jvm_memory_pressure,
+                                    "free_storage_gb": free_storage_gb,
+                                },
+                            }
+
+                            # Apply detection rules filtering
+                            resource_age_days = self._safe_datetime_age(created_at)
+
+                            if not self._should_include_resource("opensearch_domain", resource_age_days):
+                                logger.debug("inventory.opensearch_filtered", domain_name=domain_name, age=resource_age_days)
+                                continue
+
+                            # Create resource entry
+                            resource = AllCloudResourceData(
+                                resource_id=domain_arn,
+                                resource_type="opensearch_domain",
+                                resource_name=domain_name,
+                                region=region,
+                                estimated_monthly_cost=monthly_cost,
+                                currency="USD",
+                                resource_metadata=resource_metadata,
+                                is_optimizable=is_optimizable,
+                                optimization_score=optimization_score,
+                                optimization_priority=priority,
+                                potential_monthly_savings=potential_savings,
+                                optimization_recommendations=recommendations,
+                            )
+
+                            resources.append(resource)
+
+                            logger.info(
+                                "inventory.opensearch.domain_scanned",
+                                domain_name=domain_name,
+                                region=region,
+                                instance_type=instance_type,
+                                instance_count=instance_count,
+                                monthly_cost=monthly_cost,
+                                is_optimizable=is_optimizable,
+                                optimization_score=optimization_score,
+                            )
+
+                        except Exception as e:
+                            logger.error(
+                                "inventory.opensearch.domain_scan_error",
+                                domain_name=domain_name,
+                                region=region,
+                                error=str(e),
+                            )
+                            continue
+
+        except Exception as e:
+            logger.error(
+                "opensearch.scan_failed",
+                region=region,
+                error=str(e),
+            )
+
+        return resources
+
+    # =========================================================================
+    # AWS API Gateway - Cost Optimization Scanning
+    # =========================================================================
+
+    def _calculate_apigateway_monthly_cost(
+        self,
+        api_type: str,
+        request_count_per_month: float,
+        data_transfer_gb_per_month: float,
+        cache_enabled: bool,
+        region: str,
+    ) -> float:
+        """
+        Calculate estimated monthly cost for AWS API Gateway.
+
+        Pricing model (3 API types):
+        - REST API: $3.50 per million requests + $0.09/GB data transfer
+        - HTTP API: $1.00 per million requests (70% cheaper, no caching)
+        - WebSocket API: $1.00 per million messages + $0.25 per million connection minutes
+
+        Args:
+            api_type: API type (REST, HTTP, WEBSOCKET)
+            request_count_per_month: Monthly request count (estimated from 7d)
+            data_transfer_gb_per_month: Monthly data transfer in GB
+            cache_enabled: Whether API cache is enabled (REST only)
+            region: AWS region
+
+        Returns:
+            Estimated monthly cost in USD
+        """
+        # Request cost
+        request_cost = 0.0
+        if api_type == "REST":
+            request_rate = self.provider.PRICING.get("apigateway_rest_per_million", 3.50)
+            request_cost = (request_count_per_month / 1_000_000) * request_rate
+        elif api_type == "HTTP":
+            request_rate = self.provider.PRICING.get("apigateway_http_per_million", 1.00)
+            request_cost = (request_count_per_month / 1_000_000) * request_rate
+        elif api_type == "WEBSOCKET":
+            message_rate = self.provider.PRICING.get("apigateway_websocket_per_million", 1.00)
+            request_cost = (request_count_per_month / 1_000_000) * message_rate
+            # WebSocket also charges for connection minutes (not included here, would need additional metric)
+
+        # Data transfer cost
+        data_transfer_rate = self.provider.PRICING.get("apigateway_data_transfer_per_gb", 0.09)
+        data_transfer_cost = data_transfer_gb_per_month * data_transfer_rate
+
+        # Cache cost (REST API only, if enabled)
+        # Not included in basic pricing (would need cache size info)
+        cache_cost = 0.0
+
+        total_cost = request_cost + data_transfer_cost + cache_cost
+        return total_cost
+
+    def _calculate_apigateway_optimization(
+        self,
+        api: dict[str, Any],
+        api_type: str,
+        request_count: float,
+        error_4xx_count: float,
+        error_5xx_count: float,
+        cache_hit_count: float,
+        cache_miss_count: float,
+        cache_enabled: bool,
+        monthly_cost: float,
+    ) -> tuple[bool, int, str, float, list[dict[str, Any]]]:
+        """
+        Analyze AWS API Gateway for cost optimization opportunities.
+
+        Optimization scenarios (6):
+        1. Completely inactive - No requests (critical)
+        2. Very low usage - <1000 req/day (high)
+        3. High error rate - >10% 4XX/5XX (high)
+        4. REST API when HTTP API sufficient - 70% savings (medium)
+        5. Cache enabled but low hit rate - <50% (medium)
+        6. WebSocket API with no active connections - Delete if unused (low)
+
+        Returns:
+            (is_optimizable, optimization_score, priority, potential_savings, recommendations)
+        """
+        is_optimizable = False
+        optimization_score = 0
+        priority = "low"
+        potential_savings = 0.0
+        recommendations = []
+
+        # Scenario 1: CRITICAL - Completely inactive (no requests)
+        if request_count == 0.0:
+            is_optimizable = True
+            optimization_score = 95
+            priority = "critical"
+            potential_savings = monthly_cost  # Full savings
+            recommendations.append(
+                {
+                    "type": "delete_api",
+                    "title": "Delete Completely Inactive API Gateway",
+                    "description": f"API '{api.get('Name', api.get('name', ''))}' has received NO requests "
+                    f"in the last 7 days. This API is completely unused and costs ${monthly_cost:.2f}/month.",
+                    "impact": "high",
+                    "estimated_savings": f"${monthly_cost:.2f}/month",
+                    "action": "Delete this unused API Gateway after verifying no dependencies",
+                    "risk": "low",
+                }
+            )
+            return (is_optimizable, optimization_score, priority, potential_savings, recommendations)
+
+        # Scenario 2: HIGH - Very low usage (<1000 requests/day)
+        requests_per_day = request_count / 7
+
+        if requests_per_day > 0 and requests_per_day < 1000:
+            is_optimizable = True
+            optimization_score = max(optimization_score, 80)
+            priority = "high" if priority != "critical" else priority
+
+            recommendations.append(
+                {
+                    "type": "low_usage",
+                    "title": f"Very Low Usage ({requests_per_day:.0f} Requests/Day)",
+                    "description": f"API '{api.get('Name', api.get('name', ''))}' receives only {requests_per_day:.0f} requests/day. "
+                    f"Consider consolidating with other APIs or using serverless alternatives (AWS Lambda URL).",
+                    "impact": "medium",
+                    "estimated_savings": f"${monthly_cost * 0.50:.2f}/month (if consolidated)",
+                    "action": "Review if this API can be consolidated or replaced with simpler alternatives",
+                    "risk": "medium",
+                }
+            )
+            potential_savings = max(potential_savings, monthly_cost * 0.50)
+
+        # Scenario 3: HIGH - High error rate (>10% 4XX/5XX)
+        total_errors = error_4xx_count + error_5xx_count
+        if request_count > 0:
+            error_rate = (total_errors / request_count) * 100
+
+            if error_rate > 10.0:
+                is_optimizable = True
+                optimization_score = max(optimization_score, 85)
+                priority = "high" if priority != "critical" else priority
+
+                recommendations.append(
+                    {
+                        "type": "high_error_rate",
+                        "title": f"High Error Rate ({error_rate:.1f}% Errors)",
+                        "description": f"API '{api.get('Name', api.get('name', ''))}' has {error_rate:.1f}% error rate "
+                        f"({error_4xx_count:.0f} 4XX + {error_5xx_count:.0f} 5XX errors). "
+                        f"This indicates integration issues or broken endpoints.",
+                        "impact": "high",
+                        "estimated_savings": f"${monthly_cost * 0.30:.2f}/month (if errors indicate unused endpoints)",
+                        "action": "Review and fix integration errors, or delete broken API if no longer needed",
+                        "risk": "medium",
+                    }
+                )
+                potential_savings = max(potential_savings, monthly_cost * 0.30)
+
+        # Scenario 4: MEDIUM - REST API when HTTP API sufficient (70% savings)
+        if api_type == "REST":
+            is_optimizable = True
+            optimization_score = max(optimization_score, 70)
+            priority = "medium" if priority == "low" else priority
+
+            # Calculate savings by migrating REST → HTTP API
+            rest_rate = self.provider.PRICING.get("apigateway_rest_per_million", 3.50)
+            http_rate = self.provider.PRICING.get("apigateway_http_per_million", 1.00)
+            request_count_monthly = request_count * 4.33  # 7d → 30d
+            current_request_cost = (request_count_monthly / 1_000_000) * rest_rate
+            new_request_cost = (request_count_monthly / 1_000_000) * http_rate
+            migration_savings = current_request_cost - new_request_cost
+
+            if migration_savings > 0:
+                potential_savings = max(potential_savings, migration_savings)
+
+                recommendations.append(
+                    {
+                        "type": "migrate_to_http_api",
+                        "title": f"Migrate REST API to HTTP API (Save 70%)",
+                        "description": f"API '{api.get('Name', '')}' uses REST API ($3.50/M requests). "
+                        f"If you don't need API caching, request/response transformations, or usage plans, "
+                        f"migrate to HTTP API ($1.00/M requests) to save 70%.",
+                        "impact": "low",
+                        "estimated_savings": f"${migration_savings:.2f}/month",
+                        "action": "Evaluate migrating from REST API to HTTP API if features not needed",
+                        "risk": "low",
+                    }
+                )
+
+        # Scenario 5: MEDIUM - Cache enabled but low hit rate (<50%)
+        if cache_enabled and (cache_hit_count + cache_miss_count) > 0:
+            cache_total = cache_hit_count + cache_miss_count
+            cache_hit_rate = (cache_hit_count / cache_total) * 100
+
+            if cache_hit_rate < 50.0:
+                is_optimizable = True
+                optimization_score = max(optimization_score, 65)
+                priority = "medium" if priority == "low" else priority
+
+                # Estimate cache cost (varies by cache size, assume 0.5 GB = $0.020/hour = ~$14/month)
+                estimated_cache_cost = 14.00
+                potential_savings = max(potential_savings, estimated_cache_cost)
+
+                recommendations.append(
+                    {
+                        "type": "disable_cache",
+                        "title": f"Low Cache Hit Rate ({cache_hit_rate:.1f}%)",
+                        "description": f"API '{api.get('Name', '')}' has caching enabled but only {cache_hit_rate:.1f}% hit rate. "
+                        f"Cache is ineffective and costs ~$14/month. Consider disabling cache to save money.",
+                        "impact": "low",
+                        "estimated_savings": f"${estimated_cache_cost:.2f}/month",
+                        "action": "Disable API Gateway cache if hit rate remains below 50%",
+                        "risk": "low",
+                    }
+                )
+
+        # Scenario 6: LOW - WebSocket API with no active connections
+        # This would require additional metrics (WebSocket connection count)
+        # For now, we detect via request_count = 0 (covered in Scenario 1)
+
+        return (is_optimizable, optimization_score, priority, potential_savings, recommendations)
+
+    async def scan_api_gateways(self, region: str) -> list[AllCloudResourceData]:
+        """
+        Scan ALL AWS API Gateways in a region for cost intelligence.
+
+        Scans 3 API types:
+        1. REST API (apigateway client)
+        2. HTTP API (apigatewayv2 client)
+        3. WebSocket API (apigatewayv2 client)
+
+        For each API:
+        - Calculate monthly cost (requests + data transfer)
+        - Fetch CloudWatch metrics (Count, 4XXError, 5XXError, Cache)
+        - Analyze optimization opportunities (6 scenarios)
+
+        Returns:
+            List of AllCloudResourceData entries for all API Gateways
+        """
+        resources: list[AllCloudResourceData] = []
+
+        try:
+            # Scan REST APIs (apigateway client)
+            async with self.session.client("apigateway", region_name=region) as apigw:
+                async with self.session.client("cloudwatch", region_name=region) as cloudwatch:
+                    # List REST APIs
+                    rest_response = await apigw.get_rest_apis()
+                    rest_apis = rest_response.get("items", [])
+
+                    logger.info(
+                        "inventory.apigateway.rest_apis_found",
+                        region=region,
+                        count=len(rest_apis),
+                    )
+
+                    for api in rest_apis:
+                        try:
+                            api_id = api.get("id", "")
+                            api_name = api.get("name", "")
+                            created_date = api.get("createdDate")
+
+                            # Get CloudWatch metrics (7 days)
+                            end_time = datetime.utcnow()
+                            start_time = end_time - timedelta(days=7)
+
+                            # Metric 1: Count (total requests)
+                            count_response = await cloudwatch.get_metric_statistics(
+                                Namespace="AWS/ApiGateway",
+                                MetricName="Count",
+                                Dimensions=[{"Name": "ApiName", "Value": api_name}],
+                                StartTime=start_time,
+                                EndTime=end_time,
+                                Period=604800,
+                                Statistics=["Sum"],
+                            )
+                            request_count = (
+                                count_response["Datapoints"][0]["Sum"]
+                                if count_response.get("Datapoints")
+                                else 0.0
+                            )
+
+                            # Metric 2: 4XXError
+                            error_4xx_response = await cloudwatch.get_metric_statistics(
+                                Namespace="AWS/ApiGateway",
+                                MetricName="4XXError",
+                                Dimensions=[{"Name": "ApiName", "Value": api_name}],
+                                StartTime=start_time,
+                                EndTime=end_time,
+                                Period=604800,
+                                Statistics=["Sum"],
+                            )
+                            error_4xx_count = (
+                                error_4xx_response["Datapoints"][0]["Sum"]
+                                if error_4xx_response.get("Datapoints")
+                                else 0.0
+                            )
+
+                            # Metric 3: 5XXError
+                            error_5xx_response = await cloudwatch.get_metric_statistics(
+                                Namespace="AWS/ApiGateway",
+                                MetricName="5XXError",
+                                Dimensions=[{"Name": "ApiName", "Value": api_name}],
+                                StartTime=start_time,
+                                EndTime=end_time,
+                                Period=604800,
+                                Statistics=["Sum"],
+                            )
+                            error_5xx_count = (
+                                error_5xx_response["Datapoints"][0]["Sum"]
+                                if error_5xx_response.get("Datapoints")
+                                else 0.0
+                            )
+
+                            # Metric 4: CacheHitCount (if caching enabled)
+                            cache_hit_response = await cloudwatch.get_metric_statistics(
+                                Namespace="AWS/ApiGateway",
+                                MetricName="CacheHitCount",
+                                Dimensions=[{"Name": "ApiName", "Value": api_name}],
+                                StartTime=start_time,
+                                EndTime=end_time,
+                                Period=604800,
+                                Statistics=["Sum"],
+                            )
+                            cache_hit_count = (
+                                cache_hit_response["Datapoints"][0]["Sum"]
+                                if cache_hit_response.get("Datapoints")
+                                else 0.0
+                            )
+
+                            # Metric 5: CacheMissCount
+                            cache_miss_response = await cloudwatch.get_metric_statistics(
+                                Namespace="AWS/ApiGateway",
+                                MetricName="CacheMissCount",
+                                Dimensions=[{"Name": "ApiName", "Value": api_name}],
+                                StartTime=start_time,
+                                EndTime=end_time,
+                                Period=604800,
+                                Statistics=["Sum"],
+                            )
+                            cache_miss_count = (
+                                cache_miss_response["Datapoints"][0]["Sum"]
+                                if cache_miss_response.get("Datapoints")
+                                else 0.0
+                            )
+
+                            cache_enabled = (cache_hit_count + cache_miss_count) > 0
+
+                            # Estimate monthly metrics from 7-day data
+                            request_count_monthly = request_count * 4.33
+                            data_transfer_gb_monthly = (request_count * 5) / (1024 ** 3)  # Assume 5KB avg response
+
+                            # Calculate cost
+                            monthly_cost = self._calculate_apigateway_monthly_cost(
+                                api_type="REST",
+                                request_count_per_month=request_count_monthly,
+                                data_transfer_gb_per_month=data_transfer_gb_monthly,
+                                cache_enabled=cache_enabled,
+                                region=region,
+                            )
+
+                            # Calculate optimization
+                            (
+                                is_optimizable,
+                                optimization_score,
+                                priority,
+                                potential_savings,
+                                recommendations,
+                            ) = self._calculate_apigateway_optimization(
+                                api=api,
+                                api_type="REST",
+                                request_count=request_count,
+                                error_4xx_count=error_4xx_count,
+                                error_5xx_count=error_5xx_count,
+                                cache_hit_count=cache_hit_count,
+                                cache_miss_count=cache_miss_count,
+                                cache_enabled=cache_enabled,
+                                monthly_cost=monthly_cost,
+                            )
+
+                            # Build metadata
+                            resource_metadata = {
+                                "api_id": api_id,
+                                "api_name": api_name,
+                                "api_type": "REST",
+                                "endpoint_type": api.get("endpointConfiguration", {}).get("types", ["REGIONAL"])[0],
+                                "cache_enabled": cache_enabled,
+                                "created_date": created_date.isoformat() if created_date else None,
+                                "metrics": {
+                                    "request_count_7d": request_count,
+                                    "error_4xx_count_7d": error_4xx_count,
+                                    "error_5xx_count_7d": error_5xx_count,
+                                    "cache_hit_count_7d": cache_hit_count,
+                                    "cache_miss_count_7d": cache_miss_count,
+                                },
+                            }
+
+                            # Apply detection rules filtering
+                            resource_age_days = self._safe_datetime_age(created_date)
+
+                            if not self._should_include_resource("api_gateway", resource_age_days):
+                                logger.debug("inventory.apigateway_filtered", api_id=api_id, api_name=api_name, age=resource_age_days)
+                                continue
+
+                            # Create resource entry
+                            resource = AllCloudResourceData(
+                                resource_id=api_id,
+                                resource_type="api_gateway",
+                                resource_name=api_name,
+                                region=region,
+                                estimated_monthly_cost=monthly_cost,
+                                currency="USD",
+                                resource_metadata=resource_metadata,
+                                is_optimizable=is_optimizable,
+                                optimization_score=optimization_score,
+                                optimization_priority=priority,
+                                potential_monthly_savings=potential_savings,
+                                optimization_recommendations=recommendations,
+                            )
+
+                            resources.append(resource)
+
+                            logger.info(
+                                "inventory.apigateway.rest_api_scanned",
+                                api_name=api_name,
+                                region=region,
+                                request_count=request_count,
+                                monthly_cost=monthly_cost,
+                                is_optimizable=is_optimizable,
+                            )
+
+                        except Exception as e:
+                            logger.error(
+                                "inventory.apigateway.rest_api_scan_error",
+                                api_id=api.get("id", "unknown"),
+                                region=region,
+                                error=str(e),
+                            )
+                            continue
+
+            # Scan HTTP + WebSocket APIs (apigatewayv2 client)
+            async with self.session.client("apigatewayv2", region_name=region) as apigw2:
+                async with self.session.client("cloudwatch", region_name=region) as cloudwatch:
+                    # List HTTP + WebSocket APIs
+                    v2_response = await apigw2.get_apis()
+                    v2_apis = v2_response.get("Items", [])
+
+                    logger.info(
+                        "inventory.apigateway.v2_apis_found",
+                        region=region,
+                        count=len(v2_apis),
+                    )
+
+                    for api in v2_apis:
+                        try:
+                            api_id = api.get("ApiId", "")
+                            api_name = api.get("Name", "")
+                            api_protocol = api.get("ProtocolType", "HTTP")  # HTTP or WEBSOCKET
+                            created_date = api.get("CreatedDate")
+
+                            # CloudWatch metrics (note: different namespace for v2)
+                            end_time = datetime.utcnow()
+                            start_time = end_time - timedelta(days=7)
+
+                            # For HTTP/WebSocket APIs, metrics use ApiId dimension
+                            count_response = await cloudwatch.get_metric_statistics(
+                                Namespace="AWS/ApiGateway",
+                                MetricName="Count",
+                                Dimensions=[{"Name": "ApiId", "Value": api_id}],
+                                StartTime=start_time,
+                                EndTime=end_time,
+                                Period=604800,
+                                Statistics=["Sum"],
+                            )
+                            request_count = (
+                                count_response["Datapoints"][0]["Sum"]
+                                if count_response.get("Datapoints")
+                                else 0.0
+                            )
+
+                            # Errors
+                            error_4xx_response = await cloudwatch.get_metric_statistics(
+                                Namespace="AWS/ApiGateway",
+                                MetricName="4XXError",
+                                Dimensions=[{"Name": "ApiId", "Value": api_id}],
+                                StartTime=start_time,
+                                EndTime=end_time,
+                                Period=604800,
+                                Statistics=["Sum"],
+                            )
+                            error_4xx_count = (
+                                error_4xx_response["Datapoints"][0]["Sum"]
+                                if error_4xx_response.get("Datapoints")
+                                else 0.0
+                            )
+
+                            error_5xx_response = await cloudwatch.get_metric_statistics(
+                                Namespace="AWS/ApiGateway",
+                                MetricName="5XXError",
+                                Dimensions=[{"Name": "ApiId", "Value": api_id}],
+                                StartTime=start_time,
+                                EndTime=end_time,
+                                Period=604800,
+                                Statistics=["Sum"],
+                            )
+                            error_5xx_count = (
+                                error_5xx_response["Datapoints"][0]["Sum"]
+                                if error_5xx_response.get("Datapoints")
+                                else 0.0
+                            )
+
+                            # HTTP/WebSocket APIs don't support caching
+                            cache_hit_count = 0.0
+                            cache_miss_count = 0.0
+                            cache_enabled = False
+
+                            # Estimate monthly metrics
+                            request_count_monthly = request_count * 4.33
+                            data_transfer_gb_monthly = (request_count * 5) / (1024 ** 3)
+
+                            # Calculate cost
+                            monthly_cost = self._calculate_apigateway_monthly_cost(
+                                api_type=api_protocol,
+                                request_count_per_month=request_count_monthly,
+                                data_transfer_gb_per_month=data_transfer_gb_monthly,
+                                cache_enabled=False,
+                                region=region,
+                            )
+
+                            # Calculate optimization
+                            (
+                                is_optimizable,
+                                optimization_score,
+                                priority,
+                                potential_savings,
+                                recommendations,
+                            ) = self._calculate_apigateway_optimization(
+                                api=api,
+                                api_type=api_protocol,
+                                request_count=request_count,
+                                error_4xx_count=error_4xx_count,
+                                error_5xx_count=error_5xx_count,
+                                cache_hit_count=cache_hit_count,
+                                cache_miss_count=cache_miss_count,
+                                cache_enabled=cache_enabled,
+                                monthly_cost=monthly_cost,
+                            )
+
+                            # Build metadata
+                            resource_metadata = {
+                                "api_id": api_id,
+                                "api_name": api_name,
+                                "api_type": api_protocol,
+                                "api_endpoint": api.get("ApiEndpoint", ""),
+                                "created_date": created_date.isoformat() if created_date else None,
+                                "metrics": {
+                                    "request_count_7d": request_count,
+                                    "error_4xx_count_7d": error_4xx_count,
+                                    "error_5xx_count_7d": error_5xx_count,
+                                },
+                            }
+
+                            # Apply detection rules filtering (v2 APIs)
+                            resource_age_days = None
+                            if isinstance(created_date, datetime):
+                                resource_age_days = self._safe_datetime_age(created_date)
+
+                            if not self._should_include_resource("api_gateway", resource_age_days):
+                                logger.debug("inventory.apigateway_v2_filtered", api_id=api_id, api_name=api_name, age=resource_age_days)
+                                continue
+
+                            # Create resource entry
+                            resource = AllCloudResourceData(
+                                resource_id=api_id,
+                                resource_type="api_gateway",
+                                resource_name=api_name,
+                                region=region,
+                                estimated_monthly_cost=monthly_cost,
+                                currency="USD",
+                                resource_metadata=resource_metadata,
+                                is_optimizable=is_optimizable,
+                                optimization_score=optimization_score,
+                                optimization_priority=priority,
+                                potential_monthly_savings=potential_savings,
+                                optimization_recommendations=recommendations,
+                            )
+
+                            resources.append(resource)
+
+                            logger.info(
+                                "inventory.apigateway.v2_api_scanned",
+                                api_name=api_name,
+                                api_type=api_protocol,
+                                region=region,
+                                request_count=request_count,
+                                monthly_cost=monthly_cost,
+                                is_optimizable=is_optimizable,
+                            )
+
+                        except Exception as e:
+                            logger.error(
+                                "inventory.apigateway.v2_api_scan_error",
+                                api_id=api.get("ApiId", "unknown"),
+                                region=region,
+                                error=str(e),
+                            )
+                            continue
+
+        except Exception as e:
+            logger.error(
+                "apigateway.scan_failed",
+                region=region,
+                error=str(e),
+            )
+
+        return resources
+
+    # =========================================================================
+    # AWS CloudFront Distribution - Cost Optimization Scanning (GLOBAL SERVICE)
+    # =========================================================================
+
+    def _calculate_cloudfront_monthly_cost(
+        self,
+        requests_per_month: float,
+        data_transfer_gb_per_month: float,
+        invalidations_per_month: int,
+        price_class: str,
+    ) -> float:
+        """
+        Calculate estimated monthly cost for AWS CloudFront Distribution.
+
+        Pricing model (varies by region/price class):
+        - Data transfer out: $0.085/GB (US/Europe), $0.140/GB (Asia), $0.170/GB (Other)
+        - HTTP requests: $0.0075 per 10,000 requests
+        - HTTPS requests: $0.010 per 10,000 requests (assume 100% HTTPS)
+        - Invalidations: First 1,000 paths free, $0.005 per path after
+
+        Args:
+            requests_per_month: Monthly request count (estimated from 7d)
+            data_transfer_gb_per_month: Monthly data transfer out in GB
+            invalidations_per_month: Monthly invalidation requests
+            price_class: Price class (PriceClass_All, PriceClass_200, PriceClass_100)
+
+        Returns:
+            Estimated monthly cost in USD
+        """
+        # Data transfer cost (varies by price class)
+        if price_class == "PriceClass_100":  # US, Canada, Europe
+            data_transfer_rate = self.provider.PRICING.get("cloudfront_data_transfer_us_europe_per_gb", 0.085)
+        elif price_class == "PriceClass_200":  # US, Canada, Europe, Asia, Middle East, Africa
+            data_transfer_rate = self.provider.PRICING.get("cloudfront_data_transfer_asia_per_gb", 0.140)
+        else:  # PriceClass_All (all edge locations)
+            data_transfer_rate = self.provider.PRICING.get("cloudfront_data_transfer_other_per_gb", 0.170)
+
+        data_transfer_cost = data_transfer_gb_per_month * data_transfer_rate
+
+        # Request cost (assume 100% HTTPS)
+        https_rate = self.provider.PRICING.get("cloudfront_https_requests_per_10k", 0.010)
+        request_cost = (requests_per_month / 10_000) * https_rate
+
+        # Invalidation cost (first 1000 free)
+        invalidation_rate = self.provider.PRICING.get("cloudfront_invalidation_per_path", 0.005)
+        invalidation_cost = max(0, invalidations_per_month - 1000) * invalidation_rate
+
+        total_cost = data_transfer_cost + request_cost + invalidation_cost
+        return total_cost
+
+    def _calculate_cloudfront_optimization(
+        self,
+        distribution: dict[str, Any],
+        requests_per_month: float,
+        data_transfer_gb: float,
+        error_rate_4xx: float,
+        error_rate_5xx: float,
+        origin_latency_ms: float,
+        price_class: str,
+        invalidations_per_month: int,
+        monthly_cost: float,
+    ) -> tuple[bool, int, str, float, list[dict[str, Any]]]:
+        """
+        Analyze AWS CloudFront Distribution for cost optimization opportunities.
+
+        Optimization scenarios (5):
+        1. Completely inactive - No requests (critical)
+        2. Very low usage - <10K requests/month (high)
+        3. High origin latency - >500ms avg, poor caching (high)
+        4. Price class optimization - All Edges when NA/EU sufficient (medium)
+        5. Excessive invalidations - >1000/month, use versioning (medium)
+
+        Returns:
+            (is_optimizable, optimization_score, priority, potential_savings, recommendations)
+        """
+        is_optimizable = False
+        optimization_score = 0
+        priority = "low"
+        potential_savings = 0.0
+        recommendations = []
+
+        # Scenario 1: CRITICAL - Completely inactive (no requests)
+        if requests_per_month == 0.0:
+            is_optimizable = True
+            optimization_score = 95
+            priority = "critical"
+            potential_savings = monthly_cost  # Full savings
+            recommendations.append(
+                {
+                    "type": "delete_distribution",
+                    "title": "Delete Completely Inactive CloudFront Distribution",
+                    "description": f"Distribution '{distribution.get('Id', '')}' has received NO requests "
+                    f"in the last 7 days. This distribution is completely unused and costs ${monthly_cost:.2f}/month.",
+                    "impact": "high",
+                    "estimated_savings": f"${monthly_cost:.2f}/month",
+                    "action": "Delete this unused CloudFront distribution",
+                    "risk": "low",
+                }
+            )
+            return (is_optimizable, optimization_score, priority, potential_savings, recommendations)
+
+        # Scenario 2: HIGH - Very low usage (<10K requests/month)
+        if requests_per_month > 0 and requests_per_month < 10_000:
+            is_optimizable = True
+            optimization_score = max(optimization_score, 85)
+            priority = "high" if priority != "critical" else priority
+
+            # For very low traffic, direct S3 access may be cheaper
+            recommendations.append(
+                {
+                    "type": "low_usage_consolidate",
+                    "title": f"Very Low Usage ({requests_per_month:.0f} Requests/Month)",
+                    "description": f"Distribution '{distribution.get('Id', '')}' receives only {requests_per_month:.0f} requests/month. "
+                    f"For such low traffic, consider direct S3 access or consolidating with another distribution.",
+                    "impact": "medium",
+                    "estimated_savings": f"${monthly_cost * 0.70:.2f}/month (if using direct S3 access)",
+                    "action": "Review if CloudFront is necessary for this low traffic volume",
+                    "risk": "medium",
+                }
+            )
+            potential_savings = max(potential_savings, monthly_cost * 0.70)
+
+        # Scenario 3: HIGH - High origin latency (>500ms avg) indicates poor caching
+        if origin_latency_ms > 500.0:
+            is_optimizable = True
+            optimization_score = max(optimization_score, 80)
+            priority = "high" if priority != "critical" else priority
+
+            # High latency = going to origin too often = cache not effective
+            recommendations.append(
+                {
+                    "type": "optimize_caching",
+                    "title": f"High Origin Latency ({origin_latency_ms:.0f}ms Average)",
+                    "description": f"Distribution '{distribution.get('Id', '')}' has high origin latency ({origin_latency_ms:.0f}ms avg), "
+                    f"indicating poor cache hit rate. Optimize Cache-Control headers or use Lambda@Edge for better caching.",
+                    "impact": "high",
+                    "estimated_savings": f"${monthly_cost * 0.30:.2f}/month (by improving cache hit rate)",
+                    "action": "Review and optimize caching strategy (TTL, Cache-Control headers)",
+                    "risk": "low",
+                }
+            )
+            potential_savings = max(potential_savings, monthly_cost * 0.30)
+
+        # Scenario 4: MEDIUM - Price class optimization
+        # PriceClass_All = most expensive, PriceClass_100 = cheapest (US/Europe only)
+        if price_class == "PriceClass_All":
+            is_optimizable = True
+            optimization_score = max(optimization_score, 65)
+            priority = "medium" if priority == "low" else priority
+
+            # Estimate savings by switching from All Edges to US/Europe only
+            all_edges_rate = self.provider.PRICING.get("cloudfront_data_transfer_other_per_gb", 0.170)
+            us_europe_rate = self.provider.PRICING.get("cloudfront_data_transfer_us_europe_per_gb", 0.085)
+            data_transfer_savings = data_transfer_gb * (all_edges_rate - us_europe_rate)
+            potential_savings = max(potential_savings, data_transfer_savings)
+
+            recommendations.append(
+                {
+                    "type": "optimize_price_class",
+                    "title": f"Price Class 'All Edges' May Be Overkill",
+                    "description": f"Distribution '{distribution.get('Id', '')}' uses 'All Edges' price class. "
+                    f"If most users are in North America/Europe, switch to 'Use Only US, Canada and Europe' to save 50% on data transfer.",
+                    "impact": "low",
+                    "estimated_savings": f"${data_transfer_savings:.2f}/month",
+                    "action": "Change price class from 'All' to 'US/Europe' if traffic is mostly NA/EU",
+                    "risk": "low",
+                }
+            )
+
+        # Scenario 5: MEDIUM - Excessive invalidations (>1000/month)
+        if invalidations_per_month > 1000:
+            is_optimizable = True
+            optimization_score = max(optimization_score, 60)
+            priority = "medium" if priority == "low" else priority
+
+            # Calculate invalidation cost savings
+            invalidation_rate = self.provider.PRICING.get("cloudfront_invalidation_per_path", 0.005)
+            invalidation_cost = (invalidations_per_month - 1000) * invalidation_rate
+            potential_savings = max(potential_savings, invalidation_cost)
+
+            recommendations.append(
+                {
+                    "type": "reduce_invalidations",
+                    "title": f"Excessive Invalidations ({invalidations_per_month} Paths/Month)",
+                    "description": f"Distribution '{distribution.get('Id', '')}' has {invalidations_per_month} invalidation "
+                    f"requests/month. After first 1,000 free, you're charged ${invalidation_cost:.2f}/month. "
+                    f"Use versioned file names (e.g., app.v2.js) instead of invalidations.",
+                    "impact": "low",
+                    "estimated_savings": f"${invalidation_cost:.2f}/month",
+                    "action": "Implement versioning strategy (file names with versions) to avoid invalidations",
+                    "risk": "low",
+                }
+            )
+
+        return (is_optimizable, optimization_score, priority, potential_savings, recommendations)
+
+    async def scan_cloudfront_distributions(self) -> list[AllCloudResourceData]:
+        """
+        Scan ALL AWS CloudFront Distributions for cost intelligence.
+
+        ⚠️ IMPORTANT: CloudFront is a GLOBAL service (not regional).
+        This method scans all distributions regardless of region.
+
+        For each distribution:
+        - Calculate monthly cost (requests + data transfer + invalidations)
+        - Fetch CloudWatch metrics (Requests, BytesDownloaded, ErrorRate, OriginLatency)
+        - Analyze optimization opportunities (5 scenarios)
+
+        Returns:
+            List of AllCloudResourceData entries for all CloudFront Distributions
+        """
+        resources: list[AllCloudResourceData] = []
+
+        try:
+            # CloudFront is a global service, client doesn't take region parameter
+            async with self.session.client("cloudfront") as cloudfront:
+                async with self.session.client("cloudwatch", region_name="us-east-1") as cloudwatch:
+                    # CloudWatch metrics for CloudFront are ONLY in us-east-1
+
+                    # List all distributions
+                    paginator = cloudfront.get_paginator("list_distributions")
+                    distributions = []
+
+                    async for page in paginator.paginate():
+                        dist_list = page.get("DistributionList", {})
+                        distributions.extend(dist_list.get("Items", []))
+
+                    logger.info(
+                        "inventory.cloudfront.distributions_found",
+                        count=len(distributions),
+                    )
+
+                    # Process each distribution
+                    for dist in distributions:
+                        try:
+                            dist_id = dist.get("Id", "")
+                            dist_domain_name = dist.get("DomainName", "")
+                            dist_status = dist.get("Status", "")
+                            dist_enabled = dist.get("Enabled", False)
+                            price_class = dist.get("PriceClass", "PriceClass_All")
+                            created_at = dist.get("LastModifiedTime")
+
+                            # Get CloudWatch metrics (7 days)
+                            # NOTE: CloudFront metrics are in us-east-1 regardless of distribution location
+                            end_time = datetime.utcnow()
+                            start_time = end_time - timedelta(days=7)
+
+                            # Metric 1: Requests (sum over 7 days)
+                            requests_response = await cloudwatch.get_metric_statistics(
+                                Namespace="AWS/CloudFront",
+                                MetricName="Requests",
+                                Dimensions=[
+                                    {"Name": "DistributionId", "Value": dist_id},
+                                    {"Name": "Region", "Value": "Global"},
+                                ],
+                                StartTime=start_time,
+                                EndTime=end_time,
+                                Period=604800,  # 7 days
+                                Statistics=["Sum"],
+                            )
+                            requests_7d = (
+                                requests_response["Datapoints"][0]["Sum"]
+                                if requests_response.get("Datapoints")
+                                else 0.0
+                            )
+
+                            # Metric 2: BytesDownloaded (sum)
+                            bytes_downloaded_response = await cloudwatch.get_metric_statistics(
+                                Namespace="AWS/CloudFront",
+                                MetricName="BytesDownloaded",
+                                Dimensions=[
+                                    {"Name": "DistributionId", "Value": dist_id},
+                                    {"Name": "Region", "Value": "Global"},
+                                ],
+                                StartTime=start_time,
+                                EndTime=end_time,
+                                Period=604800,
+                                Statistics=["Sum"],
+                            )
+                            bytes_downloaded = (
+                                bytes_downloaded_response["Datapoints"][0]["Sum"]
+                                if bytes_downloaded_response.get("Datapoints")
+                                else 0.0
+                            )
+                            data_transfer_gb_7d = bytes_downloaded / (1024 ** 3)  # Convert to GB
+
+                            # Metric 3: 4xxErrorRate (average)
+                            error_4xx_response = await cloudwatch.get_metric_statistics(
+                                Namespace="AWS/CloudFront",
+                                MetricName="4xxErrorRate",
+                                Dimensions=[
+                                    {"Name": "DistributionId", "Value": dist_id},
+                                    {"Name": "Region", "Value": "Global"},
+                                ],
+                                StartTime=start_time,
+                                EndTime=end_time,
+                                Period=604800,
+                                Statistics=["Average"],
+                            )
+                            error_rate_4xx = (
+                                error_4xx_response["Datapoints"][0]["Average"]
+                                if error_4xx_response.get("Datapoints")
+                                else 0.0
+                            )
+
+                            # Metric 4: 5xxErrorRate (average)
+                            error_5xx_response = await cloudwatch.get_metric_statistics(
+                                Namespace="AWS/CloudFront",
+                                MetricName="5xxErrorRate",
+                                Dimensions=[
+                                    {"Name": "DistributionId", "Value": dist_id},
+                                    {"Name": "Region", "Value": "Global"},
+                                ],
+                                StartTime=start_time,
+                                EndTime=end_time,
+                                Period=604800,
+                                Statistics=["Average"],
+                            )
+                            error_rate_5xx = (
+                                error_5xx_response["Datapoints"][0]["Average"]
+                                if error_5xx_response.get("Datapoints")
+                                else 0.0
+                            )
+
+                            # Metric 5: OriginLatency (average)
+                            origin_latency_response = await cloudwatch.get_metric_statistics(
+                                Namespace="AWS/CloudFront",
+                                MetricName="OriginLatency",
+                                Dimensions=[
+                                    {"Name": "DistributionId", "Value": dist_id},
+                                    {"Name": "Region", "Value": "Global"},
+                                ],
+                                StartTime=start_time,
+                                EndTime=end_time,
+                                Period=604800,
+                                Statistics=["Average"],
+                            )
+                            origin_latency_ms = (
+                                origin_latency_response["Datapoints"][0]["Average"]
+                                if origin_latency_response.get("Datapoints")
+                                else 0.0
+                            )
+
+                            # Estimate monthly metrics from 7-day data
+                            requests_per_month = requests_7d * 4.33
+                            data_transfer_gb_per_month = data_transfer_gb_7d * 4.33
+
+                            # Estimate invalidations (not available via CloudWatch, use placeholder)
+                            # In real scenario, would need to track via CloudFront API or logs
+                            invalidations_per_month = 0
+
+                            # Calculate cost
+                            monthly_cost = self._calculate_cloudfront_monthly_cost(
+                                requests_per_month=requests_per_month,
+                                data_transfer_gb_per_month=data_transfer_gb_per_month,
+                                invalidations_per_month=invalidations_per_month,
+                                price_class=price_class,
+                            )
+
+                            # Calculate optimization
+                            (
+                                is_optimizable,
+                                optimization_score,
+                                priority,
+                                potential_savings,
+                                recommendations,
+                            ) = self._calculate_cloudfront_optimization(
+                                distribution=dist,
+                                requests_per_month=requests_per_month,
+                                data_transfer_gb=data_transfer_gb_7d,
+                                error_rate_4xx=error_rate_4xx,
+                                error_rate_5xx=error_rate_5xx,
+                                origin_latency_ms=origin_latency_ms,
+                                price_class=price_class,
+                                invalidations_per_month=invalidations_per_month,
+                                monthly_cost=monthly_cost,
+                            )
+
+                            # Build metadata
+                            resource_metadata = {
+                                "distribution_id": dist_id,
+                                "domain_name": dist_domain_name,
+                                "status": dist_status,
+                                "enabled": dist_enabled,
+                                "price_class": price_class,
+                                "metrics": {
+                                    "requests_7d": requests_7d,
+                                    "data_transfer_gb_7d": data_transfer_gb_7d,
+                                    "error_rate_4xx_avg": error_rate_4xx,
+                                    "error_rate_5xx_avg": error_rate_5xx,
+                                    "origin_latency_ms_avg": origin_latency_ms,
+                                },
+                            }
+
+                            # Apply detection rules filtering
+                            resource_age_days = None
+                            if isinstance(created_at, datetime):
+                                resource_age_days = self._safe_datetime_age(created_at)
+
+                            if not self._should_include_resource("cloudfront_distribution", resource_age_days):
+                                logger.debug("inventory.cloudfront_filtered", dist_id=dist_id, age=resource_age_days)
+                                continue
+
+                            # Create resource entry (region = "global" for CloudFront)
+                            resource = AllCloudResourceData(
+                                resource_id=dist_id,
+                                resource_type="cloudfront_distribution",
+                                resource_name=dist_domain_name,
+                                region="global",  # CloudFront is global
+                                estimated_monthly_cost=monthly_cost,
+                                currency="USD",
+                                resource_metadata=resource_metadata,
+                                is_optimizable=is_optimizable,
+                                optimization_score=optimization_score,
+                                optimization_priority=priority,
+                                potential_monthly_savings=potential_savings,
+                                optimization_recommendations=recommendations,
+                            )
+
+                            resources.append(resource)
+
+                            logger.info(
+                                "inventory.cloudfront.distribution_scanned",
+                                distribution_id=dist_id,
+                                domain_name=dist_domain_name,
+                                requests_7d=requests_7d,
+                                monthly_cost=monthly_cost,
+                                is_optimizable=is_optimizable,
+                                optimization_score=optimization_score,
+                            )
+
+                        except Exception as e:
+                            logger.error(
+                                "inventory.cloudfront.distribution_scan_error",
+                                distribution_id=dist.get("Id", "unknown"),
+                                error=str(e),
+                            )
+                            continue
+
+        except Exception as e:
+            logger.error(
+                "cloudfront.scan_failed",
+                error=str(e),
+            )
+
+        return resources
+
+    # ============================================================================
+    # AWS - ECS CLUSTER (Cost Intelligence / Inventory Mode)
+    # ============================================================================
+
+    def _calculate_ecs_cluster_monthly_cost(
+        self,
+        total_fargate_vcpu: float,
+        total_fargate_memory_gb: float,
+        total_ec2_instances: int,
+        service_connect_enabled: bool,
+        region: str,
+    ) -> float:
+        """
+        Calculate estimated monthly cost for AWS ECS Cluster.
+
+        Cost structure:
+        - ECS Control Plane: FREE (no cost for cluster itself)
+        - Fargate compute: $0.04048/vCPU-hour + $0.004445/GB-hour
+        - EC2 instances: Separate cost (instance pricing)
+        - Service Connect (optional): $0.01/vCPU-hour
+
+        Args:
+            total_fargate_vcpu: Total Fargate vCPUs running in cluster
+            total_fargate_memory_gb: Total Fargate memory GB running in cluster
+            total_ec2_instances: Number of EC2 container instances
+            service_connect_enabled: Whether Service Connect is enabled
+            region: AWS region
+
+        Returns:
+            Estimated monthly cost for cluster (Fargate compute + Service Connect)
+        """
+        # Fargate compute cost (monthly = 730 hours)
+        fargate_vcpu_cost = total_fargate_vcpu * 0.04048 * 730
+        fargate_memory_cost = total_fargate_memory_gb * 0.004445 * 730
+        fargate_total = fargate_vcpu_cost + fargate_memory_cost
+
+        # Service Connect cost (if enabled)
+        service_connect_cost = 0.0
+        if service_connect_enabled and total_fargate_vcpu > 0:
+            service_connect_rate = self.provider.PRICING.get("ecs_service_connect_per_vcpu_hour", 0.01)
+            service_connect_cost = total_fargate_vcpu * service_connect_rate * 730
+
+        # Note: EC2 instance costs are tracked separately (not included here)
+        total_cost = fargate_total + service_connect_cost
+
+        return total_cost
+
+    def _calculate_ecs_cluster_optimization(
+        self,
+        cluster_name: str,
+        running_tasks_count: int,
+        active_services_count: int,
+        registered_container_instances: int,
+        capacity_providers: list,
+        avg_cpu_utilization: float,
+        avg_memory_utilization: float,
+        monthly_cost: float,
+    ) -> tuple[bool, int, str, float, list]:
+        """
+        Calculate optimization opportunities for ECS Cluster.
+
+        Scenarios:
+        1. CRITICAL (95): Empty cluster (0 tasks, 0 services) → Delete cluster
+        2. HIGH (85): Low usage (<5 tasks, <3 services) → Consolidate to another cluster
+        3. HIGH (80): Inactive services (services with desired count = 0) → Clean up
+        4. MEDIUM (70): Mixed Fargate + EC2 (inefficient) → Pure Fargate or pure EC2
+        5. MEDIUM (65): No auto-scaling configured → Enable ECS Service Auto Scaling
+
+        Args:
+            cluster_name: ECS cluster name
+            running_tasks_count: Number of running tasks
+            active_services_count: Number of active services
+            registered_container_instances: Number of EC2 container instances
+            capacity_providers: List of capacity providers (["FARGATE", "FARGATE_SPOT", "EC2", etc.])
+            avg_cpu_utilization: Average CPU utilization (%)
+            avg_memory_utilization: Average memory utilization (%)
+            monthly_cost: Estimated monthly cost
+
+        Returns:
+            Tuple of (is_optimizable, optimization_score, priority, potential_savings, recommendations)
+        """
+        recommendations = []
+        optimization_score = 0
+        optimization_priority = "none"
+        potential_savings = 0.0
+        is_optimizable = False
+
+        # Scenario 1: CRITICAL - Empty cluster (0 tasks, 0 services)
+        if running_tasks_count == 0 and active_services_count == 0:
+            optimization_score = 95
+            optimization_priority = "critical"
+            potential_savings = monthly_cost  # Save entire cluster cost
+            is_optimizable = True
+            recommendations.append({
+                "scenario": "empty_cluster",
+                "action": "delete_cluster",
+                "priority": "critical",
+                "estimated_savings": monthly_cost,
+                "details": f"Cluster '{cluster_name}' is empty (0 tasks, 0 services). Delete to eliminate costs.",
+                "recommendation": "Delete cluster - no workloads running"
+            })
+
+        # Scenario 2: HIGH - Low usage (<5 tasks, <3 services)
+        if running_tasks_count > 0 and running_tasks_count < 5 and active_services_count < 3 and optimization_score < 85:
+            optimization_score = max(optimization_score, 85)
+            optimization_priority = "high" if optimization_priority == "none" else optimization_priority
+            potential_savings = max(potential_savings, monthly_cost * 0.4)
+            is_optimizable = True
+            recommendations.append({
+                "scenario": "low_usage",
+                "action": "consolidate_cluster",
+                "priority": "high",
+                "estimated_savings": monthly_cost * 0.4,
+                "details": f"Cluster '{cluster_name}' has only {running_tasks_count} tasks and {active_services_count} services. Consolidate to another cluster.",
+                "recommendation": "Consolidate workloads into a single cluster to reduce overhead (40% savings)"
+            })
+
+        # Scenario 3: HIGH - Inactive services (detect via metadata if available)
+        # Note: This requires service-level metadata, simplified here
+        # In production, you'd fetch describe_services() to check desiredCount
+        if active_services_count == 0 and running_tasks_count > 0 and optimization_score < 80:
+            optimization_score = max(optimization_score, 80)
+            optimization_priority = "high" if optimization_priority == "none" else optimization_priority
+            is_optimizable = True
+            recommendations.append({
+                "scenario": "inactive_services",
+                "action": "cleanup_services",
+                "priority": "high",
+                "estimated_savings": 0.0,
+                "details": f"Cluster '{cluster_name}' has services with desired count = 0. Clean up unused service definitions.",
+                "recommendation": "Delete inactive services (no cost impact, but improves visibility)"
+            })
+
+        # Scenario 4: MEDIUM - Mixed Fargate + EC2 (inefficient)
+        has_fargate = any("FARGATE" in cp for cp in capacity_providers)
+        has_ec2 = registered_container_instances > 0 or "EC2" in " ".join(capacity_providers)
+
+        if has_fargate and has_ec2 and optimization_score < 70:
+            optimization_score = max(optimization_score, 70)
+            optimization_priority = "medium" if optimization_priority == "none" else optimization_priority
+            potential_savings = max(potential_savings, monthly_cost * 0.2)
+            is_optimizable = True
+            recommendations.append({
+                "scenario": "mixed_capacity_providers",
+                "action": "standardize_launch_type",
+                "priority": "medium",
+                "estimated_savings": monthly_cost * 0.2,
+                "details": f"Cluster '{cluster_name}' uses both Fargate and EC2 instances. Standardize to pure Fargate or pure EC2 for better cost efficiency.",
+                "recommendation": "Use pure Fargate (easier management) or pure EC2 (lower cost for steady workloads)",
+                "alternatives": [
+                    {"name": "Pure Fargate", "savings": 0.0, "benefit": "Serverless, no instance management"},
+                    {"name": "Pure EC2", "savings": monthly_cost * 0.2, "benefit": "20% cheaper for steady workloads"}
+                ]
+            })
+
+        # Scenario 5: MEDIUM - No auto-scaling (heuristic: low CPU/memory utilization suggests over-provisioning)
+        if (avg_cpu_utilization < 30 or avg_memory_utilization < 30) and running_tasks_count > 3 and optimization_score < 65:
+            optimization_score = max(optimization_score, 65)
+            optimization_priority = "medium" if optimization_priority == "none" else optimization_priority
+            is_optimizable = True
+            recommendations.append({
+                "scenario": "no_auto_scaling",
+                "action": "enable_auto_scaling",
+                "priority": "medium",
+                "estimated_savings": 0.0,
+                "details": f"Cluster '{cluster_name}' has low CPU ({avg_cpu_utilization:.1f}%) or memory ({avg_memory_utilization:.1f}%) utilization. Enable ECS Service Auto Scaling to scale down during low demand.",
+                "recommendation": "Configure ECS Service Auto Scaling (target CPU 70%, target memory 80%)"
+            })
+
+        return is_optimizable, optimization_score, optimization_priority, potential_savings, recommendations
+
+    async def scan_ecs_clusters(self, region: str) -> list[AllCloudResourceData]:
+        """
+        Scan ALL AWS ECS Clusters for cost intelligence.
+
+        This method scans all ECS clusters to provide cost visibility and
+        optimization recommendations for container orchestration.
+
+        CloudWatch Metrics (AWS/ECS namespace):
+        - CPUUtilization (cluster-level)
+        - MemoryUtilization (cluster-level)
+
+        Args:
+            region: AWS region to scan
+
+        Returns:
+            List of AllCloudResourceData objects for all ECS clusters
+        """
+        resources: list[AllCloudResourceData] = []
+
+        try:
+            async with self.session.client("ecs", region_name=region) as ecs:
+                async with self.session.client("cloudwatch", region_name=region) as cloudwatch:
+                    # List all ECS clusters
+                    list_response = await ecs.list_clusters()
+                    cluster_arns = list_response.get("clusterArns", [])
+
+                    if not cluster_arns:
+                        logger.info("ecs.no_clusters_found", region=region)
+                        return resources
+
+                    # Describe all clusters
+                    describe_response = await ecs.describe_clusters(clusters=cluster_arns)
+                    clusters = describe_response.get("clusters", [])
+
+                    for cluster in clusters:
+                        try:
+                            cluster_name = cluster.get("clusterName", "unknown")
+                            cluster_arn = cluster.get("clusterArn", "")
+                            status = cluster.get("status", "UNKNOWN")
+                            running_tasks_count = cluster.get("runningTasksCount", 0)
+                            pending_tasks_count = cluster.get("pendingTasksCount", 0)
+                            active_services_count = cluster.get("activeServicesCount", 0)
+                            registered_container_instances = cluster.get("registeredContainerInstancesCount", 0)
+                            capacity_providers = cluster.get("capacityProviders", [])
+                            default_capacity_provider_strategy = cluster.get("defaultCapacityProviderStrategy", [])
+
+                            # Extract tags
+                            tags = {}
+                            for tag in cluster.get("tags", []):
+                                tags[tag["Key"]] = tag["Value"]
+
+                            # Get cluster settings (Service Connect, etc.)
+                            settings = cluster.get("settings", [])
+                            service_connect_enabled = any(
+                                setting.get("name") == "containerInsights" and setting.get("value") == "enabled"
+                                for setting in settings
+                            )
+
+                            # List all services in cluster
+                            services_response = await ecs.list_services(cluster=cluster_arn)
+                            service_arns = services_response.get("serviceArns", [])
+
+                            # List all tasks in cluster
+                            tasks_response = await ecs.list_tasks(cluster=cluster_arn)
+                            task_arns = tasks_response.get("taskArns", [])
+
+                            # Calculate total Fargate vCPU and memory (estimate from running tasks)
+                            total_fargate_vcpu = 0.0
+                            total_fargate_memory_gb = 0.0
+
+                            if task_arns:
+                                # Limit to first 100 tasks for performance
+                                task_arns_sample = task_arns[:100]
+                                tasks_describe_response = await ecs.describe_tasks(
+                                    cluster=cluster_arn,
+                                    tasks=task_arns_sample
+                                )
+                                tasks = tasks_describe_response.get("tasks", [])
+
+                                for task in tasks:
+                                    launch_type = task.get("launchType", "")
+                                    if launch_type == "FARGATE":
+                                        # Get task definition to extract vCPU and memory
+                                        task_def_arn = task.get("taskDefinitionArn", "")
+                                        if task_def_arn:
+                                            try:
+                                                task_def_response = await ecs.describe_task_definition(
+                                                    taskDefinition=task_def_arn
+                                                )
+                                                task_definition = task_def_response["taskDefinition"]
+                                                cpu_str = task_definition.get("cpu", "256")
+                                                memory_str = task_definition.get("memory", "512")
+                                                vcpu = float(cpu_str) / 1024
+                                                memory_gb = float(memory_str) / 1024
+                                                total_fargate_vcpu += vcpu
+                                                total_fargate_memory_gb += memory_gb
+                                            except Exception:
+                                                pass
+
+                            # Get CloudWatch metrics (last 7 days)
+                            avg_cpu_utilization = 0.0
+                            avg_memory_utilization = 0.0
+
+                            try:
+                                end_time = datetime.utcnow()
+                                start_time = end_time - timedelta(days=7)
+
+                                # CPU Utilization (cluster-level)
+                                cpu_response = await cloudwatch.get_metric_statistics(
+                                    Namespace="AWS/ECS",
+                                    MetricName="CPUUtilization",
+                                    Dimensions=[
+                                        {"Name": "ClusterName", "Value": cluster_name}
+                                    ],
+                                    StartTime=start_time,
+                                    EndTime=end_time,
+                                    Period=604800,  # 7 days
+                                    Statistics=["Average"],
+                                )
+
+                                datapoints = cpu_response.get("Datapoints", [])
+                                if datapoints:
+                                    avg_cpu_utilization = datapoints[0].get("Average", 0.0)
+                            except Exception:
+                                pass
+
+                            try:
+                                # Memory Utilization (cluster-level)
+                                memory_response = await cloudwatch.get_metric_statistics(
+                                    Namespace="AWS/ECS",
+                                    MetricName="MemoryUtilization",
+                                    Dimensions=[
+                                        {"Name": "ClusterName", "Value": cluster_name}
+                                    ],
+                                    StartTime=start_time,
+                                    EndTime=end_time,
+                                    Period=604800,  # 7 days
+                                    Statistics=["Average"],
+                                )
+
+                                datapoints = memory_response.get("Datapoints", [])
+                                if datapoints:
+                                    avg_memory_utilization = datapoints[0].get("Average", 0.0)
+                            except Exception:
+                                pass
+
+                            # Calculate monthly cost
+                            monthly_cost = self._calculate_ecs_cluster_monthly_cost(
+                                total_fargate_vcpu=total_fargate_vcpu,
+                                total_fargate_memory_gb=total_fargate_memory_gb,
+                                total_ec2_instances=registered_container_instances,
+                                service_connect_enabled=service_connect_enabled,
+                                region=region,
+                            )
+
+                            # Calculate optimization metrics
+                            (
+                                is_optimizable,
+                                optimization_score,
+                                optimization_priority,
+                                potential_savings,
+                                optimization_recommendations,
+                            ) = self._calculate_ecs_cluster_optimization(
+                                cluster_name=cluster_name,
+                                running_tasks_count=running_tasks_count,
+                                active_services_count=active_services_count,
+                                registered_container_instances=registered_container_instances,
+                                capacity_providers=capacity_providers,
+                                avg_cpu_utilization=avg_cpu_utilization,
+                                avg_memory_utilization=avg_memory_utilization,
+                                monthly_cost=monthly_cost,
+                            )
+
+                            # Determine utilization status
+                            if running_tasks_count == 0 and active_services_count == 0:
+                                utilization_status = "idle"
+                            elif running_tasks_count < 5:
+                                utilization_status = "low"
+                            elif running_tasks_count < 20:
+                                utilization_status = "medium"
+                            else:
+                                utilization_status = "high"
+
+                            # Build metadata
+                            metadata = {
+                                "cluster_arn": cluster_arn,
+                                "status": status,
+                                "running_tasks_count": running_tasks_count,
+                                "pending_tasks_count": pending_tasks_count,
+                                "active_services_count": active_services_count,
+                                "registered_container_instances_count": registered_container_instances,
+                                "capacity_providers": capacity_providers,
+                                "default_capacity_provider_strategy": default_capacity_provider_strategy,
+                                "service_count": len(service_arns),
+                                "task_count": len(task_arns),
+                                "total_fargate_vcpu": total_fargate_vcpu,
+                                "total_fargate_memory_gb": total_fargate_memory_gb,
+                                "service_connect_enabled": service_connect_enabled,
+                            }
+
+                            # Apply detection rules filtering
+                            # Note: ECS clusters don't have creation timestamp in API, so age is always None
+                            resource_age_days = None
+
+                            if not self._should_include_resource("ecs_cluster", resource_age_days):
+                                logger.debug("inventory.ecs_filtered", cluster_name=cluster_name, age=resource_age_days)
+                                continue
+
+                            # Create resource
+                            resource = AllCloudResourceData(
+                                resource_type="ecs_cluster",
+                                resource_id=cluster_name,
+                                resource_name=cluster_name,
+                                region=region,
+                                estimated_monthly_cost=monthly_cost,
+                                resource_metadata=metadata,
+                                currency="USD",
+                                utilization_status=utilization_status,
+                                cpu_utilization_percent=avg_cpu_utilization,
+                                memory_utilization_percent=avg_memory_utilization,
+                                storage_utilization_percent=None,
+                                network_utilization_mbps=None,
+                                is_optimizable=is_optimizable,
+                                optimization_priority=optimization_priority,
+                                optimization_score=optimization_score,
+                                potential_monthly_savings=potential_savings,
+                                optimization_recommendations=optimization_recommendations,
+                                tags=tags,
+                                resource_status=status,
+                                is_orphan=running_tasks_count == 0 and active_services_count == 0,
+                                created_at_cloud=None,  # ECS clusters don't have creation timestamp in API
+                                last_used_at=None,
+                            )
+
+                            resources.append(resource)
+
+                        except Exception as e:
+                            logger.error(
+                                "ecs.cluster_scan_failed",
+                                cluster_name=cluster.get("clusterName", "unknown"),
+                                region=region,
+                                error=str(e),
+                            )
+                            continue
+
+        except Exception as e:
+            logger.error(
+                "ecs.scan_failed",
+                region=region,
+                error=str(e),
+            )
+
+        return resources
+
+    # ============================================================================
+    # AWS - CLOUDWATCH LOG GROUP (Cost Intelligence / Inventory Mode)
+    # ============================================================================
+
+    def _calculate_cloudwatch_log_group_monthly_cost(
+        self,
+        stored_bytes: float,
+        ingestion_bytes_per_month: float,
+        retention_days: int,
+        region: str,
+    ) -> float:
+        """
+        Calculate estimated monthly cost for AWS CloudWatch Log Group.
+
+        Cost structure:
+        - Ingestion: $0.50 per GB
+        - Storage: $0.03 per GB/month (after retention period)
+        - Vended Logs (VPC Flow, Lambda, RDS, etc.): FREE ingestion
+        - Insights Queries: $0.005 per GB scanned (not included here)
+
+        Args:
+            stored_bytes: Total bytes stored in log group
+            ingestion_bytes_per_month: Monthly ingestion in bytes
+            retention_days: Log retention period in days
+            region: AWS region
+
+        Returns:
+            Estimated monthly cost for log group
+        """
+        # Convert bytes to GB
+        stored_gb = stored_bytes / (1024 ** 3)
+        ingestion_gb_per_month = ingestion_bytes_per_month / (1024 ** 3)
+
+        # Ingestion cost
+        ingestion_rate = self.provider.PRICING.get("cloudwatch_logs_ingestion_per_gb", 0.50)
+        ingestion_cost = ingestion_gb_per_month * ingestion_rate
+
+        # Storage cost (only charged after retention period)
+        storage_rate = self.provider.PRICING.get("cloudwatch_logs_storage_per_gb", 0.03)
+        storage_cost = stored_gb * storage_rate
+
+        total_cost = ingestion_cost + storage_cost
+
+        return total_cost
+
+    def _calculate_cloudwatch_log_group_optimization(
+        self,
+        log_group_name: str,
+        stored_bytes: float,
+        ingestion_bytes_per_month: float,
+        retention_days: int,
+        creation_time: int,
+        metric_filter_count: int,
+        monthly_cost: float,
+    ) -> tuple[bool, int, str, float, list]:
+        """
+        Calculate optimization opportunities for CloudWatch Log Group.
+
+        Scenarios:
+        1. CRITICAL (95): Empty log group (0 bytes, never used since 30+ days) → Delete
+        2. HIGH (85): Excessive retention (365+ days, <1 GB stored) → Reduce to 30 days
+        3. HIGH (80): Orphaned log group (resource source deleted) → Delete
+        4. MEDIUM (70): Large size (>100 GB) + long retention (>90 days) → Archive to S3
+        5. MEDIUM (65): High ingestion (>10 GB/day) without filters → Add subscription filters
+        6. LOW (50): Critical logs without S3 export → Configure export
+
+        Args:
+            log_group_name: Log group name
+            stored_bytes: Total bytes stored
+            ingestion_bytes_per_month: Monthly ingestion in bytes
+            retention_days: Retention period in days
+            creation_time: Unix timestamp of log group creation
+            metric_filter_count: Number of metric filters configured
+            monthly_cost: Estimated monthly cost
+
+        Returns:
+            Tuple of (is_optimizable, optimization_score, priority, potential_savings, recommendations)
+        """
+        recommendations = []
+        optimization_score = 0
+        optimization_priority = "none"
+        potential_savings = 0.0
+        is_optimizable = False
+
+        stored_gb = stored_bytes / (1024 ** 3)
+        ingestion_gb_per_month = ingestion_bytes_per_month / (1024 ** 3)
+        ingestion_gb_per_day = ingestion_gb_per_month / 30
+
+        # Calculate age in days
+        age_days = 0
+        if creation_time:
+            age_days = (datetime.utcnow().timestamp() - creation_time) / 86400
+
+        # Scenario 1: CRITICAL - Empty log group (never used since 30+ days)
+        if stored_bytes == 0 and ingestion_bytes_per_month == 0 and age_days > 30:
+            optimization_score = 95
+            optimization_priority = "critical"
+            potential_savings = monthly_cost
+            is_optimizable = True
+            recommendations.append({
+                "scenario": "empty_log_group",
+                "action": "delete_log_group",
+                "priority": "critical",
+                "estimated_savings": monthly_cost,
+                "details": f"Log group '{log_group_name}' is empty and unused for {age_days:.0f} days. Delete to eliminate costs.",
+                "recommendation": "Delete log group - no data logged"
+            })
+
+        # Scenario 2: HIGH - Excessive retention (365+ days, <1 GB stored)
+        if retention_days >= 365 and stored_gb < 1 and optimization_score < 85:
+            optimization_score = max(optimization_score, 85)
+            optimization_priority = "high" if optimization_priority == "none" else optimization_priority
+            # Reducing retention from 365 to 30 days saves 90% storage cost
+            storage_savings = monthly_cost * 0.9
+            potential_savings = max(potential_savings, storage_savings)
+            is_optimizable = True
+            recommendations.append({
+                "scenario": "excessive_retention",
+                "action": "reduce_retention",
+                "priority": "high",
+                "estimated_savings": storage_savings,
+                "details": f"Log group '{log_group_name}' has 365+ days retention but only {stored_gb:.2f} GB stored. Reduce retention to 30 days.",
+                "recommendation": "Reduce retention to 30 days (90% storage savings)",
+                "alternatives": [
+                    {"name": "30 days", "savings": storage_savings, "benefit": "Standard retention"},
+                    {"name": "90 days", "savings": storage_savings * 0.7, "benefit": "Compliance-friendly"}
+                ]
+            })
+
+        # Scenario 3: HIGH - Orphaned log group (heuristic: contains "/aws/" in name but no recent ingestion)
+        is_aws_service_log = "/aws/" in log_group_name or log_group_name.startswith("aws/")
+        if is_aws_service_log and ingestion_bytes_per_month == 0 and age_days > 7 and optimization_score < 80:
+            optimization_score = max(optimization_score, 80)
+            optimization_priority = "high" if optimization_priority == "none" else optimization_priority
+            potential_savings = max(potential_savings, monthly_cost)
+            is_optimizable = True
+            recommendations.append({
+                "scenario": "orphaned_log_group",
+                "action": "delete_orphaned",
+                "priority": "high",
+                "estimated_savings": monthly_cost,
+                "details": f"Log group '{log_group_name}' appears orphaned (AWS service log with no ingestion for {age_days:.0f} days). Source resource may be deleted.",
+                "recommendation": "Delete orphaned log group - source resource deleted"
+            })
+
+        # Scenario 4: MEDIUM - Large size (>100 GB) + long retention (>90 days)
+        if stored_gb > 100 and retention_days > 90 and optimization_score < 70:
+            optimization_score = max(optimization_score, 70)
+            optimization_priority = "medium" if optimization_priority == "none" else optimization_priority
+            # Archive to S3 saves 40% (S3 is cheaper than CloudWatch Logs storage)
+            archive_savings = monthly_cost * 0.4
+            potential_savings = max(potential_savings, archive_savings)
+            is_optimizable = True
+            recommendations.append({
+                "scenario": "large_log_group",
+                "action": "archive_to_s3",
+                "priority": "medium",
+                "estimated_savings": archive_savings,
+                "details": f"Log group '{log_group_name}' has {stored_gb:.2f} GB stored with {retention_days} days retention. Archive older logs to S3.",
+                "recommendation": "Export logs to S3 and reduce CloudWatch retention to 7-30 days (40% savings)"
+            })
+
+        # Scenario 5: MEDIUM - High ingestion (>10 GB/day) without filters
+        if ingestion_gb_per_day > 10 and metric_filter_count == 0 and optimization_score < 65:
+            optimization_score = max(optimization_score, 65)
+            optimization_priority = "medium" if optimization_priority == "none" else optimization_priority
+            # Subscription filters can reduce ingestion by 30%
+            filter_savings = monthly_cost * 0.3
+            potential_savings = max(potential_savings, filter_savings)
+            is_optimizable = True
+            recommendations.append({
+                "scenario": "high_ingestion_no_filters",
+                "action": "add_subscription_filters",
+                "priority": "medium",
+                "estimated_savings": filter_savings,
+                "details": f"Log group '{log_group_name}' ingests {ingestion_gb_per_day:.2f} GB/day without subscription filters. Add filters to reduce noise.",
+                "recommendation": "Configure subscription filters to drop verbose/debug logs (30% ingestion reduction)"
+            })
+
+        # Scenario 6: LOW - Critical logs without S3 export
+        is_critical_log = any(keyword in log_group_name.lower() for keyword in ["prod", "production", "error", "critical"])
+        if is_critical_log and stored_gb > 1 and optimization_score < 50:
+            optimization_score = max(optimization_score, 50)
+            optimization_priority = "low" if optimization_priority == "none" else optimization_priority
+            is_optimizable = True
+            recommendations.append({
+                "scenario": "no_s3_export",
+                "action": "configure_s3_export",
+                "priority": "low",
+                "estimated_savings": 0.0,
+                "details": f"Log group '{log_group_name}' contains critical logs but no S3 export configured. Enable export for compliance/disaster recovery.",
+                "recommendation": "Configure automated S3 export for long-term retention (no cost impact, but improves compliance)"
+            })
+
+        return is_optimizable, optimization_score, optimization_priority, potential_savings, recommendations
+
+    async def scan_cloudwatch_log_groups(self, region: str) -> list[AllCloudResourceData]:
+        """
+        Scan ALL AWS CloudWatch Log Groups for cost intelligence.
+
+        This method scans all CloudWatch Log Groups to provide cost visibility
+        and optimization recommendations for log management.
+
+        CloudWatch Metrics (AWS/Logs namespace):
+        - IncomingBytes (last 7 days)
+        - IncomingLogEvents
+
+        Args:
+            region: AWS region to scan
+
+        Returns:
+            List of AllCloudResourceData objects for all CloudWatch Log Groups
+        """
+        resources: list[AllCloudResourceData] = []
+
+        try:
+            async with self.session.client("logs", region_name=region) as logs:
+                async with self.session.client("cloudwatch", region_name=region) as cloudwatch:
+                    # Paginate through all log groups
+                    paginator = logs.get_paginator("describe_log_groups")
+
+                    async for page in paginator.paginate():
+                        log_groups = page.get("logGroups", [])
+
+                        for log_group in log_groups:
+                            try:
+                                log_group_name = log_group.get("logGroupName", "unknown")
+                                stored_bytes = log_group.get("storedBytes", 0)
+                                retention_days = log_group.get("retentionInDays", 0)  # 0 = never expire
+                                creation_time = log_group.get("creationTime", 0) / 1000  # Convert ms to seconds
+                                kms_key_id = log_group.get("kmsKeyId")
+                                metric_filter_count = log_group.get("metricFilterCount", 0)
+
+                                # Get CloudWatch metrics for ingestion (last 30 days)
+                                ingestion_bytes_per_month = 0.0
+
+                                try:
+                                    end_time = datetime.utcnow()
+                                    start_time = end_time - timedelta(days=30)
+
+                                    # IncomingBytes metric
+                                    ingestion_response = await cloudwatch.get_metric_statistics(
+                                        Namespace="AWS/Logs",
+                                        MetricName="IncomingBytes",
+                                        Dimensions=[
+                                            {"Name": "LogGroupName", "Value": log_group_name}
+                                        ],
+                                        StartTime=start_time,
+                                        EndTime=end_time,
+                                        Period=2592000,  # 30 days
+                                        Statistics=["Sum"],
+                                    )
+
+                                    datapoints = ingestion_response.get("Datapoints", [])
+                                    if datapoints:
+                                        ingestion_bytes_per_month = datapoints[0].get("Sum", 0.0)
+                                except Exception:
+                                    pass
+
+                                # Calculate monthly cost
+                                monthly_cost = self._calculate_cloudwatch_log_group_monthly_cost(
+                                    stored_bytes=stored_bytes,
+                                    ingestion_bytes_per_month=ingestion_bytes_per_month,
+                                    retention_days=retention_days if retention_days > 0 else 365,  # Default to 365 if never expire
+                                    region=region,
+                                )
+
+                                # Calculate optimization metrics
+                                (
+                                    is_optimizable,
+                                    optimization_score,
+                                    optimization_priority,
+                                    potential_savings,
+                                    optimization_recommendations,
+                                ) = self._calculate_cloudwatch_log_group_optimization(
+                                    log_group_name=log_group_name,
+                                    stored_bytes=stored_bytes,
+                                    ingestion_bytes_per_month=ingestion_bytes_per_month,
+                                    retention_days=retention_days if retention_days > 0 else 365,
+                                    creation_time=creation_time,
+                                    metric_filter_count=metric_filter_count,
+                                    monthly_cost=monthly_cost,
+                                )
+
+                                # Determine utilization status
+                                stored_gb = stored_bytes / (1024 ** 3)
+                                ingestion_gb_per_month = ingestion_bytes_per_month / (1024 ** 3)
+
+                                if stored_bytes == 0 and ingestion_bytes_per_month == 0:
+                                    utilization_status = "idle"
+                                elif ingestion_gb_per_month < 1:  # <1 GB/month
+                                    utilization_status = "low"
+                                elif ingestion_gb_per_month < 10:  # <10 GB/month
+                                    utilization_status = "medium"
+                                else:
+                                    utilization_status = "high"
+
+                                # Build metadata
+                                metadata = {
+                                    "log_group_name": log_group_name,
+                                    "stored_bytes": stored_bytes,
+                                    "stored_gb": stored_gb,
+                                    "retention_in_days": retention_days,
+                                    "kms_key_id": kms_key_id,
+                                    "creation_time": creation_time,
+                                    "metric_filter_count": metric_filter_count,
+                                    "ingestion_bytes_per_month": ingestion_bytes_per_month,
+                                    "ingestion_gb_per_month": ingestion_gb_per_month,
+                                    "ingestion_gb_per_day": ingestion_gb_per_month / 30,
+                                }
+
+                                # Apply detection rules filtering
+                                resource_age_days = None
+                                if creation_time > 0:
+                                    resource_age_days = self._safe_datetime_age(datetime.fromtimestamp(creation_time) if isinstance(creation_time, (int, float)) else None)
+
+                                if not self._should_include_resource("cloudwatch_log_group", resource_age_days):
+                                    logger.debug("inventory.cloudwatch_log_filtered", log_group_name=log_group_name, age=resource_age_days)
+                                    continue
+
+                                # Create resource
+                                resource = AllCloudResourceData(
+                                    resource_type="cloudwatch_log_group",
+                                    resource_id=log_group_name,
+                                    resource_name=log_group_name,
+                                    region=region,
+                                    estimated_monthly_cost=monthly_cost,
+                                    resource_metadata=metadata,
+                                    currency="USD",
+                                    utilization_status=utilization_status,
+                                    cpu_utilization_percent=None,
+                                    memory_utilization_percent=None,
+                                    storage_utilization_percent=None,  # N/A for log groups
+                                    network_utilization_mbps=None,
+                                    is_optimizable=is_optimizable,
+                                    optimization_priority=optimization_priority,
+                                    optimization_score=optimization_score,
+                                    potential_monthly_savings=potential_savings,
+                                    optimization_recommendations=optimization_recommendations,
+                                    tags={},  # Log groups don't support tags in API
+                                    resource_status="ACTIVE",
+                                    is_orphan=stored_bytes == 0 and ingestion_bytes_per_month == 0,
+                                    created_at_cloud=datetime.fromtimestamp(creation_time) if creation_time else None,
+                                    last_used_at=None,
+                                )
+
+                                resources.append(resource)
+
+                            except Exception as e:
+                                logger.error(
+                                    "cloudwatch_logs.log_group_scan_failed",
+                                    log_group_name=log_group.get("logGroupName", "unknown"),
+                                    region=region,
+                                    error=str(e),
+                                )
+                                continue
+
+        except Exception as e:
+            logger.error(
+                "cloudwatch_logs.scan_failed",
+                region=region,
+                error=str(e),
+            )
+
+        return resources
+
+    # ============================================================================
+    # AWS - VPC ENDPOINT (Cost Intelligence / Inventory Mode)
+    # ============================================================================
+
+    def _calculate_vpc_endpoint_monthly_cost(
+        self,
+        endpoint_type: str,
+        availability_zone_count: int,
+        region: str,
+    ) -> float:
+        """
+        Calculate estimated monthly cost for AWS VPC Endpoint.
+
+        Cost structure:
+        - Interface endpoint: $7.20/month per AZ
+        - Gateway endpoint (S3, DynamoDB): FREE
+        - Gateway Load Balancer endpoint: $7.20/month per AZ
+        - Data transfer: $0.01/GB (not included here)
+
+        Args:
+            endpoint_type: Endpoint type (Interface, Gateway, GatewayLoadBalancer)
+            availability_zone_count: Number of availability zones
+            region: AWS region
+
+        Returns:
+            Estimated monthly cost for VPC endpoint
+        """
+        if endpoint_type == "Gateway":
+            # Gateway endpoints (S3, DynamoDB) are FREE
+            return 0.0
+
+        # Interface and GatewayLoadBalancer endpoints cost $7.20/month per AZ
+        base_cost = self.provider.PRICING.get("vpc_endpoint", 7.20)
+        total_cost = base_cost * max(availability_zone_count, 1)
+
+        return total_cost
+
+    def _calculate_vpc_endpoint_optimization(
+        self,
+        endpoint_id: str,
+        endpoint_type: str,
+        service_name: str,
+        state: str,
+        network_interface_count: int,
+        availability_zone_count: int,
+        monthly_cost: float,
+    ) -> tuple[bool, int, str, float, list]:
+        """
+        Calculate optimization opportunities for VPC Endpoint.
+
+        Scenarios:
+        1. CRITICAL (95): Unused endpoint (0 network interfaces, state=available) → Delete
+        2. HIGH (85): Interface endpoint for S3/DynamoDB → Use Gateway endpoint (FREE)
+        3. MEDIUM (70): Multi-AZ for dev/test (unnecessary redundancy) → Single AZ
+        4. MEDIUM (65): Gateway type available but using Interface → Migrate
+        5. LOW (50): No private DNS enabled (security best practice)
+
+        Args:
+            endpoint_id: VPC endpoint ID
+            endpoint_type: Endpoint type (Interface, Gateway, GatewayLoadBalancer)
+            service_name: AWS service name (e.g., com.amazonaws.us-east-1.s3)
+            state: Endpoint state (available, pending, deleting, etc.)
+            network_interface_count: Number of network interfaces
+            availability_zone_count: Number of AZs
+            monthly_cost: Estimated monthly cost
+
+        Returns:
+            Tuple of (is_optimizable, optimization_score, priority, potential_savings, recommendations)
+        """
+        recommendations = []
+        optimization_score = 0
+        optimization_priority = "none"
+        potential_savings = 0.0
+        is_optimizable = False
+
+        # Scenario 1: CRITICAL - Unused endpoint (0 network interfaces)
+        if endpoint_type == "Interface" and network_interface_count == 0 and state == "available":
+            optimization_score = 95
+            optimization_priority = "critical"
+            potential_savings = monthly_cost
+            is_optimizable = True
+            recommendations.append({
+                "scenario": "unused_endpoint",
+                "action": "delete_endpoint",
+                "priority": "critical",
+                "estimated_savings": monthly_cost,
+                "details": f"VPC Endpoint '{endpoint_id}' has 0 network interfaces and is unused. Delete to eliminate costs.",
+                "recommendation": "Delete VPC Endpoint - no active connections"
+            })
+
+        # Scenario 2: HIGH - Interface endpoint for S3/DynamoDB (Gateway is FREE)
+        is_s3_or_dynamodb = ".s3" in service_name or ".dynamodb" in service_name
+        if endpoint_type == "Interface" and is_s3_or_dynamodb and optimization_score < 85:
+            optimization_score = max(optimization_score, 85)
+            optimization_priority = "high" if optimization_priority == "none" else optimization_priority
+            potential_savings = max(potential_savings, monthly_cost)
+            is_optimizable = True
+            service_type = "S3" if ".s3" in service_name else "DynamoDB"
+            recommendations.append({
+                "scenario": "interface_to_gateway",
+                "action": "migrate_to_gateway",
+                "priority": "high",
+                "estimated_savings": monthly_cost,
+                "details": f"VPC Endpoint '{endpoint_id}' uses Interface type for {service_type}. Gateway endpoints are FREE.",
+                "recommendation": f"Migrate to Gateway endpoint for {service_type} (100% savings, from ${monthly_cost:.2f} to $0)"
+            })
+
+        # Scenario 3: MEDIUM - Multi-AZ for dev/test (unnecessary redundancy)
+        # Heuristic: If endpoint has tags containing "dev", "test", "staging" with multi-AZ
+        if endpoint_type == "Interface" and availability_zone_count > 1 and optimization_score < 70:
+            optimization_score = max(optimization_score, 70)
+            optimization_priority = "medium" if optimization_priority == "none" else optimization_priority
+            # Reducing from multi-AZ to single AZ saves (az_count - 1) / az_count
+            savings = monthly_cost * ((availability_zone_count - 1) / availability_zone_count)
+            potential_savings = max(potential_savings, savings)
+            is_optimizable = True
+            recommendations.append({
+                "scenario": "multi_az_dev_test",
+                "action": "reduce_to_single_az",
+                "priority": "medium",
+                "estimated_savings": savings,
+                "details": f"VPC Endpoint '{endpoint_id}' is deployed in {availability_zone_count} AZs. For dev/test, single AZ is sufficient.",
+                "recommendation": f"Reduce to single AZ deployment ({((availability_zone_count - 1) / availability_zone_count) * 100:.0f}% savings)"
+            })
+
+        # Scenario 4: MEDIUM - Gateway type available but using Interface
+        if endpoint_type == "Interface" and is_s3_or_dynamodb and optimization_score < 65:
+            # This is similar to scenario 2, but with lower priority if already covered
+            pass
+
+        # Scenario 5: LOW - Security best practice (no cost impact)
+        if endpoint_type == "Interface" and optimization_score < 50:
+            optimization_score = max(optimization_score, 50)
+            optimization_priority = "low" if optimization_priority == "none" else optimization_priority
+            is_optimizable = True
+            recommendations.append({
+                "scenario": "no_private_dns",
+                "action": "enable_private_dns",
+                "priority": "low",
+                "estimated_savings": 0.0,
+                "details": f"VPC Endpoint '{endpoint_id}' should have private DNS enabled for security best practices.",
+                "recommendation": "Enable private DNS for better security (no cost impact)"
+            })
+
+        return is_optimizable, optimization_score, optimization_priority, potential_savings, recommendations
+
+
+    async def scan_efs_file_systems(self, region: str) -> list[AllCloudResourceData]:
+        """
+        Scan ALL AWS EFS File Systems for cost intelligence.
+
+        This method scans EFS file systems to provide cost visibility and optimization
+        recommendations. Unlike orphan detection, this scans ALL file systems regardless
+        of usage patterns.
+
+        Args:
+            region: AWS region to scan
+
+        Returns:
+            List of AllCloudResourceData objects for all EFS file systems
+        """
+        resources: list[AllCloudResourceData] = []
+
+        try:
+            async with self.session.client("efs", region_name=region) as efs:
+                async with self.session.client("cloudwatch", region_name=region) as cloudwatch:
+                    # List all EFS file systems
+                    response = await efs.describe_file_systems()
+                    file_systems = response.get("FileSystems", [])
+
+                    for fs in file_systems:
+                        try:
+                            fs_id = fs.get("FileSystemId", "")
+                            fs_name = fs.get("Name", fs_id)
+                            fs_state = fs.get("LifeCycleState", "unknown")
+
+                            # Skip non-available file systems
+                            if fs_state != "available":
+                                continue
+
+                            fs_arn = fs.get("FileSystemArn", "")
+                            created_at = fs.get("CreationTime")
+
+                            # Extract file system metadata
+                            size_bytes = fs.get("SizeInBytes", {}).get("Value", 0)
+                            size_gb = size_bytes / (1024**3)
+                            performance_mode = fs.get("PerformanceMode", "generalPurpose")
+                            throughput_mode = fs.get("ThroughputMode", "bursting")
+                            encrypted = fs.get("Encrypted", False)
+
+                            # Get tags
+                            tags = {}
+                            try:
+                                tags_response = await efs.describe_tags(FileSystemId=fs_id)
+                                tags = {tag["Key"]: tag["Value"] for tag in tags_response.get("Tags", [])}
+                            except Exception:
+                                pass
+
+                            # Get CloudWatch metrics (last 7 days)
+                            end_time = datetime.utcnow()
+                            start_time = end_time - timedelta(days=7)
+
+                            # Get client connections
+                            client_connections = 0.0
+                            try:
+                                conn_response = await cloudwatch.get_metric_statistics(
+                                    Namespace="AWS/EFS",
+                                    MetricName="ClientConnections",
+                                    Dimensions=[
+                                        {"Name": "FileSystemId", "Value": fs_id},
+                                    ],
+                                    StartTime=start_time,
+                                    EndTime=end_time,
+                                    Period=604800,  # 7 days
+                                    Statistics=["Average"],
+                                )
+                                datapoints = conn_response.get("Datapoints", [])
+                                if datapoints:
+                                    client_connections = datapoints[0].get("Average", 0.0)
+                            except Exception:
+                                pass
+
+                            # Get total I/O bytes
+                            total_io_bytes = 0.0
+                            try:
+                                io_response = await cloudwatch.get_metric_statistics(
+                                    Namespace="AWS/EFS",
+                                    MetricName="TotalIOBytes",
+                                    Dimensions=[
+                                        {"Name": "FileSystemId", "Value": fs_id},
+                                    ],
+                                    StartTime=start_time,
+                                    EndTime=end_time,
+                                    Period=604800,  # 7 days
+                                    Statistics=["Sum"],
+                                )
+                                datapoints = io_response.get("Datapoints", [])
+                                if datapoints:
+                                    total_io_bytes = datapoints[0].get("Sum", 0.0)
+                            except Exception:
+                                pass
+
+                            # Calculate cost
+                            # EFS pricing: ~$0.30/GB/month for Standard storage class
+                            storage_cost_per_gb = 0.30
+                            monthly_cost = size_gb * storage_cost_per_gb
+
+                            # Calculate optimization scenarios
+                            optimization_scenarios = []
+
+                            # Scenario 1: No client connections (unused)
+                            if client_connections == 0:
+                                optimization_scenarios.append({
+                                    "scenario": "no_client_connections",
+                                    "severity": "high",
+                                    "description": "EFS file system has no client connections in the last 7 days",
+                                    "recommendation": "Consider deleting this unused file system",
+                                    "potential_monthly_savings": monthly_cost,
+                                })
+
+                            # Scenario 2: Very low I/O activity
+                            elif total_io_bytes < 1024 * 1024 * 100:  # Less than 100 MB in 7 days
+                                optimization_scenarios.append({
+                                    "scenario": "low_io_activity",
+                                    "severity": "medium",
+                                    "description": f"EFS file system has very low I/O activity ({total_io_bytes / (1024**2):.2f} MB in 7 days)",
+                                    "recommendation": "Consider switching to Infrequent Access storage class or deleting if unused",
+                                    "potential_monthly_savings": monthly_cost * 0.92,  # IA is 92% cheaper
+                                })
+
+                            # Scenario 3: Small file system with low usage
+                            if size_gb < 1 and client_connections < 5:
+                                optimization_scenarios.append({
+                                    "scenario": "small_underutilized",
+                                    "severity": "low",
+                                    "description": f"Small EFS file system ({size_gb:.2f} GB) with minimal connections ({client_connections:.0f})",
+                                    "recommendation": "Consider consolidating with other file systems or using S3 for object storage",
+                                    "potential_monthly_savings": monthly_cost * 0.5,
+                                })
+
+                            # Scenario 4: Not encrypted (security recommendation)
+                            if not encrypted:
+                                optimization_scenarios.append({
+                                    "scenario": "not_encrypted",
+                                    "severity": "medium",
+                                    "description": "EFS file system is not encrypted at rest",
+                                    "recommendation": "Migrate to encrypted file system for better security compliance",
+                                    "potential_monthly_savings": 0.0,  # Security, not cost
+                                })
+
+                            # Create resource data
+                            resource = AllCloudResourceData(
+                                resource_type="efs_file_system",
+                                resource_id=fs_id,
+                                resource_name=fs_name,
+                                region=region,
+                                estimated_monthly_cost=monthly_cost,
+                                currency="USD",
+                                resource_metadata={
+                                    "file_system_id": fs_id,
+                                    "file_system_name": fs_name,
+                                    "lifecycle_state": fs_state,
+                                    "size_gb": round(size_gb, 2),
+                                    "size_bytes": size_bytes,
+                                    "performance_mode": performance_mode,
+                                    "throughput_mode": throughput_mode,
+                                    "encrypted": encrypted,
+                                    "client_connections_avg_7d": round(client_connections, 2),
+                                    "total_io_bytes_7d": round(total_io_bytes, 2),
+                                    "creation_time": created_at.isoformat() if (created_at and isinstance(created_at, datetime)) else str(created_at) if created_at else "unknown",
+                                    "days_since_creation": self.provider._safe_datetime_age(created_at),
+                                    "tags": tags,
+                                },
+                                optimization_scenarios=optimization_scenarios,
+                                is_optimizable=len(optimization_scenarios) > 0,
+                            )
+
+                            resources.append(resource)
+                            logger.info(
+                                "inventory.efs_scanned",
+                                file_system_id=fs_id,
+                                size_gb=round(size_gb, 2),
+                                client_connections=round(client_connections, 2),
+                                scenarios=len(optimization_scenarios),
+                            )
+
+                        except Exception as e:
+                            logger.warning(
+                                "inventory.efs_scan_error",
+                                file_system_id=fs.get("FileSystemId", "unknown"),
+                                error=str(e),
+                            )
+                            continue
+
+        except Exception as e:
+            logger.error(
+                "inventory.efs_scan_failed",
+                region=region,
+                error=str(e),
+            )
+
+        return resources
+    def _calculate_kinesis_monthly_cost(
+        self,
+        shard_count: int,
+        retention_hours: int,
+        enhanced_fanout_consumers: int,
+        incoming_bytes_per_month: float,
+        region: str,
+    ) -> float:
+        """
+        Calculate estimated monthly cost for AWS Kinesis Stream.
+
+        Pricing model:
+        - Shard cost: $0.015/hour = $10.80/month per shard
+        - Data retention (3 tiers):
+          * Free: First 24 hours (default)
+          * Extended: 25-168 hours ($0.020/GB/month)
+          * Long-term: >168 hours ($0.026/GB/month)
+        - Enhanced fan-out: $0.015/hour = $10.95/month per consumer
+
+        Args:
+            shard_count: Number of shards
+            retention_hours: Retention period (24-8760 hours)
+            enhanced_fanout_consumers: Number of enhanced fan-out consumers
+            incoming_bytes_per_month: Monthly incoming data volume (bytes)
+            region: AWS region
+
+        Returns:
+            Estimated monthly cost in USD
+        """
+        # Shard cost
+        shard_monthly_cost = self.provider.PRICING.get("kinesis_shard", 10.80)
+        total_shard_cost = shard_monthly_cost * shard_count
+
+        # Retention cost (beyond free 24h)
+        retention_cost = 0.0
+        if retention_hours > 24:
+            # Convert bytes to GB
+            data_gb = incoming_bytes_per_month / (1024**3)
+
+            if retention_hours <= 168:  # 25-168 hours (Extended)
+                retention_rate = self.provider.PRICING.get("kinesis_retention_extended_per_gb", 0.020)
+                retention_cost = data_gb * retention_rate
+            else:  # >168 hours (Long-term)
+                retention_rate = self.provider.PRICING.get("kinesis_retention_long_per_gb", 0.026)
+                retention_cost = data_gb * retention_rate
+
+        # Enhanced fan-out cost
+        fanout_monthly_cost = self.provider.PRICING.get("kinesis_enhanced_fanout_per_consumer", 10.95)
+        total_fanout_cost = fanout_monthly_cost * enhanced_fanout_consumers
+
+        total_cost = total_shard_cost + retention_cost + total_fanout_cost
+        return total_cost
+
+    def _calculate_kinesis_optimization(
+        self,
+        stream: dict[str, Any],
+        incoming_records: float,
+        incoming_bytes: float,
+        get_records_count: float,
+        iterator_age_ms: float,
+        shard_count: int,
+        retention_hours: int,
+        enhanced_fanout_consumers: int,
+        monthly_cost: float,
+    ) -> tuple[bool, int, str, float, list[dict[str, Any]]]:
+        """
+        Analyze AWS Kinesis Stream for cost optimization opportunities.
+
+        Optimization scenarios (5):
+        1. Completely inactive - No incoming records (critical)
+        2. Written but never read - Data written, never consumed (high)
+        3. Under-utilized - <1% throughput used (high)
+        4. Excessive retention - >24h when not needed (medium)
+        5. Unused enhanced fan-out - Consumers not reading data (medium)
+
+        Returns:
+            (is_optimizable, optimization_score, priority, potential_savings, recommendations)
+        """
+        is_optimizable = False
+        optimization_score = 0
+        priority = "low"
+        potential_savings = 0.0
+        recommendations = []
+
+        # Scenario 1: CRITICAL - Completely inactive (no incoming records)
+        if incoming_records == 0.0:
+            is_optimizable = True
+            optimization_score = 95
+            priority = "critical"
+            potential_savings = monthly_cost  # Full savings
+            recommendations.append(
+                {
+                    "type": "delete_stream",
+                    "title": "Delete Completely Inactive Kinesis Stream",
+                    "description": f"Stream '{stream.get('StreamName', '')}' has received NO records in the last 7 days. "
+                    f"This stream is not being used and costs ${monthly_cost:.2f}/month.",
+                    "impact": "high",
+                    "estimated_savings": f"${monthly_cost:.2f}/month",
+                    "action": "Delete this unused Kinesis Stream",
+                    "risk": "low",
+                }
+            )
+            return (is_optimizable, optimization_score, priority, potential_savings, recommendations)
+
+        # Scenario 2: HIGH - Written but never read (waste of shards)
+        if incoming_records > 0 and get_records_count == 0.0:
+            is_optimizable = True
+            optimization_score = 85
+            priority = "high"
+            potential_savings = monthly_cost * 0.80  # 80% savings
+            recommendations.append(
+                {
+                    "type": "unused_stream",
+                    "title": "Stream Receives Data But Never Consumed",
+                    "description": f"Stream '{stream.get('StreamName', '')}' receives {incoming_records:.0f} records/week "
+                    f"but has ZERO GetRecords API calls. Data is written but never read.",
+                    "impact": "high",
+                    "estimated_savings": f"${potential_savings:.2f}/month",
+                    "action": "Review if this stream is still needed, or implement consumers",
+                    "risk": "medium",
+                }
+            )
+
+        # Scenario 3: HIGH - Under-utilized (<1% throughput)
+        # Kinesis shard capacity: 1 MB/s incoming, 2 MB/s outgoing, 1000 records/s
+        # For 7 days, max capacity = 1 MB/s * 604800s = ~575 GB incoming
+        max_incoming_bytes_7d = shard_count * 1_000_000 * 604800  # bytes
+        utilization_percent = (incoming_bytes / max_incoming_bytes_7d) * 100 if max_incoming_bytes_7d > 0 else 0
+
+        if utilization_percent < 1.0 and incoming_records > 0:
+            is_optimizable = True
+            optimization_score = max(optimization_score, 75)
+            priority = "high" if priority != "critical" else priority
+
+            # Estimate right-sized shard count
+            recommended_shards = max(1, int(shard_count * utilization_percent / 100))
+            shard_savings = (shard_count - recommended_shards) * self.provider.PRICING.get("kinesis_shard", 10.80)
+            potential_savings = max(potential_savings, shard_savings)
+
+            recommendations.append(
+                {
+                    "type": "reduce_shards",
+                    "title": f"Kinesis Stream Under-Utilized ({utilization_percent:.2f}% Capacity)",
+                    "description": f"Stream '{stream.get('StreamName', '')}' uses only {utilization_percent:.2f}% "
+                    f"of its {shard_count} shard(s) capacity. Recommend reducing to {recommended_shards} shard(s).",
+                    "impact": "medium",
+                    "estimated_savings": f"${shard_savings:.2f}/month",
+                    "action": f"Reduce shard count from {shard_count} to {recommended_shards}",
+                    "risk": "low",
+                }
+            )
+
+        # Scenario 4: MEDIUM - Excessive retention (>24h when not needed)
+        # If iterator age is low (<1h), consumers are reading data quickly
+        # Extended retention (>24h) may be unnecessary
+        if retention_hours > 24 and iterator_age_ms < 3_600_000:  # <1 hour lag
+            is_optimizable = True
+            optimization_score = max(optimization_score, 60)
+            priority = "medium" if priority == "low" else priority
+
+            # Calculate retention cost savings
+            incoming_bytes_monthly = incoming_bytes * 4.33  # 7d → 30d estimate
+            data_gb = incoming_bytes_monthly / (1024**3)
+            retention_rate = self.provider.PRICING.get("kinesis_retention_extended_per_gb", 0.020)
+            retention_savings = data_gb * retention_rate
+            potential_savings = max(potential_savings, retention_savings)
+
+            recommendations.append(
+                {
+                    "type": "reduce_retention",
+                    "title": f"Excessive Data Retention ({retention_hours} Hours)",
+                    "description": f"Stream '{stream.get('StreamName', '')}' retains data for {retention_hours} hours "
+                    f"but consumers process data within 1 hour. Default 24h retention is sufficient.",
+                    "impact": "low",
+                    "estimated_savings": f"${retention_savings:.2f}/month",
+                    "action": f"Reduce retention period from {retention_hours}h to 24h",
+                    "risk": "low",
+                }
+            )
+
+        # Scenario 5: MEDIUM - Unused enhanced fan-out (paying for consumers not reading)
+        if enhanced_fanout_consumers > 0 and get_records_count == 0.0:
+            is_optimizable = True
+            optimization_score = max(optimization_score, 65)
+            priority = "medium" if priority == "low" else priority
+
+            fanout_cost = enhanced_fanout_consumers * self.provider.PRICING.get("kinesis_enhanced_fanout_per_consumer", 10.95)
+            potential_savings = max(potential_savings, fanout_cost)
+
+            recommendations.append(
+                {
+                    "type": "remove_fanout",
+                    "title": f"Unused Enhanced Fan-Out Consumers ({enhanced_fanout_consumers})",
+                    "description": f"Stream '{stream.get('StreamName', '')}' has {enhanced_fanout_consumers} "
+                    f"enhanced fan-out consumer(s) but zero GetRecords calls. These consumers are not reading data.",
+                    "impact": "medium",
+                    "estimated_savings": f"${fanout_cost:.2f}/month",
+                    "action": "Remove unused enhanced fan-out consumers",
+                    "risk": "low",
+                }
+            )
+
+        return (is_optimizable, optimization_score, priority, potential_savings, recommendations)
+
+    def _calculate_opensearch_monthly_cost(
+        self,
+        instance_type: str,
+        instance_count: int,
+        storage_size_gb: int,
+        region: str,
+    ) -> float:
+        """
+        Calculate estimated monthly cost for AWS OpenSearch Domain.
+
+        Pricing model:
+        - Instance cost: t3.small ($0.036/h) to r5.large ($0.228/h) × instance count
+        - Storage cost: $0.10/GB/month (EBS GP2 SSD)
+
+        Args:
+            instance_type: Instance type (e.g., t3.small.search, m5.large.search)
+            instance_count: Number of data nodes
+            storage_size_gb: EBS storage size in GB
+            region: AWS region
+
+        Returns:
+            Estimated monthly cost in USD
+        """
+        # Map instance type to pricing key
+        # instance_type format: "t3.small.search" → pricing key: "opensearch_t3_small"
+        pricing_key = f"opensearch_{instance_type.replace('.search', '').replace('.', '_')}"
+        hourly_cost = self.provider.PRICING.get(pricing_key, 0.161)  # Fallback to m5.large
+        instance_monthly_cost = hourly_cost * 730 * instance_count
+
+        # Storage cost
+        storage_rate = self.provider.PRICING.get("opensearch_storage_per_gb", 0.10)
+        storage_monthly_cost = storage_size_gb * storage_rate
+
+        total_cost = instance_monthly_cost + storage_monthly_cost
+        return total_cost
+
+    def _calculate_opensearch_optimization(
+        self,
+        domain: dict[str, Any],
+        search_rate: float,
+        indexing_rate: float,
+        cpu_utilization: float,
+        jvm_memory_pressure: float,
+        free_storage_gb: float,
+        total_storage_gb: int,
+        instance_type: str,
+        instance_count: int,
+        monthly_cost: float,
+    ) -> tuple[bool, int, str, float, list[dict[str, Any]]]:
+        """
+        Analyze AWS OpenSearch Domain for cost optimization opportunities.
+
+        Optimization scenarios (5):
+        1. Completely idle - No search/indexing activity (critical)
+        2. Very low usage - <100 requests/day (high)
+        3. Over-provisioned instance - Low CPU/JVM (high)
+        4. Over-provisioned storage - >50% free (medium)
+        5. Wrong instance family - Memory vs compute optimized (medium)
+
+        Returns:
+            (is_optimizable, optimization_score, priority, potential_savings, recommendations)
+        """
+        is_optimizable = False
+        optimization_score = 0
+        priority = "low"
+        potential_savings = 0.0
+        recommendations = []
+
+        # Scenario 1: CRITICAL - Completely idle (no activity)
+        if search_rate == 0.0 and indexing_rate == 0.0:
+            is_optimizable = True
+            optimization_score = 95
+            priority = "critical"
+            potential_savings = monthly_cost  # Full savings
+            recommendations.append(
+                {
+                    "type": "delete_domain",
+                    "title": "Delete Completely Idle OpenSearch Domain",
+                    "description": f"Domain '{domain.get('DomainName', '')}' has had NO search or indexing "
+                    f"activity in the last 7 days. This domain is completely unused and costs ${monthly_cost:.2f}/month.",
+                    "impact": "high",
+                    "estimated_savings": f"${monthly_cost:.2f}/month",
+                    "action": "Delete this unused OpenSearch domain after verifying no critical data",
+                    "risk": "low",
+                }
+            )
+            return (is_optimizable, optimization_score, priority, potential_savings, recommendations)
+
+        # Scenario 2: HIGH - Very low usage (<100 requests/day)
+        total_requests_7d = search_rate + indexing_rate
+        requests_per_day = total_requests_7d / 7
+
+        if requests_per_day > 0 and requests_per_day < 100:
+            is_optimizable = True
+            optimization_score = max(optimization_score, 80)
+            priority = "high" if priority != "critical" else priority
+
+            # Recommend downsizing to t3.small (dev/test tier)
+            if "t3.small" not in instance_type:
+                t3_hourly = self.provider.PRICING.get("opensearch_t3_small", 0.036)
+                t3_monthly_cost = t3_hourly * 730 * instance_count
+                storage_cost = total_storage_gb * self.provider.PRICING.get("opensearch_storage_per_gb", 0.10)
+                new_total_cost = t3_monthly_cost + storage_cost
+                savings = monthly_cost - new_total_cost
+                potential_savings = max(potential_savings, savings)
+
+                recommendations.append(
+                    {
+                        "type": "downsize_to_dev_tier",
+                        "title": f"Very Low Usage ({requests_per_day:.0f} Requests/Day)",
+                        "description": f"Domain '{domain.get('DomainName', '')}' has only {requests_per_day:.0f} requests/day. "
+                        f"Consider downsizing from {instance_type} to t3.small.search (dev/test tier).",
+                        "impact": "medium",
+                        "estimated_savings": f"${savings:.2f}/month",
+                        "action": f"Downsize instance type to t3.small.search ({instance_count} node(s))",
+                        "risk": "low",
+                    }
+                )
+
+        # Scenario 3: HIGH - Over-provisioned instance (low CPU + low JVM)
+        if cpu_utilization > 0 and cpu_utilization < 20.0 and jvm_memory_pressure < 30.0:
+            is_optimizable = True
+            optimization_score = max(optimization_score, 75)
+            priority = "high" if priority != "critical" else priority
+
+            # Estimate 40% cost reduction by downsizing
+            instance_savings = monthly_cost * 0.40
+            potential_savings = max(potential_savings, instance_savings)
+
+            recommendations.append(
+                {
+                    "type": "downsize_instance",
+                    "title": f"Over-Provisioned Instance (CPU {cpu_utilization:.1f}%, JVM {jvm_memory_pressure:.1f}%)",
+                    "description": f"Domain '{domain.get('DomainName', '')}' uses only {cpu_utilization:.1f}% CPU "
+                    f"and {jvm_memory_pressure:.1f}% JVM memory. Recommend downsizing instance type.",
+                    "impact": "medium",
+                    "estimated_savings": f"${instance_savings:.2f}/month",
+                    "action": f"Downsize from {instance_type} ({instance_count} nodes) to smaller instance",
+                    "risk": "low",
+                }
+            )
+
+        # Scenario 4: MEDIUM - Over-provisioned storage (>50% free)
+        if total_storage_gb > 0 and free_storage_gb > 0:
+            storage_utilization_percent = ((total_storage_gb - free_storage_gb) / total_storage_gb) * 100
+
+            if storage_utilization_percent < 50.0:
+                is_optimizable = True
+                optimization_score = max(optimization_score, 60)
+                priority = "medium" if priority == "low" else priority
+
+                # Recommend reducing storage by 30%
+                recommended_storage_gb = int(total_storage_gb * 0.7)
+                storage_rate = self.provider.PRICING.get("opensearch_storage_per_gb", 0.10)
+                storage_savings = (total_storage_gb - recommended_storage_gb) * storage_rate
+                potential_savings = max(potential_savings, storage_savings)
+
+                recommendations.append(
+                    {
+                        "type": "reduce_storage",
+                        "title": f"Over-Provisioned Storage ({storage_utilization_percent:.1f}% Used)",
+                        "description": f"Domain '{domain.get('DomainName', '')}' uses only {storage_utilization_percent:.1f}% "
+                        f"of its {total_storage_gb} GB storage. {free_storage_gb:.0f} GB is free.",
+                        "impact": "low",
+                        "estimated_savings": f"${storage_savings:.2f}/month",
+                        "action": f"Reduce storage from {total_storage_gb} GB to {recommended_storage_gb} GB",
+                        "risk": "low",
+                    }
+                )
+
+        # Scenario 5: MEDIUM - Wrong instance family (r5 vs m5)
+        # If JVM memory pressure is low (<50%), don't need memory-optimized (r5)
+        # If JVM memory pressure is high (>75%), need memory-optimized (r5)
+        if jvm_memory_pressure > 0:
+            if "r5" in instance_type and jvm_memory_pressure < 50.0:
+                # Using r5 (memory-optimized) but low memory usage → switch to m5 (general purpose)
+                is_optimizable = True
+                optimization_score = max(optimization_score, 65)
+                priority = "medium" if priority == "low" else priority
+
+                # Estimate 30% savings by switching r5 → m5
+                family_savings = monthly_cost * 0.30
+                potential_savings = max(potential_savings, family_savings)
+
+                recommendations.append(
+                    {
+                        "type": "switch_instance_family",
+                        "title": f"Memory-Optimized Instance Unnecessary (JVM {jvm_memory_pressure:.1f}%)",
+                        "description": f"Domain '{domain.get('DomainName', '')}' uses r5 (memory-optimized) instance "
+                        f"but only {jvm_memory_pressure:.1f}% JVM memory. Switch to m5 (general purpose) to save 30%.",
+                        "impact": "low",
+                        "estimated_savings": f"${family_savings:.2f}/month",
+                        "action": f"Switch from {instance_type} to m5 equivalent",
+                        "risk": "low",
+                    }
+                )
+            elif "m5" in instance_type and jvm_memory_pressure > 75.0:
+                # Using m5 (general purpose) but high memory usage → recommend r5 (memory-optimized)
+                # This is not a cost optimization, but a performance recommendation
+                # We don't add it to potential_savings
+                recommendations.append(
+                    {
+                        "type": "upgrade_instance_family_performance",
+                        "title": f"Consider Memory-Optimized Instance (JVM {jvm_memory_pressure:.1f}%)",
+                        "description": f"Domain '{domain.get('DomainName', '')}' uses m5 (general purpose) but has "
+                        f"{jvm_memory_pressure:.1f}% JVM memory pressure. Consider r5 for better performance.",
+                        "impact": "low",
+                        "estimated_savings": "$0.00/month (performance recommendation, not cost savings)",
+                        "action": f"Evaluate switching to r5 instance for better performance",
+                        "risk": "low",
+                    }
+                )
+
+        return (is_optimizable, optimization_score, priority, potential_savings, recommendations)
+
+
+
+
+    async def scan_elasticache_clusters(self, region: str) -> list[AllCloudResourceData]:
+        """
+        Scan ALL AWS ElastiCache Clusters for cost intelligence.
+
+        This method scans ElastiCache clusters (Redis + Memcached) to provide cost
+        visibility and optimization recommendations. Unlike orphan detection, this
+        scans ALL clusters regardless of usage patterns.
+
+        Args:
+            region: AWS region to scan
+
+        Returns:
+            List of AllCloudResourceData objects for all ElastiCache clusters
+        """
+        resources: list[AllCloudResourceData] = []
+
+        try:
+            async with self.session.client("elasticache", region_name=region) as elasticache:
+                async with self.session.client("cloudwatch", region_name=region) as cloudwatch:
+                    # List all ElastiCache clusters (Redis + Memcached)
+                    response = await elasticache.describe_cache_clusters()
+                    clusters = response.get("CacheClusters", [])
+
+                    for cluster in clusters:
+                        try:
+                            cluster_id = cluster.get("CacheClusterId", "")
+                            cluster_status = cluster.get("CacheClusterStatus", "unknown")
+
+                            # Skip non-available clusters
+                            if cluster_status != "available":
+                                continue
+
+                            cluster_arn = cluster.get("ARN", "")
+                            created_at = cluster.get("CacheClusterCreateTime")
+
+                            # Extract cluster metadata
+                            node_type = cluster.get("CacheNodeType", "cache.m5.large")
+                            num_nodes = cluster.get("NumCacheNodes", 1)
+                            engine = cluster.get("Engine", "redis")
+                            engine_version = cluster.get("EngineVersion", "unknown")
+
+                            # Get CloudWatch metrics (last 7 days)
+                            end_time = datetime.utcnow()
+                            start_time = end_time - timedelta(days=7)
+
+                            # Get cache hits
+                            cache_hits = 0.0
+                            try:
+                                hits_response = await cloudwatch.get_metric_statistics(
+                                    Namespace="AWS/ElastiCache",
+                                    MetricName="CacheHits",
+                                    Dimensions=[
+                                        {"Name": "CacheClusterId", "Value": cluster_id},
+                                    ],
+                                    StartTime=start_time,
+                                    EndTime=end_time,
+                                    Period=604800,  # 7 days
+                                    Statistics=["Sum"],
+                                )
+                                datapoints = hits_response.get("Datapoints", [])
+                                if datapoints:
+                                    cache_hits = datapoints[0].get("Sum", 0.0)
+                            except Exception:
+                                pass
+
+                            # Get cache misses
+                            cache_misses = 0.0
+                            try:
+                                misses_response = await cloudwatch.get_metric_statistics(
+                                    Namespace="AWS/ElastiCache",
+                                    MetricName="CacheMisses",
+                                    Dimensions=[
+                                        {"Name": "CacheClusterId", "Value": cluster_id},
+                                    ],
+                                    StartTime=start_time,
+                                    EndTime=end_time,
+                                    Period=604800,  # 7 days
+                                    Statistics=["Sum"],
+                                )
+                                datapoints = misses_response.get("Datapoints", [])
+                                if datapoints:
+                                    cache_misses = datapoints[0].get("Sum", 0.0)
+                            except Exception:
+                                pass
+
+                            # Get current connections
+                            curr_connections = 0.0
+                            try:
+                                conn_response = await cloudwatch.get_metric_statistics(
+                                    Namespace="AWS/ElastiCache",
+                                    MetricName="CurrConnections",
+                                    Dimensions=[
+                                        {"Name": "CacheClusterId", "Value": cluster_id},
+                                    ],
+                                    StartTime=start_time,
+                                    EndTime=end_time,
+                                    Period=604800,  # 7 days
+                                    Statistics=["Average"],
+                                )
+                                datapoints = conn_response.get("Datapoints", [])
+                                if datapoints:
+                                    curr_connections = datapoints[0].get("Average", 0.0)
+                            except Exception:
+                                pass
+
+                            # Get memory usage
+                            memory_usage_percent = 0.0
+                            try:
+                                memory_response = await cloudwatch.get_metric_statistics(
+                                    Namespace="AWS/ElastiCache",
+                                    MetricName="DatabaseMemoryUsagePercentage",
+                                    Dimensions=[
+                                        {"Name": "CacheClusterId", "Value": cluster_id},
+                                    ],
+                                    StartTime=start_time,
+                                    EndTime=end_time,
+                                    Period=604800,  # 7 days
+                                    Statistics=["Average"],
+                                )
+                                datapoints = memory_response.get("Datapoints", [])
+                                if datapoints:
+                                    memory_usage_percent = datapoints[0].get("Average", 0.0)
+                            except Exception:
+                                pass
+
+                            # Calculate monthly cost
+                            monthly_cost = self._calculate_elasticache_monthly_cost(
+                                node_type=node_type,
+                                num_nodes=num_nodes,
+                                engine=engine,
+                                region=region,
+                            )
+
+                            # Calculate optimization metrics
+                            (
+                                is_optimizable,
+                                optimization_score,
+                                optimization_priority,
+                                potential_savings,
+                                optimization_recommendations,
+                            ) = self._calculate_elasticache_optimization(
+                                cluster=cluster,
+                                cache_hits=cache_hits,
+                                cache_misses=cache_misses,
+                                curr_connections=curr_connections,
+                                memory_usage_percent=memory_usage_percent,
+                                monthly_cost=monthly_cost,
+                            )
+
+                            # Calculate cache hit rate
+                            total_requests = cache_hits + cache_misses
+                            hit_rate = (cache_hits / total_requests * 100) if total_requests > 0 else 0.0
+
+                            # Build metadata
+                            metadata = {
+                                "cluster_id": cluster_id,
+                                "cluster_arn": cluster_arn,
+                                "cluster_status": cluster_status,
+                                "node_type": node_type,
+                                "num_nodes": num_nodes,
+                                "engine": engine,
+                                "engine_version": engine_version,
+                                "cache_hits": round(cache_hits, 2),
+                                "cache_misses": round(cache_misses, 2),
+                                "hit_rate_percent": round(hit_rate, 2),
+                                "curr_connections": round(curr_connections, 2),
+                                "memory_usage_percent": round(memory_usage_percent, 2),
+                            }
+
+                            # Create resource entry
+                            resource = AllCloudResourceData(
+                                resource_id=cluster_arn,
+                                resource_type="elasticache_cluster",
+                                resource_name=cluster_id,
+                                region=region,
+                                estimated_monthly_cost=monthly_cost,
+                                currency="USD",
+                                resource_metadata=metadata,
+                                created_at_cloud=created_at if (created_at and isinstance(created_at, datetime)) else None,
+                                is_optimizable=is_optimizable,
+                                optimization_score=optimization_score,
+                                optimization_priority=optimization_priority,
+                                potential_monthly_savings=potential_savings,
+                                optimization_recommendations=optimization_recommendations,
+                            )
+
+                            resources.append(resource)
+
+                        except Exception as e:
+                            logger.error(
+                                "elasticache.cluster_scan_failed",
+                                cluster_id=cluster.get("CacheClusterId", "Unknown"),
+                                region=region,
+                                error=str(e),
+                            )
+                            continue
+
+        except Exception as e:
+            logger.error(
+                "elasticache.scan_failed",
+                region=region,
+                error=str(e),
+            )
+
+        return resources
+
+    # =========================================================================
+    # AWS Kinesis Stream - Cost Optimization Scanning
+    # =========================================================================
+
+    async def scan_kinesis_streams(self, region: str) -> list[AllCloudResourceData]:
+        """
+        Scan ALL AWS Kinesis Streams in a region for cost intelligence.
+
+        For each stream:
+        - Calculate monthly cost (shards + retention + enhanced fan-out)
+        - Fetch CloudWatch metrics (IncomingRecords, IncomingBytes, GetRecords, IteratorAge)
+        - Analyze optimization opportunities (5 scenarios)
+
+        Returns:
+            List of AllCloudResourceData entries for all Kinesis Streams
+        """
+        resources: list[AllCloudResourceData] = []
+
+        try:
+            async with self.session.client("kinesis", region_name=region) as kinesis:
+                async with self.session.client("cloudwatch", region_name=region) as cloudwatch:
+                    # List all streams
+                    paginator = kinesis.get_paginator("list_streams")
+                    stream_names = []
+
+                    async for page in paginator.paginate():
+                        stream_names.extend(page.get("StreamNames", []))
+
+                    logger.info(
+                        "inventory.kinesis.streams_found",
+                        region=region,
+                        count=len(stream_names),
+                    )
+
+                    # Process each stream
+                    for stream_name in stream_names:
+                        try:
+                            # Get stream details
+                            stream_response = await kinesis.describe_stream(StreamName=stream_name)
+                            stream_desc = stream_response.get("StreamDescription", {})
+
+                            stream_arn = stream_desc.get("StreamARN", "")
+                            stream_status = stream_desc.get("StreamStatus", "UNKNOWN")
+                            shard_count = len(stream_desc.get("Shards", []))
+                            retention_hours = stream_desc.get("RetentionPeriodHours", 24)
+                            encryption_type = stream_desc.get("EncryptionType", "NONE")
+                            created_timestamp = stream_desc.get("StreamCreationTimestamp")
+
+                            # Get enhanced fan-out consumers
+                            consumers_response = await kinesis.list_stream_consumers(StreamARN=stream_arn)
+                            consumers = consumers_response.get("Consumers", [])
+                            enhanced_fanout_consumers = len(consumers)
+
+                            # Get CloudWatch metrics (7 days)
+                            end_time = datetime.utcnow()
+                            start_time = end_time - timedelta(days=7)
+
+                            # Metric 1: IncomingRecords (sum)
+                            incoming_records_response = await cloudwatch.get_metric_statistics(
+                                Namespace="AWS/Kinesis",
+                                MetricName="IncomingRecords",
+                                Dimensions=[{"Name": "StreamName", "Value": stream_name}],
+                                StartTime=start_time,
+                                EndTime=end_time,
+                                Period=604800,  # 7 days
+                                Statistics=["Sum"],
+                            )
+                            incoming_records = (
+                                incoming_records_response["Datapoints"][0]["Sum"]
+                                if incoming_records_response.get("Datapoints")
+                                else 0.0
+                            )
+
+                            # Metric 2: IncomingBytes (sum)
+                            incoming_bytes_response = await cloudwatch.get_metric_statistics(
+                                Namespace="AWS/Kinesis",
+                                MetricName="IncomingBytes",
+                                Dimensions=[{"Name": "StreamName", "Value": stream_name}],
+                                StartTime=start_time,
+                                EndTime=end_time,
+                                Period=604800,
+                                Statistics=["Sum"],
+                            )
+                            incoming_bytes = (
+                                incoming_bytes_response["Datapoints"][0]["Sum"]
+                                if incoming_bytes_response.get("Datapoints")
+                                else 0.0
+                            )
+
+                            # Metric 3: GetRecords.Records (sum) - Consumption activity
+                            get_records_response = await cloudwatch.get_metric_statistics(
+                                Namespace="AWS/Kinesis",
+                                MetricName="GetRecords.Records",
+                                Dimensions=[{"Name": "StreamName", "Value": stream_name}],
+                                StartTime=start_time,
+                                EndTime=end_time,
+                                Period=604800,
+                                Statistics=["Sum"],
+                            )
+                            get_records_count = (
+                                get_records_response["Datapoints"][0]["Sum"]
+                                if get_records_response.get("Datapoints")
+                                else 0.0
+                            )
+
+                            # Metric 4: GetRecords.IteratorAgeMilliseconds (avg) - Consumer lag
+                            iterator_age_response = await cloudwatch.get_metric_statistics(
+                                Namespace="AWS/Kinesis",
+                                MetricName="GetRecords.IteratorAgeMilliseconds",
+                                Dimensions=[{"Name": "StreamName", "Value": stream_name}],
+                                StartTime=start_time,
+                                EndTime=end_time,
+                                Period=604800,
+                                Statistics=["Average"],
+                            )
+                            iterator_age_ms = (
+                                iterator_age_response["Datapoints"][0]["Average"]
+                                if iterator_age_response.get("Datapoints")
+                                else 0.0
+                            )
+
+                            # Calculate cost
+                            incoming_bytes_monthly = incoming_bytes * 4.33  # 7d → 30d estimate
+                            monthly_cost = self._calculate_kinesis_monthly_cost(
+                                shard_count=shard_count,
+                                retention_hours=retention_hours,
+                                enhanced_fanout_consumers=enhanced_fanout_consumers,
+                                incoming_bytes_per_month=incoming_bytes_monthly,
+                                region=region,
+                            )
+
+                            # Calculate optimization
+                            (
+                                is_optimizable,
+                                optimization_score,
+                                priority,
+                                potential_savings,
+                                recommendations,
+                            ) = self._calculate_kinesis_optimization(
+                                stream=stream_desc,
+                                incoming_records=incoming_records,
+                                incoming_bytes=incoming_bytes,
+                                get_records_count=get_records_count,
+                                iterator_age_ms=iterator_age_ms,
+                                shard_count=shard_count,
+                                retention_hours=retention_hours,
+                                enhanced_fanout_consumers=enhanced_fanout_consumers,
+                                monthly_cost=monthly_cost,
+                            )
+
+                            # Build metadata
+                            resource_metadata = {
+                                "stream_name": stream_name,
+                                "stream_arn": stream_arn,
+                                "stream_status": stream_status,
+                                "shard_count": shard_count,
+                                "retention_hours": retention_hours,
+                                "encryption_type": encryption_type,
+                                "enhanced_fanout_consumers": enhanced_fanout_consumers,
+                                "created_timestamp": created_timestamp.isoformat() if created_timestamp else None,
+                                "metrics": {
+                                    "incoming_records_7d": incoming_records,
+                                    "incoming_bytes_7d": incoming_bytes,
+                                    "get_records_count_7d": get_records_count,
+                                    "iterator_age_ms_avg": iterator_age_ms,
+                                },
+                            }
+
+                            # Apply detection rules filtering
+                            resource_age_days = self._safe_datetime_age(created_timestamp)
+
+                            if not self._should_include_resource("kinesis_stream", resource_age_days):
+                                logger.debug("inventory.kinesis_filtered", stream=stream_name, age=resource_age_days)
+                                continue
+
+                            # Create resource entry
+                            resource = AllCloudResourceData(
+                                resource_id=stream_arn,
+                                resource_type="kinesis_stream",
+                                resource_name=stream_name,
+                                region=region,
+                                estimated_monthly_cost=monthly_cost,
+                                currency="USD",
+                                resource_metadata=resource_metadata,
+                                is_optimizable=is_optimizable,
+                                optimization_score=optimization_score,
+                                optimization_priority=priority,
+                                potential_monthly_savings=potential_savings,
+                                optimization_recommendations=recommendations,
+                            )
+
+                            resources.append(resource)
+
+                            logger.info(
+                                "inventory.kinesis.stream_scanned",
+                                stream_name=stream_name,
+                                region=region,
+                                shard_count=shard_count,
+                                monthly_cost=monthly_cost,
+                                is_optimizable=is_optimizable,
+                                optimization_score=optimization_score,
+                            )
+
+                        except Exception as e:
+                            logger.error(
+                                "inventory.kinesis.stream_scan_error",
+                                stream_name=stream_name,
+                                region=region,
+                                error=str(e),
+                            )
+                            continue
+
+        except Exception as e:
+            logger.error(
+                "kinesis.scan_failed",
+                region=region,
+                error=str(e),
+            )
+
+        return resources
+
+    # =========================================================================
+    # AWS FSx File System - Cost Optimization Scanning
+    # =========================================================================
+    # =========================================================================
+    # AWS OpenSearch Domain - Cost Optimization Scanning
+    # =========================================================================
+
+    def _extract_optimization_fields_from_scenarios(
+        self, optimization_scenarios: list[OptimizationScenario]
+    ) -> tuple[bool, str | None, int, float, list[str]]:
+        """
+        Extract optimization fields from scenarios for Cost Optimization Hub.
+
+        This helper function processes a list of OptimizationScenario objects and
+        extracts the aggregate fields required for the Cost Optimization Hub:
+        - is_optimizable: Whether resource has optimization opportunities
+        - optimization_priority: Highest priority scenario (CRITICAL/HIGH/MEDIUM/LOW)
+        - optimization_score: Optimization score (0-100, from top scenario)
+        - potential_monthly_savings: Sum of all scenario savings
+        - optimization_recommendations: List of formatted recommendations
+
+        Args:
+            optimization_scenarios: List of OptimizationScenario objects
+
+        Returns:
+            Tuple of (is_optimizable, optimization_priority, optimization_score,
+                      potential_monthly_savings, optimization_recommendations)
+
+        Example:
+            scenarios = self._calculate_neptune_optimization(...)
+            (is_opt, priority, score, savings, recs) = \
+                self._extract_optimization_fields_from_scenarios(scenarios)
+        """
+        if not optimization_scenarios:
+            return (False, None, 0, 0.0, [])
+
+        # Resource is optimizable if it has any scenarios
+        is_optimizable = True
+
+        # Get highest priority scenario (CRITICAL > HIGH > MEDIUM > LOW)
+        priority_order = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3}
+        sorted_scenarios = sorted(
+            optimization_scenarios,
+            key=lambda s: (
+                priority_order.get(s.priority, 999),
+                -s.estimated_monthly_savings,
+            ),
+        )
+        top_scenario = sorted_scenarios[0]
+
+        optimization_priority = top_scenario.priority
+        optimization_score = (
+            top_scenario.optimization_score
+            if hasattr(top_scenario, "optimization_score")
+            else 0
+        )
+
+        # Sum all potential savings
+        potential_monthly_savings = sum(
+            s.estimated_monthly_savings for s in optimization_scenarios
+        )
+
+        # Format top 3 recommendations as dicts (not strings!)
+        optimization_recommendations = [
+            {
+                "action": s.scenario_name,
+                "details": s.description[:150] + "...",
+                "priority": s.priority.lower(),
+                "estimated_savings": s.estimated_monthly_savings,
+            }
+            for s in sorted_scenarios[:3]
+        ]
+
+        return (
+            is_optimizable,
+            optimization_priority,
+            optimization_score,
+            potential_monthly_savings,
+            optimization_recommendations,
+        )
+
+    async def _get_cloudwatch_metric_average(
+        self,
+        region: str,
+        namespace: str,
+        metric_name: str,
+        dimensions: list[dict[str, str]],
+        start_time: datetime,
+        end_time: datetime,
+        period: int,
+        statistic: str,
+    ) -> float:
+        """
+        Get average value of a CloudWatch metric over a time period.
+
+        Args:
+            region: AWS region
+            namespace: CloudWatch namespace (e.g., "AWS/Neptune")
+            metric_name: Metric name (e.g., "DatabaseConnections")
+            dimensions: Metric dimensions
+            start_time: Start time for metric query
+            end_time: End time for metric query
+            period: Period in seconds
+            statistic: Statistic to retrieve (e.g., "Average")
+
+        Returns:
+            Average value of the metric, or 0 if no datapoints
+        """
+        try:
+            async with self.session.client("cloudwatch", region_name=region) as cw:
+                response = await cw.get_metric_statistics(
+                    Namespace=namespace,
+                    MetricName=metric_name,
+                    Dimensions=dimensions,
+                    StartTime=start_time,
+                    EndTime=end_time,
+                    Period=period,
+                    Statistics=[statistic],
+                )
+                datapoints = response.get("Datapoints", [])
+                if datapoints:
+                    return sum(dp[statistic] for dp in datapoints) / len(datapoints)
+                return 0.0
+        except Exception as e:
+            logger = structlog.get_logger()
+            logger.warning(
+                "cloudwatch.metric_average_failed",
+                namespace=namespace,
+                metric=metric_name,
+                error=str(e),
+            )
+            return 0.0
+
+    async def _get_cloudwatch_metric_sum(
+        self,
+        region: str,
+        namespace: str,
+        metric_name: str,
+        dimensions: list[dict[str, str]],
+        start_time: datetime,
+        end_time: datetime,
+        period: int,
+        statistic: str,
+    ) -> float:
+        """
+        Get sum of a CloudWatch metric over a time period.
+
+        Args:
+            region: AWS region
+            namespace: CloudWatch namespace (e.g., "AWS/VPN")
+            metric_name: Metric name (e.g., "TunnelDataIn")
+            dimensions: Metric dimensions
+            start_time: Start time for metric query
+            end_time: End time for metric query
+            period: Period in seconds
+            statistic: Statistic to retrieve (e.g., "Sum")
+
+        Returns:
+            Sum of the metric, or 0 if no datapoints
+        """
+        try:
+            async with self.session.client("cloudwatch", region_name=region) as cw:
+                response = await cw.get_metric_statistics(
+                    Namespace=namespace,
+                    MetricName=metric_name,
+                    Dimensions=dimensions,
+                    StartTime=start_time,
+                    EndTime=end_time,
+                    Period=period,
+                    Statistics=[statistic],
+                )
+                datapoints = response.get("Datapoints", [])
+                if datapoints:
+                    return sum(dp[statistic] for dp in datapoints)
+                return 0.0
+        except Exception as e:
+            logger = structlog.get_logger()
+            logger.warning(
+                "cloudwatch.metric_sum_failed",
+                namespace=namespace,
+                metric=metric_name,
+                error=str(e),
+            )
+            return 0.0
+
+    async def scan_vpc_endpoints(self, region: str) -> list[AllCloudResourceData]:
+        """
+        Scan ALL AWS VPC Endpoints for cost intelligence.
+
+        This method scans all VPC Endpoints to provide cost visibility and
+        optimization recommendations.
+
+        VPC Endpoint Types:
+        - Interface: Elastic Network Interface in subnet ($7.20/AZ/month)
+        - Gateway: Route table entry for S3/DynamoDB (FREE)
+        - GatewayLoadBalancer: $7.20/AZ/month
+
+        Note: VPC Endpoints do NOT have CloudWatch metrics. Detection based on:
+        - Network interface count
+        - Endpoint type
+        - Service name
+        - State
+
+        Args:
+            region: AWS region to scan
+
+        Returns:
+            List of AllCloudResourceData objects for all VPC Endpoints
+        """
+        resources: list[AllCloudResourceData] = []
+
+        try:
+            async with self.session.client("ec2", region_name=region) as ec2:
+                # Describe all VPC endpoints
+                response = await ec2.describe_vpc_endpoints()
+                endpoints = response.get("VpcEndpoints", [])
+
+                for endpoint in endpoints:
+                    try:
+                        endpoint_id = endpoint.get("VpcEndpointId", "unknown")
+                        endpoint_type = endpoint.get("VpcEndpointType", "Interface")
+                        service_name = endpoint.get("ServiceName", "")
+                        state = endpoint.get("State", "unknown")
+                        vpc_id = endpoint.get("VpcId", "unknown")
+                        created_at = endpoint.get("CreationTimestamp")
+
+                        # Extract tags
+                        tags = {}
+                        endpoint_name = None
+                        for tag in endpoint.get("Tags", []):
+                            tags[tag["Key"]] = tag["Value"]
+                            if tag["Key"] == "Name":
+                                endpoint_name = tag["Value"]
+
+                        # Get network interfaces and subnets
+                        network_interfaces = endpoint.get("NetworkInterfaceIds", [])
+                        subnet_ids = endpoint.get("SubnetIds", [])
+                        availability_zone_count = len(set(subnet_ids)) if subnet_ids else 1
+
+                        # Calculate monthly cost
+                        monthly_cost = self._calculate_vpc_endpoint_monthly_cost(
+                            endpoint_type=endpoint_type,
+                            availability_zone_count=availability_zone_count,
+                            region=region,
+                        )
+
+                        # Calculate optimization metrics
+                        (
+                            is_optimizable,
+                            optimization_score,
+                            optimization_priority,
+                            potential_savings,
+                            optimization_recommendations,
+                        ) = self._calculate_vpc_endpoint_optimization(
+                            endpoint_id=endpoint_id,
+                            endpoint_type=endpoint_type,
+                            service_name=service_name,
+                            state=state,
+                            network_interface_count=len(network_interfaces),
+                            availability_zone_count=availability_zone_count,
+                            monthly_cost=monthly_cost,
+                        )
+
+                        # Determine utilization status
+                        if len(network_interfaces) == 0:
+                            utilization_status = "idle"
+                        elif len(network_interfaces) < 2:
+                            utilization_status = "low"
+                        elif len(network_interfaces) < 5:
+                            utilization_status = "medium"
+                        else:
+                            utilization_status = "high"
+
+                        # Build metadata
+                        metadata = {
+                            "endpoint_id": endpoint_id,
+                            "endpoint_type": endpoint_type,
+                            "service_name": service_name,
+                            "state": state,
+                            "vpc_id": vpc_id,
+                            "network_interface_count": len(network_interfaces),
+                            "network_interface_ids": network_interfaces,
+                            "subnet_ids": subnet_ids,
+                            "availability_zone_count": availability_zone_count,
+                            "private_dns_enabled": endpoint.get("PrivateDnsEnabled", False),
+                            "route_table_ids": endpoint.get("RouteTableIds", []),
+                        }
+
+                        # Apply detection rules filtering
+                        resource_age_days = None
+                        if isinstance(created_at, datetime):
+                            resource_age_days = self._safe_datetime_age(created_at)
+
+                        if not self._should_include_resource("vpc_endpoint", resource_age_days):
+                            logger.debug("inventory.vpc_endpoint_filtered", endpoint_id=endpoint_id, age=resource_age_days)
+                            continue
+
+                        # Create resource
+                        resource = AllCloudResourceData(
+                            resource_type="vpc_endpoint",
+                            resource_id=endpoint_id,
+                            resource_name=endpoint_name or endpoint_id,
+                            region=region,
+                            estimated_monthly_cost=monthly_cost,
+                            resource_metadata=metadata,
+                            currency="USD",
+                            utilization_status=utilization_status,
+                            cpu_utilization_percent=None,
+                            memory_utilization_percent=None,
+                            storage_utilization_percent=None,
+                            network_utilization_mbps=None,
+                            is_optimizable=is_optimizable,
+                            optimization_priority=optimization_priority,
+                            optimization_score=optimization_score,
+                            potential_monthly_savings=potential_savings,
+                            optimization_recommendations=optimization_recommendations,
+                            tags=tags,
+                            resource_status=state,
+                            is_orphan=len(network_interfaces) == 0 and state == "available",
+                            created_at_cloud=created_at,
+                            last_used_at=None,
+                        )
+
+                        resources.append(resource)
+
+                    except Exception as e:
+                        logger.error(
+                            "vpc_endpoint.endpoint_scan_failed",
+                            endpoint_id=endpoint.get("VpcEndpointId", "unknown"),
+                            region=region,
+                            error=str(e),
+                        )
+                        continue
+
+        except Exception as e:
+            logger.error(
+                "vpc_endpoint.scan_failed",
+                region=region,
+                error=str(e),
+            )
+
+        return resources
+
+    # ============================================================
+    # RESSOURCE 22 : NEPTUNE DATABASE (GRAPH DATABASE)
+    # ============================================================
+
+    def _calculate_neptune_monthly_cost(
+        self,
+        instance_type: str,
+        instance_count: int,
+        storage_gb: float,
+        backup_storage_gb: float,
+        estimated_io_requests_per_month: float,
+        region: str,
+    ) -> float:
+        """
+        Calculate estimated monthly cost for AWS Neptune Database Cluster.
+
+        Neptune is a fully managed graph database service compatible with Apache TinkerPop Gremlin
+        and W3C's SPARQL. Neptune is optimized for storing billions of relationships and querying
+        the graph with milliseconds latency.
+
+        Cost Components:
+        1. Instance cost (db.r5.large, db.r5.xlarge, db.r5.2xlarge, etc.)
+        2. Storage cost ($0.10 per GB-month, billed per GB used)
+        3. I/O cost ($0.20 per 1 million requests)
+        4. Backup storage cost ($0.021 per GB-month, beyond cluster storage)
+
+        Args:
+            instance_type: Instance type (e.g., 'db.r5.large', 'db.r5.2xlarge')
+            instance_count: Number of instances in cluster (writer + read replicas)
+            storage_gb: Allocated storage in GB (Neptune auto-scales, no provisioning)
+            backup_storage_gb: Backup storage in GB (beyond cluster storage)
+            estimated_io_requests_per_month: Estimated I/O requests per month
+            region: AWS region
+
+        Returns:
+            Estimated monthly cost in USD
+
+        Example:
+            Single-node cluster with db.r5.large, 100 GB storage, 10M I/O requests:
+            - Instance: $0.348/hour * 730 hours = $254.04
+            - Storage: 100 GB * $0.10 = $10.00
+            - I/O: 10 million * $0.20 = $2.00
+            - Total: $266.04/month
+        """
+        monthly_hours = 730
+
+        # Instance cost (writer + read replicas)
+        instance_rate_map = {
+            "db.r5.large": 0.348,      # 2 vCPU, 16 GB RAM
+            "db.r5.xlarge": 0.696,     # 4 vCPU, 32 GB RAM
+            "db.r5.2xlarge": self.provider.PRICING.get("neptune_db_r5_2xlarge", 1.392),  # 8 vCPU, 64 GB RAM
+            "db.r5.4xlarge": self.provider.PRICING.get("neptune_db_r5_4xlarge", 2.784),  # 16 vCPU, 128 GB RAM
+            "db.r5.8xlarge": 5.568,    # 32 vCPU, 256 GB RAM
+            "db.r5.12xlarge": 8.352,   # 48 vCPU, 384 GB RAM
+            "db.r5.16xlarge": 11.136,  # 64 vCPU, 512 GB RAM
+            "db.r5.24xlarge": 16.704,  # 96 vCPU, 768 GB RAM
+            "db.t3.medium": 0.073,     # 2 vCPU, 4 GB RAM (dev/test)
+        }
+        instance_hourly_rate = instance_rate_map.get(instance_type, 0.348)  # Default to db.r5.large
+        instance_cost = instance_hourly_rate * monthly_hours * instance_count
+
+        # Storage cost (Neptune auto-scales, pay for what you use)
+        storage_rate = self.provider.PRICING.get("neptune_storage_per_gb", 0.10)
+        storage_cost = storage_gb * storage_rate
+
+        # I/O cost (per million requests)
+        io_rate = self.provider.PRICING.get("neptune_io_per_million", 0.20)
+        io_cost = (estimated_io_requests_per_month / 1_000_000) * io_rate
+
+        # Backup storage cost (beyond cluster storage)
+        backup_rate = self.provider.PRICING.get("neptune_backup_storage_per_gb", 0.021)
+        backup_cost = backup_storage_gb * backup_rate
+
+        total_cost = instance_cost + storage_cost + io_cost + backup_cost
+
+        return round(total_cost, 2)
+
+    def _calculate_neptune_optimization(
+        self,
+        cluster_identifier: str,
+        instance_type: str,
+        instance_count: int,
+        storage_gb: float,
+        backup_retention_days: int,
+        multi_az: bool,
+        avg_connections_7d: float,
+        engine_version: str,
+        status: str,
+        tags: dict,
+        region: str,
+    ) -> list[OptimizationScenario]:
+        """
+        Calculate optimization scenarios for AWS Neptune Database Cluster.
+
+        Neptune Optimization Scenarios:
+        1. Zero Connections (CRITICAL) - No database connections for 7+ days → Delete cluster
+        2. Low Connections (HIGH) - <5 avg connections on expensive instance (≥db.r5.2xlarge) → Downsize to db.r5.large
+        3. Single Read Replica Dev/Test (MEDIUM) - Dev/test cluster with read replicas → Remove replicas
+        4. Excessive Backup Retention (MEDIUM) - Backup retention >30 days for dev/test → Reduce to 7 days
+        5. Single-AZ Production (LOW) - Production cluster without Multi-AZ → Enable Multi-AZ
+
+        Args:
+            cluster_identifier: Neptune cluster ID
+            instance_type: Instance type (e.g., 'db.r5.large')
+            instance_count: Number of instances (writer + replicas)
+            storage_gb: Storage size in GB
+            backup_retention_days: Backup retention period in days
+            multi_az: Multi-AZ deployment enabled
+            avg_connections_7d: Average connections over last 7 days
+            engine_version: Neptune engine version
+            status: Cluster status (available, stopped, etc.)
+            tags: Resource tags
+            region: AWS region
+
+        Returns:
+            List of optimization scenarios with priority, estimated savings, and recommendations
+        """
+        scenarios = []
+
+        # Current cost
+        current_cost = self._calculate_neptune_monthly_cost(
+            instance_type=instance_type,
+            instance_count=instance_count,
+            storage_gb=storage_gb,
+            backup_storage_gb=storage_gb * 0.1,  # Estimate 10% backup overhead
+            estimated_io_requests_per_month=50_000_000,  # Default estimate
+            region=region,
+        )
+
+        # Detect environment from tags
+        env = tags.get("Environment", tags.get("environment", "")).lower()
+        is_production = env in ["production", "prod", "prd"]
+
+        # =============================================
+        # SCENARIO 1: Zero Connections (CRITICAL)
+        # =============================================
+        if avg_connections_7d == 0.0 and status == "available":
+            # No connections for 7+ days → Delete cluster
+            potential_savings = current_cost
+            scenarios.append(
+                OptimizationScenario(
+                    scenario_name="neptune_zero_connections",
+                    priority="CRITICAL",
+                    estimated_monthly_savings=potential_savings,
+                    current_monthly_cost=current_cost,
+                    optimized_monthly_cost=0.0,
+                    confidence_level="high",
+                    description=(
+                        f"Neptune cluster '{cluster_identifier}' has zero database connections "
+                        f"over the last 7 days. This cluster is completely idle and should be deleted."
+                    ),
+                    recommendation=(
+                        "Delete this Neptune cluster to eliminate costs:\n"
+                        f"1. Take final snapshot: aws neptune create-db-cluster-snapshot\n"
+                        f"2. Delete cluster: aws neptune delete-db-cluster --db-cluster-identifier {cluster_identifier}\n"
+                        f"3. Estimated savings: ${potential_savings:.2f}/month (100%)"
+                    ),
+                    action_complexity="low",
+                    risk_level="low",
+                    implementation_time="5 minutes",
+                )
+            )
+
+        # =============================================
+        # SCENARIO 2: Low Connections + Expensive Instance (HIGH)
+        # =============================================
+        expensive_instances = ["db.r5.2xlarge", "db.r5.4xlarge", "db.r5.8xlarge", "db.r5.12xlarge"]
+        if avg_connections_7d < 5.0 and instance_type in expensive_instances:
+            # Low usage on expensive instance → Downsize to db.r5.large
+            optimized_cost = self._calculate_neptune_monthly_cost(
+                instance_type="db.r5.large",
+                instance_count=instance_count,
+                storage_gb=storage_gb,
+                backup_storage_gb=storage_gb * 0.1,
+                estimated_io_requests_per_month=50_000_000,
+                region=region,
+            )
+            potential_savings = current_cost - optimized_cost
+
+            scenarios.append(
+                OptimizationScenario(
+                    scenario_name="neptune_low_connections_expensive_instance",
+                    priority="HIGH",
+                    estimated_monthly_savings=potential_savings,
+                    current_monthly_cost=current_cost,
+                    optimized_monthly_cost=optimized_cost,
+                    confidence_level="high",
+                    description=(
+                        f"Neptune cluster '{cluster_identifier}' has low connection usage "
+                        f"(avg {avg_connections_7d:.1f} connections) but uses expensive instance type '{instance_type}'. "
+                        f"This is over-provisioned for the workload."
+                    ),
+                    recommendation=(
+                        f"Downsize to db.r5.large to match workload:\n"
+                        f"1. Modify cluster: aws neptune modify-db-cluster --db-cluster-identifier {cluster_identifier} --apply-immediately\n"
+                        f"2. Modify instances: aws neptune modify-db-instance --db-instance-class db.r5.large\n"
+                        f"3. Monitor performance after change\n"
+                        f"4. Estimated savings: ${potential_savings:.2f}/month ({(potential_savings / current_cost * 100):.0f}%)"
+                    ),
+                    action_complexity="medium",
+                    risk_level="low",
+                    implementation_time="15 minutes",
+                )
+            )
+
+        # =============================================
+        # SCENARIO 3: Dev/Test with Read Replicas (MEDIUM)
+        # =============================================
+        if not is_production and instance_count > 1:
+            # Dev/test cluster with read replicas → Remove replicas
+            optimized_cost = self._calculate_neptune_monthly_cost(
+                instance_type=instance_type,
+                instance_count=1,  # Writer only
+                storage_gb=storage_gb,
+                backup_storage_gb=storage_gb * 0.1,
+                estimated_io_requests_per_month=50_000_000,
+                region=region,
+            )
+            potential_savings = current_cost - optimized_cost
+
+            scenarios.append(
+                OptimizationScenario(
+                    scenario_name="neptune_dev_test_read_replicas",
+                    priority="MEDIUM",
+                    estimated_monthly_savings=potential_savings,
+                    current_monthly_cost=current_cost,
+                    optimized_monthly_cost=optimized_cost,
+                    confidence_level="high",
+                    description=(
+                        f"Neptune cluster '{cluster_identifier}' is tagged as dev/test but has "
+                        f"{instance_count} instances (including read replicas). Read replicas are "
+                        f"typically not required for non-production workloads."
+                    ),
+                    recommendation=(
+                        f"Remove read replicas to reduce costs:\n"
+                        f"1. Identify replica instances: aws neptune describe-db-instances --filters Name=db-cluster-id,Values={cluster_identifier}\n"
+                        f"2. Delete replicas: aws neptune delete-db-instance --db-instance-identifier <replica-id>\n"
+                        f"3. Keep only writer instance\n"
+                        f"4. Estimated savings: ${potential_savings:.2f}/month ({(potential_savings / current_cost * 100):.0f}%)"
+                    ),
+                    action_complexity="medium",
+                    risk_level="low",
+                    implementation_time="10 minutes",
+                )
+            )
+
+        # =============================================
+        # SCENARIO 4: Excessive Backup Retention (MEDIUM)
+        # =============================================
+        if not is_production and backup_retention_days > 30:
+            # Long backup retention for dev/test → Reduce to 7 days
+            # Approximate backup storage savings
+            backup_storage_gb = storage_gb * 0.1  # Estimate 10% backup overhead
+            backup_rate = self.provider.PRICING.get("neptune_backup_storage_per_gb", 0.021)
+            backup_savings = backup_storage_gb * backup_rate * 0.5  # ~50% reduction
+
+            scenarios.append(
+                OptimizationScenario(
+                    scenario_name="neptune_excessive_backup_retention",
+                    priority="MEDIUM",
+                    estimated_monthly_savings=backup_savings,
+                    current_monthly_cost=current_cost,
+                    optimized_monthly_cost=current_cost - backup_savings,
+                    confidence_level="medium",
+                    description=(
+                        f"Neptune cluster '{cluster_identifier}' is tagged as dev/test but has "
+                        f"backup retention set to {backup_retention_days} days. This is excessive "
+                        f"for non-production workloads and increases backup storage costs."
+                    ),
+                    recommendation=(
+                        f"Reduce backup retention to 7 days:\n"
+                        f"1. Modify cluster: aws neptune modify-db-cluster --db-cluster-identifier {cluster_identifier} --backup-retention-period 7\n"
+                        f"2. Old backups will be automatically deleted after 7 days\n"
+                        f"3. Estimated savings: ${backup_savings:.2f}/month (backup storage reduction)"
+                    ),
+                    action_complexity="low",
+                    risk_level="low",
+                    implementation_time="5 minutes",
+                )
+            )
+
+        # =============================================
+        # SCENARIO 5: Single-AZ Production (LOW)
+        # =============================================
+        if is_production and not multi_az:
+            # Production cluster without Multi-AZ → Enable Multi-AZ
+            scenarios.append(
+                OptimizationScenario(
+                    scenario_name="neptune_single_az_production",
+                    priority="LOW",
+                    estimated_monthly_savings=0.0,  # This is a reliability improvement, not cost savings
+                    current_monthly_cost=current_cost,
+                    optimized_monthly_cost=current_cost,
+                    confidence_level="high",
+                    description=(
+                        f"Neptune cluster '{cluster_identifier}' is tagged as production but does not have "
+                        f"Multi-AZ deployment enabled. This creates a single point of failure and reduces "
+                        f"availability during maintenance or AZ failures."
+                    ),
+                    recommendation=(
+                        f"Enable Multi-AZ for high availability:\n"
+                        f"1. Create read replica in different AZ: aws neptune create-db-instance --availability-zone <different-az>\n"
+                        f"2. Configure automatic failover\n"
+                        f"3. This improves reliability but increases cost (additional replica)\n"
+                        f"4. Cost impact: +${(current_cost / instance_count):.2f}/month per replica"
+                    ),
+                    action_complexity="medium",
+                    risk_level="low",
+                    implementation_time="20 minutes",
+                )
+            )
+
+        return scenarios
+
+    async def scan_neptune_clusters(self, region: str) -> list[AllCloudResourceData]:
+        """
+        Scan ALL AWS Neptune Database Clusters for cost intelligence.
+
+        AWS Neptune is a fully managed graph database service that supports both Apache TinkerPop Gremlin
+        and W3C's SPARQL query languages. Neptune is optimized for storing billions of relationships
+        and querying the graph with milliseconds latency.
+
+        Use Cases:
+        - Knowledge graphs (fraud detection, recommendation engines)
+        - Identity graphs (social networking, user profiles)
+        - Network/IT operations (dependency tracking, impact analysis)
+
+        CloudWatch Metrics Used:
+        - DatabaseConnections (AWS/Neptune) - Active database connections
+
+        Cost Optimization Scenarios:
+        1. Zero Connections (CRITICAL) - No connections for 7+ days → Delete
+        2. Low Connections + Expensive Instance (HIGH) - <5 connections on ≥db.r5.2xlarge → Downsize
+        3. Dev/Test with Read Replicas (MEDIUM) - Remove replicas for non-prod
+        4. Excessive Backup Retention (MEDIUM) - >30 days for dev/test → Reduce to 7 days
+        5. Single-AZ Production (LOW) - Enable Multi-AZ for reliability
+
+        Args:
+            region: AWS region to scan
+
+        Returns:
+            List of AllCloudResourceData for all Neptune clusters in region
+        """
+        resources = []
+
+        try:
+            async with self.session.client("neptune", region_name=region) as neptune:
+                # Describe all Neptune clusters
+                response = await neptune.describe_db_clusters()
+                clusters = response.get("DBClusters", [])
+
+                logger.info(
+                    "neptune.clusters_found",
+                    region=region,
+                    cluster_count=len(clusters),
+                )
+
+                for cluster in clusters:
+                    try:
+                        cluster_identifier = cluster.get("DBClusterIdentifier", "unknown")
+                        engine = cluster.get("Engine", "")
+
+                        # Only process Neptune clusters (skip Aurora, RDS)
+                        if engine != "neptune":
+                            continue
+
+                        # Extract cluster details
+                        status = cluster.get("Status", "unknown")
+                        instance_type = "db.r5.large"  # Default
+                        instance_count = 0
+
+                        # Get instance details from cluster members
+                        members = cluster.get("DBClusterMembers", [])
+                        instance_count = len(members)
+
+                        # Get instance type from first member
+                        if members:
+                            first_member_id = members[0].get("DBInstanceIdentifier")
+                            instances_response = await neptune.describe_db_instances(
+                                DBInstanceIdentifier=first_member_id
+                            )
+                            instances = instances_response.get("DBInstances", [])
+                            if instances:
+                                instance_type = instances[0].get("DBInstanceClass", "db.r5.large")
+
+                        storage_gb = cluster.get("AllocatedStorage", 0)  # Neptune auto-scales
+                        backup_retention_days = cluster.get("BackupRetentionPeriod", 1)
+                        multi_az = cluster.get("MultiAZ", False)
+                        engine_version = cluster.get("EngineVersion", "unknown")
+
+                        # Extract tags
+                        tags_list = cluster.get("TagList", [])
+                        tags = {tag["Key"]: tag["Value"] for tag in tags_list}
+
+                        # ====================================
+                        # CLOUDWATCH METRICS (7-day lookback)
+                        # ====================================
+                        end_time = datetime.now(timezone.utc)
+                        start_time = end_time - timedelta(days=7)
+
+                        # Metric: DatabaseConnections (active connections)
+                        avg_connections_7d = await self._get_cloudwatch_metric_average(
+                            region=region,
+                            namespace="AWS/Neptune",
+                            metric_name="DatabaseConnections",
+                            dimensions=[
+                                {"Name": "DBClusterIdentifier", "Value": cluster_identifier}
+                            ],
+                            start_time=start_time,
+                            end_time=end_time,
+                            period=3600,  # 1 hour
+                            statistic="Average",
+                        )
+
+                        # ====================================
+                        # COST CALCULATION
+                        # ====================================
+                        monthly_cost = self._calculate_neptune_monthly_cost(
+                            instance_type=instance_type,
+                            instance_count=instance_count,
+                            storage_gb=storage_gb if storage_gb > 0 else 10.0,  # Min 10 GB
+                            backup_storage_gb=(storage_gb if storage_gb > 0 else 10.0) * 0.1,
+                            estimated_io_requests_per_month=50_000_000,  # Default estimate
+                            region=region,
+                        )
+
+                        # ====================================
+                        # OPTIMIZATION SCENARIOS
+                        # ====================================
+                        optimization_scenarios = self._calculate_neptune_optimization(
+                            cluster_identifier=cluster_identifier,
+                            instance_type=instance_type,
+                            instance_count=instance_count,
+                            storage_gb=storage_gb if storage_gb > 0 else 10.0,
+                            backup_retention_days=backup_retention_days,
+                            multi_az=multi_az,
+                            avg_connections_7d=avg_connections_7d,
+                            engine_version=engine_version,
+                            status=status,
+                            tags=tags,
+                            region=region,
+                        )
+
+                        # ====================================
+                        # EXTRACT OPTIMIZATION FIELDS FROM SCENARIOS
+                        # ====================================
+                        (
+                            is_optimizable,
+                            optimization_priority,
+                            optimization_score,
+                            potential_monthly_savings,
+                            optimization_recommendations,
+                        ) = self._extract_optimization_fields_from_scenarios(
+                            optimization_scenarios
+                        )
+
+                        # ====================================
+                        # CHECK IF ORPHAN (Zero connections for 7+ days)
+                        # ====================================
+                        is_orphan = avg_connections_7d == 0.0 and status == "available"
+
+                        # ====================================
+                        # CREATE RESOURCE DATA
+                        # ====================================
+                        resource = AllCloudResourceData(
+                            resource_type="neptune_cluster",
+                            resource_id=cluster.get("DbClusterResourceId", cluster_identifier),
+                            resource_name=cluster_identifier,
+                            region=region,
+                            estimated_monthly_cost=monthly_cost,
+                            currency="USD",
+                            resource_metadata={
+                                "cluster_identifier": cluster_identifier,
+                                "engine": engine,
+                                "engine_version": engine_version,
+                                "status": status,
+                                "instance_type": instance_type,
+                                "instance_count": instance_count,
+                                "storage_gb": storage_gb,
+                                "backup_retention_days": backup_retention_days,
+                                "multi_az": multi_az,
+                                "endpoint": cluster.get("Endpoint", ""),
+                                "reader_endpoint": cluster.get("ReaderEndpoint", ""),
+                                "avg_connections_7d": round(avg_connections_7d, 2),
+                                "tags": tags,
+                            },
+                            optimization_scenarios=optimization_scenarios,
+                            is_optimizable=is_optimizable,
+                            optimization_priority=optimization_priority,
+                            optimization_score=optimization_score,
+                            potential_monthly_savings=potential_monthly_savings,
+                            optimization_recommendations=optimization_recommendations,
+                            is_orphan=is_orphan,
+                            created_at_cloud=cluster.get("ClusterCreateTime"),
+                        )
+
+                        resources.append(resource)
+
+                        logger.debug(
+                            "neptune.cluster_scanned",
+                            cluster_identifier=cluster_identifier,
+                            instance_type=instance_type,
+                            instance_count=instance_count,
+                            monthly_cost=monthly_cost,
+                            avg_connections_7d=round(avg_connections_7d, 2),
+                            scenarios_count=len(optimization_scenarios),
+                            is_orphan=is_orphan,
+                        )
+
+                    except Exception as e:
+                        logger.error(
+                            "neptune.cluster_scan_failed",
+                            cluster_identifier=cluster.get("DBClusterIdentifier", "unknown"),
+                            region=region,
+                            error=str(e),
+                        )
+                        continue
+
+        except Exception as e:
+            logger.error(
+                "neptune.scan_failed",
+                region=region,
+                error=str(e),
+            )
+
+        return resources
+
+    # ============================================================
+    # RESSOURCE 23 : MSK (MANAGED STREAMING FOR APACHE KAFKA)
+    # ============================================================
+
+    def _calculate_msk_monthly_cost(
+        self,
+        broker_instance_type: str,
+        broker_count: int,
+        storage_per_broker_gb: int,
+        estimated_data_transfer_gb: float,
+        region: str,
+    ) -> float:
+        """
+        Calculate estimated monthly cost for AWS MSK (Managed Streaming for Apache Kafka) Cluster.
+
+        MSK is a fully managed Apache Kafka service that makes it easy to build and run applications
+        that use Apache Kafka to process streaming data. MSK manages Kafka cluster operations,
+        patching, and monitoring.
+
+        Cost Components:
+        1. Broker instance cost (kafka.m5.large, kafka.m5.xlarge, kafka.m5.2xlarge, etc.)
+        2. Storage cost ($0.10 per GB-month per broker)
+        3. Data transfer cost ($0.01 per GB for cross-AZ/cross-region)
+
+        Args:
+            broker_instance_type: Broker instance type (e.g., 'kafka.m5.large', 'kafka.m5.2xlarge')
+            broker_count: Number of broker nodes (typically 2-3 for HA)
+            storage_per_broker_gb: Storage allocated per broker in GB
+            estimated_data_transfer_gb: Estimated cross-AZ data transfer per month
+            region: AWS region
+
+        Returns:
+            Estimated monthly cost in USD
+
+        Example:
+            3-broker cluster with kafka.m5.large, 1000 GB storage/broker, 500 GB transfer:
+            - Brokers: $0.42/hour * 730 hours * 3 = $919.80
+            - Storage: 1000 GB * $0.10 * 3 = $300.00
+            - Data transfer: 500 GB * $0.01 = $5.00
+            - Total: $1,224.80/month
+        """
+        monthly_hours = 730
+
+        # Broker instance cost
+        broker_rate_map = {
+            "kafka.m5.large": 0.42,     # 2 vCPU, 8 GB RAM
+            "kafka.m5.xlarge": 0.84,    # 4 vCPU, 16 GB RAM
+            "kafka.m5.2xlarge": self.provider.PRICING.get("msk_kafka_m5_2xlarge", 0.84),  # 8 vCPU, 32 GB RAM
+            "kafka.m5.4xlarge": self.provider.PRICING.get("msk_kafka_m5_4xlarge", 1.68),  # 16 vCPU, 64 GB RAM
+            "kafka.m5.8xlarge": 3.36,   # 32 vCPU, 128 GB RAM
+            "kafka.m5.12xlarge": 5.04,  # 48 vCPU, 192 GB RAM
+            "kafka.m5.16xlarge": 6.72,  # 64 vCPU, 256 GB RAM
+            "kafka.m5.24xlarge": 10.08, # 96 vCPU, 384 GB RAM
+            "kafka.t3.small": 0.07,     # 2 vCPU, 2 GB RAM (dev/test)
+        }
+        broker_hourly_rate = broker_rate_map.get(broker_instance_type, 0.42)  # Default to kafka.m5.large
+        broker_cost = broker_hourly_rate * monthly_hours * broker_count
+
+        # Storage cost (per broker)
+        storage_rate = self.provider.PRICING.get("msk_storage_per_gb", 0.10)
+        storage_cost = storage_per_broker_gb * storage_rate * broker_count
+
+        # Data transfer cost (cross-AZ/cross-region)
+        data_transfer_rate = self.provider.PRICING.get("msk_data_transfer_per_gb", 0.01)
+        data_transfer_cost = estimated_data_transfer_gb * data_transfer_rate
+
+        total_cost = broker_cost + storage_cost + data_transfer_cost
+
+        return round(total_cost, 2)
+
+    def _calculate_msk_optimization(
+        self,
+        cluster_name: str,
+        broker_instance_type: str,
+        broker_count: int,
+        storage_per_broker_gb: int,
+        avg_bytes_in_per_sec_7d: float,
+        avg_bytes_out_per_sec_7d: float,
+        avg_cpu_percent_7d: float,
+        kafka_version: str,
+        state: str,
+        tags: dict,
+        region: str,
+    ) -> list[OptimizationScenario]:
+        """
+        Calculate optimization scenarios for AWS MSK (Managed Streaming for Apache Kafka) Cluster.
+
+        MSK Optimization Scenarios:
+        1. Zero Throughput (CRITICAL) - No messages for 7+ days → Delete cluster
+        2. Low Throughput + Expensive Brokers (HIGH) - Low throughput on expensive brokers (≥kafka.m5.2xlarge) → Downsize
+        3. Over-provisioned Brokers (MEDIUM) - Low CPU (<20%) on expensive brokers → Downsize
+        4. Excessive Storage (MEDIUM) - Storage usage <20% with large provisioned → Reduce storage
+        5. Dev/Test with 3+ Brokers (MEDIUM) - Non-prod cluster with HA configuration → Reduce to 1-2 brokers
+        6. No Auto-Scaling (LOW) - Manual storage provisioning → Enable auto-scaling
+
+        Args:
+            cluster_name: MSK cluster name
+            broker_instance_type: Broker instance type (e.g., 'kafka.m5.large')
+            broker_count: Number of broker nodes
+            storage_per_broker_gb: Storage per broker in GB
+            avg_bytes_in_per_sec_7d: Average incoming bytes/sec over 7 days
+            avg_bytes_out_per_sec_7d: Average outgoing bytes/sec over 7 days
+            avg_cpu_percent_7d: Average CPU utilization over 7 days
+            kafka_version: Apache Kafka version
+            state: Cluster state (ACTIVE, CREATING, DELETING, etc.)
+            tags: Resource tags
+            region: AWS region
+
+        Returns:
+            List of optimization scenarios with priority, estimated savings, and recommendations
+        """
+        scenarios = []
+
+        # Current cost
+        estimated_data_transfer_gb = (avg_bytes_out_per_sec_7d * 86400 * 30) / (1024 ** 3)  # Monthly estimate
+        current_cost = self._calculate_msk_monthly_cost(
+            broker_instance_type=broker_instance_type,
+            broker_count=broker_count,
+            storage_per_broker_gb=storage_per_broker_gb,
+            estimated_data_transfer_gb=estimated_data_transfer_gb,
+            region=region,
+        )
+
+        # Detect environment from tags
+        env = tags.get("Environment", tags.get("environment", "")).lower()
+        is_production = env in ["production", "prod", "prd"]
+
+        # Calculate total throughput (bytes/sec)
+        total_throughput_bps = avg_bytes_in_per_sec_7d + avg_bytes_out_per_sec_7d
+
+        # =============================================
+        # SCENARIO 1: Zero Throughput (CRITICAL)
+        # =============================================
+        if total_throughput_bps == 0.0 and state == "ACTIVE":
+            # No messages for 7+ days → Delete cluster
+            potential_savings = current_cost
+            scenarios.append(
+                OptimizationScenario(
+                    scenario_name="msk_zero_throughput",
+                    priority="CRITICAL",
+                    estimated_monthly_savings=potential_savings,
+                    current_monthly_cost=current_cost,
+                    optimized_monthly_cost=0.0,
+                    confidence_level="high",
+                    description=(
+                        f"MSK cluster '{cluster_name}' has zero message throughput "
+                        f"over the last 7 days. This cluster is completely idle and should be deleted."
+                    ),
+                    recommendation=(
+                        "Delete this MSK cluster to eliminate costs:\n"
+                        f"1. Backup configuration: aws kafka describe-cluster --cluster-arn <arn>\n"
+                        f"2. Delete cluster: aws kafka delete-cluster --cluster-arn <arn>\n"
+                        f"3. Estimated savings: ${potential_savings:.2f}/month (100%)"
+                    ),
+                    action_complexity="low",
+                    risk_level="low",
+                    implementation_time="5 minutes",
+                )
+            )
+
+        # =============================================
+        # SCENARIO 2: Low Throughput + Expensive Brokers (HIGH)
+        # =============================================
+        expensive_brokers = ["kafka.m5.2xlarge", "kafka.m5.4xlarge", "kafka.m5.8xlarge", "kafka.m5.12xlarge"]
+        # Convert bytes/sec to MB/sec for readability
+        throughput_mbps = total_throughput_bps / (1024 ** 2)
+
+        if throughput_mbps < 10.0 and broker_instance_type in expensive_brokers:
+            # Low throughput (<10 MB/s) on expensive brokers → Downsize to kafka.m5.large
+            optimized_cost = self._calculate_msk_monthly_cost(
+                broker_instance_type="kafka.m5.large",
+                broker_count=broker_count,
+                storage_per_broker_gb=storage_per_broker_gb,
+                estimated_data_transfer_gb=estimated_data_transfer_gb,
+                region=region,
+            )
+            potential_savings = current_cost - optimized_cost
+
+            scenarios.append(
+                OptimizationScenario(
+                    scenario_name="msk_low_throughput_expensive_brokers",
+                    priority="HIGH",
+                    estimated_monthly_savings=potential_savings,
+                    current_monthly_cost=current_cost,
+                    optimized_monthly_cost=optimized_cost,
+                    confidence_level="high",
+                    description=(
+                        f"MSK cluster '{cluster_name}' has low throughput "
+                        f"(avg {throughput_mbps:.2f} MB/s) but uses expensive broker type '{broker_instance_type}'. "
+                        f"This is over-provisioned for the workload."
+                    ),
+                    recommendation=(
+                        f"Downsize to kafka.m5.large to match workload:\n"
+                        f"1. Create new configuration with kafka.m5.large brokers\n"
+                        f"2. Update cluster: aws kafka update-broker-type --cluster-arn <arn> --target-instance-type kafka.m5.large\n"
+                        f"3. Monitor performance after change\n"
+                        f"4. Estimated savings: ${potential_savings:.2f}/month ({(potential_savings / current_cost * 100):.0f}%)"
+                    ),
+                    action_complexity="medium",
+                    risk_level="low",
+                    implementation_time="30 minutes",
+                )
+            )
+
+        # =============================================
+        # SCENARIO 3: Over-provisioned Brokers (MEDIUM)
+        # =============================================
+        if avg_cpu_percent_7d < 20.0 and broker_instance_type in expensive_brokers:
+            # Low CPU (<20%) on expensive brokers → Downsize
+            optimized_cost = self._calculate_msk_monthly_cost(
+                broker_instance_type="kafka.m5.large",
+                broker_count=broker_count,
+                storage_per_broker_gb=storage_per_broker_gb,
+                estimated_data_transfer_gb=estimated_data_transfer_gb,
+                region=region,
+            )
+            potential_savings = current_cost - optimized_cost
+
+            scenarios.append(
+                OptimizationScenario(
+                    scenario_name="msk_over_provisioned_brokers",
+                    priority="MEDIUM",
+                    estimated_monthly_savings=potential_savings,
+                    current_monthly_cost=current_cost,
+                    optimized_monthly_cost=optimized_cost,
+                    confidence_level="high",
+                    description=(
+                        f"MSK cluster '{cluster_name}' has low CPU utilization "
+                        f"(avg {avg_cpu_percent_7d:.1f}%) on expensive broker type '{broker_instance_type}'. "
+                        f"Brokers are under-utilized and can be downsized."
+                    ),
+                    recommendation=(
+                        f"Downsize to kafka.m5.large based on CPU utilization:\n"
+                        f"1. Review workload patterns over 30 days\n"
+                        f"2. Update broker type: aws kafka update-broker-type --target-instance-type kafka.m5.large\n"
+                        f"3. Monitor CPU and throughput metrics\n"
+                        f"4. Estimated savings: ${potential_savings:.2f}/month ({(potential_savings / current_cost * 100):.0f}%)"
+                    ),
+                    action_complexity="medium",
+                    risk_level="low",
+                    implementation_time="30 minutes",
+                )
+            )
+
+        # =============================================
+        # SCENARIO 4: Excessive Storage (MEDIUM)
+        # =============================================
+        if storage_per_broker_gb >= 1000:
+            # Large storage allocation (≥1 TB/broker) → Consider reducing if under-utilized
+            # Estimate 50% reduction potential
+            optimized_storage = int(storage_per_broker_gb * 0.5)
+            optimized_cost = self._calculate_msk_monthly_cost(
+                broker_instance_type=broker_instance_type,
+                broker_count=broker_count,
+                storage_per_broker_gb=optimized_storage,
+                estimated_data_transfer_gb=estimated_data_transfer_gb,
+                region=region,
+            )
+            potential_savings = current_cost - optimized_cost
+
+            scenarios.append(
+                OptimizationScenario(
+                    scenario_name="msk_excessive_storage",
+                    priority="MEDIUM",
+                    estimated_monthly_savings=potential_savings,
+                    current_monthly_cost=current_cost,
+                    optimized_monthly_cost=optimized_cost,
+                    confidence_level="medium",
+                    description=(
+                        f"MSK cluster '{cluster_name}' has large storage allocation "
+                        f"({storage_per_broker_gb} GB per broker). Review actual usage to "
+                        f"determine if storage can be reduced."
+                    ),
+                    recommendation=(
+                        f"Review storage usage and reduce if under-utilized:\n"
+                        f"1. Check storage utilization: aws cloudwatch get-metric-statistics --namespace AWS/Kafka --metric-name KafkaDataLogsDiskUsed\n"
+                        f"2. If usage <20%, reduce storage to {optimized_storage} GB per broker\n"
+                        f"3. Enable storage auto-scaling for future growth\n"
+                        f"4. Estimated savings: ${potential_savings:.2f}/month ({(potential_savings / current_cost * 100):.0f}%)"
+                    ),
+                    action_complexity="medium",
+                    risk_level="medium",
+                    implementation_time="20 minutes",
+                )
+            )
+
+        # =============================================
+        # SCENARIO 5: Dev/Test with 3+ Brokers (MEDIUM)
+        # =============================================
+        if not is_production and broker_count >= 3:
+            # Dev/test cluster with high availability → Reduce to 1-2 brokers
+            optimized_broker_count = 1
+            optimized_cost = self._calculate_msk_monthly_cost(
+                broker_instance_type=broker_instance_type,
+                broker_count=optimized_broker_count,
+                storage_per_broker_gb=storage_per_broker_gb,
+                estimated_data_transfer_gb=estimated_data_transfer_gb,
+                region=region,
+            )
+            potential_savings = current_cost - optimized_cost
+
+            scenarios.append(
+                OptimizationScenario(
+                    scenario_name="msk_dev_test_high_availability",
+                    priority="MEDIUM",
+                    estimated_monthly_savings=potential_savings,
+                    current_monthly_cost=current_cost,
+                    optimized_monthly_cost=optimized_cost,
+                    confidence_level="high",
+                    description=(
+                        f"MSK cluster '{cluster_name}' is tagged as dev/test but has "
+                        f"{broker_count} brokers (high availability configuration). "
+                        f"Non-production workloads typically don't require HA."
+                    ),
+                    recommendation=(
+                        f"Reduce broker count to 1 for dev/test:\n"
+                        f"1. ⚠️ MSK does not support in-place broker count changes\n"
+                        f"2. Create new cluster with 1 broker: aws kafka create-cluster --number-of-broker-nodes 1\n"
+                        f"3. Migrate topics and data from old cluster\n"
+                        f"4. Delete old cluster\n"
+                        f"5. Estimated savings: ${potential_savings:.2f}/month ({(potential_savings / current_cost * 100):.0f}%)"
+                    ),
+                    action_complexity="high",
+                    risk_level="medium",
+                    implementation_time="2 hours",
+                )
+            )
+
+        # =============================================
+        # SCENARIO 6: No Auto-Scaling (LOW)
+        # =============================================
+        # Note: MSK auto-scaling is determined by storage configuration, not exposed in describe-cluster
+        # This scenario is informational/best-practice recommendation
+        scenarios.append(
+            OptimizationScenario(
+                scenario_name="msk_no_auto_scaling",
+                priority="LOW",
+                estimated_monthly_savings=0.0,  # Prevents over-provisioning, not direct savings
+                current_monthly_cost=current_cost,
+                optimized_monthly_cost=current_cost,
+                confidence_level="medium",
+                description=(
+                    f"MSK cluster '{cluster_name}' may not have storage auto-scaling enabled. "
+                    f"Auto-scaling prevents storage exhaustion and reduces over-provisioning costs."
+                ),
+                recommendation=(
+                    f"Enable storage auto-scaling for cost optimization:\n"
+                    f"1. Check current configuration: aws kafka describe-cluster --cluster-arn <arn>\n"
+                    f"2. Enable auto-scaling: aws kafka update-storage --cluster-arn <arn> --provisioned-throughput Enabled=true\n"
+                    f"3. Set target utilization to 60-70%\n"
+                    f"4. Benefit: Automatic storage adjustment based on usage"
+                ),
+                action_complexity="low",
+                risk_level="low",
+                implementation_time="10 minutes",
+            )
+        )
+
+        return scenarios
+
+    async def scan_msk_clusters(self, region: str) -> list[AllCloudResourceData]:
+        """
+        Scan ALL AWS MSK (Managed Streaming for Apache Kafka) Clusters for cost intelligence.
+
+        AWS MSK is a fully managed service for Apache Kafka that makes it easy to build and run
+        applications that use Apache Kafka to process streaming data. MSK manages the Kafka cluster
+        infrastructure, operations, and monitoring.
+
+        Use Cases:
+        - Real-time data pipelines (log aggregation, event sourcing)
+        - Stream processing (fraud detection, clickstream analysis)
+        - Microservices communication (event-driven architectures)
+
+        CloudWatch Metrics Used:
+        - BytesInPerSec (AWS/Kafka) - Incoming bytes per second
+        - BytesOutPerSec (AWS/Kafka) - Outgoing bytes per second
+        - CpuUser (AWS/Kafka) - CPU utilization (user space)
+
+        Cost Optimization Scenarios:
+        1. Zero Throughput (CRITICAL) - No messages for 7+ days → Delete
+        2. Low Throughput + Expensive Brokers (HIGH) - <10 MB/s on ≥kafka.m5.2xlarge → Downsize
+        3. Over-provisioned Brokers (MEDIUM) - Low CPU (<20%) on expensive brokers → Downsize
+        4. Excessive Storage (MEDIUM) - Large storage allocation (≥1 TB) → Review usage
+        5. Dev/Test with 3+ Brokers (MEDIUM) - Non-prod with HA → Reduce to 1-2 brokers
+        6. No Auto-Scaling (LOW) - Enable storage auto-scaling for cost efficiency
+
+        Args:
+            region: AWS region to scan
+
+        Returns:
+            List of AllCloudResourceData for all MSK clusters in region
+        """
+        resources = []
+
+        try:
+            async with self.session.client("kafka", region_name=region) as kafka:
+                # List all MSK clusters
+                response = await kafka.list_clusters_v2()
+                cluster_info_list = response.get("ClusterInfoList", [])
+
+                logger.info(
+                    "msk.clusters_found",
+                    region=region,
+                    cluster_count=len(cluster_info_list),
+                )
+
+                for cluster_info in cluster_info_list:
+                    try:
+                        cluster_arn = cluster_info.get("ClusterArn", "")
+                        cluster_name = cluster_info.get("ClusterName", "unknown")
+                        state = cluster_info.get("State", "UNKNOWN")
+
+                        # Get detailed cluster info
+                        detail_response = await kafka.describe_cluster_v2(
+                            ClusterArn=cluster_arn
+                        )
+                        cluster = detail_response.get("ClusterInfo", {})
+
+                        # Extract cluster details
+                        provisioned = cluster.get("Provisioned", {})
+                        broker_node_group = provisioned.get("BrokerNodeGroupInfo", {})
+
+                        broker_instance_type = broker_node_group.get("InstanceType", "kafka.m5.large")
+                        broker_count = provisioned.get("NumberOfBrokerNodes", 0)
+
+                        storage_info = broker_node_group.get("StorageInfo", {})
+                        ebs_storage = storage_info.get("EbsStorageInfo", {})
+                        storage_per_broker_gb = ebs_storage.get("VolumeSize", 0)
+
+                        kafka_version = provisioned.get("KafkaVersion", "unknown")
+
+                        # Extract tags
+                        tags = cluster.get("Tags", {})
+
+                        # ====================================
+                        # CLOUDWATCH METRICS (7-day lookback)
+                        # ====================================
+                        end_time = datetime.now(timezone.utc)
+                        start_time = end_time - timedelta(days=7)
+
+                        # Metric: BytesInPerSec (incoming messages)
+                        avg_bytes_in_per_sec_7d = await self._get_cloudwatch_metric_average(
+                            region=region,
+                            namespace="AWS/Kafka",
+                            metric_name="BytesInPerSec",
+                            dimensions=[
+                                {"Name": "Cluster Name", "Value": cluster_name}
+                            ],
+                            start_time=start_time,
+                            end_time=end_time,
+                            period=3600,  # 1 hour
+                            statistic="Average",
+                        )
+
+                        # Metric: BytesOutPerSec (outgoing messages)
+                        avg_bytes_out_per_sec_7d = await self._get_cloudwatch_metric_average(
+                            region=region,
+                            namespace="AWS/Kafka",
+                            metric_name="BytesOutPerSec",
+                            dimensions=[
+                                {"Name": "Cluster Name", "Value": cluster_name}
+                            ],
+                            start_time=start_time,
+                            end_time=end_time,
+                            period=3600,  # 1 hour
+                            statistic="Average",
+                        )
+
+                        # Metric: CpuUser (CPU utilization)
+                        avg_cpu_percent_7d = await self._get_cloudwatch_metric_average(
+                            region=region,
+                            namespace="AWS/Kafka",
+                            metric_name="CpuUser",
+                            dimensions=[
+                                {"Name": "Cluster Name", "Value": cluster_name}
+                            ],
+                            start_time=start_time,
+                            end_time=end_time,
+                            period=3600,  # 1 hour
+                            statistic="Average",
+                        )
+
+                        # ====================================
+                        # COST CALCULATION
+                        # ====================================
+                        estimated_data_transfer_gb = (avg_bytes_out_per_sec_7d * 86400 * 30) / (1024 ** 3)
+                        monthly_cost = self._calculate_msk_monthly_cost(
+                            broker_instance_type=broker_instance_type,
+                            broker_count=broker_count,
+                            storage_per_broker_gb=storage_per_broker_gb,
+                            estimated_data_transfer_gb=estimated_data_transfer_gb,
+                            region=region,
+                        )
+
+                        # ====================================
+                        # OPTIMIZATION SCENARIOS
+                        # ====================================
+                        optimization_scenarios = self._calculate_msk_optimization(
+                            cluster_name=cluster_name,
+                            broker_instance_type=broker_instance_type,
+                            broker_count=broker_count,
+                            storage_per_broker_gb=storage_per_broker_gb,
+                            avg_bytes_in_per_sec_7d=avg_bytes_in_per_sec_7d,
+                            avg_bytes_out_per_sec_7d=avg_bytes_out_per_sec_7d,
+                            avg_cpu_percent_7d=avg_cpu_percent_7d,
+                            kafka_version=kafka_version,
+                            state=state,
+                            tags=tags,
+                            region=region,
+                        )
+
+                        # ====================================
+                        # EXTRACT OPTIMIZATION FIELDS FROM SCENARIOS
+                        # ====================================
+                        (
+                            is_optimizable,
+                            optimization_priority,
+                            optimization_score,
+                            potential_monthly_savings,
+                            optimization_recommendations,
+                        ) = self._extract_optimization_fields_from_scenarios(
+                            optimization_scenarios
+                        )
+
+                        # ====================================
+                        # CHECK IF ORPHAN (Zero throughput for 7+ days)
+                        # ====================================
+                        total_throughput = avg_bytes_in_per_sec_7d + avg_bytes_out_per_sec_7d
+                        is_orphan = total_throughput == 0.0 and state == "ACTIVE"
+
+                        # ====================================
+                        # CREATE RESOURCE DATA
+                        # ====================================
+                        resource = AllCloudResourceData(
+                            resource_type="msk_cluster",
+                            resource_id=cluster_arn,
+                            resource_name=cluster_name,
+                            region=region,
+                            estimated_monthly_cost=monthly_cost,
+                            currency="USD",
+                            resource_metadata={
+                                "cluster_name": cluster_name,
+                                "cluster_arn": cluster_arn,
+                                "state": state,
+                                "broker_instance_type": broker_instance_type,
+                                "broker_count": broker_count,
+                                "storage_per_broker_gb": storage_per_broker_gb,
+                                "kafka_version": kafka_version,
+                                "avg_bytes_in_per_sec_7d": round(avg_bytes_in_per_sec_7d, 2),
+                                "avg_bytes_out_per_sec_7d": round(avg_bytes_out_per_sec_7d, 2),
+                                "avg_cpu_percent_7d": round(avg_cpu_percent_7d, 2),
+                                "tags": tags,
+                            },
+                            optimization_scenarios=optimization_scenarios,
+                            is_optimizable=is_optimizable,
+                            optimization_priority=optimization_priority,
+                            optimization_score=optimization_score,
+                            potential_monthly_savings=potential_monthly_savings,
+                            optimization_recommendations=optimization_recommendations,
+                            is_orphan=is_orphan,
+                            created_at_cloud=cluster.get("CreationTime"),
+                        )
+
+                        resources.append(resource)
+
+                        logger.debug(
+                            "msk.cluster_scanned",
+                            cluster_name=cluster_name,
+                            broker_instance_type=broker_instance_type,
+                            broker_count=broker_count,
+                            monthly_cost=monthly_cost,
+                            avg_throughput_mbps=round((avg_bytes_in_per_sec_7d + avg_bytes_out_per_sec_7d) / (1024 ** 2), 2),
+                            scenarios_count=len(optimization_scenarios),
+                            is_orphan=is_orphan,
+                        )
+
+                    except Exception as e:
+                        logger.error(
+                            "msk.cluster_scan_failed",
+                            cluster_arn=cluster_info.get("ClusterArn", "unknown"),
+                            region=region,
+                            error=str(e),
+                        )
+                        continue
+
+        except Exception as e:
+            logger.error(
+                "msk.scan_failed",
+                region=region,
+                error=str(e),
+            )
+
+        return resources
+
+    # ============================================================
+    # RESSOURCE 24 : SAGEMAKER ENDPOINT (ML INFERENCE)
+    # ============================================================
+    def _calculate_redshift_monthly_cost(
+        self,
+        node_type: str,
+        number_of_nodes: int,
+        storage_gb: float,
+        region: str,
+    ) -> float:
+        """
+        Calculate estimated monthly cost for AWS Redshift Cluster.
+
+        Redshift is a fully managed data warehouse service optimized for analytics workloads.
+        It uses columnar storage and parallel query execution for fast query performance.
+
+        Cost Components:
+        1. Node cost (dc2.large, dc2.xlarge, ra3.xlplus, ra3.4xlarge, etc.)
+        2. Storage cost (for RA3 nodes only - managed storage)
+        3. Backup storage cost (not included - typically minimal)
+
+        Args:
+            node_type: Node type (e.g., 'dc2.large', 'ra3.xlplus')
+            number_of_nodes: Number of nodes in cluster
+            storage_gb: Storage size in GB (for RA3 only)
+            region: AWS region
+
+        Returns:
+            Estimated monthly cost in USD
+
+        Example:
+            2-node cluster with dc2.large:
+            - Nodes: $0.25/hour * 730 hours * 2 = $365/month
+        """
+        monthly_hours = 730
+
+        # Node cost based on type
+        node_rate_map = {
+            "dc2.large": self.provider.PRICING.get("redshift_dc2_large", 0.25),         # 2 vCPU, 15 GB RAM, 160 GB SSD
+            "dc2.xlarge": self.provider.PRICING.get("redshift_dc2_xlarge", 1.00),       # 4 vCPU, 31 GB RAM, 2.56 TB SSD
+            "dc2.8xlarge": self.provider.PRICING.get("redshift_dc2_8xlarge", 4.80),     # 32 vCPU, 244 GB RAM, 2.56 TB SSD
+            "ra3.xlplus": self.provider.PRICING.get("redshift_ra3_xlplus", 1.086),      # 4 vCPU, 32 GB RAM, managed storage
+            "ra3.4xlarge": self.provider.PRICING.get("redshift_ra3_4xlarge", 3.26),     # 12 vCPU, 96 GB RAM, managed storage
+            "ra3.16xlarge": 13.04,   # 48 vCPU, 384 GB RAM, managed storage
+        }
+
+        node_hourly_rate = node_rate_map.get(node_type, 0.25)  # Default to dc2.large
+        node_cost = node_hourly_rate * monthly_hours * number_of_nodes
+
+        # Storage cost (only for RA3 nodes with managed storage)
+        storage_cost = 0.0
+        if "ra3" in node_type and storage_gb > 0:
+            storage_rate = self.provider.PRICING.get("redshift_storage_per_gb", 0.024)
+            storage_cost = storage_gb * storage_rate
+
+        total_cost = node_cost + storage_cost
+
+        return round(total_cost, 2)
+
+    def _calculate_redshift_optimization(
+        self,
+        cluster_identifier: str,
+        node_type: str,
+        number_of_nodes: int,
+        storage_gb: float,
+        avg_connections_7d: float,
+        avg_cpu_percent_7d: float,
+        avg_disk_usage_percent: float,
+        cluster_status: str,
+        tags: dict,
+        region: str,
+    ) -> list[OptimizationScenario]:
+        """
+        Calculate optimization scenarios for AWS Redshift Cluster.
+
+        Redshift Optimization Scenarios:
+        1. Zero Connections (CRITICAL) - No database connections for 7+ days → Pause/Delete cluster
+        2. Low Query Volume + Expensive Nodes (HIGH) - Low usage on expensive nodes (≥dc2.8xlarge) → Downsize or migrate to Aurora
+        3. Over-provisioned Nodes (MEDIUM) - Low CPU (<30%) + multi-node cluster → Reduce node count
+        4. Dev/Test Multi-Node (MEDIUM) - Dev/test cluster with >1 node → Single node cluster
+        5. No Concurrency Scaling (LOW) - Manual scaling → Enable concurrency scaling
+
+        Args:
+            cluster_identifier: Cluster identifier
+            node_type: Node type (e.g., 'dc2.large')
+            number_of_nodes: Number of nodes
+            storage_gb: Storage size in GB
+            avg_connections_7d: Average connections over 7 days
+            avg_cpu_percent_7d: Average CPU utilization over 7 days
+            avg_disk_usage_percent: Average disk usage percentage
+            cluster_status: Cluster status (available, paused, etc.)
+            tags: Resource tags
+            region: AWS region
+
+        Returns:
+            List of optimization scenarios with priority, estimated savings, and recommendations
+        """
+        scenarios = []
+
+        # Current cost
+        current_cost = self._calculate_redshift_monthly_cost(
+            node_type=node_type,
+            number_of_nodes=number_of_nodes,
+            storage_gb=storage_gb,
+            region=region,
+        )
+
+        # Detect environment from tags
+        env = tags.get("Environment", tags.get("environment", "")).lower()
+        is_production = env in ["production", "prod", "prd"]
+
+        # =============================================
+        # SCENARIO 1: Zero Connections (CRITICAL)
+        # =============================================
+        if avg_connections_7d < 0.1 and cluster_status == "available":
+            # No connections for 7+ days → Pause or Delete cluster
+            potential_savings = current_cost
+            scenarios.append(
+                OptimizationScenario(
+                    scenario_name="redshift_zero_connections",
+                    priority="CRITICAL",
+                    estimated_monthly_savings=potential_savings,
+                    current_monthly_cost=current_cost,
+                    optimized_monthly_cost=0.0,
+                    confidence_level="high",
+                    description=(
+                        f"Redshift cluster '{cluster_identifier}' has zero database connections "
+                        f"over the last 7 days. This cluster is completely idle."
+                    ),
+                    recommendation=(
+                        "Pause or delete this Redshift cluster:\n"
+                        f"1. Pause cluster (retains data): aws redshift pause-cluster --cluster-identifier {cluster_identifier}\n"
+                        f"2. Or delete cluster: aws redshift delete-cluster --cluster-identifier {cluster_identifier} --final-cluster-snapshot-identifier final-snapshot\n"
+                        f"3. Paused clusters only incur storage costs (~10% of compute cost)\n"
+                        f"4. Estimated savings: ${potential_savings:.2f}/month (100% if deleted, ~90% if paused)"
+                    ),
+                    action_complexity="low",
+                    risk_level="low",
+                    implementation_time="5 minutes",
+                )
+            )
+
+        # =============================================
+        # SCENARIO 2: Low Query Volume + Expensive Nodes (HIGH)
+        # =============================================
+        expensive_nodes = ["dc2.8xlarge", "ra3.4xlarge", "ra3.16xlarge"]
+        if avg_connections_7d < 10.0 and node_type in expensive_nodes:
+            # Low connections (<10 avg) on expensive nodes → Downsize to dc2.large or migrate
+            optimized_cost = self._calculate_redshift_monthly_cost(
+                node_type="dc2.large",
+                number_of_nodes=number_of_nodes,
+                storage_gb=0,  # dc2 has local storage
+                region=region,
+            )
+            potential_savings = current_cost - optimized_cost
+
+            scenarios.append(
+                OptimizationScenario(
+                    scenario_name="redshift_low_query_volume_expensive_nodes",
+                    priority="HIGH",
+                    estimated_monthly_savings=potential_savings,
+                    current_monthly_cost=current_cost,
+                    optimized_monthly_cost=optimized_cost,
+                    confidence_level="high",
+                    description=(
+                        f"Redshift cluster '{cluster_identifier}' has low connection rate "
+                        f"(avg {avg_connections_7d:.1f} connections) but uses expensive node type '{node_type}'. "
+                        f"Consider downsizing to dc2.large or migrating to Aurora PostgreSQL for OLTP workloads."
+                    ),
+                    recommendation=(
+                        f"Downsize to dc2.large or migrate to Aurora:\n"
+                        f"1. If OLAP workload: Resize cluster to dc2.large: aws redshift modify-cluster --node-type dc2.large\n"
+                        f"2. If OLTP workload: Migrate to Aurora PostgreSQL (lower cost for transactional queries)\n"
+                        f"3. Take snapshot before resize for rollback option\n"
+                        f"4. Estimated savings: ${potential_savings:.2f}/month ({(potential_savings / current_cost * 100):.0f}%)"
+                    ),
+                    action_complexity="medium",
+                    risk_level="medium",
+                    implementation_time="1 hour",
+                )
+            )
+
+        # =============================================
+        # SCENARIO 3: Over-provisioned Nodes (MEDIUM)
+        # =============================================
+        if avg_cpu_percent_7d < 30.0 and number_of_nodes > 1:
+            # Low CPU (<30%) + multi-node → Reduce node count
+            optimized_nodes = max(1, number_of_nodes // 2)
+            optimized_cost = self._calculate_redshift_monthly_cost(
+                node_type=node_type,
+                number_of_nodes=optimized_nodes,
+                storage_gb=storage_gb if "ra3" in node_type else 0,
+                region=region,
+            )
+            potential_savings = current_cost - optimized_cost
+
+            scenarios.append(
+                OptimizationScenario(
+                    scenario_name="redshift_over_provisioned_nodes",
+                    priority="MEDIUM",
+                    estimated_monthly_savings=potential_savings,
+                    current_monthly_cost=current_cost,
+                    optimized_monthly_cost=optimized_cost,
+                    confidence_level="high",
+                    description=(
+                        f"Redshift cluster '{cluster_identifier}' has low CPU utilization "
+                        f"(avg {avg_cpu_percent_7d:.1f}%) with {number_of_nodes} nodes. "
+                        f"The cluster is over-provisioned and can be downsized."
+                    ),
+                    recommendation=(
+                        f"Reduce node count to {optimized_nodes} nodes:\n"
+                        f"1. Resize cluster: aws redshift modify-cluster --cluster-identifier {cluster_identifier} --number-of-nodes {optimized_nodes}\n"
+                        f"2. Monitor query performance after resize\n"
+                        f"3. Redshift will redistribute data automatically\n"
+                        f"4. Estimated savings: ${potential_savings:.2f}/month ({(potential_savings / current_cost * 100):.0f}%)"
+                    ),
+                    action_complexity="medium",
+                    risk_level="low",
+                    implementation_time="30 minutes",
+                )
+            )
+
+        # =============================================
+        # SCENARIO 4: Dev/Test Multi-Node (MEDIUM)
+        # =============================================
+        if not is_production and number_of_nodes > 1:
+            # Dev/test cluster with multi-node → Single node
+            optimized_cost = self._calculate_redshift_monthly_cost(
+                node_type=node_type,
+                number_of_nodes=1,
+                storage_gb=storage_gb if "ra3" in node_type else 0,
+                region=region,
+            )
+            potential_savings = current_cost - optimized_cost
+
+            scenarios.append(
+                OptimizationScenario(
+                    scenario_name="redshift_dev_test_multi_node",
+                    priority="MEDIUM",
+                    estimated_monthly_savings=potential_savings,
+                    current_monthly_cost=current_cost,
+                    optimized_monthly_cost=optimized_cost,
+                    confidence_level="high",
+                    description=(
+                        f"Redshift cluster '{cluster_identifier}' is tagged as dev/test but has "
+                        f"{number_of_nodes} nodes. Dev/test workloads typically don't require "
+                        f"multi-node clusters for parallel processing."
+                    ),
+                    recommendation=(
+                        f"Reduce to single-node cluster for dev/test:\n"
+                        f"1. Resize cluster: aws redshift modify-cluster --cluster-identifier {cluster_identifier} --number-of-nodes 1\n"
+                        f"2. Single node is sufficient for most dev/test workloads\n"
+                        f"3. Use production cluster for load testing\n"
+                        f"4. Estimated savings: ${potential_savings:.2f}/month ({(potential_savings / current_cost * 100):.0f}%)"
+                    ),
+                    action_complexity="low",
+                    risk_level="low",
+                    implementation_time="20 minutes",
+                )
+            )
+
+        # =============================================
+        # SCENARIO 5: No Concurrency Scaling (LOW)
+        # =============================================
+        # Note: Concurrency scaling is determined by cluster settings, not exposed in describe-clusters
+        # This scenario is informational/best-practice recommendation
+        scenarios.append(
+            OptimizationScenario(
+                scenario_name="redshift_no_concurrency_scaling",
+                priority="LOW",
+                estimated_monthly_savings=0.0,  # Variable savings based on workload spikes
+                current_monthly_cost=current_cost,
+                optimized_monthly_cost=current_cost,
+                confidence_level="medium",
+                description=(
+                    f"Redshift cluster '{cluster_identifier}' may not have concurrency scaling enabled. "
+                    f"Concurrency scaling automatically adds compute capacity during query spikes, "
+                    f"preventing queue delays without over-provisioning base cluster."
+                ),
+                recommendation=(
+                    f"Enable concurrency scaling for cost efficiency:\n"
+                    f"1. Enable in cluster parameter group: concurrency_scaling_mode = auto\n"
+                    f"2. Set max_concurrency_scaling_clusters (default: 10)\n"
+                    f"3. Free for up to 1 hour/day of usage\n"
+                    f"4. Benefit: Handle query spikes without over-provisioning base cluster"
+                ),
+                action_complexity="low",
+                risk_level="low",
+                implementation_time="10 minutes",
+            )
+        )
+
+        return scenarios
+
+    async def scan_redshift_clusters(self, region: str) -> list[AllCloudResourceData]:
+        """
+        Scan ALL AWS Redshift Clusters for cost intelligence.
+
+        AWS Redshift is a fully managed data warehouse service optimized for analytics workloads.
+        It uses columnar storage and parallel query execution for fast performance on large datasets.
+
+        Use Cases:
+        - Business intelligence (BI) and analytics
+        - Data warehousing (ETL pipelines)
+        - Log analysis and event data processing
+
+        CloudWatch Metrics Used:
+        - DatabaseConnections (AWS/Redshift) - Average database connections
+        - CPUUtilization (AWS/Redshift) - CPU usage percentage
+        - PercentageDiskSpaceUsed (AWS/Redshift) - Disk usage percentage
+
+        Cost Optimization Scenarios:
+        1. Zero Connections (CRITICAL) - No connections for 7+ days → Pause/Delete
+        2. Low Query Volume + Expensive Nodes (HIGH) - <10 connections on expensive nodes → Downsize
+        3. Over-provisioned Nodes (MEDIUM) - Low CPU (<30%) + multi-node → Reduce nodes
+        4. Dev/Test Multi-Node (MEDIUM) - Dev/test with >1 node → Single node
+        5. No Concurrency Scaling (LOW) - Enable concurrency scaling for spike handling
+
+        Args:
+            region: AWS region to scan
+
+        Returns:
+            List of AllCloudResourceData for all Redshift clusters in region
+        """
+        resources = []
+
+        try:
+            async with self.session.client("redshift", region_name=region) as redshift:
+                # Describe all Redshift clusters
+                response = await redshift.describe_clusters()
+                clusters = response.get("Clusters", [])
+
+                logger.info(
+                    "redshift.clusters_found",
+                    region=region,
+                    cluster_count=len(clusters),
+                )
+
+                for cluster in clusters:
+                    try:
+                        cluster_identifier = cluster.get("ClusterIdentifier", "unknown")
+                        cluster_status = cluster.get("ClusterStatus", "unknown")
+
+                        # Extract cluster details
+                        node_type = cluster.get("NodeType", "dc2.large")
+                        number_of_nodes = cluster.get("NumberOfNodes", 1)
+
+                        # Calculate storage (for RA3 nodes, use TotalStorageCapacity; for DC2, estimate)
+                        storage_gb = 0.0
+                        if "ra3" in node_type:
+                            storage_gb = cluster.get("TotalStorageCapacity", 0) / (1024 ** 3)  # Convert bytes to GB
+
+                        # Extract tags
+                        tags_list = cluster.get("Tags", [])
+                        tags = {tag["Key"]: tag["Value"] for tag in tags_list}
+
+                        # ====================================
+                        # CLOUDWATCH METRICS (7-day lookback)
+                        # ====================================
+                        end_time = datetime.now(timezone.utc)
+                        start_time = end_time - timedelta(days=7)
+
+                        # Metric: DatabaseConnections (average connections)
+                        avg_connections_7d = await self._get_cloudwatch_metric_average(
+                            region=region,
+                            namespace="AWS/Redshift",
+                            metric_name="DatabaseConnections",
+                            dimensions=[
+                                {"Name": "ClusterIdentifier", "Value": cluster_identifier}
+                            ],
+                            start_time=start_time,
+                            end_time=end_time,
+                            period=3600,  # 1 hour
+                            statistic="Average",
+                        )
+
+                        # Metric: CPUUtilization (CPU usage)
+                        avg_cpu_percent_7d = await self._get_cloudwatch_metric_average(
+                            region=region,
+                            namespace="AWS/Redshift",
+                            metric_name="CPUUtilization",
+                            dimensions=[
+                                {"Name": "ClusterIdentifier", "Value": cluster_identifier}
+                            ],
+                            start_time=start_time,
+                            end_time=end_time,
+                            period=3600,  # 1 hour
+                            statistic="Average",
+                        )
+
+                        # Metric: PercentageDiskSpaceUsed (disk usage)
+                        avg_disk_usage_percent = await self._get_cloudwatch_metric_average(
+                            region=region,
+                            namespace="AWS/Redshift",
+                            metric_name="PercentageDiskSpaceUsed",
+                            dimensions=[
+                                {"Name": "ClusterIdentifier", "Value": cluster_identifier}
+                            ],
+                            start_time=start_time,
+                            end_time=end_time,
+                            period=3600,  # 1 hour
+                            statistic="Average",
+                        )
+
+                        # ====================================
+                        # COST CALCULATION
+                        # ====================================
+                        monthly_cost = self._calculate_redshift_monthly_cost(
+                            node_type=node_type,
+                            number_of_nodes=number_of_nodes,
+                            storage_gb=storage_gb,
+                            region=region,
+                        )
+
+                        # ====================================
+                        # OPTIMIZATION SCENARIOS
+                        # ====================================
+                        optimization_scenarios = self._calculate_redshift_optimization(
+                            cluster_identifier=cluster_identifier,
+                            node_type=node_type,
+                            number_of_nodes=number_of_nodes,
+                            storage_gb=storage_gb,
+                            avg_connections_7d=avg_connections_7d,
+                            avg_cpu_percent_7d=avg_cpu_percent_7d,
+                            avg_disk_usage_percent=avg_disk_usage_percent,
+                            cluster_status=cluster_status,
+                            tags=tags,
+                            region=region,
+                        )
+
+                        # ====================================
+                        # EXTRACT OPTIMIZATION FIELDS FROM SCENARIOS
+                        # ====================================
+                        (
+                            is_optimizable,
+                            optimization_priority,
+                            optimization_score,
+                            potential_monthly_savings,
+                            optimization_recommendations,
+                        ) = self._extract_optimization_fields_from_scenarios(
+                            optimization_scenarios
+                        )
+
+                        # ====================================
+                        # CHECK IF ORPHAN (Zero connections for 7+ days)
+                        # ====================================
+                        is_orphan = avg_connections_7d < 0.1 and cluster_status == "available"
+
+                        # ====================================
+                        # CREATE RESOURCE DATA
+                        # ====================================
+                        resource = AllCloudResourceData(
+                            resource_type="redshift_cluster",
+                            resource_id=cluster_identifier,
+                            resource_name=cluster_identifier,
+                            region=region,
+                            estimated_monthly_cost=monthly_cost,
+                            currency="USD",
+                            resource_metadata={
+                                "cluster_identifier": cluster_identifier,
+                                "cluster_status": cluster_status,
+                                "node_type": node_type,
+                                "number_of_nodes": number_of_nodes,
+                                "storage_gb": round(storage_gb, 2) if storage_gb > 0 else 0,
+                                "endpoint": cluster.get("Endpoint", {}).get("Address", ""),
+                                "avg_connections_7d": round(avg_connections_7d, 2),
+                                "avg_cpu_percent_7d": round(avg_cpu_percent_7d, 2),
+                                "avg_disk_usage_percent": round(avg_disk_usage_percent, 2),
+                                "tags": tags,
+                            },
+                            optimization_scenarios=optimization_scenarios,
+                            is_optimizable=is_optimizable,
+                            optimization_priority=optimization_priority,
+                            optimization_score=optimization_score,
+                            potential_monthly_savings=potential_monthly_savings,
+                            optimization_recommendations=optimization_recommendations,
+                            is_orphan=is_orphan,
+                            created_at_cloud=cluster.get("ClusterCreateTime"),
+                        )
+
+                        resources.append(resource)
+
+                        logger.debug(
+                            "redshift.cluster_scanned",
+                            cluster_identifier=cluster_identifier,
+                            node_type=node_type,
+                            number_of_nodes=number_of_nodes,
+                            monthly_cost=monthly_cost,
+                            avg_connections_7d=round(avg_connections_7d, 2),
+                            scenarios_count=len(optimization_scenarios),
+                            is_orphan=is_orphan,
+                        )
+
+                    except Exception as e:
+                        logger.error(
+                            "redshift.cluster_scan_failed",
+                            cluster_identifier=cluster.get("ClusterIdentifier", "unknown"),
+                            region=region,
+                            error=str(e),
+                        )
+                        continue
+
+        except Exception as e:
+            logger.error(
+                "redshift.scan_failed",
+                region=region,
+                error=str(e),
+            )
+
+        return resources
+
+    # ============================================================
+    # RESSOURCE 26 : VPN CONNECTION (SITE-TO-SITE VPN)
+    # ============================================================
+
+    def _calculate_vpn_connection_monthly_cost(
+        self,
+        region: str,
+    ) -> float:
+        """
+        Calculate estimated monthly cost for AWS VPN Connection.
+
+        VPN Connections provide secure connectivity between on-premises networks and AWS VPCs
+        using IPsec tunnels. Each connection has 2 tunnels for redundancy.
+
+        Cost Components:
+        1. Connection cost ($36/month flat rate per connection)
+        2. Data transfer cost (not included - varies by usage)
+
+        Args:
+            region: AWS region
+
+        Returns:
+            Estimated monthly cost in USD (flat rate)
+
+        Example:
+            Single VPN Connection:
+            - Connection: $36/month (flat rate)
+        """
+        # VPN Connection is a flat rate ($36/month)
+        vpn_cost = self.provider.PRICING.get("vpn_connection", 36.00)
+
+        return round(vpn_cost, 2)
+
+    def _calculate_vpn_connection_optimization(
+        self,
+        vpn_id: str,
+        total_bytes_in_30d: float,
+        total_bytes_out_30d: float,
+        tunnel_1_state: str,
+        tunnel_2_state: str,
+        vpn_state: str,
+        tags: dict,
+        region: str,
+    ) -> list[OptimizationScenario]:
+        """
+        Calculate optimization scenarios for AWS VPN Connection.
+
+        VPN Connection Optimization Scenarios:
+        1. Zero Data Transfer (CRITICAL) - No data transfer for 30+ days → Delete connection
+        2. Low Data Transfer (HIGH) - <100 MB/month + available state → Delete or consolidate
+        3. Single Tunnel Active (MEDIUM) - Only 1 of 2 tunnels UP → Check redundancy requirements
+        4. Replaced by Transit Gateway (MEDIUM) - Transit Gateway exists → Migrate to TGW
+        5. Dev/Test VPN (LOW) - Dev/test connection always up → Delete when not needed
+
+        Args:
+            vpn_id: VPN Connection ID
+            total_bytes_in_30d: Total incoming bytes over 30 days
+            total_bytes_out_30d: Total outgoing bytes over 30 days
+            tunnel_1_state: Tunnel 1 state (UP/DOWN)
+            tunnel_2_state: Tunnel 2 state (UP/DOWN)
+            vpn_state: VPN state (available, deleted, etc.)
+            tags: Resource tags
+            region: AWS region
+
+        Returns:
+            List of optimization scenarios with priority, estimated savings, and recommendations
+        """
+        scenarios = []
+
+        # Current cost (flat rate)
+        current_cost = self._calculate_vpn_connection_monthly_cost(region=region)
+
+        # Detect environment from tags
+        env = tags.get("Environment", tags.get("environment", "")).lower()
+        is_production = env in ["production", "prod", "prd"]
+
+        # Calculate total data transfer
+        total_bytes_transferred = total_bytes_in_30d + total_bytes_out_30d
+        total_mb_transferred = total_bytes_transferred / (1024 ** 2)
+
+        # =============================================
+        # SCENARIO 1: Zero Data Transfer (CRITICAL)
+        # =============================================
+        if total_bytes_transferred == 0 and vpn_state == "available":
+            # No data transfer for 30+ days → Delete connection
+            potential_savings = current_cost
+            scenarios.append(
+                OptimizationScenario(
+                    scenario_name="vpn_zero_data_transfer",
+                    priority="CRITICAL",
+                    estimated_monthly_savings=potential_savings,
+                    current_monthly_cost=current_cost,
+                    optimized_monthly_cost=0.0,
+                    confidence_level="high",
+                    description=(
+                        f"VPN Connection '{vpn_id}' has zero data transfer "
+                        f"over the last 30 days. This connection is completely idle and should be deleted."
+                    ),
+                    recommendation=(
+                        "Delete this VPN Connection to eliminate costs:\n"
+                        f"1. Verify no active routes pointing to this VPN\n"
+                        f"2. Delete VPN connection: aws ec2 delete-vpn-connection --vpn-connection-id {vpn_id}\n"
+                        f"3. Estimated savings: ${potential_savings:.2f}/month (100%)"
+                    ),
+                    action_complexity="low",
+                    risk_level="low",
+                    implementation_time="5 minutes",
+                )
+            )
+
+        # =============================================
+        # SCENARIO 2: Low Data Transfer (HIGH)
+        # =============================================
+        if total_mb_transferred < 100 and total_mb_transferred > 0 and vpn_state == "available":
+            # Low data transfer (<100 MB/month) → Delete or consolidate
+            potential_savings = current_cost
+            scenarios.append(
+                OptimizationScenario(
+                    scenario_name="vpn_low_data_transfer",
+                    priority="HIGH",
+                    estimated_monthly_savings=potential_savings,
+                    current_monthly_cost=current_cost,
+                    optimized_monthly_cost=0.0,
+                    confidence_level="high",
+                    description=(
+                        f"VPN Connection '{vpn_id}' has very low data transfer "
+                        f"({total_mb_transferred:.2f} MB over 30 days). This suggests minimal usage "
+                        f"and the connection may no longer be needed."
+                    ),
+                    recommendation=(
+                        f"Delete or consolidate VPN connection:\n"
+                        f"1. Investigate if workload can be migrated to AWS or consolidated with another VPN\n"
+                        f"2. If no longer needed: aws ec2 delete-vpn-connection --vpn-connection-id {vpn_id}\n"
+                        f"3. Estimated savings: ${potential_savings:.2f}/month (100%)"
+                    ),
+                    action_complexity="medium",
+                    risk_level="medium",
+                    implementation_time="15 minutes",
+                )
+            )
+
+        # =============================================
+        # SCENARIO 3: Single Tunnel Active (MEDIUM)
+        # =============================================
+        if vpn_state == "available" and ((tunnel_1_state == "UP" and tunnel_2_state == "DOWN") or
+                                          (tunnel_1_state == "DOWN" and tunnel_2_state == "UP")):
+            # Only one tunnel UP → Check redundancy
+            scenarios.append(
+                OptimizationScenario(
+                    scenario_name="vpn_single_tunnel_active",
+                    priority="MEDIUM",
+                    estimated_monthly_savings=0.0,  # Reliability issue, not cost savings
+                    current_monthly_cost=current_cost,
+                    optimized_monthly_cost=current_cost,
+                    confidence_level="high",
+                    description=(
+                        f"VPN Connection '{vpn_id}' has only one tunnel UP (Tunnel 1: {tunnel_1_state}, "
+                        f"Tunnel 2: {tunnel_2_state}). VPN connections should have both tunnels UP "
+                        f"for redundancy and high availability."
+                    ),
+                    recommendation=(
+                        f"Investigate and restore second tunnel:\n"
+                        f"1. Check on-premises VPN device configuration for both tunnels\n"
+                        f"2. Verify IPsec settings match AWS configuration\n"
+                        f"3. Review CloudWatch VPN tunnel status metrics\n"
+                        f"4. Both tunnels should be UP for redundancy (no cost impact)"
+                    ),
+                    action_complexity="medium",
+                    risk_level="high",
+                    implementation_time="30 minutes",
+                )
+            )
+
+        # =============================================
+        # SCENARIO 4: Replaced by Transit Gateway (MEDIUM)
+        # =============================================
+        # Note: This requires checking if Transit Gateway exists in same VPC/region
+        # This is a heuristic recommendation - actual migration requires analysis
+        scenarios.append(
+            OptimizationScenario(
+                scenario_name="vpn_replaced_by_transit_gateway",
+                priority="MEDIUM",
+                estimated_monthly_savings=0.0,  # TGW may be more cost-effective at scale
+                current_monthly_cost=current_cost,
+                optimized_monthly_cost=current_cost,
+                confidence_level="low",
+                description=(
+                    f"VPN Connection '{vpn_id}' may be a candidate for Transit Gateway migration. "
+                    f"Transit Gateway provides centralized connectivity management and can be more "
+                    f"cost-effective for multiple VPN connections or VPCs."
+                ),
+                recommendation=(
+                    f"Consider migrating to Transit Gateway if you have:\n"
+                    f"1. Multiple VPN connections (3+ VPNs)\n"
+                    f"2. Multiple VPC peering connections\n"
+                    f"3. Centralized network architecture requirement\n"
+                    f"4. Note: TGW has hourly charge ($0.05/hour) but simplifies management at scale"
+                ),
+                action_complexity="high",
+                risk_level="medium",
+                implementation_time="2 hours",
+            )
+        )
+
+        # =============================================
+        # SCENARIO 5: Dev/Test VPN Always Up (LOW)
+        # =============================================
+        if not is_production and vpn_state == "available":
+            # Dev/test VPN always up → Delete when not needed
+            potential_savings = current_cost * 0.5  # Assume 50% time not needed
+            scenarios.append(
+                OptimizationScenario(
+                    scenario_name="vpn_dev_test_always_up",
+                    priority="LOW",
+                    estimated_monthly_savings=potential_savings,
+                    current_monthly_cost=current_cost,
+                    optimized_monthly_cost=current_cost - potential_savings,
+                    confidence_level="medium",
+                    description=(
+                        f"VPN Connection '{vpn_id}' is tagged as dev/test but remains UP continuously. "
+                        f"Dev/test VPNs are typically only needed during business hours or active development periods."
+                    ),
+                    recommendation=(
+                        f"Delete VPN when not needed for dev/test:\n"
+                        f"1. Delete VPN outside business hours: aws ec2 delete-vpn-connection --vpn-connection-id {vpn_id}\n"
+                        f"2. Recreate when needed (configuration can be saved as template)\n"
+                        f"3. Or use Lambda to automate start/stop based on schedule\n"
+                        f"4. Estimated savings: ~${potential_savings:.2f}/month (50% time savings)"
+                    ),
+                    action_complexity="medium",
+                    risk_level="low",
+                    implementation_time="20 minutes",
+                )
+            )
+
+        return scenarios
+
+    async def scan_vpn_connections(self, region: str) -> list[AllCloudResourceData]:
+        """
+        Scan ALL AWS VPN Connections for cost intelligence.
+
+        AWS VPN Connections provide secure connectivity between on-premises networks and AWS VPCs
+        using IPsec tunnels. Each connection has 2 tunnels for redundancy and high availability.
+
+        Use Cases:
+        - Hybrid cloud connectivity (on-premises to AWS)
+        - Disaster recovery (backup connectivity)
+        - Secure remote access (site-to-site VPN)
+
+        CloudWatch Metrics Used:
+        - TunnelDataIn (AWS/VPN) - Incoming bytes over 30 days
+        - TunnelDataOut (AWS/VPN) - Outgoing bytes over 30 days
+        - TunnelState (AWS/VPN) - Tunnel status (UP/DOWN)
+
+        Cost Optimization Scenarios:
+        1. Zero Data Transfer (CRITICAL) - No data transfer for 30+ days → Delete
+        2. Low Data Transfer (HIGH) - <100 MB/month → Delete or consolidate
+        3. Single Tunnel Active (MEDIUM) - Only 1 of 2 tunnels UP → Fix redundancy
+        4. Replaced by Transit Gateway (MEDIUM) - Migrate to TGW for scale
+        5. Dev/Test VPN Always Up (LOW) - Delete when not needed
+
+        Args:
+            region: AWS region to scan
+
+        Returns:
+            List of AllCloudResourceData for all VPN Connections in region
+        """
+        resources = []
+
+        try:
+            async with self.session.client("ec2", region_name=region) as ec2:
+                # Describe all VPN connections
+                response = await ec2.describe_vpn_connections()
+                vpn_connections = response.get("VpnConnections", [])
+
+                logger.info(
+                    "vpn.connections_found",
+                    region=region,
+                    vpn_count=len(vpn_connections),
+                )
+
+                for vpn in vpn_connections:
+                    try:
+                        vpn_id = vpn.get("VpnConnectionId", "unknown")
+                        vpn_state = vpn.get("State", "unknown")
+
+                        # Skip deleted/deleting VPN connections
+                        if vpn_state in ["deleted", "deleting"]:
+                            continue
+
+                        # Extract VPN details
+                        vpn_type = vpn.get("Type", "ipsec.1")
+                        customer_gateway_id = vpn.get("CustomerGatewayId", "")
+                        vpn_gateway_id = vpn.get("VpnGatewayId", "")
+
+                        # Extract tunnel states
+                        vgw_telemetry = vpn.get("VgwTelemetry", [])
+                        tunnel_1_state = "DOWN"
+                        tunnel_2_state = "DOWN"
+
+                        if len(vgw_telemetry) >= 1:
+                            tunnel_1_state = vgw_telemetry[0].get("Status", "DOWN")
+                        if len(vgw_telemetry) >= 2:
+                            tunnel_2_state = vgw_telemetry[1].get("Status", "DOWN")
+
+                        # Extract tags
+                        tags_list = vpn.get("Tags", [])
+                        tags = {tag["Key"]: tag["Value"] for tag in tags_list}
+
+                        # ====================================
+                        # CLOUDWATCH METRICS (30-day lookback)
+                        # ====================================
+                        end_time = datetime.now(timezone.utc)
+                        start_time = end_time - timedelta(days=30)
+
+                        # Metric: TunnelDataIn (incoming bytes)
+                        total_bytes_in_30d = await self._get_cloudwatch_metric_sum(
+                            region=region,
+                            namespace="AWS/VPN",
+                            metric_name="TunnelDataIn",
+                            dimensions=[
+                                {"Name": "VpnId", "Value": vpn_id}
+                            ],
+                            start_time=start_time,
+                            end_time=end_time,
+                            period=86400,  # 1 day
+                            statistic="Sum",
+                        )
+
+                        # Metric: TunnelDataOut (outgoing bytes)
+                        total_bytes_out_30d = await self._get_cloudwatch_metric_sum(
+                            region=region,
+                            namespace="AWS/VPN",
+                            metric_name="TunnelDataOut",
+                            dimensions=[
+                                {"Name": "VpnId", "Value": vpn_id}
+                            ],
+                            start_time=start_time,
+                            end_time=end_time,
+                            period=86400,  # 1 day
+                            statistic="Sum",
+                        )
+
+                        # ====================================
+                        # COST CALCULATION
+                        # ====================================
+                        monthly_cost = self._calculate_vpn_connection_monthly_cost(region=region)
+
+                        # ====================================
+                        # OPTIMIZATION SCENARIOS
+                        # ====================================
+                        optimization_scenarios = self._calculate_vpn_connection_optimization(
+                            vpn_id=vpn_id,
+                            total_bytes_in_30d=total_bytes_in_30d,
+                            total_bytes_out_30d=total_bytes_out_30d,
+                            tunnel_1_state=tunnel_1_state,
+                            tunnel_2_state=tunnel_2_state,
+                            vpn_state=vpn_state,
+                            tags=tags,
+                            region=region,
+                        )
+
+                        # ====================================
+                        # EXTRACT OPTIMIZATION FIELDS FROM SCENARIOS
+                        # ====================================
+                        (
+                            is_optimizable,
+                            optimization_priority,
+                            optimization_score,
+                            potential_monthly_savings,
+                            optimization_recommendations,
+                        ) = self._extract_optimization_fields_from_scenarios(
+                            optimization_scenarios
+                        )
+
+                        # ====================================
+                        # CHECK IF ORPHAN (Zero data transfer for 30+ days)
+                        # ====================================
+                        total_bytes_transferred = total_bytes_in_30d + total_bytes_out_30d
+                        is_orphan = total_bytes_transferred == 0 and vpn_state == "available"
+
+                        # ====================================
+                        # CREATE RESOURCE DATA
+                        # ====================================
+                        resource = AllCloudResourceData(
+                            resource_type="vpn_connection",
+                            resource_id=vpn_id,
+                            resource_name=tags.get("Name", vpn_id),
+                            region=region,
+                            estimated_monthly_cost=monthly_cost,
+                            currency="USD",
+                            resource_metadata={
+                                "vpn_id": vpn_id,
+                                "vpn_state": vpn_state,
+                                "vpn_type": vpn_type,
+                                "customer_gateway_id": customer_gateway_id,
+                                "vpn_gateway_id": vpn_gateway_id,
+                                "tunnel_1_state": tunnel_1_state,
+                                "tunnel_2_state": tunnel_2_state,
+                                "total_bytes_in_30d": int(total_bytes_in_30d),
+                                "total_bytes_out_30d": int(total_bytes_out_30d),
+                                "total_mb_transferred_30d": round((total_bytes_in_30d + total_bytes_out_30d) / (1024 ** 2), 2),
+                                "tags": tags,
+                            },
+                            optimization_scenarios=optimization_scenarios,
+                            is_optimizable=is_optimizable,
+                            optimization_priority=optimization_priority,
+                            optimization_score=optimization_score,
+                            potential_monthly_savings=potential_monthly_savings,
+                            optimization_recommendations=optimization_recommendations,
+                            is_orphan=is_orphan,
+                            created_at_cloud=None,  # VPN connections don't have creation time in API
+                        )
+
+                        resources.append(resource)
+
+                        logger.debug(
+                            "vpn.connection_scanned",
+                            vpn_id=vpn_id,
+                            vpn_state=vpn_state,
+                            monthly_cost=monthly_cost,
+                            total_mb_transferred_30d=round((total_bytes_in_30d + total_bytes_out_30d) / (1024 ** 2), 2),
+                            scenarios_count=len(optimization_scenarios),
+                            is_orphan=is_orphan,
+                        )
+
+                    except Exception as e:
+                        logger.error(
+                            "vpn.connection_scan_failed",
+                            vpn_id=vpn.get("VpnConnectionId", "unknown"),
+                            region=region,
+                            error=str(e),
+                        )
+                        continue
+
+        except Exception as e:
+            logger.error(
+                "vpn.scan_failed",
+                region=region,
+                error=str(e),
+            )
+
+        return resources
+
+    # ============================================================
+    # RESSOURCE 27 : TRANSIT GATEWAY ATTACHMENT
+    # ============================================================
+
+    def _calculate_transit_gateway_monthly_cost(
+        self,
+        region: str,
+    ) -> float:
+        """
+        Calculate estimated monthly cost for AWS Transit Gateway Attachment.
+
+        Transit Gateway Attachments connect VPCs, VPNs, and on-premises networks
+        to a central Transit Gateway for simplified network topology.
+
+        Cost Components:
+        1. Attachment cost ($36/month flat rate per attachment)
+        2. Data processing cost (not included - varies by usage)
+
+        Args:
+            region: AWS region
+
+        Returns:
+            Estimated monthly cost in USD (flat rate)
+
+        Example:
+            Single TGW Attachment:
+            - Attachment: $36/month (flat rate)
+        """
+        # Transit Gateway Attachment is a flat rate ($36/month)
+        tgw_attachment_cost = self.provider.PRICING.get("transit_gateway_attachment", 36.00)
+
+        return round(tgw_attachment_cost, 2)
+
+    def _calculate_transit_gateway_optimization(
+        self,
+        attachment_id: str,
+        total_bytes_in_30d: float,
+        total_bytes_out_30d: float,
+        packet_drop_blackhole: float,
+        attachment_state: str,
+        resource_type: str,
+        tags: dict,
+        region: str,
+    ) -> list[OptimizationScenario]:
+        """
+        Calculate optimization scenarios for AWS Transit Gateway Attachment.
+
+        Transit Gateway Attachment Optimization Scenarios:
+        1. Zero Data Transfer (CRITICAL) - No data transfer for 30+ days → Delete attachment
+        2. Very Low Data Transfer (HIGH) - <100 MB/month → Delete or consolidate
+        3. Blackhole Packet Drops (MEDIUM) - Route invalid → Fix routing tables
+        4. Duplicate Attachment (MEDIUM) - Same VPC + TGW → Remove duplicates
+        5. Dev/Test Attachment (LOW) - Dev/test attachment always on → Delete when not needed
+
+        Args:
+            attachment_id: Transit Gateway Attachment ID
+            total_bytes_in_30d: Total incoming bytes over 30 days
+            total_bytes_out_30d: Total outgoing bytes over 30 days
+            packet_drop_blackhole: Packet drops due to blackhole routes over 7 days
+            attachment_state: Attachment state (available, deleted, etc.)
+            resource_type: Attachment resource type (vpc, vpn, etc.)
+            tags: Resource tags
+            region: AWS region
+
+        Returns:
+            List of optimization scenarios with priority, estimated savings, and recommendations
+        """
+        scenarios = []
+
+        # Current cost (flat rate)
+        current_cost = self._calculate_transit_gateway_monthly_cost(region=region)
+
+        # Detect environment from tags
+        env = tags.get("Environment", tags.get("environment", "")).lower()
+        is_production = env in ["production", "prod", "prd"]
+
+        # Calculate total data transfer
+        total_bytes_transferred = total_bytes_in_30d + total_bytes_out_30d
+        total_mb_transferred = total_bytes_transferred / (1024 ** 2)
+
+        # =============================================
+        # SCENARIO 1: Zero Data Transfer (CRITICAL)
+        # =============================================
+        if total_bytes_transferred == 0 and attachment_state == "available":
+            # No data transfer for 30+ days → Delete attachment
+            potential_savings = current_cost
+            scenarios.append(
+                OptimizationScenario(
+                    scenario_name="tgw_zero_data_transfer",
+                    priority="CRITICAL",
+                    estimated_monthly_savings=potential_savings,
+                    current_monthly_cost=current_cost,
+                    optimized_monthly_cost=0.0,
+                    confidence_level="high",
+                    description=(
+                        f"Transit Gateway Attachment '{attachment_id}' has zero data transfer "
+                        f"over the last 30 days. This attachment is completely idle and should be deleted."
+                    ),
+                    recommendation=(
+                        "Delete this Transit Gateway Attachment to eliminate costs:\n"
+                        "1. Verify no critical traffic is routed through this attachment\n"
+                        "2. aws ec2 delete-transit-gateway-attachment --transit-gateway-attachment-id "
+                        f"{attachment_id} --region {region}\n"
+                        "3. Update route tables if necessary\n\n"
+                        f"💰 Monthly Savings: ${potential_savings:.2f}"
+                    ),
+                    optimization_score=95,
+                )
+            )
+
+        # =============================================
+        # SCENARIO 2: Very Low Data Transfer (HIGH)
+        # =============================================
+        elif 0 < total_mb_transferred < 100 and attachment_state == "available":
+            # <100 MB/month → Delete or consolidate
+            potential_savings = current_cost
+            scenarios.append(
+                OptimizationScenario(
+                    scenario_name="tgw_low_data_transfer",
+                    priority="HIGH",
+                    estimated_monthly_savings=potential_savings,
+                    current_monthly_cost=current_cost,
+                    optimized_monthly_cost=0.0,
+                    confidence_level="high",
+                    description=(
+                        f"Transit Gateway Attachment '{attachment_id}' has very low data transfer "
+                        f"({total_mb_transferred:.2f} MB over 30 days). Consider consolidating traffic "
+                        f"through other attachments or deleting if not critical."
+                    ),
+                    recommendation=(
+                        "Delete or consolidate this Transit Gateway Attachment:\n"
+                        f"1. Current data transfer: {total_mb_transferred:.2f} MB/month\n"
+                        "2. Consider consolidating traffic through other attachments\n"
+                        "3. If not critical, delete to save costs\n"
+                        "4. aws ec2 delete-transit-gateway-attachment --transit-gateway-attachment-id "
+                        f"{attachment_id} --region {region}\n\n"
+                        f"💰 Monthly Savings: ${potential_savings:.2f}"
+                    ),
+                    optimization_score=85,
+                )
+            )
+
+        # =============================================
+        # SCENARIO 3: Blackhole Packet Drops (MEDIUM)
+        # =============================================
+        if packet_drop_blackhole > 1000:
+            # Route invalid → Fix routing tables
+            potential_savings = 0.0  # Opportunity cost
+            scenarios.append(
+                OptimizationScenario(
+                    scenario_name="tgw_blackhole_packet_drops",
+                    priority="MEDIUM",
+                    estimated_monthly_savings=potential_savings,
+                    current_monthly_cost=current_cost,
+                    optimized_monthly_cost=current_cost,
+                    confidence_level="high",
+                    description=(
+                        f"Transit Gateway Attachment '{attachment_id}' has {int(packet_drop_blackhole)} "
+                        f"blackhole packet drops over 7 days. This indicates invalid routing configuration. "
+                        f"The attachment is configured but not functioning properly."
+                    ),
+                    recommendation=(
+                        "Fix routing configuration for this Transit Gateway Attachment:\n"
+                        f"1. Blackhole packet drops: {int(packet_drop_blackhole)} (last 7 days)\n"
+                        "2. Check Transit Gateway route tables: aws ec2 describe-transit-gateway-route-tables\n"
+                        "3. Verify VPC/VPN route tables for valid routes\n"
+                        "4. Fix routes or delete attachment if not needed\n\n"
+                        "⚠️ No direct cost savings, but improves network reliability"
+                    ),
+                    optimization_score=70,
+                )
+            )
+
+        # =============================================
+        # SCENARIO 4: Duplicate Attachment (MEDIUM)
+        # =============================================
+        # Note: This scenario requires cross-attachment analysis, which is complex.
+        # For simplicity, we'll check if there are tags indicating duplication.
+        duplicate_tag = tags.get("Duplicate", tags.get("duplicate", "")).lower()
+        if duplicate_tag in ["true", "yes", "1"]:
+            # Same VPC + TGW → Remove duplicates
+            potential_savings = current_cost
+            scenarios.append(
+                OptimizationScenario(
+                    scenario_name="tgw_duplicate_attachment",
+                    priority="MEDIUM",
+                    estimated_monthly_savings=potential_savings,
+                    current_monthly_cost=current_cost,
+                    optimized_monthly_cost=0.0,
+                    confidence_level="medium",
+                    description=(
+                        f"Transit Gateway Attachment '{attachment_id}' appears to be a duplicate "
+                        f"(based on tags). Multiple attachments for the same VPC/Transit Gateway "
+                        f"can be consolidated."
+                    ),
+                    recommendation=(
+                        "Remove duplicate Transit Gateway Attachment:\n"
+                        "1. List all attachments: aws ec2 describe-transit-gateway-attachments\n"
+                        "2. Identify duplicate attachments for same VPC/TGW\n"
+                        "3. Delete duplicate: aws ec2 delete-transit-gateway-attachment "
+                        f"--transit-gateway-attachment-id {attachment_id} --region {region}\n\n"
+                        f"💰 Monthly Savings: ${potential_savings:.2f}"
+                    ),
+                    optimization_score=65,
+                )
+            )
+
+        # =============================================
+        # SCENARIO 5: Dev/Test Attachment (LOW)
+        # =============================================
+        if not is_production and env in ["dev", "test", "staging", "development"]:
+            # Dev/test attachment always on → Delete when not needed
+            potential_savings = current_cost
+            scenarios.append(
+                OptimizationScenario(
+                    scenario_name="tgw_dev_test_always_on",
+                    priority="LOW",
+                    estimated_monthly_savings=potential_savings,
+                    current_monthly_cost=current_cost,
+                    optimized_monthly_cost=0.0,
+                    confidence_level="medium",
+                    description=(
+                        f"Transit Gateway Attachment '{attachment_id}' is tagged as '{env}' environment "
+                        f"but remains always on. Dev/test attachments should be deleted when not in use."
+                    ),
+                    recommendation=(
+                        "Delete dev/test Transit Gateway Attachment when not needed:\n"
+                        f"1. Environment: {env}\n"
+                        "2. Delete during off-hours or non-testing periods\n"
+                        "3. Recreate when needed (IaC: Terraform/CloudFormation)\n"
+                        "4. aws ec2 delete-transit-gateway-attachment --transit-gateway-attachment-id "
+                        f"{attachment_id} --region {region}\n\n"
+                        f"💰 Monthly Savings: ${potential_savings:.2f}"
+                    ),
+                    optimization_score=50,
+                )
+            )
+
+        return scenarios
+
+    async def scan_transit_gateway_attachments(
+        self, region: str
+    ) -> list[AllCloudResourceData]:
+        """
+        Scan ALL AWS Transit Gateway Attachments for cost intelligence.
+
+        Transit Gateway Attachments connect VPCs, VPNs, Direct Connect gateways,
+        and peering connections to a central Transit Gateway hub.
+
+        CloudWatch Metrics Used:
+        - BytesIn (AWS/TransitGateway) - Incoming bytes over 30 days
+        - BytesOut (AWS/TransitGateway) - Outgoing bytes over 30 days
+        - PacketDropCountBlackhole (AWS/TransitGateway) - Packet drops due to invalid routes
+
+        Cost Optimization Scenarios:
+        1. Zero Data Transfer (CRITICAL) - No data transfer for 30+ days → Delete
+        2. Very Low Data Transfer (HIGH) - <100 MB/month → Delete or consolidate
+        3. Blackhole Packet Drops (MEDIUM) - Route invalid → Fix routing tables
+        4. Duplicate Attachment (MEDIUM) - Same VPC + TGW → Remove duplicates
+        5. Dev/Test Attachment (LOW) - Dev/test attachment always on → Delete when not needed
+
+        Args:
+            region: AWS region to scan
+
+        Returns:
+            List of all Transit Gateway Attachments with optimization recommendations
+        """
+        import structlog
+
+        logger = structlog.get_logger()
+        resources = []
+
+        try:
+            async with self.provider.session.client("ec2", region_name=region) as ec2:
+                async with self.provider.session.client(
+                    "cloudwatch", region_name=region
+                ) as cw:
+                    # Describe all Transit Gateway attachments
+                    response = await ec2.describe_transit_gateway_attachments()
+
+                    for attachment in response.get("TransitGatewayAttachments", []):
+                        try:
+                            attachment_id = attachment["TransitGatewayAttachmentId"]
+                            attachment_state = attachment.get("State", "unknown")
+                            resource_type = attachment.get("ResourceType", "unknown")
+
+                            # Skip deleted/deleting/failed attachments
+                            if attachment_state in ["deleted", "deleting", "failed"]:
+                                continue
+
+                            # Extract tags
+                            tags = {}
+                            for tag in attachment.get("Tags", []):
+                                tags[tag["Key"]] = tag["Value"]
+
+                            # ====================================
+                            # CLOUDWATCH METRICS (30-day lookback)
+                            # ====================================
+                            now = datetime.now(timezone.utc)
+                            start_time = now - timedelta(days=30)
+
+                            # BytesIn metric (30 days)
+                            bytes_in_response = await cw.get_metric_statistics(
+                                Namespace="AWS/TransitGateway",
+                                MetricName="BytesIn",
+                                Dimensions=[
+                                    {
+                                        "Name": "TransitGatewayAttachment",
+                                        "Value": attachment_id,
+                                    },
+                                ],
+                                StartTime=start_time,
+                                EndTime=now,
+                                Period=86400,  # 1 day
+                                Statistics=["Sum"],
+                            )
+                            total_bytes_in_30d = sum(
+                                dp["Sum"]
+                                for dp in bytes_in_response.get("Datapoints", [])
+                            )
+
+                            # BytesOut metric (30 days)
+                            bytes_out_response = await cw.get_metric_statistics(
+                                Namespace="AWS/TransitGateway",
+                                MetricName="BytesOut",
+                                Dimensions=[
+                                    {
+                                        "Name": "TransitGatewayAttachment",
+                                        "Value": attachment_id,
+                                    },
+                                ],
+                                StartTime=start_time,
+                                EndTime=now,
+                                Period=86400,  # 1 day
+                                Statistics=["Sum"],
+                            )
+                            total_bytes_out_30d = sum(
+                                dp["Sum"]
+                                for dp in bytes_out_response.get("Datapoints", [])
+                            )
+
+                            # PacketDropCountBlackhole metric (7 days)
+                            start_time_7d = now - timedelta(days=7)
+                            blackhole_response = await cw.get_metric_statistics(
+                                Namespace="AWS/TransitGateway",
+                                MetricName="PacketDropCountBlackhole",
+                                Dimensions=[
+                                    {
+                                        "Name": "TransitGatewayAttachment",
+                                        "Value": attachment_id,
+                                    },
+                                ],
+                                StartTime=start_time_7d,
+                                EndTime=now,
+                                Period=3600,  # 1 hour
+                                Statistics=["Sum"],
+                            )
+                            packet_drop_blackhole = sum(
+                                dp["Sum"]
+                                for dp in blackhole_response.get("Datapoints", [])
+                            )
+
+                            # ====================================
+                            # COST CALCULATION
+                            # ====================================
+                            monthly_cost = self._calculate_transit_gateway_monthly_cost(
+                                region=region
+                            )
+
+                            # ====================================
+                            # OPTIMIZATION SCENARIOS
+                            # ====================================
+                            optimization_scenarios = (
+                                self._calculate_transit_gateway_optimization(
+                                    attachment_id=attachment_id,
+                                    total_bytes_in_30d=total_bytes_in_30d,
+                                    total_bytes_out_30d=total_bytes_out_30d,
+                                    packet_drop_blackhole=packet_drop_blackhole,
+                                    attachment_state=attachment_state,
+                                    resource_type=resource_type,
+                                    tags=tags,
+                                    region=region,
+                                )
+                            )
+
+                            # ====================================
+                            # ORPHAN DETECTION
+                            # ====================================
+                            total_bytes_transferred = (
+                                total_bytes_in_30d + total_bytes_out_30d
+                            )
+                            is_orphan = (
+                                total_bytes_transferred == 0
+                                and attachment_state == "available"
+                            )
+
+                            # ====================================
+                            # EXTRACT OPTIMIZATION FIELDS FROM SCENARIOS
+                            # ====================================
+                            (
+                                is_optimizable,
+                                optimization_priority,
+                                optimization_score,
+                                potential_monthly_savings,
+                                optimization_recommendations,
+                            ) = self._extract_optimization_fields_from_scenarios(
+                                optimization_scenarios
+                            )
+
+                            # Apply detection rules filtering
+                            creation_time = attachment.get("CreationTime")
+                            resource_age_days = None
+                            if isinstance(creation_time, datetime):
+                                resource_age_days = self._safe_datetime_age(creation_time)
+
+                            if not self._should_include_resource("transit_gateway_attachment", resource_age_days):
+                                logger.debug("inventory.transit_gateway_filtered", attachment_id=attachment_id, age=resource_age_days)
+                                continue
+
+                            # ====================================
+                            # CREATE RESOURCE DATA
+                            # ====================================
+                            resource = AllCloudResourceData(
+                                resource_type="transit_gateway_attachment",
+                                resource_id=attachment_id,
+                                resource_name=tags.get("Name", attachment_id),
+                                region=region,
+                                estimated_monthly_cost=monthly_cost,
+                                currency="USD",
+                                resource_metadata={
+                                    "attachment_id": attachment_id,
+                                    "attachment_state": attachment_state,
+                                    "resource_type": resource_type,
+                                    "transit_gateway_id": attachment.get(
+                                        "TransitGatewayId", "unknown"
+                                    ),
+                                    "resource_id": attachment.get(
+                                        "ResourceId", "unknown"
+                                    ),
+                                    "resource_owner_id": attachment.get(
+                                        "ResourceOwnerId", "unknown"
+                                    ),
+                                    "total_bytes_in_30d": int(total_bytes_in_30d),
+                                    "total_bytes_out_30d": int(total_bytes_out_30d),
+                                    "total_mb_transferred_30d": round(
+                                        (total_bytes_in_30d + total_bytes_out_30d)
+                                        / (1024**2),
+                                        2,
+                                    ),
+                                    "packet_drop_blackhole_7d": int(
+                                        packet_drop_blackhole
+                                    ),
+                                    "tags": tags,
+                                },
+                                optimization_scenarios=optimization_scenarios,
+                                is_optimizable=is_optimizable,
+                                optimization_priority=optimization_priority,
+                                optimization_score=optimization_score,
+                                potential_monthly_savings=potential_monthly_savings,
+                                optimization_recommendations=optimization_recommendations,
+                                is_orphan=is_orphan,
+                                created_at_cloud=attachment.get("CreationTime"),
+                            )
+
+                            resources.append(resource)
+
+                            logger.debug(
+                                "tgw.attachment_scanned",
+                                attachment_id=attachment_id,
+                                attachment_state=attachment_state,
+                                monthly_cost=monthly_cost,
+                                total_mb_transferred_30d=round(
+                                    (total_bytes_in_30d + total_bytes_out_30d)
+                                    / (1024**2),
+                                    2,
+                                ),
+                                scenarios_count=len(optimization_scenarios),
+                                is_orphan=is_orphan,
+                            )
+
+                        except Exception as e:
+                            logger.error(
+                                "tgw.attachment_scan_failed",
+                                attachment_id=attachment.get(
+                                    "TransitGatewayAttachmentId", "unknown"
+                                ),
+                                region=region,
+                                error=str(e),
+                            )
+                            continue
+
+        except Exception as e:
+            logger.error(
+                "tgw.scan_failed",
+                region=region,
+                error=str(e),
+            )
+
+        return resources
+
+    # ============================================================
+    # RESSOURCE 28 : GLOBAL ACCELERATOR (CDN)
+    # ============================================================
+
+    def _calculate_global_accelerator_monthly_cost(
+        self,
+        region: str = "global",
+    ) -> float:
+        """
+        Calculate estimated monthly cost for AWS Global Accelerator.
+
+        Global Accelerator improves application availability and performance by routing traffic
+        through the AWS global network to optimal endpoints.
+
+        Cost Components:
+        1. Fixed fee ($18/month per accelerator)
+        2. Data transfer cost (not included - $0.025/GB varies by usage)
+
+        Args:
+            region: AWS region (always "global" for Global Accelerator)
+
+        Returns:
+            Estimated monthly cost in USD (fixed fee only)
+
+        Example:
+            Single Global Accelerator:
+            - Fixed fee: $18/month
+            - Data transfer: Variable (not included in base cost)
+        """
+        # Global Accelerator fixed fee ($18/month)
+        ga_cost = self.provider.PRICING.get("global_accelerator", 18.00)
+
+        return round(ga_cost, 2)
+
+    def _calculate_global_accelerator_optimization(
+        self,
+        accelerator_arn: str,
+        accelerator_name: str,
+        endpoint_count: int,
+        total_bytes_in_30d: float,
+        active_flow_count_7d: float,
+        enabled: bool,
+        tags: dict,
+        region: str = "global",
+    ) -> list[OptimizationScenario]:
+        """
+        Calculate optimization scenarios for AWS Global Accelerator.
+
+        Global Accelerator Optimization Scenarios:
+        1. Zero Endpoints Configured (CRITICAL) - No endpoints → Delete accelerator
+        2. Zero Traffic (HIGH) - No traffic for 30+ days → Delete accelerator
+        3. Very Low Traffic (MEDIUM) - <1 GB/month → Use CloudFront instead
+        4. No Active Flows (MEDIUM) - No active connections for 7+ days → Delete
+        5. Disabled Accelerator (LOW) - Accelerator disabled but still charged → Delete
+
+        Args:
+            accelerator_arn: Global Accelerator ARN
+            accelerator_name: Accelerator name
+            endpoint_count: Number of endpoints configured
+            total_bytes_in_30d: Total processed bytes over 30 days
+            active_flow_count_7d: Active flow count over 7 days
+            enabled: Whether accelerator is enabled
+            tags: Resource tags
+            region: AWS region (always "global")
+
+        Returns:
+            List of optimization scenarios with priority, estimated savings, and recommendations
+        """
+        scenarios = []
+
+        # Current cost (fixed fee only, data transfer not included)
+        current_cost = self._calculate_global_accelerator_monthly_cost(region=region)
+
+        # Detect environment from tags
+        env = tags.get("Environment", tags.get("environment", "")).lower()
+        is_production = env in ["production", "prod", "prd"]
+
+        # Calculate data transfer in GB
+        total_gb_transferred = total_bytes_in_30d / (1024**3)
+
+        # =============================================
+        # SCENARIO 1: Zero Endpoints Configured (CRITICAL)
+        # =============================================
+        if endpoint_count == 0:
+            # No endpoints → Delete accelerator
+            potential_savings = current_cost
+            scenarios.append(
+                OptimizationScenario(
+                    scenario_name="ga_zero_endpoints",
+                    priority="CRITICAL",
+                    estimated_monthly_savings=potential_savings,
+                    current_monthly_cost=current_cost,
+                    optimized_monthly_cost=0.0,
+                    confidence_level="high",
+                    description=(
+                        f"Global Accelerator '{accelerator_name}' has zero endpoints configured. "
+                        f"Without endpoints, the accelerator serves no purpose and should be deleted."
+                    ),
+                    recommendation=(
+                        "Delete Global Accelerator with no endpoints:\n"
+                        "1. Verify no endpoints are configured: aws globalaccelerator list-accelerators\n"
+                        f"2. Delete accelerator: aws globalaccelerator delete-accelerator --accelerator-arn {accelerator_arn}\n"
+                        "3. Wait for deletion to complete (can take a few minutes)\n\n"
+                        f"💰 Monthly Savings: ${potential_savings:.2f}"
+                    ),
+                    optimization_score=95,
+                )
+            )
+
+        # =============================================
+        # SCENARIO 2: Zero Traffic (HIGH)
+        # =============================================
+        elif total_bytes_in_30d == 0 and endpoint_count > 0:
+            # No traffic for 30+ days → Delete accelerator
+            potential_savings = current_cost
+            scenarios.append(
+                OptimizationScenario(
+                    scenario_name="ga_zero_traffic",
+                    priority="HIGH",
+                    estimated_monthly_savings=potential_savings,
+                    current_monthly_cost=current_cost,
+                    optimized_monthly_cost=0.0,
+                    confidence_level="high",
+                    description=(
+                        f"Global Accelerator '{accelerator_name}' has {endpoint_count} endpoint(s) "
+                        f"but zero traffic over the last 30 days. The accelerator is not being used."
+                    ),
+                    recommendation=(
+                        "Delete Global Accelerator with zero traffic:\n"
+                        "1. Verify no traffic: Check CloudWatch ProcessedBytesIn metric\n"
+                        f"2. Delete accelerator: aws globalaccelerator delete-accelerator --accelerator-arn {accelerator_arn}\n"
+                        "3. Remove DNS records pointing to accelerator\n\n"
+                        f"💰 Monthly Savings: ${potential_savings:.2f}"
+                    ),
+                    optimization_score=85,
+                )
+            )
+
+        # =============================================
+        # SCENARIO 3: Very Low Traffic (MEDIUM)
+        # =============================================
+        elif 0 < total_gb_transferred < 1:
+            # <1 GB/month → Use CloudFront instead
+            potential_savings = current_cost  # CloudFront has no fixed fee
+            scenarios.append(
+                OptimizationScenario(
+                    scenario_name="ga_low_traffic",
+                    priority="MEDIUM",
+                    estimated_monthly_savings=potential_savings,
+                    current_monthly_cost=current_cost,
+                    optimized_monthly_cost=0.0,
+                    confidence_level="medium",
+                    description=(
+                        f"Global Accelerator '{accelerator_name}' has very low traffic "
+                        f"({total_gb_transferred:.2f} GB over 30 days). For low traffic volumes, "
+                        f"CloudFront is more cost-effective (no fixed fee, $0.085/GB)."
+                    ),
+                    recommendation=(
+                        "Migrate from Global Accelerator to CloudFront for low traffic:\n"
+                        f"1. Current traffic: {total_gb_transferred:.2f} GB/month\n"
+                        f"2. Global Accelerator cost: ${current_cost}/month + ${total_gb_transferred * 0.025:.2f} (data transfer)\n"
+                        f"3. CloudFront cost: ${total_gb_transferred * 0.085:.2f} (no fixed fee)\n"
+                        "4. Migrate to CloudFront distribution\n"
+                        f"5. Delete accelerator: aws globalaccelerator delete-accelerator --accelerator-arn {accelerator_arn}\n\n"
+                        f"💰 Monthly Savings: ${potential_savings:.2f} (fixed fee)"
+                    ),
+                    optimization_score=70,
+                )
+            )
+
+        # =============================================
+        # SCENARIO 4: No Active Flows (MEDIUM)
+        # =============================================
+        if active_flow_count_7d == 0 and endpoint_count > 0:
+            # No active connections for 7+ days → Delete
+            potential_savings = current_cost
+            scenarios.append(
+                OptimizationScenario(
+                    scenario_name="ga_no_active_flows",
+                    priority="MEDIUM",
+                    estimated_monthly_savings=potential_savings,
+                    current_monthly_cost=current_cost,
+                    optimized_monthly_cost=0.0,
+                    confidence_level="high",
+                    description=(
+                        f"Global Accelerator '{accelerator_name}' has no active flows over the last 7 days. "
+                        f"No clients are actively using the accelerator."
+                    ),
+                    recommendation=(
+                        "Delete Global Accelerator with no active connections:\n"
+                        "1. Verify no active flows: Check CloudWatch ActiveFlowCount metric\n"
+                        f"2. Delete accelerator: aws globalaccelerator delete-accelerator --accelerator-arn {accelerator_arn}\n"
+                        "3. Update DNS records if necessary\n\n"
+                        f"💰 Monthly Savings: ${potential_savings:.2f}"
+                    ),
+                    optimization_score=65,
+                )
+            )
+
+        # =============================================
+        # SCENARIO 5: Disabled Accelerator (LOW)
+        # =============================================
+        if not enabled:
+            # Accelerator disabled but still charged → Delete
+            potential_savings = current_cost
+            scenarios.append(
+                OptimizationScenario(
+                    scenario_name="ga_disabled_accelerator",
+                    priority="LOW",
+                    estimated_monthly_savings=potential_savings,
+                    current_monthly_cost=current_cost,
+                    optimized_monthly_cost=0.0,
+                    confidence_level="high",
+                    description=(
+                        f"Global Accelerator '{accelerator_name}' is disabled but still incurs charges "
+                        f"(${current_cost}/month). Disabled accelerators should be deleted, not just disabled."
+                    ),
+                    recommendation=(
+                        "Delete disabled Global Accelerator (still charged):\n"
+                        "1. Accelerator is disabled but still costs money\n"
+                        f"2. Delete accelerator: aws globalaccelerator delete-accelerator --accelerator-arn {accelerator_arn}\n"
+                        "3. Recreate when needed if necessary\n\n"
+                        f"💰 Monthly Savings: ${potential_savings:.2f}"
+                    ),
+                    optimization_score=50,
+                )
+            )
+
+        return scenarios
+
+    async def scan_global_accelerators(
+        self, region: str
+    ) -> list[AllCloudResourceData]:
+        """
+        Scan ALL AWS Global Accelerators for cost intelligence.
+
+        Global Accelerator is a global service that improves application availability
+        and performance by routing traffic through AWS's global network.
+
+        IMPORTANT: Global Accelerator is a global service. This scan should only
+        be run in us-west-2 region to avoid duplicate results.
+
+        CloudWatch Metrics Used:
+        - ProcessedBytesIn (AWS/GlobalAccelerator) - Incoming bytes over 30 days
+        - ActiveFlowCount (AWS/GlobalAccelerator) - Active connections over 7 days
+
+        Cost Optimization Scenarios:
+        1. Zero Endpoints Configured (CRITICAL) - No endpoints → Delete accelerator
+        2. Zero Traffic (HIGH) - No traffic for 30+ days → Delete accelerator
+        3. Very Low Traffic (MEDIUM) - <1 GB/month → Use CloudFront instead
+        4. No Active Flows (MEDIUM) - No active connections for 7+ days → Delete
+        5. Disabled Accelerator (LOW) - Accelerator disabled but still charged → Delete
+
+        Args:
+            region: AWS region to scan (must be us-west-2 for Global Accelerator)
+
+        Returns:
+            List of all Global Accelerators with optimization recommendations
+        """
+        import structlog
+
+        logger = structlog.get_logger()
+        resources = []
+
+        # Global Accelerator is a global service, only check in us-west-2
+        if region != "us-west-2":
+            logger.debug("ga.skip_region", region=region, reason="Global Accelerator is only scanned in us-west-2")
+            return resources
+
+        try:
+            async with self.provider.session.client(
+                "globalaccelerator", region_name="us-west-2"
+            ) as ga:
+                async with self.provider.session.client(
+                    "cloudwatch", region_name="us-west-2"
+                ) as cw:
+                    # List all Global Accelerators
+                    response = await ga.list_accelerators()
+
+                    for accelerator in response.get("Accelerators", []):
+                        try:
+                            accelerator_arn = accelerator["AcceleratorArn"]
+                            accelerator_name = accelerator.get(
+                                "Name", accelerator_arn.split("/")[-1]
+                            )
+                            enabled = accelerator.get("Enabled", False)
+                            status = accelerator.get("Status", "unknown")
+
+                            # Skip deleted accelerators
+                            if status == "IN_PROGRESS":
+                                continue
+
+                            # Count endpoints
+                            endpoint_count = 0
+                            try:
+                                listeners_response = await ga.list_listeners(
+                                    AcceleratorArn=accelerator_arn
+                                )
+                                for listener in listeners_response.get("Listeners", []):
+                                    listener_arn = listener["ListenerArn"]
+                                    endpoint_groups = await ga.list_endpoint_groups(
+                                        ListenerArn=listener_arn
+                                    )
+                                    for eg in endpoint_groups.get("EndpointGroups", []):
+                                        endpoint_count += len(
+                                            eg.get("EndpointDescriptions", [])
+                                        )
+                            except Exception as e:
+                                logger.warning(
+                                    "ga.endpoint_count_failed",
+                                    accelerator_arn=accelerator_arn,
+                                    error=str(e),
+                                )
+
+                            # Extract tags
+                            tags = {}
+                            try:
+                                tags_response = await ga.list_tags_for_resource(
+                                    ResourceArn=accelerator_arn
+                                )
+                                for tag in tags_response.get("Tags", []):
+                                    tags[tag["Key"]] = tag["Value"]
+                            except Exception as e:
+                                logger.warning(
+                                    "ga.tags_failed",
+                                    accelerator_arn=accelerator_arn,
+                                    error=str(e),
+                                )
+
+                            # ====================================
+                            # CLOUDWATCH METRICS
+                            # ====================================
+                            now = datetime.now(timezone.utc)
+
+                            # ProcessedBytesIn metric (30 days)
+                            start_time_30d = now - timedelta(days=30)
+                            try:
+                                bytes_in_response = await cw.get_metric_statistics(
+                                    Namespace="AWS/GlobalAccelerator",
+                                    MetricName="ProcessedBytesIn",
+                                    Dimensions=[
+                                        {"Name": "Accelerator", "Value": accelerator_arn},
+                                    ],
+                                    StartTime=start_time_30d,
+                                    EndTime=now,
+                                    Period=86400,  # 1 day
+                                    Statistics=["Sum"],
+                                )
+                                total_bytes_in_30d = sum(
+                                    dp["Sum"]
+                                    for dp in bytes_in_response.get("Datapoints", [])
+                                )
+                            except Exception as e:
+                                logger.warning(
+                                    "ga.bytes_in_metric_failed",
+                                    accelerator_arn=accelerator_arn,
+                                    error=str(e),
+                                )
+                                total_bytes_in_30d = 0
+
+                            # ActiveFlowCount metric (7 days)
+                            start_time_7d = now - timedelta(days=7)
+                            try:
+                                flow_count_response = await cw.get_metric_statistics(
+                                    Namespace="AWS/GlobalAccelerator",
+                                    MetricName="ActiveFlowCount",
+                                    Dimensions=[
+                                        {"Name": "Accelerator", "Value": accelerator_arn},
+                                    ],
+                                    StartTime=start_time_7d,
+                                    EndTime=now,
+                                    Period=3600,  # 1 hour
+                                    Statistics=["Average"],
+                                )
+                                active_flow_count_7d = sum(
+                                    dp["Average"]
+                                    for dp in flow_count_response.get("Datapoints", [])
+                                )
+                            except Exception as e:
+                                logger.warning(
+                                    "ga.flow_count_metric_failed",
+                                    accelerator_arn=accelerator_arn,
+                                    error=str(e),
+                                )
+                                active_flow_count_7d = 0
+
+                            # ====================================
+                            # COST CALCULATION
+                            # ====================================
+                            monthly_cost = self._calculate_global_accelerator_monthly_cost(
+                                region="global"
+                            )
+
+                            # ====================================
+                            # OPTIMIZATION SCENARIOS
+                            # ====================================
+                            optimization_scenarios = (
+                                self._calculate_global_accelerator_optimization(
+                                    accelerator_arn=accelerator_arn,
+                                    accelerator_name=accelerator_name,
+                                    endpoint_count=endpoint_count,
+                                    total_bytes_in_30d=total_bytes_in_30d,
+                                    active_flow_count_7d=active_flow_count_7d,
+                                    enabled=enabled,
+                                    tags=tags,
+                                    region="global",
+                                )
+                            )
+
+                            # ====================================
+                            # ORPHAN DETECTION
+                            # ====================================
+                            is_orphan = (
+                                endpoint_count == 0
+                                or (total_bytes_in_30d == 0 and endpoint_count > 0)
+                            )
+
+                            # ====================================
+                            # EXTRACT OPTIMIZATION FIELDS FROM SCENARIOS
+                            # ====================================
+                            (
+                                is_optimizable,
+                                optimization_priority,
+                                optimization_score,
+                                potential_monthly_savings,
+                                optimization_recommendations,
+                            ) = self._extract_optimization_fields_from_scenarios(
+                                optimization_scenarios
+                            )
+
+                            # Apply detection rules filtering
+                            created_time = accelerator.get("CreatedTime")
+                            resource_age_days = None
+                            if isinstance(created_time, datetime):
+                                resource_age_days = self._safe_datetime_age(created_time)
+
+                            if not self._should_include_resource("global_accelerator", resource_age_days):
+                                logger.debug("inventory.global_accelerator_filtered", accelerator_arn=accelerator_arn, age=resource_age_days)
+                                continue
+
+                            # ====================================
+                            # CREATE RESOURCE DATA
+                            # ====================================
+                            resource = AllCloudResourceData(
+                                resource_type="global_accelerator",
+                                resource_id=accelerator_arn,
+                                resource_name=accelerator_name,
+                                region="global",
+                                estimated_monthly_cost=monthly_cost,
+                                currency="USD",
+                                resource_metadata={
+                                    "accelerator_arn": accelerator_arn,
+                                    "accelerator_name": accelerator_name,
+                                    "enabled": enabled,
+                                    "status": status,
+                                    "endpoint_count": endpoint_count,
+                                    "ip_addresses": accelerator.get("IpSets", []),
+                                    "dns_name": accelerator.get("DnsName", ""),
+                                    "total_bytes_in_30d": int(total_bytes_in_30d),
+                                    "total_gb_transferred_30d": round(
+                                        total_bytes_in_30d / (1024**3), 2
+                                    ),
+                                    "active_flow_count_7d": round(active_flow_count_7d, 2),
+                                    "tags": tags,
+                                },
+                                optimization_scenarios=optimization_scenarios,
+                                is_optimizable=is_optimizable,
+                                optimization_priority=optimization_priority,
+                                optimization_score=optimization_score,
+                                potential_monthly_savings=potential_monthly_savings,
+                                optimization_recommendations=optimization_recommendations,
+                                is_orphan=is_orphan,
+                                created_at_cloud=accelerator.get("CreatedTime"),
+                            )
+
+                            resources.append(resource)
+
+                            logger.debug(
+                                "ga.accelerator_scanned",
+                                accelerator_name=accelerator_name,
+                                enabled=enabled,
+                                endpoint_count=endpoint_count,
+                                monthly_cost=monthly_cost,
+                                total_gb_transferred_30d=round(
+                                    total_bytes_in_30d / (1024**3), 2
+                                ),
+                                scenarios_count=len(optimization_scenarios),
+                                is_orphan=is_orphan,
+                            )
+
+                        except Exception as e:
+                            logger.error(
+                                "ga.accelerator_scan_failed",
+                                accelerator_arn=accelerator.get("AcceleratorArn", "unknown"),
+                                error=str(e),
+                            )
+                            continue
+
+        except Exception as e:
+            logger.error(
+                "ga.scan_failed",
+                region=region,
+                error=str(e),
+            )
+
+        return resources
+
+    # ============================================================
+    # RESSOURCE 29 : DOCUMENTDB CLUSTER (MONGODB-COMPATIBLE DATABASE)
+    # ============================================================
+
+    def _calculate_documentdb_monthly_cost(
+        self,
+        instance_count: int,
+        instance_class: str,
+        region: str,
+    ) -> float:
+        """
+        Calculate estimated monthly cost for AWS DocumentDB Cluster.
+
+        DocumentDB is a fully managed MongoDB-compatible database service
+        with support for multi-instance clusters.
+
+        Cost Components:
+        1. Instance cost (per instance per hour)
+        2. Storage cost (billed separately, not included here)
+        3. I/O cost (billed separately, not included here)
+
+        Args:
+            instance_count: Number of instances in the cluster
+            instance_class: Instance class (e.g., db.r5.large)
+            region: AWS region
+
+        Returns:
+            Estimated monthly cost in USD (instances only)
+
+        Example:
+            Single db.r5.large instance:
+            - Instance: $0.277/hour × 730 hours = ~$199/month
+        """
+        monthly_hours = 730
+
+        # Instance pricing (only db.r5.large for MVP, default for others)
+        instance_hourly_rate = self.provider.PRICING.get("documentdb_r5_large", 0.277)
+
+        # Calculate total cost for all instances
+        total_cost = instance_hourly_rate * monthly_hours * instance_count
+
+        return round(total_cost, 2)
+
+    def _calculate_documentdb_optimization(
+        self,
+        cluster_id: str,
+        instance_count: int,
+        instance_class: str,
+        avg_connections_7d: float,
+        avg_cpu_7d: float,
+        cluster_status: str,
+        tags: dict,
+        region: str,
+    ) -> list[OptimizationScenario]:
+        """
+        Calculate optimization scenarios for AWS DocumentDB Cluster.
+
+        DocumentDB Cluster Optimization Scenarios:
+        1. Zero Connections (CRITICAL) - No connections for 7+ days → Delete cluster
+        2. Very Low Connections + Multi-Instance (HIGH) - <5 connections/day + >1 instance → Reduce instances
+        3. Low CPU + Multi-Instance (MEDIUM) - <20% CPU + >1 instance → Reduce instances
+        4. Stopped Cluster (MEDIUM) - Status = stopped + age > 7 days → Delete or snapshot
+        5. Oversized Instance (LOW) - Dev/test with production instance → Downsize
+
+        Args:
+            cluster_id: DocumentDB cluster identifier
+            instance_count: Number of instances in the cluster
+            instance_class: Instance class (e.g., db.r5.large)
+            avg_connections_7d: Average database connections over 7 days
+            avg_cpu_7d: Average CPU utilization over 7 days
+            cluster_status: Cluster status (available, stopped, etc.)
+            tags: Resource tags
+            region: AWS region
+
+        Returns:
+            List of optimization scenarios with priority, estimated savings, and recommendations
+        """
+        scenarios = []
+
+        # Current cost (per instance)
+        current_cost = self._calculate_documentdb_monthly_cost(
+            instance_count=instance_count,
+            instance_class=instance_class,
+            region=region,
+        )
+
+        # Cost per instance
+        cost_per_instance = current_cost / max(instance_count, 1)
+
+        # Detect environment from tags
+        env = tags.get("Environment", tags.get("environment", "")).lower()
+        is_production = env in ["production", "prod", "prd"]
+
+        # =============================================
+        # SCENARIO 1: Zero Connections (CRITICAL)
+        # =============================================
+        if avg_connections_7d == 0 and cluster_status == "available":
+            # No connections for 7+ days → Delete cluster
+            potential_savings = current_cost
+            scenarios.append(
+                OptimizationScenario(
+                    scenario_name="documentdb_zero_connections",
+                    priority="CRITICAL",
+                    estimated_monthly_savings=potential_savings,
+                    current_monthly_cost=current_cost,
+                    optimized_monthly_cost=0.0,
+                    confidence_level="high",
+                    description=(
+                        f"DocumentDB Cluster '{cluster_id}' has zero database connections "
+                        f"over the last 7 days ({instance_count} instance(s), ${current_cost}/month). "
+                        f"The cluster is completely idle and should be deleted."
+                    ),
+                    recommendation=(
+                        "Delete DocumentDB Cluster with zero connections:\n"
+                        "1. Verify no applications are using this cluster\n"
+                        f"2. Create final snapshot (optional): aws docdb create-db-cluster-snapshot --db-cluster-identifier {cluster_id} --db-cluster-snapshot-identifier final-snapshot-{cluster_id}\n"
+                        f"3. Delete cluster: aws docdb delete-db-cluster --db-cluster-identifier {cluster_id} --skip-final-snapshot --region {region}\n\n"
+                        f"💰 Monthly Savings: ${potential_savings:.2f}"
+                    ),
+                    optimization_score=95,
+                )
+            )
+
+        # =============================================
+        # SCENARIO 2: Very Low Connections + Multi-Instance (HIGH)
+        # =============================================
+        elif avg_connections_7d < 5 and instance_count > 1 and cluster_status == "available":
+            # <5 connections/day + >1 instance → Reduce to 1 instance
+            instances_to_remove = instance_count - 1
+            potential_savings = cost_per_instance * instances_to_remove
+            scenarios.append(
+                OptimizationScenario(
+                    scenario_name="documentdb_low_connections_multi_instance",
+                    priority="HIGH",
+                    estimated_monthly_savings=potential_savings,
+                    current_monthly_cost=current_cost,
+                    optimized_monthly_cost=cost_per_instance,
+                    confidence_level="high",
+                    description=(
+                        f"DocumentDB Cluster '{cluster_id}' has very low connection volume "
+                        f"({avg_connections_7d:.1f} connections over 7 days) but runs {instance_count} instances. "
+                        f"Reduce to 1 instance for dev/test workloads."
+                    ),
+                    recommendation=(
+                        "Reduce DocumentDB Cluster to 1 instance:\n"
+                        f"1. Current: {instance_count} instances, avg {avg_connections_7d:.1f} connections\n"
+                        f"2. Delete {instances_to_remove} instance(s): aws docdb delete-db-instance --db-instance-identifier <instance-id> --region {region}\n"
+                        "3. Keep only primary instance for low workloads\n\n"
+                        f"💰 Monthly Savings: ${potential_savings:.2f} ({instances_to_remove} instance(s))"
+                    ),
+                    optimization_score=85,
+                )
+            )
+
+        # =============================================
+        # SCENARIO 3: Low CPU + Multi-Instance (MEDIUM)
+        # =============================================
+        if avg_cpu_7d < 20 and instance_count > 1 and cluster_status == "available":
+            # <20% CPU + >1 instance → Reduce instances or downsize
+            instances_to_remove = instance_count - 1
+            potential_savings = cost_per_instance * instances_to_remove
+            scenarios.append(
+                OptimizationScenario(
+                    scenario_name="documentdb_low_cpu_multi_instance",
+                    priority="MEDIUM",
+                    estimated_monthly_savings=potential_savings,
+                    current_monthly_cost=current_cost,
+                    optimized_monthly_cost=cost_per_instance,
+                    confidence_level="medium",
+                    description=(
+                        f"DocumentDB Cluster '{cluster_id}' has low CPU utilization "
+                        f"({avg_cpu_7d:.1f}% over 7 days) with {instance_count} instances. "
+                        f"The cluster is over-provisioned and can be scaled down."
+                    ),
+                    recommendation=(
+                        "Reduce DocumentDB Cluster instances or downsize:\n"
+                        f"1. Current: {instance_count} instances, avg {avg_cpu_7d:.1f}% CPU\n"
+                        f"2. Option A: Delete {instances_to_remove} instance(s) (save ${potential_savings:.2f}/month)\n"
+                        f"3. Option B: Downsize instance class (e.g., {instance_class} → db.t3.medium)\n"
+                        "4. Monitor performance after change\n\n"
+                        f"💰 Monthly Savings: ${potential_savings:.2f} (remove instances)"
+                    ),
+                    optimization_score=70,
+                )
+            )
+
+        # =============================================
+        # SCENARIO 4: Stopped Cluster (MEDIUM)
+        # =============================================
+        if cluster_status == "stopped":
+            # Status = stopped → Delete or snapshot
+            potential_savings = current_cost  # Stopped clusters don't incur instance costs, but storage still costs
+            scenarios.append(
+                OptimizationScenario(
+                    scenario_name="documentdb_stopped_cluster",
+                    priority="MEDIUM",
+                    estimated_monthly_savings=potential_savings,
+                    current_monthly_cost=current_cost,
+                    optimized_monthly_cost=0.0,
+                    confidence_level="high",
+                    description=(
+                        f"DocumentDB Cluster '{cluster_id}' is stopped ({instance_count} instance(s)). "
+                        f"Stopped clusters still incur storage costs. Consider creating a snapshot and deleting."
+                    ),
+                    recommendation=(
+                        "Delete stopped DocumentDB Cluster (storage still charged):\n"
+                        "1. Cluster is stopped but storage is still billed\n"
+                        f"2. Create final snapshot: aws docdb create-db-cluster-snapshot --db-cluster-identifier {cluster_id} --db-cluster-snapshot-identifier final-snapshot-{cluster_id}\n"
+                        f"3. Delete cluster: aws docdb delete-db-cluster --db-cluster-identifier {cluster_id} --skip-final-snapshot --region {region}\n"
+                        "4. Restore from snapshot when needed\n\n"
+                        f"💰 Monthly Savings: ${potential_savings:.2f} (instance cost) + storage cost"
+                    ),
+                    optimization_score=65,
+                )
+            )
+
+        # =============================================
+        # SCENARIO 5: Oversized Instance (LOW)
+        # =============================================
+        if not is_production and env in ["dev", "test", "staging", "development"]:
+            # Dev/test with production instance → Downsize
+            # Estimate 50% savings by downsizing to db.t3.medium
+            potential_savings = current_cost * 0.5
+            scenarios.append(
+                OptimizationScenario(
+                    scenario_name="documentdb_oversized_instance_dev",
+                    priority="LOW",
+                    estimated_monthly_savings=potential_savings,
+                    current_monthly_cost=current_cost,
+                    optimized_monthly_cost=current_cost * 0.5,
+                    confidence_level="medium",
+                    description=(
+                        f"DocumentDB Cluster '{cluster_id}' is tagged as '{env}' environment "
+                        f"but uses production-grade instance class '{instance_class}'. "
+                        f"Dev/test environments should use smaller instance types."
+                    ),
+                    recommendation=(
+                        "Downsize DocumentDB Cluster for dev/test:\n"
+                        f"1. Environment: {env}\n"
+                        f"2. Current: {instance_class} ({instance_count} instance(s))\n"
+                        "3. Recommended: db.t3.medium or db.t4g.medium for dev/test\n"
+                        f"4. Modify instance class: aws docdb modify-db-instance --db-instance-identifier <instance-id> --db-instance-class db.t3.medium --apply-immediately --region {region}\n\n"
+                        f"💰 Monthly Savings: ~${potential_savings:.2f} (50% reduction)"
+                    ),
+                    optimization_score=50,
+                )
+            )
+
+        return scenarios
+
+    async def scan_documentdb_clusters(
+        self, region: str
+    ) -> list[AllCloudResourceData]:
+        """
+        Scan ALL AWS DocumentDB Clusters for cost intelligence.
+
+        DocumentDB is a fully managed MongoDB-compatible database service
+        designed for JSON data storage and querying.
+
+        CloudWatch Metrics Used:
+        - DatabaseConnections (AWS/DocDB) - Average connections over 7 days
+        - CPUUtilization (AWS/DocDB) - Average CPU % over 7 days
+        - FreeableMemory (AWS/DocDB) - Available memory
+
+        Cost Optimization Scenarios:
+        1. Zero Connections (CRITICAL) - No connections for 7+ days → Delete cluster
+        2. Very Low Connections + Multi-Instance (HIGH) - <5 connections/day + >1 instance → Reduce instances
+        3. Low CPU + Multi-Instance (MEDIUM) - <20% CPU + >1 instance → Reduce instances
+        4. Stopped Cluster (MEDIUM) - Status = stopped + age > 7 days → Delete or snapshot
+        5. Oversized Instance (LOW) - Dev/test with production instance → Downsize
+
+        Args:
+            region: AWS region to scan
+
+        Returns:
+            List of all DocumentDB Clusters with optimization recommendations
+        """
+        import structlog
+
+        logger = structlog.get_logger()
+        resources = []
+
+        try:
+            async with self.provider.session.client("docdb", region_name=region) as docdb:
+                async with self.provider.session.client(
+                    "cloudwatch", region_name=region
+                ) as cw:
+                    # Describe all DocumentDB clusters
+                    response = await docdb.describe_db_clusters()
+
+                    for cluster in response.get("DBClusters", []):
+                        try:
+                            cluster_id = cluster["DBClusterIdentifier"]
+                            cluster_status = cluster.get("Status", "unknown")
+                            engine = cluster.get("Engine", "docdb")
+                            engine_version = cluster.get("EngineVersion", "unknown")
+
+                            # Skip Neptune clusters (handled by scan_neptune_clusters)
+                            if engine != "docdb":
+                                continue
+
+                            # Get cluster members (instances)
+                            cluster_members = cluster.get("DBClusterMembers", [])
+                            instance_count = len(cluster_members)
+
+                            # Get instance class (from first instance)
+                            instance_class = "db.r5.large"  # Default
+                            if instance_count > 0:
+                                try:
+                                    first_instance_id = cluster_members[0].get(
+                                        "DBInstanceIdentifier"
+                                    )
+                                    if first_instance_id:
+                                        instances_response = (
+                                            await docdb.describe_db_instances(
+                                                DBInstanceIdentifier=first_instance_id
+                                            )
+                                        )
+                                        if instances_response.get("DBInstances"):
+                                            instance_class = instances_response[
+                                                "DBInstances"
+                                            ][0].get("DBInstanceClass", "db.r5.large")
+                                except Exception as e:
+                                    logger.warning(
+                                        "documentdb.instance_class_failed",
+                                        cluster_id=cluster_id,
+                                        error=str(e),
+                                    )
+
+                            # Extract tags
+                            tags = {}
+                            for tag in cluster.get("TagList", []):
+                                tags[tag["Key"]] = tag["Value"]
+
+                            # ====================================
+                            # CLOUDWATCH METRICS (7-day lookback)
+                            # ====================================
+                            now = datetime.now(timezone.utc)
+                            start_time = now - timedelta(days=7)
+
+                            # DatabaseConnections metric (7 days)
+                            try:
+                                connections_response = await cw.get_metric_statistics(
+                                    Namespace="AWS/DocDB",
+                                    MetricName="DatabaseConnections",
+                                    Dimensions=[
+                                        {"Name": "DBClusterIdentifier", "Value": cluster_id},
+                                    ],
+                                    StartTime=start_time,
+                                    EndTime=now,
+                                    Period=3600,  # 1 hour
+                                    Statistics=["Average"],
+                                )
+                                datapoints = connections_response.get("Datapoints", [])
+                                avg_connections_7d = (
+                                    sum(dp["Average"] for dp in datapoints) / len(datapoints)
+                                    if datapoints
+                                    else 0
+                                )
+                            except Exception as e:
+                                logger.warning(
+                                    "documentdb.connections_metric_failed",
+                                    cluster_id=cluster_id,
+                                    error=str(e),
+                                )
+                                avg_connections_7d = 0
+
+                            # CPUUtilization metric (7 days)
+                            try:
+                                cpu_response = await cw.get_metric_statistics(
+                                    Namespace="AWS/DocDB",
+                                    MetricName="CPUUtilization",
+                                    Dimensions=[
+                                        {"Name": "DBClusterIdentifier", "Value": cluster_id},
+                                    ],
+                                    StartTime=start_time,
+                                    EndTime=now,
+                                    Period=3600,  # 1 hour
+                                    Statistics=["Average"],
+                                )
+                                datapoints = cpu_response.get("Datapoints", [])
+                                avg_cpu_7d = (
+                                    sum(dp["Average"] for dp in datapoints) / len(datapoints)
+                                    if datapoints
+                                    else 0
+                                )
+                            except Exception as e:
+                                logger.warning(
+                                    "documentdb.cpu_metric_failed",
+                                    cluster_id=cluster_id,
+                                    error=str(e),
+                                )
+                                avg_cpu_7d = 0
+
+                            # ====================================
+                            # COST CALCULATION
+                            # ====================================
+                            monthly_cost = self._calculate_documentdb_monthly_cost(
+                                instance_count=max(instance_count, 1),
+                                instance_class=instance_class,
+                                region=region,
+                            )
+
+                            # ====================================
+                            # OPTIMIZATION SCENARIOS
+                            # ====================================
+                            optimization_scenarios = self._calculate_documentdb_optimization(
+                                cluster_id=cluster_id,
+                                instance_count=instance_count,
+                                instance_class=instance_class,
+                                avg_connections_7d=avg_connections_7d,
+                                avg_cpu_7d=avg_cpu_7d,
+                                cluster_status=cluster_status,
+                                tags=tags,
+                                region=region,
+                            )
+
+                            # ====================================
+                            # EXTRACT OPTIMIZATION FIELDS FROM SCENARIOS
+                            # ====================================
+                            (
+                                is_optimizable,
+                                optimization_priority,
+                                optimization_score,
+                                potential_monthly_savings,
+                                optimization_recommendations,
+                            ) = self._extract_optimization_fields_from_scenarios(
+                                optimization_scenarios
+                            )
+
+                            # ====================================
+                            # ORPHAN DETECTION
+                            # ====================================
+                            is_orphan = avg_connections_7d < 0.1 and cluster_status == "available"
+
+                            # Apply detection rules filtering
+                            cluster_create_time = cluster.get("ClusterCreateTime")
+                            resource_age_days = None
+                            if isinstance(cluster_create_time, datetime):
+                                resource_age_days = self._safe_datetime_age(cluster_create_time)
+
+                            if not self._should_include_resource("documentdb_cluster", resource_age_days):
+                                logger.debug("inventory.documentdb_filtered", cluster_id=cluster_id, age=resource_age_days)
+                                continue
+
+                            # ====================================
+                            # CREATE RESOURCE DATA
+                            # ====================================
+                            resource = AllCloudResourceData(
+                                resource_type="documentdb_cluster",
+                                resource_id=cluster_id,
+                                resource_name=cluster_id,
+                                region=region,
+                                estimated_monthly_cost=monthly_cost,
+                                currency="USD",
+                                resource_metadata={
+                                    "cluster_id": cluster_id,
+                                    "cluster_status": cluster_status,
+                                    "engine": engine,
+                                    "engine_version": engine_version,
+                                    "instance_count": instance_count,
+                                    "instance_class": instance_class,
+                                    "cluster_endpoint": cluster.get("Endpoint", ""),
+                                    "reader_endpoint": cluster.get("ReaderEndpoint", ""),
+                                    "port": cluster.get("Port", 27017),
+                                    "multi_az": cluster.get("MultiAZ", False),
+                                    "storage_encrypted": cluster.get("StorageEncrypted", False),
+                                    "avg_connections_7d": round(avg_connections_7d, 2),
+                                    "avg_cpu_7d": round(avg_cpu_7d, 2),
+                                    "tags": tags,
+                                },
+                                optimization_scenarios=optimization_scenarios,
+                                is_optimizable=is_optimizable,
+                                optimization_priority=optimization_priority,
+                                optimization_score=optimization_score,
+                                potential_monthly_savings=potential_monthly_savings,
+                                optimization_recommendations=optimization_recommendations,
+                                is_orphan=is_orphan,
+                                created_at_cloud=cluster.get("ClusterCreateTime"),
+                            )
+
+                            resources.append(resource)
+
+                            logger.debug(
+                                "documentdb.cluster_scanned",
+                                cluster_id=cluster_id,
+                                cluster_status=cluster_status,
+                                instance_count=instance_count,
+                                monthly_cost=monthly_cost,
+                                avg_connections_7d=round(avg_connections_7d, 2),
+                                avg_cpu_7d=round(avg_cpu_7d, 2),
+                                scenarios_count=len(optimization_scenarios),
+                                is_orphan=is_orphan,
+                            )
+
+                        except Exception as e:
+                            logger.error(
+                                "documentdb.cluster_scan_failed",
+                                cluster_id=cluster.get("DBClusterIdentifier", "unknown"),
+                                region=region,
+                                error=str(e),
+                            )
+                            continue
+
+        except Exception as e:
+            logger.error(
+                "documentdb.scan_failed",
+                region=region,
+                error=str(e),
+            )
+
+        return resources
 class AzureInventoryScanner:
     """Azure-specific inventory scanner for cost intelligence."""
 
@@ -4568,7 +11839,7 @@ class AzureInventoryScanner:
         try:
             from azure.identity import ClientSecretCredential
             from azure.mgmt.monitor import MonitorManagementClient
-            from datetime import datetime, timedelta
+            from datetime import datetime, timedelta, timezone
 
             credential = ClientSecretCredential(
                 tenant_id=self.tenant_id,
@@ -4630,7 +11901,7 @@ class AzureInventoryScanner:
         try:
             from azure.identity import ClientSecretCredential
             from azure.mgmt.monitor import MonitorManagementClient
-            from datetime import datetime, timedelta
+            from datetime import datetime, timedelta, timezone
 
             credential = ClientSecretCredential(
                 tenant_id=self.tenant_id,
@@ -11245,7 +18516,7 @@ class AzureInventoryScanner:
 
                         # Count recent backup jobs
                         try:
-                            from datetime import datetime, timedelta
+                            from datetime import datetime, timedelta, timezone
 
                             start_time = datetime.utcnow() - timedelta(days=30)
                             jobs = backup_client.backup_jobs.list(
@@ -11494,7 +18765,7 @@ class AzureInventoryScanner:
 
                         # Get pipeline runs from last 30 days
                         try:
-                            from datetime import datetime, timedelta
+                            from datetime import datetime, timedelta, timezone
 
                             end_time = datetime.utcnow()
                             start_time = end_time - timedelta(days=30)
@@ -11989,8 +19260,7 @@ class AzureInventoryScanner:
 
                     # Calculate days since SFTP enabled (if creation time available)
                     days_sftp_enabled = 30  # Placeholder
-                    if account.creation_time:
-                        from datetime import datetime
+                    if account.creation_time and isinstance(account.creation_time, datetime):
                         delta = datetime.utcnow() - account.creation_time
                         days_sftp_enabled = delta.days
 
@@ -22446,643 +29716,6 @@ class AzureInventoryScanner:
     # AWS - EKS CLUSTER (Cost Intelligence / Inventory Mode)
     # ============================================================================
 
-    async def scan_elasticache_clusters(self, region: str) -> list[AllCloudResourceData]:
-        """
-        Scan ALL AWS ElastiCache Clusters for cost intelligence.
-
-        This method scans ElastiCache clusters (Redis + Memcached) to provide cost
-        visibility and optimization recommendations. Unlike orphan detection, this
-        scans ALL clusters regardless of usage patterns.
-
-        Args:
-            region: AWS region to scan
-
-        Returns:
-            List of AllCloudResourceData objects for all ElastiCache clusters
-        """
-        resources: list[AllCloudResourceData] = []
-
-        try:
-            async with self.session.client("elasticache", region_name=region) as elasticache:
-                async with self.session.client("cloudwatch", region_name=region) as cloudwatch:
-                    # List all ElastiCache clusters (Redis + Memcached)
-                    response = await elasticache.describe_cache_clusters()
-                    clusters = response.get("CacheClusters", [])
-
-                    for cluster in clusters:
-                        try:
-                            cluster_id = cluster.get("CacheClusterId", "")
-                            cluster_status = cluster.get("CacheClusterStatus", "unknown")
-
-                            # Skip non-available clusters
-                            if cluster_status != "available":
-                                continue
-
-                            cluster_arn = cluster.get("ARN", "")
-                            created_at = cluster.get("CacheClusterCreateTime")
-
-                            # Extract cluster metadata
-                            node_type = cluster.get("CacheNodeType", "cache.m5.large")
-                            num_nodes = cluster.get("NumCacheNodes", 1)
-                            engine = cluster.get("Engine", "redis")
-                            engine_version = cluster.get("EngineVersion", "unknown")
-
-                            # Get CloudWatch metrics (last 7 days)
-                            end_time = datetime.utcnow()
-                            start_time = end_time - timedelta(days=7)
-
-                            # Get cache hits
-                            cache_hits = 0.0
-                            try:
-                                hits_response = await cloudwatch.get_metric_statistics(
-                                    Namespace="AWS/ElastiCache",
-                                    MetricName="CacheHits",
-                                    Dimensions=[
-                                        {"Name": "CacheClusterId", "Value": cluster_id},
-                                    ],
-                                    StartTime=start_time,
-                                    EndTime=end_time,
-                                    Period=604800,  # 7 days
-                                    Statistics=["Sum"],
-                                )
-                                datapoints = hits_response.get("Datapoints", [])
-                                if datapoints:
-                                    cache_hits = datapoints[0].get("Sum", 0.0)
-                            except Exception:
-                                pass
-
-                            # Get cache misses
-                            cache_misses = 0.0
-                            try:
-                                misses_response = await cloudwatch.get_metric_statistics(
-                                    Namespace="AWS/ElastiCache",
-                                    MetricName="CacheMisses",
-                                    Dimensions=[
-                                        {"Name": "CacheClusterId", "Value": cluster_id},
-                                    ],
-                                    StartTime=start_time,
-                                    EndTime=end_time,
-                                    Period=604800,  # 7 days
-                                    Statistics=["Sum"],
-                                )
-                                datapoints = misses_response.get("Datapoints", [])
-                                if datapoints:
-                                    cache_misses = datapoints[0].get("Sum", 0.0)
-                            except Exception:
-                                pass
-
-                            # Get current connections
-                            curr_connections = 0.0
-                            try:
-                                conn_response = await cloudwatch.get_metric_statistics(
-                                    Namespace="AWS/ElastiCache",
-                                    MetricName="CurrConnections",
-                                    Dimensions=[
-                                        {"Name": "CacheClusterId", "Value": cluster_id},
-                                    ],
-                                    StartTime=start_time,
-                                    EndTime=end_time,
-                                    Period=604800,  # 7 days
-                                    Statistics=["Average"],
-                                )
-                                datapoints = conn_response.get("Datapoints", [])
-                                if datapoints:
-                                    curr_connections = datapoints[0].get("Average", 0.0)
-                            except Exception:
-                                pass
-
-                            # Get memory usage
-                            memory_usage_percent = 0.0
-                            try:
-                                memory_response = await cloudwatch.get_metric_statistics(
-                                    Namespace="AWS/ElastiCache",
-                                    MetricName="DatabaseMemoryUsagePercentage",
-                                    Dimensions=[
-                                        {"Name": "CacheClusterId", "Value": cluster_id},
-                                    ],
-                                    StartTime=start_time,
-                                    EndTime=end_time,
-                                    Period=604800,  # 7 days
-                                    Statistics=["Average"],
-                                )
-                                datapoints = memory_response.get("Datapoints", [])
-                                if datapoints:
-                                    memory_usage_percent = datapoints[0].get("Average", 0.0)
-                            except Exception:
-                                pass
-
-                            # Calculate monthly cost
-                            monthly_cost = self._calculate_elasticache_monthly_cost(
-                                node_type=node_type,
-                                num_nodes=num_nodes,
-                                engine=engine,
-                                region=region,
-                            )
-
-                            # Calculate optimization metrics
-                            (
-                                is_optimizable,
-                                optimization_score,
-                                optimization_priority,
-                                potential_savings,
-                                optimization_recommendations,
-                            ) = self._calculate_elasticache_optimization(
-                                cluster=cluster,
-                                cache_hits=cache_hits,
-                                cache_misses=cache_misses,
-                                curr_connections=curr_connections,
-                                memory_usage_percent=memory_usage_percent,
-                                monthly_cost=monthly_cost,
-                            )
-
-                            # Calculate cache hit rate
-                            total_requests = cache_hits + cache_misses
-                            hit_rate = (cache_hits / total_requests * 100) if total_requests > 0 else 0.0
-
-                            # Build metadata
-                            metadata = {
-                                "cluster_id": cluster_id,
-                                "cluster_arn": cluster_arn,
-                                "cluster_status": cluster_status,
-                                "node_type": node_type,
-                                "num_nodes": num_nodes,
-                                "engine": engine,
-                                "engine_version": engine_version,
-                                "cache_hits": round(cache_hits, 2),
-                                "cache_misses": round(cache_misses, 2),
-                                "hit_rate_percent": round(hit_rate, 2),
-                                "curr_connections": round(curr_connections, 2),
-                                "memory_usage_percent": round(memory_usage_percent, 2),
-                            }
-
-                            # Create resource entry
-                            resource = AllCloudResourceData(
-                                resource_id=cluster_arn,
-                                resource_type="elasticache_cluster",
-                                resource_name=cluster_id,
-                                region=region,
-                                estimated_monthly_cost=monthly_cost,
-                                currency="USD",
-                                resource_metadata=metadata,
-                                created_at_cloud=created_at,
-                                is_optimizable=is_optimizable,
-                                optimization_score=optimization_score,
-                                optimization_priority=optimization_priority,
-                                potential_monthly_savings=potential_savings,
-                                optimization_recommendations=optimization_recommendations,
-                            )
-
-                            resources.append(resource)
-
-                        except Exception as e:
-                            logger.error(
-                                "elasticache.cluster_scan_failed",
-                                cluster_id=cluster.get("CacheClusterId", "Unknown"),
-                                region=region,
-                                error=str(e),
-                            )
-                            continue
-
-        except Exception as e:
-            logger.error(
-                "elasticache.scan_failed",
-                region=region,
-                error=str(e),
-            )
-
-        return resources
-
-    # =========================================================================
-    # AWS Kinesis Stream - Cost Optimization Scanning
-    # =========================================================================
-
-    def _calculate_kinesis_monthly_cost(
-        self,
-        shard_count: int,
-        retention_hours: int,
-        enhanced_fanout_consumers: int,
-        incoming_bytes_per_month: float,
-        region: str,
-    ) -> float:
-        """
-        Calculate estimated monthly cost for AWS Kinesis Stream.
-
-        Pricing model:
-        - Shard cost: $0.015/hour = $10.80/month per shard
-        - Data retention (3 tiers):
-          * Free: First 24 hours (default)
-          * Extended: 25-168 hours ($0.020/GB/month)
-          * Long-term: >168 hours ($0.026/GB/month)
-        - Enhanced fan-out: $0.015/hour = $10.95/month per consumer
-
-        Args:
-            shard_count: Number of shards
-            retention_hours: Retention period (24-8760 hours)
-            enhanced_fanout_consumers: Number of enhanced fan-out consumers
-            incoming_bytes_per_month: Monthly incoming data volume (bytes)
-            region: AWS region
-
-        Returns:
-            Estimated monthly cost in USD
-        """
-        # Shard cost
-        shard_monthly_cost = self.PRICING.get("kinesis_shard", 10.80)
-        total_shard_cost = shard_monthly_cost * shard_count
-
-        # Retention cost (beyond free 24h)
-        retention_cost = 0.0
-        if retention_hours > 24:
-            # Convert bytes to GB
-            data_gb = incoming_bytes_per_month / (1024**3)
-
-            if retention_hours <= 168:  # 25-168 hours (Extended)
-                retention_rate = self.PRICING.get("kinesis_retention_extended_per_gb", 0.020)
-                retention_cost = data_gb * retention_rate
-            else:  # >168 hours (Long-term)
-                retention_rate = self.PRICING.get("kinesis_retention_long_per_gb", 0.026)
-                retention_cost = data_gb * retention_rate
-
-        # Enhanced fan-out cost
-        fanout_monthly_cost = self.PRICING.get("kinesis_enhanced_fanout_per_consumer", 10.95)
-        total_fanout_cost = fanout_monthly_cost * enhanced_fanout_consumers
-
-        total_cost = total_shard_cost + retention_cost + total_fanout_cost
-        return total_cost
-
-    def _calculate_kinesis_optimization(
-        self,
-        stream: dict[str, Any],
-        incoming_records: float,
-        incoming_bytes: float,
-        get_records_count: float,
-        iterator_age_ms: float,
-        shard_count: int,
-        retention_hours: int,
-        enhanced_fanout_consumers: int,
-        monthly_cost: float,
-    ) -> tuple[bool, int, str, float, list[dict[str, Any]]]:
-        """
-        Analyze AWS Kinesis Stream for cost optimization opportunities.
-
-        Optimization scenarios (5):
-        1. Completely inactive - No incoming records (critical)
-        2. Written but never read - Data written, never consumed (high)
-        3. Under-utilized - <1% throughput used (high)
-        4. Excessive retention - >24h when not needed (medium)
-        5. Unused enhanced fan-out - Consumers not reading data (medium)
-
-        Returns:
-            (is_optimizable, optimization_score, priority, potential_savings, recommendations)
-        """
-        is_optimizable = False
-        optimization_score = 0
-        priority = "low"
-        potential_savings = 0.0
-        recommendations = []
-
-        # Scenario 1: CRITICAL - Completely inactive (no incoming records)
-        if incoming_records == 0.0:
-            is_optimizable = True
-            optimization_score = 95
-            priority = "critical"
-            potential_savings = monthly_cost  # Full savings
-            recommendations.append(
-                {
-                    "type": "delete_stream",
-                    "title": "Delete Completely Inactive Kinesis Stream",
-                    "description": f"Stream '{stream.get('StreamName', '')}' has received NO records in the last 7 days. "
-                    f"This stream is not being used and costs ${monthly_cost:.2f}/month.",
-                    "impact": "high",
-                    "estimated_savings": f"${monthly_cost:.2f}/month",
-                    "action": "Delete this unused Kinesis Stream",
-                    "risk": "low",
-                }
-            )
-            return (is_optimizable, optimization_score, priority, potential_savings, recommendations)
-
-        # Scenario 2: HIGH - Written but never read (waste of shards)
-        if incoming_records > 0 and get_records_count == 0.0:
-            is_optimizable = True
-            optimization_score = 85
-            priority = "high"
-            potential_savings = monthly_cost * 0.80  # 80% savings
-            recommendations.append(
-                {
-                    "type": "unused_stream",
-                    "title": "Stream Receives Data But Never Consumed",
-                    "description": f"Stream '{stream.get('StreamName', '')}' receives {incoming_records:.0f} records/week "
-                    f"but has ZERO GetRecords API calls. Data is written but never read.",
-                    "impact": "high",
-                    "estimated_savings": f"${potential_savings:.2f}/month",
-                    "action": "Review if this stream is still needed, or implement consumers",
-                    "risk": "medium",
-                }
-            )
-
-        # Scenario 3: HIGH - Under-utilized (<1% throughput)
-        # Kinesis shard capacity: 1 MB/s incoming, 2 MB/s outgoing, 1000 records/s
-        # For 7 days, max capacity = 1 MB/s * 604800s = ~575 GB incoming
-        max_incoming_bytes_7d = shard_count * 1_000_000 * 604800  # bytes
-        utilization_percent = (incoming_bytes / max_incoming_bytes_7d) * 100 if max_incoming_bytes_7d > 0 else 0
-
-        if utilization_percent < 1.0 and incoming_records > 0:
-            is_optimizable = True
-            optimization_score = max(optimization_score, 75)
-            priority = "high" if priority != "critical" else priority
-
-            # Estimate right-sized shard count
-            recommended_shards = max(1, int(shard_count * utilization_percent / 100))
-            shard_savings = (shard_count - recommended_shards) * self.PRICING.get("kinesis_shard", 10.80)
-            potential_savings = max(potential_savings, shard_savings)
-
-            recommendations.append(
-                {
-                    "type": "reduce_shards",
-                    "title": f"Kinesis Stream Under-Utilized ({utilization_percent:.2f}% Capacity)",
-                    "description": f"Stream '{stream.get('StreamName', '')}' uses only {utilization_percent:.2f}% "
-                    f"of its {shard_count} shard(s) capacity. Recommend reducing to {recommended_shards} shard(s).",
-                    "impact": "medium",
-                    "estimated_savings": f"${shard_savings:.2f}/month",
-                    "action": f"Reduce shard count from {shard_count} to {recommended_shards}",
-                    "risk": "low",
-                }
-            )
-
-        # Scenario 4: MEDIUM - Excessive retention (>24h when not needed)
-        # If iterator age is low (<1h), consumers are reading data quickly
-        # Extended retention (>24h) may be unnecessary
-        if retention_hours > 24 and iterator_age_ms < 3_600_000:  # <1 hour lag
-            is_optimizable = True
-            optimization_score = max(optimization_score, 60)
-            priority = "medium" if priority == "low" else priority
-
-            # Calculate retention cost savings
-            incoming_bytes_monthly = incoming_bytes * 4.33  # 7d → 30d estimate
-            data_gb = incoming_bytes_monthly / (1024**3)
-            retention_rate = self.PRICING.get("kinesis_retention_extended_per_gb", 0.020)
-            retention_savings = data_gb * retention_rate
-            potential_savings = max(potential_savings, retention_savings)
-
-            recommendations.append(
-                {
-                    "type": "reduce_retention",
-                    "title": f"Excessive Data Retention ({retention_hours} Hours)",
-                    "description": f"Stream '{stream.get('StreamName', '')}' retains data for {retention_hours} hours "
-                    f"but consumers process data within 1 hour. Default 24h retention is sufficient.",
-                    "impact": "low",
-                    "estimated_savings": f"${retention_savings:.2f}/month",
-                    "action": f"Reduce retention period from {retention_hours}h to 24h",
-                    "risk": "low",
-                }
-            )
-
-        # Scenario 5: MEDIUM - Unused enhanced fan-out (paying for consumers not reading)
-        if enhanced_fanout_consumers > 0 and get_records_count == 0.0:
-            is_optimizable = True
-            optimization_score = max(optimization_score, 65)
-            priority = "medium" if priority == "low" else priority
-
-            fanout_cost = enhanced_fanout_consumers * self.PRICING.get("kinesis_enhanced_fanout_per_consumer", 10.95)
-            potential_savings = max(potential_savings, fanout_cost)
-
-            recommendations.append(
-                {
-                    "type": "remove_fanout",
-                    "title": f"Unused Enhanced Fan-Out Consumers ({enhanced_fanout_consumers})",
-                    "description": f"Stream '{stream.get('StreamName', '')}' has {enhanced_fanout_consumers} "
-                    f"enhanced fan-out consumer(s) but zero GetRecords calls. These consumers are not reading data.",
-                    "impact": "medium",
-                    "estimated_savings": f"${fanout_cost:.2f}/month",
-                    "action": "Remove unused enhanced fan-out consumers",
-                    "risk": "low",
-                }
-            )
-
-        return (is_optimizable, optimization_score, priority, potential_savings, recommendations)
-
-    async def scan_kinesis_streams(self, region: str) -> list[AllCloudResourceData]:
-        """
-        Scan ALL AWS Kinesis Streams in a region for cost intelligence.
-
-        For each stream:
-        - Calculate monthly cost (shards + retention + enhanced fan-out)
-        - Fetch CloudWatch metrics (IncomingRecords, IncomingBytes, GetRecords, IteratorAge)
-        - Analyze optimization opportunities (5 scenarios)
-
-        Returns:
-            List of AllCloudResourceData entries for all Kinesis Streams
-        """
-        resources: list[AllCloudResourceData] = []
-
-        try:
-            async with self.session.client("kinesis", region_name=region) as kinesis:
-                async with self.session.client("cloudwatch", region_name=region) as cloudwatch:
-                    # List all streams
-                    paginator = kinesis.get_paginator("list_streams")
-                    stream_names = []
-
-                    async for page in paginator.paginate():
-                        stream_names.extend(page.get("StreamNames", []))
-
-                    logger.info(
-                        "inventory.kinesis.streams_found",
-                        region=region,
-                        count=len(stream_names),
-                    )
-
-                    # Process each stream
-                    for stream_name in stream_names:
-                        try:
-                            # Get stream details
-                            stream_response = await kinesis.describe_stream(StreamName=stream_name)
-                            stream_desc = stream_response.get("StreamDescription", {})
-
-                            stream_arn = stream_desc.get("StreamARN", "")
-                            stream_status = stream_desc.get("StreamStatus", "UNKNOWN")
-                            shard_count = len(stream_desc.get("Shards", []))
-                            retention_hours = stream_desc.get("RetentionPeriodHours", 24)
-                            encryption_type = stream_desc.get("EncryptionType", "NONE")
-                            created_timestamp = stream_desc.get("StreamCreationTimestamp")
-
-                            # Get enhanced fan-out consumers
-                            consumers_response = await kinesis.list_stream_consumers(StreamARN=stream_arn)
-                            consumers = consumers_response.get("Consumers", [])
-                            enhanced_fanout_consumers = len(consumers)
-
-                            # Get CloudWatch metrics (7 days)
-                            end_time = datetime.utcnow()
-                            start_time = end_time - timedelta(days=7)
-
-                            # Metric 1: IncomingRecords (sum)
-                            incoming_records_response = await cloudwatch.get_metric_statistics(
-                                Namespace="AWS/Kinesis",
-                                MetricName="IncomingRecords",
-                                Dimensions=[{"Name": "StreamName", "Value": stream_name}],
-                                StartTime=start_time,
-                                EndTime=end_time,
-                                Period=604800,  # 7 days
-                                Statistics=["Sum"],
-                            )
-                            incoming_records = (
-                                incoming_records_response["Datapoints"][0]["Sum"]
-                                if incoming_records_response.get("Datapoints")
-                                else 0.0
-                            )
-
-                            # Metric 2: IncomingBytes (sum)
-                            incoming_bytes_response = await cloudwatch.get_metric_statistics(
-                                Namespace="AWS/Kinesis",
-                                MetricName="IncomingBytes",
-                                Dimensions=[{"Name": "StreamName", "Value": stream_name}],
-                                StartTime=start_time,
-                                EndTime=end_time,
-                                Period=604800,
-                                Statistics=["Sum"],
-                            )
-                            incoming_bytes = (
-                                incoming_bytes_response["Datapoints"][0]["Sum"]
-                                if incoming_bytes_response.get("Datapoints")
-                                else 0.0
-                            )
-
-                            # Metric 3: GetRecords.Records (sum) - Consumption activity
-                            get_records_response = await cloudwatch.get_metric_statistics(
-                                Namespace="AWS/Kinesis",
-                                MetricName="GetRecords.Records",
-                                Dimensions=[{"Name": "StreamName", "Value": stream_name}],
-                                StartTime=start_time,
-                                EndTime=end_time,
-                                Period=604800,
-                                Statistics=["Sum"],
-                            )
-                            get_records_count = (
-                                get_records_response["Datapoints"][0]["Sum"]
-                                if get_records_response.get("Datapoints")
-                                else 0.0
-                            )
-
-                            # Metric 4: GetRecords.IteratorAgeMilliseconds (avg) - Consumer lag
-                            iterator_age_response = await cloudwatch.get_metric_statistics(
-                                Namespace="AWS/Kinesis",
-                                MetricName="GetRecords.IteratorAgeMilliseconds",
-                                Dimensions=[{"Name": "StreamName", "Value": stream_name}],
-                                StartTime=start_time,
-                                EndTime=end_time,
-                                Period=604800,
-                                Statistics=["Average"],
-                            )
-                            iterator_age_ms = (
-                                iterator_age_response["Datapoints"][0]["Average"]
-                                if iterator_age_response.get("Datapoints")
-                                else 0.0
-                            )
-
-                            # Calculate cost
-                            incoming_bytes_monthly = incoming_bytes * 4.33  # 7d → 30d estimate
-                            monthly_cost = self._calculate_kinesis_monthly_cost(
-                                shard_count=shard_count,
-                                retention_hours=retention_hours,
-                                enhanced_fanout_consumers=enhanced_fanout_consumers,
-                                incoming_bytes_per_month=incoming_bytes_monthly,
-                                region=region,
-                            )
-
-                            # Calculate optimization
-                            (
-                                is_optimizable,
-                                optimization_score,
-                                priority,
-                                potential_savings,
-                                recommendations,
-                            ) = self._calculate_kinesis_optimization(
-                                stream=stream_desc,
-                                incoming_records=incoming_records,
-                                incoming_bytes=incoming_bytes,
-                                get_records_count=get_records_count,
-                                iterator_age_ms=iterator_age_ms,
-                                shard_count=shard_count,
-                                retention_hours=retention_hours,
-                                enhanced_fanout_consumers=enhanced_fanout_consumers,
-                                monthly_cost=monthly_cost,
-                            )
-
-                            # Build metadata
-                            resource_metadata = {
-                                "stream_name": stream_name,
-                                "stream_arn": stream_arn,
-                                "stream_status": stream_status,
-                                "shard_count": shard_count,
-                                "retention_hours": retention_hours,
-                                "encryption_type": encryption_type,
-                                "enhanced_fanout_consumers": enhanced_fanout_consumers,
-                                "created_timestamp": created_timestamp.isoformat() if created_timestamp else None,
-                                "metrics": {
-                                    "incoming_records_7d": incoming_records,
-                                    "incoming_bytes_7d": incoming_bytes,
-                                    "get_records_count_7d": get_records_count,
-                                    "iterator_age_ms_avg": iterator_age_ms,
-                                },
-                            }
-
-                            # Apply detection rules filtering
-                            resource_age_days = None
-                            if created_timestamp:
-                                resource_age_days = (datetime.utcnow() - created_timestamp.replace(tzinfo=None)).days
-
-                            if not self._should_include_resource("kinesis_stream", resource_age_days):
-                                logger.debug("inventory.kinesis_filtered", stream=stream_name, age=resource_age_days)
-                                continue
-
-                            # Create resource entry
-                            resource = AllCloudResourceData(
-                                resource_id=stream_arn,
-                                resource_type="kinesis_stream",
-                                resource_name=stream_name,
-                                region=region,
-                                estimated_monthly_cost=monthly_cost,
-                                currency="USD",
-                                resource_metadata=resource_metadata,
-                                is_optimizable=is_optimizable,
-                                optimization_score=optimization_score,
-                                optimization_priority=priority,
-                                potential_monthly_savings=potential_savings,
-                                optimization_recommendations=recommendations,
-                            )
-
-                            resources.append(resource)
-
-                            logger.info(
-                                "inventory.kinesis.stream_scanned",
-                                stream_name=stream_name,
-                                region=region,
-                                shard_count=shard_count,
-                                monthly_cost=monthly_cost,
-                                is_optimizable=is_optimizable,
-                                optimization_score=optimization_score,
-                            )
-
-                        except Exception as e:
-                            logger.error(
-                                "inventory.kinesis.stream_scan_error",
-                                stream_name=stream_name,
-                                region=region,
-                                error=str(e),
-                            )
-                            continue
-
-        except Exception as e:
-            logger.error(
-                "kinesis.scan_failed",
-                region=region,
-                error=str(e),
-            )
-
-        return resources
-
-    # =========================================================================
-    # AWS FSx File System - Cost Optimization Scanning
-    # =========================================================================
-
     def _calculate_fsx_monthly_cost(
         self,
         file_system_type: str,
@@ -23117,17 +29750,17 @@ class AzureInventoryScanner:
         # Storage cost
         storage_cost = 0.0
         if file_system_type == "LUSTRE":
-            storage_rate = self.PRICING.get("fsx_lustre_per_gb", 0.145)
+            storage_rate = self.provider.PRICING.get("fsx_lustre_per_gb", 0.145)
             storage_cost = storage_capacity_gb * storage_rate
         elif file_system_type == "WINDOWS":
             # Detect HDD vs SSD based on deployment_type or assume SSD
-            storage_rate = self.PRICING.get("fsx_windows_per_gb", 0.13)
+            storage_rate = self.provider.PRICING.get("fsx_windows_per_gb", 0.13)
             storage_cost = storage_capacity_gb * storage_rate
         elif file_system_type == "ONTAP":
-            storage_rate = self.PRICING.get("fsx_ontap_per_gb", 0.144)
+            storage_rate = self.provider.PRICING.get("fsx_ontap_per_gb", 0.144)
             storage_cost = storage_capacity_gb * storage_rate
         elif file_system_type == "OPENZFS":
-            storage_rate = self.PRICING.get("fsx_openzfs_per_gb", 0.0996)
+            storage_rate = self.provider.PRICING.get("fsx_openzfs_per_gb", 0.0996)
             storage_cost = storage_capacity_gb * storage_rate
         else:
             # Fallback
@@ -23136,11 +29769,11 @@ class AzureInventoryScanner:
         # Throughput cost (if applicable)
         throughput_cost = 0.0
         if throughput_capacity_mbps > 0:
-            throughput_rate = self.PRICING.get("fsx_throughput_per_mbps", 2.20)
+            throughput_rate = self.provider.PRICING.get("fsx_throughput_per_mbps", 2.20)
             throughput_cost = throughput_capacity_mbps * throughput_rate
 
         # Backup cost
-        backup_rate = self.PRICING.get("fsx_backup_per_gb", 0.05)
+        backup_rate = self.provider.PRICING.get("fsx_backup_per_gb", 0.05)
         backup_cost = backup_storage_gb * backup_rate
 
         total_cost = storage_cost + throughput_cost + backup_cost
@@ -23215,11 +29848,11 @@ class AzureInventoryScanner:
                 recommended_storage_gb = int(storage_capacity_gb * 0.6)
                 storage_rate = 0.13  # Default
                 if file_system_type == "LUSTRE":
-                    storage_rate = self.PRICING.get("fsx_lustre_per_gb", 0.145)
+                    storage_rate = self.provider.PRICING.get("fsx_lustre_per_gb", 0.145)
                 elif file_system_type == "ONTAP":
-                    storage_rate = self.PRICING.get("fsx_ontap_per_gb", 0.144)
+                    storage_rate = self.provider.PRICING.get("fsx_ontap_per_gb", 0.144)
                 elif file_system_type == "OPENZFS":
-                    storage_rate = self.PRICING.get("fsx_openzfs_per_gb", 0.0996)
+                    storage_rate = self.provider.PRICING.get("fsx_openzfs_per_gb", 0.0996)
 
                 storage_savings = (storage_capacity_gb - recommended_storage_gb) * storage_rate
                 potential_savings = max(potential_savings, storage_savings)
@@ -23253,7 +29886,7 @@ class AzureInventoryScanner:
 
                 # Estimate right-sized throughput
                 recommended_throughput = max(8, int(throughput_capacity_mbps * 0.5))  # Min 8 MB/s
-                throughput_rate = self.PRICING.get("fsx_throughput_per_mbps", 2.20)
+                throughput_rate = self.provider.PRICING.get("fsx_throughput_per_mbps", 2.20)
                 throughput_savings = (throughput_capacity_mbps - recommended_throughput) * throughput_rate
                 potential_savings = max(potential_savings, throughput_savings)
 
@@ -23284,8 +29917,8 @@ class AzureInventoryScanner:
                 priority = "medium" if priority == "low" else priority
 
                 # Calculate savings by switching SSD to HDD
-                ssd_rate = self.PRICING.get("fsx_windows_per_gb", 0.13)
-                hdd_rate = self.PRICING.get("fsx_windows_hdd_per_gb", 0.013)
+                ssd_rate = self.provider.PRICING.get("fsx_windows_per_gb", 0.13)
+                hdd_rate = self.provider.PRICING.get("fsx_windows_hdd_per_gb", 0.013)
                 storage_savings = storage_capacity_gb * (ssd_rate - hdd_rate)
                 potential_savings = max(potential_savings, storage_savings)
 
@@ -23314,7 +29947,7 @@ class AzureInventoryScanner:
 
                 # Estimate 50% reduction in backup storage
                 recommended_backup_gb = backup_storage_gb * 0.5
-                backup_rate = self.PRICING.get("fsx_backup_per_gb", 0.05)
+                backup_rate = self.provider.PRICING.get("fsx_backup_per_gb", 0.05)
                 backup_savings = (backup_storage_gb - recommended_backup_gb) * backup_rate
                 potential_savings = max(potential_savings, backup_savings)
 
@@ -23523,9 +30156,7 @@ class AzureInventoryScanner:
                             }
 
                             # Apply detection rules filtering
-                            resource_age_days = None
-                            if isinstance(created_time, datetime):
-                                resource_age_days = (datetime.utcnow() - created_time.replace(tzinfo=None)).days
+                            resource_age_days = self._safe_datetime_age(created_time)
 
                             if not self._should_include_resource("fsx_file_system", resource_age_days):
                                 logger.debug("inventory.fsx_filtered", filesystem_id=filesystem_id, age=resource_age_days)
@@ -23578,3718 +30209,6 @@ class AzureInventoryScanner:
 
         return resources
 
-    # =========================================================================
-    # AWS OpenSearch Domain - Cost Optimization Scanning
-    # =========================================================================
-
-    def _calculate_opensearch_monthly_cost(
-        self,
-        instance_type: str,
-        instance_count: int,
-        storage_size_gb: int,
-        region: str,
-    ) -> float:
-        """
-        Calculate estimated monthly cost for AWS OpenSearch Domain.
-
-        Pricing model:
-        - Instance cost: t3.small ($0.036/h) to r5.large ($0.228/h) × instance count
-        - Storage cost: $0.10/GB/month (EBS GP2 SSD)
-
-        Args:
-            instance_type: Instance type (e.g., t3.small.search, m5.large.search)
-            instance_count: Number of data nodes
-            storage_size_gb: EBS storage size in GB
-            region: AWS region
-
-        Returns:
-            Estimated monthly cost in USD
-        """
-        # Map instance type to pricing key
-        # instance_type format: "t3.small.search" → pricing key: "opensearch_t3_small"
-        pricing_key = f"opensearch_{instance_type.replace('.search', '').replace('.', '_')}"
-        hourly_cost = self.PRICING.get(pricing_key, 0.161)  # Fallback to m5.large
-        instance_monthly_cost = hourly_cost * 730 * instance_count
-
-        # Storage cost
-        storage_rate = self.PRICING.get("opensearch_storage_per_gb", 0.10)
-        storage_monthly_cost = storage_size_gb * storage_rate
-
-        total_cost = instance_monthly_cost + storage_monthly_cost
-        return total_cost
-
-    def _calculate_opensearch_optimization(
-        self,
-        domain: dict[str, Any],
-        search_rate: float,
-        indexing_rate: float,
-        cpu_utilization: float,
-        jvm_memory_pressure: float,
-        free_storage_gb: float,
-        total_storage_gb: int,
-        instance_type: str,
-        instance_count: int,
-        monthly_cost: float,
-    ) -> tuple[bool, int, str, float, list[dict[str, Any]]]:
-        """
-        Analyze AWS OpenSearch Domain for cost optimization opportunities.
-
-        Optimization scenarios (5):
-        1. Completely idle - No search/indexing activity (critical)
-        2. Very low usage - <100 requests/day (high)
-        3. Over-provisioned instance - Low CPU/JVM (high)
-        4. Over-provisioned storage - >50% free (medium)
-        5. Wrong instance family - Memory vs compute optimized (medium)
-
-        Returns:
-            (is_optimizable, optimization_score, priority, potential_savings, recommendations)
-        """
-        is_optimizable = False
-        optimization_score = 0
-        priority = "low"
-        potential_savings = 0.0
-        recommendations = []
-
-        # Scenario 1: CRITICAL - Completely idle (no activity)
-        if search_rate == 0.0 and indexing_rate == 0.0:
-            is_optimizable = True
-            optimization_score = 95
-            priority = "critical"
-            potential_savings = monthly_cost  # Full savings
-            recommendations.append(
-                {
-                    "type": "delete_domain",
-                    "title": "Delete Completely Idle OpenSearch Domain",
-                    "description": f"Domain '{domain.get('DomainName', '')}' has had NO search or indexing "
-                    f"activity in the last 7 days. This domain is completely unused and costs ${monthly_cost:.2f}/month.",
-                    "impact": "high",
-                    "estimated_savings": f"${monthly_cost:.2f}/month",
-                    "action": "Delete this unused OpenSearch domain after verifying no critical data",
-                    "risk": "low",
-                }
-            )
-            return (is_optimizable, optimization_score, priority, potential_savings, recommendations)
-
-        # Scenario 2: HIGH - Very low usage (<100 requests/day)
-        total_requests_7d = search_rate + indexing_rate
-        requests_per_day = total_requests_7d / 7
-
-        if requests_per_day > 0 and requests_per_day < 100:
-            is_optimizable = True
-            optimization_score = max(optimization_score, 80)
-            priority = "high" if priority != "critical" else priority
-
-            # Recommend downsizing to t3.small (dev/test tier)
-            if "t3.small" not in instance_type:
-                t3_hourly = self.PRICING.get("opensearch_t3_small", 0.036)
-                t3_monthly_cost = t3_hourly * 730 * instance_count
-                storage_cost = total_storage_gb * self.PRICING.get("opensearch_storage_per_gb", 0.10)
-                new_total_cost = t3_monthly_cost + storage_cost
-                savings = monthly_cost - new_total_cost
-                potential_savings = max(potential_savings, savings)
-
-                recommendations.append(
-                    {
-                        "type": "downsize_to_dev_tier",
-                        "title": f"Very Low Usage ({requests_per_day:.0f} Requests/Day)",
-                        "description": f"Domain '{domain.get('DomainName', '')}' has only {requests_per_day:.0f} requests/day. "
-                        f"Consider downsizing from {instance_type} to t3.small.search (dev/test tier).",
-                        "impact": "medium",
-                        "estimated_savings": f"${savings:.2f}/month",
-                        "action": f"Downsize instance type to t3.small.search ({instance_count} node(s))",
-                        "risk": "low",
-                    }
-                )
-
-        # Scenario 3: HIGH - Over-provisioned instance (low CPU + low JVM)
-        if cpu_utilization > 0 and cpu_utilization < 20.0 and jvm_memory_pressure < 30.0:
-            is_optimizable = True
-            optimization_score = max(optimization_score, 75)
-            priority = "high" if priority != "critical" else priority
-
-            # Estimate 40% cost reduction by downsizing
-            instance_savings = monthly_cost * 0.40
-            potential_savings = max(potential_savings, instance_savings)
-
-            recommendations.append(
-                {
-                    "type": "downsize_instance",
-                    "title": f"Over-Provisioned Instance (CPU {cpu_utilization:.1f}%, JVM {jvm_memory_pressure:.1f}%)",
-                    "description": f"Domain '{domain.get('DomainName', '')}' uses only {cpu_utilization:.1f}% CPU "
-                    f"and {jvm_memory_pressure:.1f}% JVM memory. Recommend downsizing instance type.",
-                    "impact": "medium",
-                    "estimated_savings": f"${instance_savings:.2f}/month",
-                    "action": f"Downsize from {instance_type} ({instance_count} nodes) to smaller instance",
-                    "risk": "low",
-                }
-            )
-
-        # Scenario 4: MEDIUM - Over-provisioned storage (>50% free)
-        if total_storage_gb > 0 and free_storage_gb > 0:
-            storage_utilization_percent = ((total_storage_gb - free_storage_gb) / total_storage_gb) * 100
-
-            if storage_utilization_percent < 50.0:
-                is_optimizable = True
-                optimization_score = max(optimization_score, 60)
-                priority = "medium" if priority == "low" else priority
-
-                # Recommend reducing storage by 30%
-                recommended_storage_gb = int(total_storage_gb * 0.7)
-                storage_rate = self.PRICING.get("opensearch_storage_per_gb", 0.10)
-                storage_savings = (total_storage_gb - recommended_storage_gb) * storage_rate
-                potential_savings = max(potential_savings, storage_savings)
-
-                recommendations.append(
-                    {
-                        "type": "reduce_storage",
-                        "title": f"Over-Provisioned Storage ({storage_utilization_percent:.1f}% Used)",
-                        "description": f"Domain '{domain.get('DomainName', '')}' uses only {storage_utilization_percent:.1f}% "
-                        f"of its {total_storage_gb} GB storage. {free_storage_gb:.0f} GB is free.",
-                        "impact": "low",
-                        "estimated_savings": f"${storage_savings:.2f}/month",
-                        "action": f"Reduce storage from {total_storage_gb} GB to {recommended_storage_gb} GB",
-                        "risk": "low",
-                    }
-                )
-
-        # Scenario 5: MEDIUM - Wrong instance family (r5 vs m5)
-        # If JVM memory pressure is low (<50%), don't need memory-optimized (r5)
-        # If JVM memory pressure is high (>75%), need memory-optimized (r5)
-        if jvm_memory_pressure > 0:
-            if "r5" in instance_type and jvm_memory_pressure < 50.0:
-                # Using r5 (memory-optimized) but low memory usage → switch to m5 (general purpose)
-                is_optimizable = True
-                optimization_score = max(optimization_score, 65)
-                priority = "medium" if priority == "low" else priority
-
-                # Estimate 30% savings by switching r5 → m5
-                family_savings = monthly_cost * 0.30
-                potential_savings = max(potential_savings, family_savings)
-
-                recommendations.append(
-                    {
-                        "type": "switch_instance_family",
-                        "title": f"Memory-Optimized Instance Unnecessary (JVM {jvm_memory_pressure:.1f}%)",
-                        "description": f"Domain '{domain.get('DomainName', '')}' uses r5 (memory-optimized) instance "
-                        f"but only {jvm_memory_pressure:.1f}% JVM memory. Switch to m5 (general purpose) to save 30%.",
-                        "impact": "low",
-                        "estimated_savings": f"${family_savings:.2f}/month",
-                        "action": f"Switch from {instance_type} to m5 equivalent",
-                        "risk": "low",
-                    }
-                )
-            elif "m5" in instance_type and jvm_memory_pressure > 75.0:
-                # Using m5 (general purpose) but high memory usage → recommend r5 (memory-optimized)
-                # This is not a cost optimization, but a performance recommendation
-                # We don't add it to potential_savings
-                recommendations.append(
-                    {
-                        "type": "upgrade_instance_family_performance",
-                        "title": f"Consider Memory-Optimized Instance (JVM {jvm_memory_pressure:.1f}%)",
-                        "description": f"Domain '{domain.get('DomainName', '')}' uses m5 (general purpose) but has "
-                        f"{jvm_memory_pressure:.1f}% JVM memory pressure. Consider r5 for better performance.",
-                        "impact": "low",
-                        "estimated_savings": "$0.00/month (performance recommendation, not cost savings)",
-                        "action": f"Evaluate switching to r5 instance for better performance",
-                        "risk": "low",
-                    }
-                )
-
-        return (is_optimizable, optimization_score, priority, potential_savings, recommendations)
-
-    async def scan_opensearch_domains(self, region: str) -> list[AllCloudResourceData]:
-        """
-        Scan ALL AWS OpenSearch Domains in a region for cost intelligence.
-
-        For each domain:
-        - Calculate monthly cost (instance + storage)
-        - Fetch CloudWatch metrics (SearchRate, IndexingRate, CPU, JVM, Storage)
-        - Analyze optimization opportunities (5 scenarios)
-
-        Returns:
-            List of AllCloudResourceData entries for all OpenSearch Domains
-        """
-        resources: list[AllCloudResourceData] = []
-
-        try:
-            async with self.session.client("opensearch", region_name=region) as opensearch:
-                async with self.session.client("cloudwatch", region_name=region) as cloudwatch:
-                    # List all domains
-                    response = await opensearch.list_domain_names()
-                    domain_names = [d["DomainName"] for d in response.get("DomainNames", [])]
-
-                    logger.info(
-                        "inventory.opensearch.domains_found",
-                        region=region,
-                        count=len(domain_names),
-                    )
-
-                    # Process each domain
-                    for domain_name in domain_names:
-                        try:
-                            # Get domain details
-                            domain_response = await opensearch.describe_domain(DomainName=domain_name)
-                            domain = domain_response.get("DomainStatus", {})
-
-                            domain_arn = domain.get("ARN", "")
-                            domain_status = domain.get("Processing", False)  # Processing = updating
-                            created_at = domain.get("Created")
-
-                            # Get cluster config
-                            cluster_config = domain.get("ClusterConfig", {})
-                            instance_type = cluster_config.get("InstanceType", "m5.large.search")
-                            instance_count = cluster_config.get("InstanceCount", 1)
-
-                            # Get EBS storage
-                            ebs_options = domain.get("EBSOptions", {})
-                            ebs_enabled = ebs_options.get("EBSEnabled", False)
-                            storage_size_gb = ebs_options.get("VolumeSize", 0) if ebs_enabled else 0
-
-                            # Get CloudWatch metrics (7 days)
-                            end_time = datetime.utcnow()
-                            start_time = end_time - timedelta(days=7)
-
-                            # Metric 1: SearchRate (sum over 7 days)
-                            search_rate_response = await cloudwatch.get_metric_statistics(
-                                Namespace="AWS/ES",
-                                MetricName="SearchRate",
-                                Dimensions=[
-                                    {"Name": "DomainName", "Value": domain_name},
-                                    {"Name": "ClientId", "Value": domain_arn.split(":")[4]},
-                                ],
-                                StartTime=start_time,
-                                EndTime=end_time,
-                                Period=604800,  # 7 days
-                                Statistics=["Sum"],
-                            )
-                            search_rate = (
-                                search_rate_response["Datapoints"][0]["Sum"]
-                                if search_rate_response.get("Datapoints")
-                                else 0.0
-                            )
-
-                            # Metric 2: IndexingRate (sum over 7 days)
-                            indexing_rate_response = await cloudwatch.get_metric_statistics(
-                                Namespace="AWS/ES",
-                                MetricName="IndexingRate",
-                                Dimensions=[
-                                    {"Name": "DomainName", "Value": domain_name},
-                                    {"Name": "ClientId", "Value": domain_arn.split(":")[4]},
-                                ],
-                                StartTime=start_time,
-                                EndTime=end_time,
-                                Period=604800,
-                                Statistics=["Sum"],
-                            )
-                            indexing_rate = (
-                                indexing_rate_response["Datapoints"][0]["Sum"]
-                                if indexing_rate_response.get("Datapoints")
-                                else 0.0
-                            )
-
-                            # Metric 3: CPUUtilization (average over 7 days)
-                            cpu_response = await cloudwatch.get_metric_statistics(
-                                Namespace="AWS/ES",
-                                MetricName="CPUUtilization",
-                                Dimensions=[
-                                    {"Name": "DomainName", "Value": domain_name},
-                                    {"Name": "ClientId", "Value": domain_arn.split(":")[4]},
-                                ],
-                                StartTime=start_time,
-                                EndTime=end_time,
-                                Period=604800,
-                                Statistics=["Average"],
-                            )
-                            cpu_utilization = (
-                                cpu_response["Datapoints"][0]["Average"]
-                                if cpu_response.get("Datapoints")
-                                else 0.0
-                            )
-
-                            # Metric 4: JVMMemoryPressure (average)
-                            jvm_response = await cloudwatch.get_metric_statistics(
-                                Namespace="AWS/ES",
-                                MetricName="JVMMemoryPressure",
-                                Dimensions=[
-                                    {"Name": "DomainName", "Value": domain_name},
-                                    {"Name": "ClientId", "Value": domain_arn.split(":")[4]},
-                                ],
-                                StartTime=start_time,
-                                EndTime=end_time,
-                                Period=604800,
-                                Statistics=["Average"],
-                            )
-                            jvm_memory_pressure = (
-                                jvm_response["Datapoints"][0]["Average"]
-                                if jvm_response.get("Datapoints")
-                                else 0.0
-                            )
-
-                            # Metric 5: FreeStorageSpace (minimum, to detect low storage)
-                            storage_response = await cloudwatch.get_metric_statistics(
-                                Namespace="AWS/ES",
-                                MetricName="FreeStorageSpace",
-                                Dimensions=[
-                                    {"Name": "DomainName", "Value": domain_name},
-                                    {"Name": "ClientId", "Value": domain_arn.split(":")[4]},
-                                ],
-                                StartTime=start_time,
-                                EndTime=end_time,
-                                Period=604800,
-                                Statistics=["Average"],
-                            )
-                            free_storage_mb = (
-                                storage_response["Datapoints"][0]["Average"]
-                                if storage_response.get("Datapoints")
-                                else 0.0
-                            )
-                            free_storage_gb = free_storage_mb / 1024  # Convert MB to GB
-
-                            # Calculate cost
-                            monthly_cost = self._calculate_opensearch_monthly_cost(
-                                instance_type=instance_type,
-                                instance_count=instance_count,
-                                storage_size_gb=storage_size_gb,
-                                region=region,
-                            )
-
-                            # Calculate optimization
-                            (
-                                is_optimizable,
-                                optimization_score,
-                                priority,
-                                potential_savings,
-                                recommendations,
-                            ) = self._calculate_opensearch_optimization(
-                                domain=domain,
-                                search_rate=search_rate,
-                                indexing_rate=indexing_rate,
-                                cpu_utilization=cpu_utilization,
-                                jvm_memory_pressure=jvm_memory_pressure,
-                                free_storage_gb=free_storage_gb,
-                                total_storage_gb=storage_size_gb,
-                                instance_type=instance_type,
-                                instance_count=instance_count,
-                                monthly_cost=monthly_cost,
-                            )
-
-                            # Build metadata
-                            resource_metadata = {
-                                "domain_name": domain_name,
-                                "domain_arn": domain_arn,
-                                "instance_type": instance_type,
-                                "instance_count": instance_count,
-                                "storage_size_gb": storage_size_gb,
-                                "engine_version": domain.get("EngineVersion", "Unknown"),
-                                "processing": domain_status,
-                                "created_at": created_at.isoformat() if created_at else None,
-                                "metrics": {
-                                    "search_rate_7d": search_rate,
-                                    "indexing_rate_7d": indexing_rate,
-                                    "cpu_utilization_avg": cpu_utilization,
-                                    "jvm_memory_pressure_avg": jvm_memory_pressure,
-                                    "free_storage_gb": free_storage_gb,
-                                },
-                            }
-
-                            # Apply detection rules filtering
-                            resource_age_days = None
-                            if isinstance(created_at, datetime):
-                                resource_age_days = (datetime.utcnow() - created_at.replace(tzinfo=None)).days
-
-                            if not self._should_include_resource("opensearch_domain", resource_age_days):
-                                logger.debug("inventory.opensearch_filtered", domain_name=domain_name, age=resource_age_days)
-                                continue
-
-                            # Create resource entry
-                            resource = AllCloudResourceData(
-                                resource_id=domain_arn,
-                                resource_type="opensearch_domain",
-                                resource_name=domain_name,
-                                region=region,
-                                estimated_monthly_cost=monthly_cost,
-                                currency="USD",
-                                resource_metadata=resource_metadata,
-                                is_optimizable=is_optimizable,
-                                optimization_score=optimization_score,
-                                optimization_priority=priority,
-                                potential_monthly_savings=potential_savings,
-                                optimization_recommendations=recommendations,
-                            )
-
-                            resources.append(resource)
-
-                            logger.info(
-                                "inventory.opensearch.domain_scanned",
-                                domain_name=domain_name,
-                                region=region,
-                                instance_type=instance_type,
-                                instance_count=instance_count,
-                                monthly_cost=monthly_cost,
-                                is_optimizable=is_optimizable,
-                                optimization_score=optimization_score,
-                            )
-
-                        except Exception as e:
-                            logger.error(
-                                "inventory.opensearch.domain_scan_error",
-                                domain_name=domain_name,
-                                region=region,
-                                error=str(e),
-                            )
-                            continue
-
-        except Exception as e:
-            logger.error(
-                "opensearch.scan_failed",
-                region=region,
-                error=str(e),
-            )
-
-        return resources
-
-    # =========================================================================
-    # AWS API Gateway - Cost Optimization Scanning
-    # =========================================================================
-
-    def _calculate_apigateway_monthly_cost(
-        self,
-        api_type: str,
-        request_count_per_month: float,
-        data_transfer_gb_per_month: float,
-        cache_enabled: bool,
-        region: str,
-    ) -> float:
-        """
-        Calculate estimated monthly cost for AWS API Gateway.
-
-        Pricing model (3 API types):
-        - REST API: $3.50 per million requests + $0.09/GB data transfer
-        - HTTP API: $1.00 per million requests (70% cheaper, no caching)
-        - WebSocket API: $1.00 per million messages + $0.25 per million connection minutes
-
-        Args:
-            api_type: API type (REST, HTTP, WEBSOCKET)
-            request_count_per_month: Monthly request count (estimated from 7d)
-            data_transfer_gb_per_month: Monthly data transfer in GB
-            cache_enabled: Whether API cache is enabled (REST only)
-            region: AWS region
-
-        Returns:
-            Estimated monthly cost in USD
-        """
-        # Request cost
-        request_cost = 0.0
-        if api_type == "REST":
-            request_rate = self.PRICING.get("apigateway_rest_per_million", 3.50)
-            request_cost = (request_count_per_month / 1_000_000) * request_rate
-        elif api_type == "HTTP":
-            request_rate = self.PRICING.get("apigateway_http_per_million", 1.00)
-            request_cost = (request_count_per_month / 1_000_000) * request_rate
-        elif api_type == "WEBSOCKET":
-            message_rate = self.PRICING.get("apigateway_websocket_per_million", 1.00)
-            request_cost = (request_count_per_month / 1_000_000) * message_rate
-            # WebSocket also charges for connection minutes (not included here, would need additional metric)
-
-        # Data transfer cost
-        data_transfer_rate = self.PRICING.get("apigateway_data_transfer_per_gb", 0.09)
-        data_transfer_cost = data_transfer_gb_per_month * data_transfer_rate
-
-        # Cache cost (REST API only, if enabled)
-        # Not included in basic pricing (would need cache size info)
-        cache_cost = 0.0
-
-        total_cost = request_cost + data_transfer_cost + cache_cost
-        return total_cost
-
-    def _calculate_apigateway_optimization(
-        self,
-        api: dict[str, Any],
-        api_type: str,
-        request_count: float,
-        error_4xx_count: float,
-        error_5xx_count: float,
-        cache_hit_count: float,
-        cache_miss_count: float,
-        cache_enabled: bool,
-        monthly_cost: float,
-    ) -> tuple[bool, int, str, float, list[dict[str, Any]]]:
-        """
-        Analyze AWS API Gateway for cost optimization opportunities.
-
-        Optimization scenarios (6):
-        1. Completely inactive - No requests (critical)
-        2. Very low usage - <1000 req/day (high)
-        3. High error rate - >10% 4XX/5XX (high)
-        4. REST API when HTTP API sufficient - 70% savings (medium)
-        5. Cache enabled but low hit rate - <50% (medium)
-        6. WebSocket API with no active connections - Delete if unused (low)
-
-        Returns:
-            (is_optimizable, optimization_score, priority, potential_savings, recommendations)
-        """
-        is_optimizable = False
-        optimization_score = 0
-        priority = "low"
-        potential_savings = 0.0
-        recommendations = []
-
-        # Scenario 1: CRITICAL - Completely inactive (no requests)
-        if request_count == 0.0:
-            is_optimizable = True
-            optimization_score = 95
-            priority = "critical"
-            potential_savings = monthly_cost  # Full savings
-            recommendations.append(
-                {
-                    "type": "delete_api",
-                    "title": "Delete Completely Inactive API Gateway",
-                    "description": f"API '{api.get('Name', api.get('name', ''))}' has received NO requests "
-                    f"in the last 7 days. This API is completely unused and costs ${monthly_cost:.2f}/month.",
-                    "impact": "high",
-                    "estimated_savings": f"${monthly_cost:.2f}/month",
-                    "action": "Delete this unused API Gateway after verifying no dependencies",
-                    "risk": "low",
-                }
-            )
-            return (is_optimizable, optimization_score, priority, potential_savings, recommendations)
-
-        # Scenario 2: HIGH - Very low usage (<1000 requests/day)
-        requests_per_day = request_count / 7
-
-        if requests_per_day > 0 and requests_per_day < 1000:
-            is_optimizable = True
-            optimization_score = max(optimization_score, 80)
-            priority = "high" if priority != "critical" else priority
-
-            recommendations.append(
-                {
-                    "type": "low_usage",
-                    "title": f"Very Low Usage ({requests_per_day:.0f} Requests/Day)",
-                    "description": f"API '{api.get('Name', api.get('name', ''))}' receives only {requests_per_day:.0f} requests/day. "
-                    f"Consider consolidating with other APIs or using serverless alternatives (AWS Lambda URL).",
-                    "impact": "medium",
-                    "estimated_savings": f"${monthly_cost * 0.50:.2f}/month (if consolidated)",
-                    "action": "Review if this API can be consolidated or replaced with simpler alternatives",
-                    "risk": "medium",
-                }
-            )
-            potential_savings = max(potential_savings, monthly_cost * 0.50)
-
-        # Scenario 3: HIGH - High error rate (>10% 4XX/5XX)
-        total_errors = error_4xx_count + error_5xx_count
-        if request_count > 0:
-            error_rate = (total_errors / request_count) * 100
-
-            if error_rate > 10.0:
-                is_optimizable = True
-                optimization_score = max(optimization_score, 85)
-                priority = "high" if priority != "critical" else priority
-
-                recommendations.append(
-                    {
-                        "type": "high_error_rate",
-                        "title": f"High Error Rate ({error_rate:.1f}% Errors)",
-                        "description": f"API '{api.get('Name', api.get('name', ''))}' has {error_rate:.1f}% error rate "
-                        f"({error_4xx_count:.0f} 4XX + {error_5xx_count:.0f} 5XX errors). "
-                        f"This indicates integration issues or broken endpoints.",
-                        "impact": "high",
-                        "estimated_savings": f"${monthly_cost * 0.30:.2f}/month (if errors indicate unused endpoints)",
-                        "action": "Review and fix integration errors, or delete broken API if no longer needed",
-                        "risk": "medium",
-                    }
-                )
-                potential_savings = max(potential_savings, monthly_cost * 0.30)
-
-        # Scenario 4: MEDIUM - REST API when HTTP API sufficient (70% savings)
-        if api_type == "REST":
-            is_optimizable = True
-            optimization_score = max(optimization_score, 70)
-            priority = "medium" if priority == "low" else priority
-
-            # Calculate savings by migrating REST → HTTP API
-            rest_rate = self.PRICING.get("apigateway_rest_per_million", 3.50)
-            http_rate = self.PRICING.get("apigateway_http_per_million", 1.00)
-            request_count_monthly = request_count * 4.33  # 7d → 30d
-            current_request_cost = (request_count_monthly / 1_000_000) * rest_rate
-            new_request_cost = (request_count_monthly / 1_000_000) * http_rate
-            migration_savings = current_request_cost - new_request_cost
-
-            if migration_savings > 0:
-                potential_savings = max(potential_savings, migration_savings)
-
-                recommendations.append(
-                    {
-                        "type": "migrate_to_http_api",
-                        "title": f"Migrate REST API to HTTP API (Save 70%)",
-                        "description": f"API '{api.get('Name', '')}' uses REST API ($3.50/M requests). "
-                        f"If you don't need API caching, request/response transformations, or usage plans, "
-                        f"migrate to HTTP API ($1.00/M requests) to save 70%.",
-                        "impact": "low",
-                        "estimated_savings": f"${migration_savings:.2f}/month",
-                        "action": "Evaluate migrating from REST API to HTTP API if features not needed",
-                        "risk": "low",
-                    }
-                )
-
-        # Scenario 5: MEDIUM - Cache enabled but low hit rate (<50%)
-        if cache_enabled and (cache_hit_count + cache_miss_count) > 0:
-            cache_total = cache_hit_count + cache_miss_count
-            cache_hit_rate = (cache_hit_count / cache_total) * 100
-
-            if cache_hit_rate < 50.0:
-                is_optimizable = True
-                optimization_score = max(optimization_score, 65)
-                priority = "medium" if priority == "low" else priority
-
-                # Estimate cache cost (varies by cache size, assume 0.5 GB = $0.020/hour = ~$14/month)
-                estimated_cache_cost = 14.00
-                potential_savings = max(potential_savings, estimated_cache_cost)
-
-                recommendations.append(
-                    {
-                        "type": "disable_cache",
-                        "title": f"Low Cache Hit Rate ({cache_hit_rate:.1f}%)",
-                        "description": f"API '{api.get('Name', '')}' has caching enabled but only {cache_hit_rate:.1f}% hit rate. "
-                        f"Cache is ineffective and costs ~$14/month. Consider disabling cache to save money.",
-                        "impact": "low",
-                        "estimated_savings": f"${estimated_cache_cost:.2f}/month",
-                        "action": "Disable API Gateway cache if hit rate remains below 50%",
-                        "risk": "low",
-                    }
-                )
-
-        # Scenario 6: LOW - WebSocket API with no active connections
-        # This would require additional metrics (WebSocket connection count)
-        # For now, we detect via request_count = 0 (covered in Scenario 1)
-
-        return (is_optimizable, optimization_score, priority, potential_savings, recommendations)
-
-    async def scan_api_gateways(self, region: str) -> list[AllCloudResourceData]:
-        """
-        Scan ALL AWS API Gateways in a region for cost intelligence.
-
-        Scans 3 API types:
-        1. REST API (apigateway client)
-        2. HTTP API (apigatewayv2 client)
-        3. WebSocket API (apigatewayv2 client)
-
-        For each API:
-        - Calculate monthly cost (requests + data transfer)
-        - Fetch CloudWatch metrics (Count, 4XXError, 5XXError, Cache)
-        - Analyze optimization opportunities (6 scenarios)
-
-        Returns:
-            List of AllCloudResourceData entries for all API Gateways
-        """
-        resources: list[AllCloudResourceData] = []
-
-        try:
-            # Scan REST APIs (apigateway client)
-            async with self.session.client("apigateway", region_name=region) as apigw:
-                async with self.session.client("cloudwatch", region_name=region) as cloudwatch:
-                    # List REST APIs
-                    rest_response = await apigw.get_rest_apis()
-                    rest_apis = rest_response.get("items", [])
-
-                    logger.info(
-                        "inventory.apigateway.rest_apis_found",
-                        region=region,
-                        count=len(rest_apis),
-                    )
-
-                    for api in rest_apis:
-                        try:
-                            api_id = api.get("id", "")
-                            api_name = api.get("name", "")
-                            created_date = api.get("createdDate")
-
-                            # Get CloudWatch metrics (7 days)
-                            end_time = datetime.utcnow()
-                            start_time = end_time - timedelta(days=7)
-
-                            # Metric 1: Count (total requests)
-                            count_response = await cloudwatch.get_metric_statistics(
-                                Namespace="AWS/ApiGateway",
-                                MetricName="Count",
-                                Dimensions=[{"Name": "ApiName", "Value": api_name}],
-                                StartTime=start_time,
-                                EndTime=end_time,
-                                Period=604800,
-                                Statistics=["Sum"],
-                            )
-                            request_count = (
-                                count_response["Datapoints"][0]["Sum"]
-                                if count_response.get("Datapoints")
-                                else 0.0
-                            )
-
-                            # Metric 2: 4XXError
-                            error_4xx_response = await cloudwatch.get_metric_statistics(
-                                Namespace="AWS/ApiGateway",
-                                MetricName="4XXError",
-                                Dimensions=[{"Name": "ApiName", "Value": api_name}],
-                                StartTime=start_time,
-                                EndTime=end_time,
-                                Period=604800,
-                                Statistics=["Sum"],
-                            )
-                            error_4xx_count = (
-                                error_4xx_response["Datapoints"][0]["Sum"]
-                                if error_4xx_response.get("Datapoints")
-                                else 0.0
-                            )
-
-                            # Metric 3: 5XXError
-                            error_5xx_response = await cloudwatch.get_metric_statistics(
-                                Namespace="AWS/ApiGateway",
-                                MetricName="5XXError",
-                                Dimensions=[{"Name": "ApiName", "Value": api_name}],
-                                StartTime=start_time,
-                                EndTime=end_time,
-                                Period=604800,
-                                Statistics=["Sum"],
-                            )
-                            error_5xx_count = (
-                                error_5xx_response["Datapoints"][0]["Sum"]
-                                if error_5xx_response.get("Datapoints")
-                                else 0.0
-                            )
-
-                            # Metric 4: CacheHitCount (if caching enabled)
-                            cache_hit_response = await cloudwatch.get_metric_statistics(
-                                Namespace="AWS/ApiGateway",
-                                MetricName="CacheHitCount",
-                                Dimensions=[{"Name": "ApiName", "Value": api_name}],
-                                StartTime=start_time,
-                                EndTime=end_time,
-                                Period=604800,
-                                Statistics=["Sum"],
-                            )
-                            cache_hit_count = (
-                                cache_hit_response["Datapoints"][0]["Sum"]
-                                if cache_hit_response.get("Datapoints")
-                                else 0.0
-                            )
-
-                            # Metric 5: CacheMissCount
-                            cache_miss_response = await cloudwatch.get_metric_statistics(
-                                Namespace="AWS/ApiGateway",
-                                MetricName="CacheMissCount",
-                                Dimensions=[{"Name": "ApiName", "Value": api_name}],
-                                StartTime=start_time,
-                                EndTime=end_time,
-                                Period=604800,
-                                Statistics=["Sum"],
-                            )
-                            cache_miss_count = (
-                                cache_miss_response["Datapoints"][0]["Sum"]
-                                if cache_miss_response.get("Datapoints")
-                                else 0.0
-                            )
-
-                            cache_enabled = (cache_hit_count + cache_miss_count) > 0
-
-                            # Estimate monthly metrics from 7-day data
-                            request_count_monthly = request_count * 4.33
-                            data_transfer_gb_monthly = (request_count * 5) / (1024 ** 3)  # Assume 5KB avg response
-
-                            # Calculate cost
-                            monthly_cost = self._calculate_apigateway_monthly_cost(
-                                api_type="REST",
-                                request_count_per_month=request_count_monthly,
-                                data_transfer_gb_per_month=data_transfer_gb_monthly,
-                                cache_enabled=cache_enabled,
-                                region=region,
-                            )
-
-                            # Calculate optimization
-                            (
-                                is_optimizable,
-                                optimization_score,
-                                priority,
-                                potential_savings,
-                                recommendations,
-                            ) = self._calculate_apigateway_optimization(
-                                api=api,
-                                api_type="REST",
-                                request_count=request_count,
-                                error_4xx_count=error_4xx_count,
-                                error_5xx_count=error_5xx_count,
-                                cache_hit_count=cache_hit_count,
-                                cache_miss_count=cache_miss_count,
-                                cache_enabled=cache_enabled,
-                                monthly_cost=monthly_cost,
-                            )
-
-                            # Build metadata
-                            resource_metadata = {
-                                "api_id": api_id,
-                                "api_name": api_name,
-                                "api_type": "REST",
-                                "endpoint_type": api.get("endpointConfiguration", {}).get("types", ["REGIONAL"])[0],
-                                "cache_enabled": cache_enabled,
-                                "created_date": created_date.isoformat() if created_date else None,
-                                "metrics": {
-                                    "request_count_7d": request_count,
-                                    "error_4xx_count_7d": error_4xx_count,
-                                    "error_5xx_count_7d": error_5xx_count,
-                                    "cache_hit_count_7d": cache_hit_count,
-                                    "cache_miss_count_7d": cache_miss_count,
-                                },
-                            }
-
-                            # Apply detection rules filtering
-                            resource_age_days = None
-                            if isinstance(created_date, datetime):
-                                resource_age_days = (datetime.utcnow() - created_date.replace(tzinfo=None)).days
-
-                            if not self._should_include_resource("api_gateway", resource_age_days):
-                                logger.debug("inventory.apigateway_filtered", api_id=api_id, api_name=api_name, age=resource_age_days)
-                                continue
-
-                            # Create resource entry
-                            resource = AllCloudResourceData(
-                                resource_id=api_id,
-                                resource_type="api_gateway",
-                                resource_name=api_name,
-                                region=region,
-                                estimated_monthly_cost=monthly_cost,
-                                currency="USD",
-                                resource_metadata=resource_metadata,
-                                is_optimizable=is_optimizable,
-                                optimization_score=optimization_score,
-                                optimization_priority=priority,
-                                potential_monthly_savings=potential_savings,
-                                optimization_recommendations=recommendations,
-                            )
-
-                            resources.append(resource)
-
-                            logger.info(
-                                "inventory.apigateway.rest_api_scanned",
-                                api_name=api_name,
-                                region=region,
-                                request_count=request_count,
-                                monthly_cost=monthly_cost,
-                                is_optimizable=is_optimizable,
-                            )
-
-                        except Exception as e:
-                            logger.error(
-                                "inventory.apigateway.rest_api_scan_error",
-                                api_id=api.get("id", "unknown"),
-                                region=region,
-                                error=str(e),
-                            )
-                            continue
-
-            # Scan HTTP + WebSocket APIs (apigatewayv2 client)
-            async with self.session.client("apigatewayv2", region_name=region) as apigw2:
-                async with self.session.client("cloudwatch", region_name=region) as cloudwatch:
-                    # List HTTP + WebSocket APIs
-                    v2_response = await apigw2.get_apis()
-                    v2_apis = v2_response.get("Items", [])
-
-                    logger.info(
-                        "inventory.apigateway.v2_apis_found",
-                        region=region,
-                        count=len(v2_apis),
-                    )
-
-                    for api in v2_apis:
-                        try:
-                            api_id = api.get("ApiId", "")
-                            api_name = api.get("Name", "")
-                            api_protocol = api.get("ProtocolType", "HTTP")  # HTTP or WEBSOCKET
-                            created_date = api.get("CreatedDate")
-
-                            # CloudWatch metrics (note: different namespace for v2)
-                            end_time = datetime.utcnow()
-                            start_time = end_time - timedelta(days=7)
-
-                            # For HTTP/WebSocket APIs, metrics use ApiId dimension
-                            count_response = await cloudwatch.get_metric_statistics(
-                                Namespace="AWS/ApiGateway",
-                                MetricName="Count",
-                                Dimensions=[{"Name": "ApiId", "Value": api_id}],
-                                StartTime=start_time,
-                                EndTime=end_time,
-                                Period=604800,
-                                Statistics=["Sum"],
-                            )
-                            request_count = (
-                                count_response["Datapoints"][0]["Sum"]
-                                if count_response.get("Datapoints")
-                                else 0.0
-                            )
-
-                            # Errors
-                            error_4xx_response = await cloudwatch.get_metric_statistics(
-                                Namespace="AWS/ApiGateway",
-                                MetricName="4XXError",
-                                Dimensions=[{"Name": "ApiId", "Value": api_id}],
-                                StartTime=start_time,
-                                EndTime=end_time,
-                                Period=604800,
-                                Statistics=["Sum"],
-                            )
-                            error_4xx_count = (
-                                error_4xx_response["Datapoints"][0]["Sum"]
-                                if error_4xx_response.get("Datapoints")
-                                else 0.0
-                            )
-
-                            error_5xx_response = await cloudwatch.get_metric_statistics(
-                                Namespace="AWS/ApiGateway",
-                                MetricName="5XXError",
-                                Dimensions=[{"Name": "ApiId", "Value": api_id}],
-                                StartTime=start_time,
-                                EndTime=end_time,
-                                Period=604800,
-                                Statistics=["Sum"],
-                            )
-                            error_5xx_count = (
-                                error_5xx_response["Datapoints"][0]["Sum"]
-                                if error_5xx_response.get("Datapoints")
-                                else 0.0
-                            )
-
-                            # HTTP/WebSocket APIs don't support caching
-                            cache_hit_count = 0.0
-                            cache_miss_count = 0.0
-                            cache_enabled = False
-
-                            # Estimate monthly metrics
-                            request_count_monthly = request_count * 4.33
-                            data_transfer_gb_monthly = (request_count * 5) / (1024 ** 3)
-
-                            # Calculate cost
-                            monthly_cost = self._calculate_apigateway_monthly_cost(
-                                api_type=api_protocol,
-                                request_count_per_month=request_count_monthly,
-                                data_transfer_gb_per_month=data_transfer_gb_monthly,
-                                cache_enabled=False,
-                                region=region,
-                            )
-
-                            # Calculate optimization
-                            (
-                                is_optimizable,
-                                optimization_score,
-                                priority,
-                                potential_savings,
-                                recommendations,
-                            ) = self._calculate_apigateway_optimization(
-                                api=api,
-                                api_type=api_protocol,
-                                request_count=request_count,
-                                error_4xx_count=error_4xx_count,
-                                error_5xx_count=error_5xx_count,
-                                cache_hit_count=cache_hit_count,
-                                cache_miss_count=cache_miss_count,
-                                cache_enabled=cache_enabled,
-                                monthly_cost=monthly_cost,
-                            )
-
-                            # Build metadata
-                            resource_metadata = {
-                                "api_id": api_id,
-                                "api_name": api_name,
-                                "api_type": api_protocol,
-                                "api_endpoint": api.get("ApiEndpoint", ""),
-                                "created_date": created_date.isoformat() if created_date else None,
-                                "metrics": {
-                                    "request_count_7d": request_count,
-                                    "error_4xx_count_7d": error_4xx_count,
-                                    "error_5xx_count_7d": error_5xx_count,
-                                },
-                            }
-
-                            # Apply detection rules filtering (v2 APIs)
-                            resource_age_days = None
-                            if isinstance(created_date, datetime):
-                                resource_age_days = (datetime.utcnow() - created_date.replace(tzinfo=None)).days
-
-                            if not self._should_include_resource("api_gateway", resource_age_days):
-                                logger.debug("inventory.apigateway_v2_filtered", api_id=api_id, api_name=api_name, age=resource_age_days)
-                                continue
-
-                            # Create resource entry
-                            resource = AllCloudResourceData(
-                                resource_id=api_id,
-                                resource_type="api_gateway",
-                                resource_name=api_name,
-                                region=region,
-                                estimated_monthly_cost=monthly_cost,
-                                currency="USD",
-                                resource_metadata=resource_metadata,
-                                is_optimizable=is_optimizable,
-                                optimization_score=optimization_score,
-                                optimization_priority=priority,
-                                potential_monthly_savings=potential_savings,
-                                optimization_recommendations=recommendations,
-                            )
-
-                            resources.append(resource)
-
-                            logger.info(
-                                "inventory.apigateway.v2_api_scanned",
-                                api_name=api_name,
-                                api_type=api_protocol,
-                                region=region,
-                                request_count=request_count,
-                                monthly_cost=monthly_cost,
-                                is_optimizable=is_optimizable,
-                            )
-
-                        except Exception as e:
-                            logger.error(
-                                "inventory.apigateway.v2_api_scan_error",
-                                api_id=api.get("ApiId", "unknown"),
-                                region=region,
-                                error=str(e),
-                            )
-                            continue
-
-        except Exception as e:
-            logger.error(
-                "apigateway.scan_failed",
-                region=region,
-                error=str(e),
-            )
-
-        return resources
-
-    # =========================================================================
-    # AWS CloudFront Distribution - Cost Optimization Scanning (GLOBAL SERVICE)
-    # =========================================================================
-
-    def _calculate_cloudfront_monthly_cost(
-        self,
-        requests_per_month: float,
-        data_transfer_gb_per_month: float,
-        invalidations_per_month: int,
-        price_class: str,
-    ) -> float:
-        """
-        Calculate estimated monthly cost for AWS CloudFront Distribution.
-
-        Pricing model (varies by region/price class):
-        - Data transfer out: $0.085/GB (US/Europe), $0.140/GB (Asia), $0.170/GB (Other)
-        - HTTP requests: $0.0075 per 10,000 requests
-        - HTTPS requests: $0.010 per 10,000 requests (assume 100% HTTPS)
-        - Invalidations: First 1,000 paths free, $0.005 per path after
-
-        Args:
-            requests_per_month: Monthly request count (estimated from 7d)
-            data_transfer_gb_per_month: Monthly data transfer out in GB
-            invalidations_per_month: Monthly invalidation requests
-            price_class: Price class (PriceClass_All, PriceClass_200, PriceClass_100)
-
-        Returns:
-            Estimated monthly cost in USD
-        """
-        # Data transfer cost (varies by price class)
-        if price_class == "PriceClass_100":  # US, Canada, Europe
-            data_transfer_rate = self.PRICING.get("cloudfront_data_transfer_us_europe_per_gb", 0.085)
-        elif price_class == "PriceClass_200":  # US, Canada, Europe, Asia, Middle East, Africa
-            data_transfer_rate = self.PRICING.get("cloudfront_data_transfer_asia_per_gb", 0.140)
-        else:  # PriceClass_All (all edge locations)
-            data_transfer_rate = self.PRICING.get("cloudfront_data_transfer_other_per_gb", 0.170)
-
-        data_transfer_cost = data_transfer_gb_per_month * data_transfer_rate
-
-        # Request cost (assume 100% HTTPS)
-        https_rate = self.PRICING.get("cloudfront_https_requests_per_10k", 0.010)
-        request_cost = (requests_per_month / 10_000) * https_rate
-
-        # Invalidation cost (first 1000 free)
-        invalidation_rate = self.PRICING.get("cloudfront_invalidation_per_path", 0.005)
-        invalidation_cost = max(0, invalidations_per_month - 1000) * invalidation_rate
-
-        total_cost = data_transfer_cost + request_cost + invalidation_cost
-        return total_cost
-
-    def _calculate_cloudfront_optimization(
-        self,
-        distribution: dict[str, Any],
-        requests_per_month: float,
-        data_transfer_gb: float,
-        error_rate_4xx: float,
-        error_rate_5xx: float,
-        origin_latency_ms: float,
-        price_class: str,
-        invalidations_per_month: int,
-        monthly_cost: float,
-    ) -> tuple[bool, int, str, float, list[dict[str, Any]]]:
-        """
-        Analyze AWS CloudFront Distribution for cost optimization opportunities.
-
-        Optimization scenarios (5):
-        1. Completely inactive - No requests (critical)
-        2. Very low usage - <10K requests/month (high)
-        3. High origin latency - >500ms avg, poor caching (high)
-        4. Price class optimization - All Edges when NA/EU sufficient (medium)
-        5. Excessive invalidations - >1000/month, use versioning (medium)
-
-        Returns:
-            (is_optimizable, optimization_score, priority, potential_savings, recommendations)
-        """
-        is_optimizable = False
-        optimization_score = 0
-        priority = "low"
-        potential_savings = 0.0
-        recommendations = []
-
-        # Scenario 1: CRITICAL - Completely inactive (no requests)
-        if requests_per_month == 0.0:
-            is_optimizable = True
-            optimization_score = 95
-            priority = "critical"
-            potential_savings = monthly_cost  # Full savings
-            recommendations.append(
-                {
-                    "type": "delete_distribution",
-                    "title": "Delete Completely Inactive CloudFront Distribution",
-                    "description": f"Distribution '{distribution.get('Id', '')}' has received NO requests "
-                    f"in the last 7 days. This distribution is completely unused and costs ${monthly_cost:.2f}/month.",
-                    "impact": "high",
-                    "estimated_savings": f"${monthly_cost:.2f}/month",
-                    "action": "Delete this unused CloudFront distribution",
-                    "risk": "low",
-                }
-            )
-            return (is_optimizable, optimization_score, priority, potential_savings, recommendations)
-
-        # Scenario 2: HIGH - Very low usage (<10K requests/month)
-        if requests_per_month > 0 and requests_per_month < 10_000:
-            is_optimizable = True
-            optimization_score = max(optimization_score, 85)
-            priority = "high" if priority != "critical" else priority
-
-            # For very low traffic, direct S3 access may be cheaper
-            recommendations.append(
-                {
-                    "type": "low_usage_consolidate",
-                    "title": f"Very Low Usage ({requests_per_month:.0f} Requests/Month)",
-                    "description": f"Distribution '{distribution.get('Id', '')}' receives only {requests_per_month:.0f} requests/month. "
-                    f"For such low traffic, consider direct S3 access or consolidating with another distribution.",
-                    "impact": "medium",
-                    "estimated_savings": f"${monthly_cost * 0.70:.2f}/month (if using direct S3 access)",
-                    "action": "Review if CloudFront is necessary for this low traffic volume",
-                    "risk": "medium",
-                }
-            )
-            potential_savings = max(potential_savings, monthly_cost * 0.70)
-
-        # Scenario 3: HIGH - High origin latency (>500ms avg) indicates poor caching
-        if origin_latency_ms > 500.0:
-            is_optimizable = True
-            optimization_score = max(optimization_score, 80)
-            priority = "high" if priority != "critical" else priority
-
-            # High latency = going to origin too often = cache not effective
-            recommendations.append(
-                {
-                    "type": "optimize_caching",
-                    "title": f"High Origin Latency ({origin_latency_ms:.0f}ms Average)",
-                    "description": f"Distribution '{distribution.get('Id', '')}' has high origin latency ({origin_latency_ms:.0f}ms avg), "
-                    f"indicating poor cache hit rate. Optimize Cache-Control headers or use Lambda@Edge for better caching.",
-                    "impact": "high",
-                    "estimated_savings": f"${monthly_cost * 0.30:.2f}/month (by improving cache hit rate)",
-                    "action": "Review and optimize caching strategy (TTL, Cache-Control headers)",
-                    "risk": "low",
-                }
-            )
-            potential_savings = max(potential_savings, monthly_cost * 0.30)
-
-        # Scenario 4: MEDIUM - Price class optimization
-        # PriceClass_All = most expensive, PriceClass_100 = cheapest (US/Europe only)
-        if price_class == "PriceClass_All":
-            is_optimizable = True
-            optimization_score = max(optimization_score, 65)
-            priority = "medium" if priority == "low" else priority
-
-            # Estimate savings by switching from All Edges to US/Europe only
-            all_edges_rate = self.PRICING.get("cloudfront_data_transfer_other_per_gb", 0.170)
-            us_europe_rate = self.PRICING.get("cloudfront_data_transfer_us_europe_per_gb", 0.085)
-            data_transfer_savings = data_transfer_gb * (all_edges_rate - us_europe_rate)
-            potential_savings = max(potential_savings, data_transfer_savings)
-
-            recommendations.append(
-                {
-                    "type": "optimize_price_class",
-                    "title": f"Price Class 'All Edges' May Be Overkill",
-                    "description": f"Distribution '{distribution.get('Id', '')}' uses 'All Edges' price class. "
-                    f"If most users are in North America/Europe, switch to 'Use Only US, Canada and Europe' to save 50% on data transfer.",
-                    "impact": "low",
-                    "estimated_savings": f"${data_transfer_savings:.2f}/month",
-                    "action": "Change price class from 'All' to 'US/Europe' if traffic is mostly NA/EU",
-                    "risk": "low",
-                }
-            )
-
-        # Scenario 5: MEDIUM - Excessive invalidations (>1000/month)
-        if invalidations_per_month > 1000:
-            is_optimizable = True
-            optimization_score = max(optimization_score, 60)
-            priority = "medium" if priority == "low" else priority
-
-            # Calculate invalidation cost savings
-            invalidation_rate = self.PRICING.get("cloudfront_invalidation_per_path", 0.005)
-            invalidation_cost = (invalidations_per_month - 1000) * invalidation_rate
-            potential_savings = max(potential_savings, invalidation_cost)
-
-            recommendations.append(
-                {
-                    "type": "reduce_invalidations",
-                    "title": f"Excessive Invalidations ({invalidations_per_month} Paths/Month)",
-                    "description": f"Distribution '{distribution.get('Id', '')}' has {invalidations_per_month} invalidation "
-                    f"requests/month. After first 1,000 free, you're charged ${invalidation_cost:.2f}/month. "
-                    f"Use versioned file names (e.g., app.v2.js) instead of invalidations.",
-                    "impact": "low",
-                    "estimated_savings": f"${invalidation_cost:.2f}/month",
-                    "action": "Implement versioning strategy (file names with versions) to avoid invalidations",
-                    "risk": "low",
-                }
-            )
-
-        return (is_optimizable, optimization_score, priority, potential_savings, recommendations)
-
-    async def scan_cloudfront_distributions(self) -> list[AllCloudResourceData]:
-        """
-        Scan ALL AWS CloudFront Distributions for cost intelligence.
-
-        ⚠️ IMPORTANT: CloudFront is a GLOBAL service (not regional).
-        This method scans all distributions regardless of region.
-
-        For each distribution:
-        - Calculate monthly cost (requests + data transfer + invalidations)
-        - Fetch CloudWatch metrics (Requests, BytesDownloaded, ErrorRate, OriginLatency)
-        - Analyze optimization opportunities (5 scenarios)
-
-        Returns:
-            List of AllCloudResourceData entries for all CloudFront Distributions
-        """
-        resources: list[AllCloudResourceData] = []
-
-        try:
-            # CloudFront is a global service, client doesn't take region parameter
-            async with self.session.client("cloudfront") as cloudfront:
-                async with self.session.client("cloudwatch", region_name="us-east-1") as cloudwatch:
-                    # CloudWatch metrics for CloudFront are ONLY in us-east-1
-
-                    # List all distributions
-                    paginator = cloudfront.get_paginator("list_distributions")
-                    distributions = []
-
-                    async for page in paginator.paginate():
-                        dist_list = page.get("DistributionList", {})
-                        distributions.extend(dist_list.get("Items", []))
-
-                    logger.info(
-                        "inventory.cloudfront.distributions_found",
-                        count=len(distributions),
-                    )
-
-                    # Process each distribution
-                    for dist in distributions:
-                        try:
-                            dist_id = dist.get("Id", "")
-                            dist_domain_name = dist.get("DomainName", "")
-                            dist_status = dist.get("Status", "")
-                            dist_enabled = dist.get("Enabled", False)
-                            price_class = dist.get("PriceClass", "PriceClass_All")
-
-                            # Get CloudWatch metrics (7 days)
-                            # NOTE: CloudFront metrics are in us-east-1 regardless of distribution location
-                            end_time = datetime.utcnow()
-                            start_time = end_time - timedelta(days=7)
-
-                            # Metric 1: Requests (sum over 7 days)
-                            requests_response = await cloudwatch.get_metric_statistics(
-                                Namespace="AWS/CloudFront",
-                                MetricName="Requests",
-                                Dimensions=[
-                                    {"Name": "DistributionId", "Value": dist_id},
-                                    {"Name": "Region", "Value": "Global"},
-                                ],
-                                StartTime=start_time,
-                                EndTime=end_time,
-                                Period=604800,  # 7 days
-                                Statistics=["Sum"],
-                            )
-                            requests_7d = (
-                                requests_response["Datapoints"][0]["Sum"]
-                                if requests_response.get("Datapoints")
-                                else 0.0
-                            )
-
-                            # Metric 2: BytesDownloaded (sum)
-                            bytes_downloaded_response = await cloudwatch.get_metric_statistics(
-                                Namespace="AWS/CloudFront",
-                                MetricName="BytesDownloaded",
-                                Dimensions=[
-                                    {"Name": "DistributionId", "Value": dist_id},
-                                    {"Name": "Region", "Value": "Global"},
-                                ],
-                                StartTime=start_time,
-                                EndTime=end_time,
-                                Period=604800,
-                                Statistics=["Sum"],
-                            )
-                            bytes_downloaded = (
-                                bytes_downloaded_response["Datapoints"][0]["Sum"]
-                                if bytes_downloaded_response.get("Datapoints")
-                                else 0.0
-                            )
-                            data_transfer_gb_7d = bytes_downloaded / (1024 ** 3)  # Convert to GB
-
-                            # Metric 3: 4xxErrorRate (average)
-                            error_4xx_response = await cloudwatch.get_metric_statistics(
-                                Namespace="AWS/CloudFront",
-                                MetricName="4xxErrorRate",
-                                Dimensions=[
-                                    {"Name": "DistributionId", "Value": dist_id},
-                                    {"Name": "Region", "Value": "Global"},
-                                ],
-                                StartTime=start_time,
-                                EndTime=end_time,
-                                Period=604800,
-                                Statistics=["Average"],
-                            )
-                            error_rate_4xx = (
-                                error_4xx_response["Datapoints"][0]["Average"]
-                                if error_4xx_response.get("Datapoints")
-                                else 0.0
-                            )
-
-                            # Metric 4: 5xxErrorRate (average)
-                            error_5xx_response = await cloudwatch.get_metric_statistics(
-                                Namespace="AWS/CloudFront",
-                                MetricName="5xxErrorRate",
-                                Dimensions=[
-                                    {"Name": "DistributionId", "Value": dist_id},
-                                    {"Name": "Region", "Value": "Global"},
-                                ],
-                                StartTime=start_time,
-                                EndTime=end_time,
-                                Period=604800,
-                                Statistics=["Average"],
-                            )
-                            error_rate_5xx = (
-                                error_5xx_response["Datapoints"][0]["Average"]
-                                if error_5xx_response.get("Datapoints")
-                                else 0.0
-                            )
-
-                            # Metric 5: OriginLatency (average)
-                            origin_latency_response = await cloudwatch.get_metric_statistics(
-                                Namespace="AWS/CloudFront",
-                                MetricName="OriginLatency",
-                                Dimensions=[
-                                    {"Name": "DistributionId", "Value": dist_id},
-                                    {"Name": "Region", "Value": "Global"},
-                                ],
-                                StartTime=start_time,
-                                EndTime=end_time,
-                                Period=604800,
-                                Statistics=["Average"],
-                            )
-                            origin_latency_ms = (
-                                origin_latency_response["Datapoints"][0]["Average"]
-                                if origin_latency_response.get("Datapoints")
-                                else 0.0
-                            )
-
-                            # Estimate monthly metrics from 7-day data
-                            requests_per_month = requests_7d * 4.33
-                            data_transfer_gb_per_month = data_transfer_gb_7d * 4.33
-
-                            # Estimate invalidations (not available via CloudWatch, use placeholder)
-                            # In real scenario, would need to track via CloudFront API or logs
-                            invalidations_per_month = 0
-
-                            # Calculate cost
-                            monthly_cost = self._calculate_cloudfront_monthly_cost(
-                                requests_per_month=requests_per_month,
-                                data_transfer_gb_per_month=data_transfer_gb_per_month,
-                                invalidations_per_month=invalidations_per_month,
-                                price_class=price_class,
-                            )
-
-                            # Calculate optimization
-                            (
-                                is_optimizable,
-                                optimization_score,
-                                priority,
-                                potential_savings,
-                                recommendations,
-                            ) = self._calculate_cloudfront_optimization(
-                                distribution=dist,
-                                requests_per_month=requests_per_month,
-                                data_transfer_gb=data_transfer_gb_7d,
-                                error_rate_4xx=error_rate_4xx,
-                                error_rate_5xx=error_rate_5xx,
-                                origin_latency_ms=origin_latency_ms,
-                                price_class=price_class,
-                                invalidations_per_month=invalidations_per_month,
-                                monthly_cost=monthly_cost,
-                            )
-
-                            # Build metadata
-                            resource_metadata = {
-                                "distribution_id": dist_id,
-                                "domain_name": dist_domain_name,
-                                "status": dist_status,
-                                "enabled": dist_enabled,
-                                "price_class": price_class,
-                                "metrics": {
-                                    "requests_7d": requests_7d,
-                                    "data_transfer_gb_7d": data_transfer_gb_7d,
-                                    "error_rate_4xx_avg": error_rate_4xx,
-                                    "error_rate_5xx_avg": error_rate_5xx,
-                                    "origin_latency_ms_avg": origin_latency_ms,
-                                },
-                            }
-
-                            # Apply detection rules filtering
-                            resource_age_days = None
-                            if isinstance(created_at, datetime):
-                                resource_age_days = (datetime.utcnow() - created_at.replace(tzinfo=None)).days
-
-                            if not self._should_include_resource("cloudfront_distribution", resource_age_days):
-                                logger.debug("inventory.cloudfront_filtered", dist_id=dist_id, age=resource_age_days)
-                                continue
-
-                            # Create resource entry (region = "global" for CloudFront)
-                            resource = AllCloudResourceData(
-                                resource_id=dist_id,
-                                resource_type="cloudfront_distribution",
-                                resource_name=dist_domain_name,
-                                region="global",  # CloudFront is global
-                                estimated_monthly_cost=monthly_cost,
-                                currency="USD",
-                                resource_metadata=resource_metadata,
-                                is_optimizable=is_optimizable,
-                                optimization_score=optimization_score,
-                                optimization_priority=priority,
-                                potential_monthly_savings=potential_savings,
-                                optimization_recommendations=recommendations,
-                            )
-
-                            resources.append(resource)
-
-                            logger.info(
-                                "inventory.cloudfront.distribution_scanned",
-                                distribution_id=dist_id,
-                                domain_name=dist_domain_name,
-                                requests_7d=requests_7d,
-                                monthly_cost=monthly_cost,
-                                is_optimizable=is_optimizable,
-                                optimization_score=optimization_score,
-                            )
-
-                        except Exception as e:
-                            logger.error(
-                                "inventory.cloudfront.distribution_scan_error",
-                                distribution_id=dist.get("Id", "unknown"),
-                                error=str(e),
-                            )
-                            continue
-
-        except Exception as e:
-            logger.error(
-                "cloudfront.scan_failed",
-                error=str(e),
-            )
-
-        return resources
-
-    # ============================================================================
-    # AWS - ECS CLUSTER (Cost Intelligence / Inventory Mode)
-    # ============================================================================
-
-    def _calculate_ecs_cluster_monthly_cost(
-        self,
-        total_fargate_vcpu: float,
-        total_fargate_memory_gb: float,
-        total_ec2_instances: int,
-        service_connect_enabled: bool,
-        region: str,
-    ) -> float:
-        """
-        Calculate estimated monthly cost for AWS ECS Cluster.
-
-        Cost structure:
-        - ECS Control Plane: FREE (no cost for cluster itself)
-        - Fargate compute: $0.04048/vCPU-hour + $0.004445/GB-hour
-        - EC2 instances: Separate cost (instance pricing)
-        - Service Connect (optional): $0.01/vCPU-hour
-
-        Args:
-            total_fargate_vcpu: Total Fargate vCPUs running in cluster
-            total_fargate_memory_gb: Total Fargate memory GB running in cluster
-            total_ec2_instances: Number of EC2 container instances
-            service_connect_enabled: Whether Service Connect is enabled
-            region: AWS region
-
-        Returns:
-            Estimated monthly cost for cluster (Fargate compute + Service Connect)
-        """
-        # Fargate compute cost (monthly = 730 hours)
-        fargate_vcpu_cost = total_fargate_vcpu * 0.04048 * 730
-        fargate_memory_cost = total_fargate_memory_gb * 0.004445 * 730
-        fargate_total = fargate_vcpu_cost + fargate_memory_cost
-
-        # Service Connect cost (if enabled)
-        service_connect_cost = 0.0
-        if service_connect_enabled and total_fargate_vcpu > 0:
-            service_connect_rate = self.PRICING.get("ecs_service_connect_per_vcpu_hour", 0.01)
-            service_connect_cost = total_fargate_vcpu * service_connect_rate * 730
-
-        # Note: EC2 instance costs are tracked separately (not included here)
-        total_cost = fargate_total + service_connect_cost
-
-        return total_cost
-
-    def _calculate_ecs_cluster_optimization(
-        self,
-        cluster_name: str,
-        running_tasks_count: int,
-        active_services_count: int,
-        registered_container_instances: int,
-        capacity_providers: list,
-        avg_cpu_utilization: float,
-        avg_memory_utilization: float,
-        monthly_cost: float,
-    ) -> tuple[bool, int, str, float, list]:
-        """
-        Calculate optimization opportunities for ECS Cluster.
-
-        Scenarios:
-        1. CRITICAL (95): Empty cluster (0 tasks, 0 services) → Delete cluster
-        2. HIGH (85): Low usage (<5 tasks, <3 services) → Consolidate to another cluster
-        3. HIGH (80): Inactive services (services with desired count = 0) → Clean up
-        4. MEDIUM (70): Mixed Fargate + EC2 (inefficient) → Pure Fargate or pure EC2
-        5. MEDIUM (65): No auto-scaling configured → Enable ECS Service Auto Scaling
-
-        Args:
-            cluster_name: ECS cluster name
-            running_tasks_count: Number of running tasks
-            active_services_count: Number of active services
-            registered_container_instances: Number of EC2 container instances
-            capacity_providers: List of capacity providers (["FARGATE", "FARGATE_SPOT", "EC2", etc.])
-            avg_cpu_utilization: Average CPU utilization (%)
-            avg_memory_utilization: Average memory utilization (%)
-            monthly_cost: Estimated monthly cost
-
-        Returns:
-            Tuple of (is_optimizable, optimization_score, priority, potential_savings, recommendations)
-        """
-        recommendations = []
-        optimization_score = 0
-        optimization_priority = "none"
-        potential_savings = 0.0
-        is_optimizable = False
-
-        # Scenario 1: CRITICAL - Empty cluster (0 tasks, 0 services)
-        if running_tasks_count == 0 and active_services_count == 0:
-            optimization_score = 95
-            optimization_priority = "critical"
-            potential_savings = monthly_cost  # Save entire cluster cost
-            is_optimizable = True
-            recommendations.append({
-                "scenario": "empty_cluster",
-                "action": "delete_cluster",
-                "priority": "critical",
-                "estimated_savings": monthly_cost,
-                "details": f"Cluster '{cluster_name}' is empty (0 tasks, 0 services). Delete to eliminate costs.",
-                "recommendation": "Delete cluster - no workloads running"
-            })
-
-        # Scenario 2: HIGH - Low usage (<5 tasks, <3 services)
-        if running_tasks_count > 0 and running_tasks_count < 5 and active_services_count < 3 and optimization_score < 85:
-            optimization_score = max(optimization_score, 85)
-            optimization_priority = "high" if optimization_priority == "none" else optimization_priority
-            potential_savings = max(potential_savings, monthly_cost * 0.4)
-            is_optimizable = True
-            recommendations.append({
-                "scenario": "low_usage",
-                "action": "consolidate_cluster",
-                "priority": "high",
-                "estimated_savings": monthly_cost * 0.4,
-                "details": f"Cluster '{cluster_name}' has only {running_tasks_count} tasks and {active_services_count} services. Consolidate to another cluster.",
-                "recommendation": "Consolidate workloads into a single cluster to reduce overhead (40% savings)"
-            })
-
-        # Scenario 3: HIGH - Inactive services (detect via metadata if available)
-        # Note: This requires service-level metadata, simplified here
-        # In production, you'd fetch describe_services() to check desiredCount
-        if active_services_count == 0 and running_tasks_count > 0 and optimization_score < 80:
-            optimization_score = max(optimization_score, 80)
-            optimization_priority = "high" if optimization_priority == "none" else optimization_priority
-            is_optimizable = True
-            recommendations.append({
-                "scenario": "inactive_services",
-                "action": "cleanup_services",
-                "priority": "high",
-                "estimated_savings": 0.0,
-                "details": f"Cluster '{cluster_name}' has services with desired count = 0. Clean up unused service definitions.",
-                "recommendation": "Delete inactive services (no cost impact, but improves visibility)"
-            })
-
-        # Scenario 4: MEDIUM - Mixed Fargate + EC2 (inefficient)
-        has_fargate = any("FARGATE" in cp for cp in capacity_providers)
-        has_ec2 = registered_container_instances > 0 or "EC2" in " ".join(capacity_providers)
-
-        if has_fargate and has_ec2 and optimization_score < 70:
-            optimization_score = max(optimization_score, 70)
-            optimization_priority = "medium" if optimization_priority == "none" else optimization_priority
-            potential_savings = max(potential_savings, monthly_cost * 0.2)
-            is_optimizable = True
-            recommendations.append({
-                "scenario": "mixed_capacity_providers",
-                "action": "standardize_launch_type",
-                "priority": "medium",
-                "estimated_savings": monthly_cost * 0.2,
-                "details": f"Cluster '{cluster_name}' uses both Fargate and EC2 instances. Standardize to pure Fargate or pure EC2 for better cost efficiency.",
-                "recommendation": "Use pure Fargate (easier management) or pure EC2 (lower cost for steady workloads)",
-                "alternatives": [
-                    {"name": "Pure Fargate", "savings": 0.0, "benefit": "Serverless, no instance management"},
-                    {"name": "Pure EC2", "savings": monthly_cost * 0.2, "benefit": "20% cheaper for steady workloads"}
-                ]
-            })
-
-        # Scenario 5: MEDIUM - No auto-scaling (heuristic: low CPU/memory utilization suggests over-provisioning)
-        if (avg_cpu_utilization < 30 or avg_memory_utilization < 30) and running_tasks_count > 3 and optimization_score < 65:
-            optimization_score = max(optimization_score, 65)
-            optimization_priority = "medium" if optimization_priority == "none" else optimization_priority
-            is_optimizable = True
-            recommendations.append({
-                "scenario": "no_auto_scaling",
-                "action": "enable_auto_scaling",
-                "priority": "medium",
-                "estimated_savings": 0.0,
-                "details": f"Cluster '{cluster_name}' has low CPU ({avg_cpu_utilization:.1f}%) or memory ({avg_memory_utilization:.1f}%) utilization. Enable ECS Service Auto Scaling to scale down during low demand.",
-                "recommendation": "Configure ECS Service Auto Scaling (target CPU 70%, target memory 80%)"
-            })
-
-        return is_optimizable, optimization_score, optimization_priority, potential_savings, recommendations
-
-    async def scan_ecs_clusters(self, region: str) -> list[AllCloudResourceData]:
-        """
-        Scan ALL AWS ECS Clusters for cost intelligence.
-
-        This method scans all ECS clusters to provide cost visibility and
-        optimization recommendations for container orchestration.
-
-        CloudWatch Metrics (AWS/ECS namespace):
-        - CPUUtilization (cluster-level)
-        - MemoryUtilization (cluster-level)
-
-        Args:
-            region: AWS region to scan
-
-        Returns:
-            List of AllCloudResourceData objects for all ECS clusters
-        """
-        resources: list[AllCloudResourceData] = []
-
-        try:
-            async with self.session.client("ecs", region_name=region) as ecs:
-                async with self.session.client("cloudwatch", region_name=region) as cloudwatch:
-                    # List all ECS clusters
-                    list_response = await ecs.list_clusters()
-                    cluster_arns = list_response.get("clusterArns", [])
-
-                    if not cluster_arns:
-                        logger.info("ecs.no_clusters_found", region=region)
-                        return resources
-
-                    # Describe all clusters
-                    describe_response = await ecs.describe_clusters(clusters=cluster_arns)
-                    clusters = describe_response.get("clusters", [])
-
-                    for cluster in clusters:
-                        try:
-                            cluster_name = cluster.get("clusterName", "unknown")
-                            cluster_arn = cluster.get("clusterArn", "")
-                            status = cluster.get("status", "UNKNOWN")
-                            running_tasks_count = cluster.get("runningTasksCount", 0)
-                            pending_tasks_count = cluster.get("pendingTasksCount", 0)
-                            active_services_count = cluster.get("activeServicesCount", 0)
-                            registered_container_instances = cluster.get("registeredContainerInstancesCount", 0)
-                            capacity_providers = cluster.get("capacityProviders", [])
-                            default_capacity_provider_strategy = cluster.get("defaultCapacityProviderStrategy", [])
-
-                            # Extract tags
-                            tags = {}
-                            for tag in cluster.get("tags", []):
-                                tags[tag["Key"]] = tag["Value"]
-
-                            # Get cluster settings (Service Connect, etc.)
-                            settings = cluster.get("settings", [])
-                            service_connect_enabled = any(
-                                setting.get("name") == "containerInsights" and setting.get("value") == "enabled"
-                                for setting in settings
-                            )
-
-                            # List all services in cluster
-                            services_response = await ecs.list_services(cluster=cluster_arn)
-                            service_arns = services_response.get("serviceArns", [])
-
-                            # List all tasks in cluster
-                            tasks_response = await ecs.list_tasks(cluster=cluster_arn)
-                            task_arns = tasks_response.get("taskArns", [])
-
-                            # Calculate total Fargate vCPU and memory (estimate from running tasks)
-                            total_fargate_vcpu = 0.0
-                            total_fargate_memory_gb = 0.0
-
-                            if task_arns:
-                                # Limit to first 100 tasks for performance
-                                task_arns_sample = task_arns[:100]
-                                tasks_describe_response = await ecs.describe_tasks(
-                                    cluster=cluster_arn,
-                                    tasks=task_arns_sample
-                                )
-                                tasks = tasks_describe_response.get("tasks", [])
-
-                                for task in tasks:
-                                    launch_type = task.get("launchType", "")
-                                    if launch_type == "FARGATE":
-                                        # Get task definition to extract vCPU and memory
-                                        task_def_arn = task.get("taskDefinitionArn", "")
-                                        if task_def_arn:
-                                            try:
-                                                task_def_response = await ecs.describe_task_definition(
-                                                    taskDefinition=task_def_arn
-                                                )
-                                                task_definition = task_def_response["taskDefinition"]
-                                                cpu_str = task_definition.get("cpu", "256")
-                                                memory_str = task_definition.get("memory", "512")
-                                                vcpu = float(cpu_str) / 1024
-                                                memory_gb = float(memory_str) / 1024
-                                                total_fargate_vcpu += vcpu
-                                                total_fargate_memory_gb += memory_gb
-                                            except Exception:
-                                                pass
-
-                            # Get CloudWatch metrics (last 7 days)
-                            avg_cpu_utilization = 0.0
-                            avg_memory_utilization = 0.0
-
-                            try:
-                                end_time = datetime.utcnow()
-                                start_time = end_time - timedelta(days=7)
-
-                                # CPU Utilization (cluster-level)
-                                cpu_response = await cloudwatch.get_metric_statistics(
-                                    Namespace="AWS/ECS",
-                                    MetricName="CPUUtilization",
-                                    Dimensions=[
-                                        {"Name": "ClusterName", "Value": cluster_name}
-                                    ],
-                                    StartTime=start_time,
-                                    EndTime=end_time,
-                                    Period=604800,  # 7 days
-                                    Statistics=["Average"],
-                                )
-
-                                datapoints = cpu_response.get("Datapoints", [])
-                                if datapoints:
-                                    avg_cpu_utilization = datapoints[0].get("Average", 0.0)
-                            except Exception:
-                                pass
-
-                            try:
-                                # Memory Utilization (cluster-level)
-                                memory_response = await cloudwatch.get_metric_statistics(
-                                    Namespace="AWS/ECS",
-                                    MetricName="MemoryUtilization",
-                                    Dimensions=[
-                                        {"Name": "ClusterName", "Value": cluster_name}
-                                    ],
-                                    StartTime=start_time,
-                                    EndTime=end_time,
-                                    Period=604800,  # 7 days
-                                    Statistics=["Average"],
-                                )
-
-                                datapoints = memory_response.get("Datapoints", [])
-                                if datapoints:
-                                    avg_memory_utilization = datapoints[0].get("Average", 0.0)
-                            except Exception:
-                                pass
-
-                            # Calculate monthly cost
-                            monthly_cost = self._calculate_ecs_cluster_monthly_cost(
-                                total_fargate_vcpu=total_fargate_vcpu,
-                                total_fargate_memory_gb=total_fargate_memory_gb,
-                                total_ec2_instances=registered_container_instances,
-                                service_connect_enabled=service_connect_enabled,
-                                region=region,
-                            )
-
-                            # Calculate optimization metrics
-                            (
-                                is_optimizable,
-                                optimization_score,
-                                optimization_priority,
-                                potential_savings,
-                                optimization_recommendations,
-                            ) = self._calculate_ecs_cluster_optimization(
-                                cluster_name=cluster_name,
-                                running_tasks_count=running_tasks_count,
-                                active_services_count=active_services_count,
-                                registered_container_instances=registered_container_instances,
-                                capacity_providers=capacity_providers,
-                                avg_cpu_utilization=avg_cpu_utilization,
-                                avg_memory_utilization=avg_memory_utilization,
-                                monthly_cost=monthly_cost,
-                            )
-
-                            # Determine utilization status
-                            if running_tasks_count == 0 and active_services_count == 0:
-                                utilization_status = "idle"
-                            elif running_tasks_count < 5:
-                                utilization_status = "low"
-                            elif running_tasks_count < 20:
-                                utilization_status = "medium"
-                            else:
-                                utilization_status = "high"
-
-                            # Build metadata
-                            metadata = {
-                                "cluster_arn": cluster_arn,
-                                "status": status,
-                                "running_tasks_count": running_tasks_count,
-                                "pending_tasks_count": pending_tasks_count,
-                                "active_services_count": active_services_count,
-                                "registered_container_instances_count": registered_container_instances,
-                                "capacity_providers": capacity_providers,
-                                "default_capacity_provider_strategy": default_capacity_provider_strategy,
-                                "service_count": len(service_arns),
-                                "task_count": len(task_arns),
-                                "total_fargate_vcpu": total_fargate_vcpu,
-                                "total_fargate_memory_gb": total_fargate_memory_gb,
-                                "service_connect_enabled": service_connect_enabled,
-                            }
-
-                            # Apply detection rules filtering
-                            # Note: ECS clusters don't have creation timestamp in API, so age is always None
-                            resource_age_days = None
-
-                            if not self._should_include_resource("ecs_cluster", resource_age_days):
-                                logger.debug("inventory.ecs_filtered", cluster_name=cluster_name, age=resource_age_days)
-                                continue
-
-                            # Create resource
-                            resource = AllCloudResourceData(
-                                resource_type="ecs_cluster",
-                                resource_id=cluster_name,
-                                resource_name=cluster_name,
-                                region=region,
-                                estimated_monthly_cost=monthly_cost,
-                                resource_metadata=metadata,
-                                currency="USD",
-                                utilization_status=utilization_status,
-                                cpu_utilization_percent=avg_cpu_utilization,
-                                memory_utilization_percent=avg_memory_utilization,
-                                storage_utilization_percent=None,
-                                network_utilization_mbps=None,
-                                is_optimizable=is_optimizable,
-                                optimization_priority=optimization_priority,
-                                optimization_score=optimization_score,
-                                potential_monthly_savings=potential_savings,
-                                optimization_recommendations=optimization_recommendations,
-                                tags=tags,
-                                resource_status=status,
-                                is_orphan=running_tasks_count == 0 and active_services_count == 0,
-                                created_at_cloud=None,  # ECS clusters don't have creation timestamp in API
-                                last_used_at=None,
-                            )
-
-                            resources.append(resource)
-
-                        except Exception as e:
-                            logger.error(
-                                "ecs.cluster_scan_failed",
-                                cluster_name=cluster.get("clusterName", "unknown"),
-                                region=region,
-                                error=str(e),
-                            )
-                            continue
-
-        except Exception as e:
-            logger.error(
-                "ecs.scan_failed",
-                region=region,
-                error=str(e),
-            )
-
-        return resources
-
-    # ============================================================================
-    # AWS - CLOUDWATCH LOG GROUP (Cost Intelligence / Inventory Mode)
-    # ============================================================================
-
-    def _calculate_cloudwatch_log_group_monthly_cost(
-        self,
-        stored_bytes: float,
-        ingestion_bytes_per_month: float,
-        retention_days: int,
-        region: str,
-    ) -> float:
-        """
-        Calculate estimated monthly cost for AWS CloudWatch Log Group.
-
-        Cost structure:
-        - Ingestion: $0.50 per GB
-        - Storage: $0.03 per GB/month (after retention period)
-        - Vended Logs (VPC Flow, Lambda, RDS, etc.): FREE ingestion
-        - Insights Queries: $0.005 per GB scanned (not included here)
-
-        Args:
-            stored_bytes: Total bytes stored in log group
-            ingestion_bytes_per_month: Monthly ingestion in bytes
-            retention_days: Log retention period in days
-            region: AWS region
-
-        Returns:
-            Estimated monthly cost for log group
-        """
-        # Convert bytes to GB
-        stored_gb = stored_bytes / (1024 ** 3)
-        ingestion_gb_per_month = ingestion_bytes_per_month / (1024 ** 3)
-
-        # Ingestion cost
-        ingestion_rate = self.PRICING.get("cloudwatch_logs_ingestion_per_gb", 0.50)
-        ingestion_cost = ingestion_gb_per_month * ingestion_rate
-
-        # Storage cost (only charged after retention period)
-        storage_rate = self.PRICING.get("cloudwatch_logs_storage_per_gb", 0.03)
-        storage_cost = stored_gb * storage_rate
-
-        total_cost = ingestion_cost + storage_cost
-
-        return total_cost
-
-    def _calculate_cloudwatch_log_group_optimization(
-        self,
-        log_group_name: str,
-        stored_bytes: float,
-        ingestion_bytes_per_month: float,
-        retention_days: int,
-        creation_time: int,
-        metric_filter_count: int,
-        monthly_cost: float,
-    ) -> tuple[bool, int, str, float, list]:
-        """
-        Calculate optimization opportunities for CloudWatch Log Group.
-
-        Scenarios:
-        1. CRITICAL (95): Empty log group (0 bytes, never used since 30+ days) → Delete
-        2. HIGH (85): Excessive retention (365+ days, <1 GB stored) → Reduce to 30 days
-        3. HIGH (80): Orphaned log group (resource source deleted) → Delete
-        4. MEDIUM (70): Large size (>100 GB) + long retention (>90 days) → Archive to S3
-        5. MEDIUM (65): High ingestion (>10 GB/day) without filters → Add subscription filters
-        6. LOW (50): Critical logs without S3 export → Configure export
-
-        Args:
-            log_group_name: Log group name
-            stored_bytes: Total bytes stored
-            ingestion_bytes_per_month: Monthly ingestion in bytes
-            retention_days: Retention period in days
-            creation_time: Unix timestamp of log group creation
-            metric_filter_count: Number of metric filters configured
-            monthly_cost: Estimated monthly cost
-
-        Returns:
-            Tuple of (is_optimizable, optimization_score, priority, potential_savings, recommendations)
-        """
-        recommendations = []
-        optimization_score = 0
-        optimization_priority = "none"
-        potential_savings = 0.0
-        is_optimizable = False
-
-        stored_gb = stored_bytes / (1024 ** 3)
-        ingestion_gb_per_month = ingestion_bytes_per_month / (1024 ** 3)
-        ingestion_gb_per_day = ingestion_gb_per_month / 30
-
-        # Calculate age in days
-        age_days = 0
-        if creation_time:
-            age_days = (datetime.utcnow().timestamp() - creation_time) / 86400
-
-        # Scenario 1: CRITICAL - Empty log group (never used since 30+ days)
-        if stored_bytes == 0 and ingestion_bytes_per_month == 0 and age_days > 30:
-            optimization_score = 95
-            optimization_priority = "critical"
-            potential_savings = monthly_cost
-            is_optimizable = True
-            recommendations.append({
-                "scenario": "empty_log_group",
-                "action": "delete_log_group",
-                "priority": "critical",
-                "estimated_savings": monthly_cost,
-                "details": f"Log group '{log_group_name}' is empty and unused for {age_days:.0f} days. Delete to eliminate costs.",
-                "recommendation": "Delete log group - no data logged"
-            })
-
-        # Scenario 2: HIGH - Excessive retention (365+ days, <1 GB stored)
-        if retention_days >= 365 and stored_gb < 1 and optimization_score < 85:
-            optimization_score = max(optimization_score, 85)
-            optimization_priority = "high" if optimization_priority == "none" else optimization_priority
-            # Reducing retention from 365 to 30 days saves 90% storage cost
-            storage_savings = monthly_cost * 0.9
-            potential_savings = max(potential_savings, storage_savings)
-            is_optimizable = True
-            recommendations.append({
-                "scenario": "excessive_retention",
-                "action": "reduce_retention",
-                "priority": "high",
-                "estimated_savings": storage_savings,
-                "details": f"Log group '{log_group_name}' has 365+ days retention but only {stored_gb:.2f} GB stored. Reduce retention to 30 days.",
-                "recommendation": "Reduce retention to 30 days (90% storage savings)",
-                "alternatives": [
-                    {"name": "30 days", "savings": storage_savings, "benefit": "Standard retention"},
-                    {"name": "90 days", "savings": storage_savings * 0.7, "benefit": "Compliance-friendly"}
-                ]
-            })
-
-        # Scenario 3: HIGH - Orphaned log group (heuristic: contains "/aws/" in name but no recent ingestion)
-        is_aws_service_log = "/aws/" in log_group_name or log_group_name.startswith("aws/")
-        if is_aws_service_log and ingestion_bytes_per_month == 0 and age_days > 7 and optimization_score < 80:
-            optimization_score = max(optimization_score, 80)
-            optimization_priority = "high" if optimization_priority == "none" else optimization_priority
-            potential_savings = max(potential_savings, monthly_cost)
-            is_optimizable = True
-            recommendations.append({
-                "scenario": "orphaned_log_group",
-                "action": "delete_orphaned",
-                "priority": "high",
-                "estimated_savings": monthly_cost,
-                "details": f"Log group '{log_group_name}' appears orphaned (AWS service log with no ingestion for {age_days:.0f} days). Source resource may be deleted.",
-                "recommendation": "Delete orphaned log group - source resource deleted"
-            })
-
-        # Scenario 4: MEDIUM - Large size (>100 GB) + long retention (>90 days)
-        if stored_gb > 100 and retention_days > 90 and optimization_score < 70:
-            optimization_score = max(optimization_score, 70)
-            optimization_priority = "medium" if optimization_priority == "none" else optimization_priority
-            # Archive to S3 saves 40% (S3 is cheaper than CloudWatch Logs storage)
-            archive_savings = monthly_cost * 0.4
-            potential_savings = max(potential_savings, archive_savings)
-            is_optimizable = True
-            recommendations.append({
-                "scenario": "large_log_group",
-                "action": "archive_to_s3",
-                "priority": "medium",
-                "estimated_savings": archive_savings,
-                "details": f"Log group '{log_group_name}' has {stored_gb:.2f} GB stored with {retention_days} days retention. Archive older logs to S3.",
-                "recommendation": "Export logs to S3 and reduce CloudWatch retention to 7-30 days (40% savings)"
-            })
-
-        # Scenario 5: MEDIUM - High ingestion (>10 GB/day) without filters
-        if ingestion_gb_per_day > 10 and metric_filter_count == 0 and optimization_score < 65:
-            optimization_score = max(optimization_score, 65)
-            optimization_priority = "medium" if optimization_priority == "none" else optimization_priority
-            # Subscription filters can reduce ingestion by 30%
-            filter_savings = monthly_cost * 0.3
-            potential_savings = max(potential_savings, filter_savings)
-            is_optimizable = True
-            recommendations.append({
-                "scenario": "high_ingestion_no_filters",
-                "action": "add_subscription_filters",
-                "priority": "medium",
-                "estimated_savings": filter_savings,
-                "details": f"Log group '{log_group_name}' ingests {ingestion_gb_per_day:.2f} GB/day without subscription filters. Add filters to reduce noise.",
-                "recommendation": "Configure subscription filters to drop verbose/debug logs (30% ingestion reduction)"
-            })
-
-        # Scenario 6: LOW - Critical logs without S3 export
-        is_critical_log = any(keyword in log_group_name.lower() for keyword in ["prod", "production", "error", "critical"])
-        if is_critical_log and stored_gb > 1 and optimization_score < 50:
-            optimization_score = max(optimization_score, 50)
-            optimization_priority = "low" if optimization_priority == "none" else optimization_priority
-            is_optimizable = True
-            recommendations.append({
-                "scenario": "no_s3_export",
-                "action": "configure_s3_export",
-                "priority": "low",
-                "estimated_savings": 0.0,
-                "details": f"Log group '{log_group_name}' contains critical logs but no S3 export configured. Enable export for compliance/disaster recovery.",
-                "recommendation": "Configure automated S3 export for long-term retention (no cost impact, but improves compliance)"
-            })
-
-        return is_optimizable, optimization_score, optimization_priority, potential_savings, recommendations
-
-    async def scan_cloudwatch_log_groups(self, region: str) -> list[AllCloudResourceData]:
-        """
-        Scan ALL AWS CloudWatch Log Groups for cost intelligence.
-
-        This method scans all CloudWatch Log Groups to provide cost visibility
-        and optimization recommendations for log management.
-
-        CloudWatch Metrics (AWS/Logs namespace):
-        - IncomingBytes (last 7 days)
-        - IncomingLogEvents
-
-        Args:
-            region: AWS region to scan
-
-        Returns:
-            List of AllCloudResourceData objects for all CloudWatch Log Groups
-        """
-        resources: list[AllCloudResourceData] = []
-
-        try:
-            async with self.session.client("logs", region_name=region) as logs:
-                async with self.session.client("cloudwatch", region_name=region) as cloudwatch:
-                    # Paginate through all log groups
-                    paginator = logs.get_paginator("describe_log_groups")
-
-                    async for page in paginator.paginate():
-                        log_groups = page.get("logGroups", [])
-
-                        for log_group in log_groups:
-                            try:
-                                log_group_name = log_group.get("logGroupName", "unknown")
-                                stored_bytes = log_group.get("storedBytes", 0)
-                                retention_days = log_group.get("retentionInDays", 0)  # 0 = never expire
-                                creation_time = log_group.get("creationTime", 0) / 1000  # Convert ms to seconds
-                                kms_key_id = log_group.get("kmsKeyId")
-                                metric_filter_count = log_group.get("metricFilterCount", 0)
-
-                                # Get CloudWatch metrics for ingestion (last 30 days)
-                                ingestion_bytes_per_month = 0.0
-
-                                try:
-                                    end_time = datetime.utcnow()
-                                    start_time = end_time - timedelta(days=30)
-
-                                    # IncomingBytes metric
-                                    ingestion_response = await cloudwatch.get_metric_statistics(
-                                        Namespace="AWS/Logs",
-                                        MetricName="IncomingBytes",
-                                        Dimensions=[
-                                            {"Name": "LogGroupName", "Value": log_group_name}
-                                        ],
-                                        StartTime=start_time,
-                                        EndTime=end_time,
-                                        Period=2592000,  # 30 days
-                                        Statistics=["Sum"],
-                                    )
-
-                                    datapoints = ingestion_response.get("Datapoints", [])
-                                    if datapoints:
-                                        ingestion_bytes_per_month = datapoints[0].get("Sum", 0.0)
-                                except Exception:
-                                    pass
-
-                                # Calculate monthly cost
-                                monthly_cost = self._calculate_cloudwatch_log_group_monthly_cost(
-                                    stored_bytes=stored_bytes,
-                                    ingestion_bytes_per_month=ingestion_bytes_per_month,
-                                    retention_days=retention_days if retention_days > 0 else 365,  # Default to 365 if never expire
-                                    region=region,
-                                )
-
-                                # Calculate optimization metrics
-                                (
-                                    is_optimizable,
-                                    optimization_score,
-                                    optimization_priority,
-                                    potential_savings,
-                                    optimization_recommendations,
-                                ) = self._calculate_cloudwatch_log_group_optimization(
-                                    log_group_name=log_group_name,
-                                    stored_bytes=stored_bytes,
-                                    ingestion_bytes_per_month=ingestion_bytes_per_month,
-                                    retention_days=retention_days if retention_days > 0 else 365,
-                                    creation_time=creation_time,
-                                    metric_filter_count=metric_filter_count,
-                                    monthly_cost=monthly_cost,
-                                )
-
-                                # Determine utilization status
-                                stored_gb = stored_bytes / (1024 ** 3)
-                                ingestion_gb_per_month = ingestion_bytes_per_month / (1024 ** 3)
-
-                                if stored_bytes == 0 and ingestion_bytes_per_month == 0:
-                                    utilization_status = "idle"
-                                elif ingestion_gb_per_month < 1:  # <1 GB/month
-                                    utilization_status = "low"
-                                elif ingestion_gb_per_month < 10:  # <10 GB/month
-                                    utilization_status = "medium"
-                                else:
-                                    utilization_status = "high"
-
-                                # Build metadata
-                                metadata = {
-                                    "log_group_name": log_group_name,
-                                    "stored_bytes": stored_bytes,
-                                    "stored_gb": stored_gb,
-                                    "retention_in_days": retention_days,
-                                    "kms_key_id": kms_key_id,
-                                    "creation_time": creation_time,
-                                    "metric_filter_count": metric_filter_count,
-                                    "ingestion_bytes_per_month": ingestion_bytes_per_month,
-                                    "ingestion_gb_per_month": ingestion_gb_per_month,
-                                    "ingestion_gb_per_day": ingestion_gb_per_month / 30,
-                                }
-
-                                # Apply detection rules filtering
-                                resource_age_days = None
-                                if creation_time > 0:
-                                    resource_age_days = (datetime.utcnow() - datetime.fromtimestamp(creation_time)).days
-
-                                if not self._should_include_resource("cloudwatch_log_group", resource_age_days):
-                                    logger.debug("inventory.cloudwatch_log_filtered", log_group_name=log_group_name, age=resource_age_days)
-                                    continue
-
-                                # Create resource
-                                resource = AllCloudResourceData(
-                                    resource_type="cloudwatch_log_group",
-                                    resource_id=log_group_name,
-                                    resource_name=log_group_name,
-                                    region=region,
-                                    estimated_monthly_cost=monthly_cost,
-                                    resource_metadata=metadata,
-                                    currency="USD",
-                                    utilization_status=utilization_status,
-                                    cpu_utilization_percent=None,
-                                    memory_utilization_percent=None,
-                                    storage_utilization_percent=None,  # N/A for log groups
-                                    network_utilization_mbps=None,
-                                    is_optimizable=is_optimizable,
-                                    optimization_priority=optimization_priority,
-                                    optimization_score=optimization_score,
-                                    potential_monthly_savings=potential_savings,
-                                    optimization_recommendations=optimization_recommendations,
-                                    tags={},  # Log groups don't support tags in API
-                                    resource_status="ACTIVE",
-                                    is_orphan=stored_bytes == 0 and ingestion_bytes_per_month == 0,
-                                    created_at_cloud=datetime.fromtimestamp(creation_time) if creation_time else None,
-                                    last_used_at=None,
-                                )
-
-                                resources.append(resource)
-
-                            except Exception as e:
-                                logger.error(
-                                    "cloudwatch_logs.log_group_scan_failed",
-                                    log_group_name=log_group.get("logGroupName", "unknown"),
-                                    region=region,
-                                    error=str(e),
-                                )
-                                continue
-
-        except Exception as e:
-            logger.error(
-                "cloudwatch_logs.scan_failed",
-                region=region,
-                error=str(e),
-            )
-
-        return resources
-
-    # ============================================================================
-    # AWS - VPC ENDPOINT (Cost Intelligence / Inventory Mode)
-    # ============================================================================
-
-    def _calculate_vpc_endpoint_monthly_cost(
-        self,
-        endpoint_type: str,
-        availability_zone_count: int,
-        region: str,
-    ) -> float:
-        """
-        Calculate estimated monthly cost for AWS VPC Endpoint.
-
-        Cost structure:
-        - Interface endpoint: $7.20/month per AZ
-        - Gateway endpoint (S3, DynamoDB): FREE
-        - Gateway Load Balancer endpoint: $7.20/month per AZ
-        - Data transfer: $0.01/GB (not included here)
-
-        Args:
-            endpoint_type: Endpoint type (Interface, Gateway, GatewayLoadBalancer)
-            availability_zone_count: Number of availability zones
-            region: AWS region
-
-        Returns:
-            Estimated monthly cost for VPC endpoint
-        """
-        if endpoint_type == "Gateway":
-            # Gateway endpoints (S3, DynamoDB) are FREE
-            return 0.0
-
-        # Interface and GatewayLoadBalancer endpoints cost $7.20/month per AZ
-        base_cost = self.PRICING.get("vpc_endpoint", 7.20)
-        total_cost = base_cost * max(availability_zone_count, 1)
-
-        return total_cost
-
-    def _calculate_vpc_endpoint_optimization(
-        self,
-        endpoint_id: str,
-        endpoint_type: str,
-        service_name: str,
-        state: str,
-        network_interface_count: int,
-        availability_zone_count: int,
-        monthly_cost: float,
-    ) -> tuple[bool, int, str, float, list]:
-        """
-        Calculate optimization opportunities for VPC Endpoint.
-
-        Scenarios:
-        1. CRITICAL (95): Unused endpoint (0 network interfaces, state=available) → Delete
-        2. HIGH (85): Interface endpoint for S3/DynamoDB → Use Gateway endpoint (FREE)
-        3. MEDIUM (70): Multi-AZ for dev/test (unnecessary redundancy) → Single AZ
-        4. MEDIUM (65): Gateway type available but using Interface → Migrate
-        5. LOW (50): No private DNS enabled (security best practice)
-
-        Args:
-            endpoint_id: VPC endpoint ID
-            endpoint_type: Endpoint type (Interface, Gateway, GatewayLoadBalancer)
-            service_name: AWS service name (e.g., com.amazonaws.us-east-1.s3)
-            state: Endpoint state (available, pending, deleting, etc.)
-            network_interface_count: Number of network interfaces
-            availability_zone_count: Number of AZs
-            monthly_cost: Estimated monthly cost
-
-        Returns:
-            Tuple of (is_optimizable, optimization_score, priority, potential_savings, recommendations)
-        """
-        recommendations = []
-        optimization_score = 0
-        optimization_priority = "none"
-        potential_savings = 0.0
-        is_optimizable = False
-
-        # Scenario 1: CRITICAL - Unused endpoint (0 network interfaces)
-        if endpoint_type == "Interface" and network_interface_count == 0 and state == "available":
-            optimization_score = 95
-            optimization_priority = "critical"
-            potential_savings = monthly_cost
-            is_optimizable = True
-            recommendations.append({
-                "scenario": "unused_endpoint",
-                "action": "delete_endpoint",
-                "priority": "critical",
-                "estimated_savings": monthly_cost,
-                "details": f"VPC Endpoint '{endpoint_id}' has 0 network interfaces and is unused. Delete to eliminate costs.",
-                "recommendation": "Delete VPC Endpoint - no active connections"
-            })
-
-        # Scenario 2: HIGH - Interface endpoint for S3/DynamoDB (Gateway is FREE)
-        is_s3_or_dynamodb = ".s3" in service_name or ".dynamodb" in service_name
-        if endpoint_type == "Interface" and is_s3_or_dynamodb and optimization_score < 85:
-            optimization_score = max(optimization_score, 85)
-            optimization_priority = "high" if optimization_priority == "none" else optimization_priority
-            potential_savings = max(potential_savings, monthly_cost)
-            is_optimizable = True
-            service_type = "S3" if ".s3" in service_name else "DynamoDB"
-            recommendations.append({
-                "scenario": "interface_to_gateway",
-                "action": "migrate_to_gateway",
-                "priority": "high",
-                "estimated_savings": monthly_cost,
-                "details": f"VPC Endpoint '{endpoint_id}' uses Interface type for {service_type}. Gateway endpoints are FREE.",
-                "recommendation": f"Migrate to Gateway endpoint for {service_type} (100% savings, from ${monthly_cost:.2f} to $0)"
-            })
-
-        # Scenario 3: MEDIUM - Multi-AZ for dev/test (unnecessary redundancy)
-        # Heuristic: If endpoint has tags containing "dev", "test", "staging" with multi-AZ
-        if endpoint_type == "Interface" and availability_zone_count > 1 and optimization_score < 70:
-            optimization_score = max(optimization_score, 70)
-            optimization_priority = "medium" if optimization_priority == "none" else optimization_priority
-            # Reducing from multi-AZ to single AZ saves (az_count - 1) / az_count
-            savings = monthly_cost * ((availability_zone_count - 1) / availability_zone_count)
-            potential_savings = max(potential_savings, savings)
-            is_optimizable = True
-            recommendations.append({
-                "scenario": "multi_az_dev_test",
-                "action": "reduce_to_single_az",
-                "priority": "medium",
-                "estimated_savings": savings,
-                "details": f"VPC Endpoint '{endpoint_id}' is deployed in {availability_zone_count} AZs. For dev/test, single AZ is sufficient.",
-                "recommendation": f"Reduce to single AZ deployment ({((availability_zone_count - 1) / availability_zone_count) * 100:.0f}% savings)"
-            })
-
-        # Scenario 4: MEDIUM - Gateway type available but using Interface
-        if endpoint_type == "Interface" and is_s3_or_dynamodb and optimization_score < 65:
-            # This is similar to scenario 2, but with lower priority if already covered
-            pass
-
-        # Scenario 5: LOW - Security best practice (no cost impact)
-        if endpoint_type == "Interface" and optimization_score < 50:
-            optimization_score = max(optimization_score, 50)
-            optimization_priority = "low" if optimization_priority == "none" else optimization_priority
-            is_optimizable = True
-            recommendations.append({
-                "scenario": "no_private_dns",
-                "action": "enable_private_dns",
-                "priority": "low",
-                "estimated_savings": 0.0,
-                "details": f"VPC Endpoint '{endpoint_id}' should have private DNS enabled for security best practices.",
-                "recommendation": "Enable private DNS for better security (no cost impact)"
-            })
-
-        return is_optimizable, optimization_score, optimization_priority, potential_savings, recommendations
-
-    async def scan_vpc_endpoints(self, region: str) -> list[AllCloudResourceData]:
-        """
-        Scan ALL AWS VPC Endpoints for cost intelligence.
-
-        This method scans all VPC Endpoints to provide cost visibility and
-        optimization recommendations.
-
-        VPC Endpoint Types:
-        - Interface: Elastic Network Interface in subnet ($7.20/AZ/month)
-        - Gateway: Route table entry for S3/DynamoDB (FREE)
-        - GatewayLoadBalancer: $7.20/AZ/month
-
-        Note: VPC Endpoints do NOT have CloudWatch metrics. Detection based on:
-        - Network interface count
-        - Endpoint type
-        - Service name
-        - State
-
-        Args:
-            region: AWS region to scan
-
-        Returns:
-            List of AllCloudResourceData objects for all VPC Endpoints
-        """
-        resources: list[AllCloudResourceData] = []
-
-        try:
-            async with self.session.client("ec2", region_name=region) as ec2:
-                # Describe all VPC endpoints
-                response = await ec2.describe_vpc_endpoints()
-                endpoints = response.get("VpcEndpoints", [])
-
-                for endpoint in endpoints:
-                    try:
-                        endpoint_id = endpoint.get("VpcEndpointId", "unknown")
-                        endpoint_type = endpoint.get("VpcEndpointType", "Interface")
-                        service_name = endpoint.get("ServiceName", "")
-                        state = endpoint.get("State", "unknown")
-                        vpc_id = endpoint.get("VpcId", "unknown")
-                        created_at = endpoint.get("CreationTimestamp")
-
-                        # Extract tags
-                        tags = {}
-                        endpoint_name = None
-                        for tag in endpoint.get("Tags", []):
-                            tags[tag["Key"]] = tag["Value"]
-                            if tag["Key"] == "Name":
-                                endpoint_name = tag["Value"]
-
-                        # Get network interfaces and subnets
-                        network_interfaces = endpoint.get("NetworkInterfaceIds", [])
-                        subnet_ids = endpoint.get("SubnetIds", [])
-                        availability_zone_count = len(set(subnet_ids)) if subnet_ids else 1
-
-                        # Calculate monthly cost
-                        monthly_cost = self._calculate_vpc_endpoint_monthly_cost(
-                            endpoint_type=endpoint_type,
-                            availability_zone_count=availability_zone_count,
-                            region=region,
-                        )
-
-                        # Calculate optimization metrics
-                        (
-                            is_optimizable,
-                            optimization_score,
-                            optimization_priority,
-                            potential_savings,
-                            optimization_recommendations,
-                        ) = self._calculate_vpc_endpoint_optimization(
-                            endpoint_id=endpoint_id,
-                            endpoint_type=endpoint_type,
-                            service_name=service_name,
-                            state=state,
-                            network_interface_count=len(network_interfaces),
-                            availability_zone_count=availability_zone_count,
-                            monthly_cost=monthly_cost,
-                        )
-
-                        # Determine utilization status
-                        if len(network_interfaces) == 0:
-                            utilization_status = "idle"
-                        elif len(network_interfaces) < 2:
-                            utilization_status = "low"
-                        elif len(network_interfaces) < 5:
-                            utilization_status = "medium"
-                        else:
-                            utilization_status = "high"
-
-                        # Build metadata
-                        metadata = {
-                            "endpoint_id": endpoint_id,
-                            "endpoint_type": endpoint_type,
-                            "service_name": service_name,
-                            "state": state,
-                            "vpc_id": vpc_id,
-                            "network_interface_count": len(network_interfaces),
-                            "network_interface_ids": network_interfaces,
-                            "subnet_ids": subnet_ids,
-                            "availability_zone_count": availability_zone_count,
-                            "private_dns_enabled": endpoint.get("PrivateDnsEnabled", False),
-                            "route_table_ids": endpoint.get("RouteTableIds", []),
-                        }
-
-                        # Apply detection rules filtering
-                        resource_age_days = None
-                        if isinstance(created_at, datetime):
-                            resource_age_days = (datetime.utcnow() - created_at.replace(tzinfo=None)).days
-
-                        if not self._should_include_resource("vpc_endpoint", resource_age_days):
-                            logger.debug("inventory.vpc_endpoint_filtered", endpoint_id=endpoint_id, age=resource_age_days)
-                            continue
-
-                        # Create resource
-                        resource = AllCloudResourceData(
-                            resource_type="vpc_endpoint",
-                            resource_id=endpoint_id,
-                            resource_name=endpoint_name or endpoint_id,
-                            region=region,
-                            estimated_monthly_cost=monthly_cost,
-                            resource_metadata=metadata,
-                            currency="USD",
-                            utilization_status=utilization_status,
-                            cpu_utilization_percent=None,
-                            memory_utilization_percent=None,
-                            storage_utilization_percent=None,
-                            network_utilization_mbps=None,
-                            is_optimizable=is_optimizable,
-                            optimization_priority=optimization_priority,
-                            optimization_score=optimization_score,
-                            potential_monthly_savings=potential_savings,
-                            optimization_recommendations=optimization_recommendations,
-                            tags=tags,
-                            resource_status=state,
-                            is_orphan=len(network_interfaces) == 0 and state == "available",
-                            created_at_cloud=created_at,
-                            last_used_at=None,
-                        )
-
-                        resources.append(resource)
-
-                    except Exception as e:
-                        logger.error(
-                            "vpc_endpoint.endpoint_scan_failed",
-                            endpoint_id=endpoint.get("VpcEndpointId", "unknown"),
-                            region=region,
-                            error=str(e),
-                        )
-                        continue
-
-        except Exception as e:
-            logger.error(
-                "vpc_endpoint.scan_failed",
-                region=region,
-                error=str(e),
-            )
-
-        return resources
-
-    # ============================================================
-    # RESSOURCE 22 : NEPTUNE DATABASE (GRAPH DATABASE)
-    # ============================================================
-
-    def _calculate_neptune_monthly_cost(
-        self,
-        instance_type: str,
-        instance_count: int,
-        storage_gb: float,
-        backup_storage_gb: float,
-        estimated_io_requests_per_month: float,
-        region: str,
-    ) -> float:
-        """
-        Calculate estimated monthly cost for AWS Neptune Database Cluster.
-
-        Neptune is a fully managed graph database service compatible with Apache TinkerPop Gremlin
-        and W3C's SPARQL. Neptune is optimized for storing billions of relationships and querying
-        the graph with milliseconds latency.
-
-        Cost Components:
-        1. Instance cost (db.r5.large, db.r5.xlarge, db.r5.2xlarge, etc.)
-        2. Storage cost ($0.10 per GB-month, billed per GB used)
-        3. I/O cost ($0.20 per 1 million requests)
-        4. Backup storage cost ($0.021 per GB-month, beyond cluster storage)
-
-        Args:
-            instance_type: Instance type (e.g., 'db.r5.large', 'db.r5.2xlarge')
-            instance_count: Number of instances in cluster (writer + read replicas)
-            storage_gb: Allocated storage in GB (Neptune auto-scales, no provisioning)
-            backup_storage_gb: Backup storage in GB (beyond cluster storage)
-            estimated_io_requests_per_month: Estimated I/O requests per month
-            region: AWS region
-
-        Returns:
-            Estimated monthly cost in USD
-
-        Example:
-            Single-node cluster with db.r5.large, 100 GB storage, 10M I/O requests:
-            - Instance: $0.348/hour * 730 hours = $254.04
-            - Storage: 100 GB * $0.10 = $10.00
-            - I/O: 10 million * $0.20 = $2.00
-            - Total: $266.04/month
-        """
-        monthly_hours = 730
-
-        # Instance cost (writer + read replicas)
-        instance_rate_map = {
-            "db.r5.large": 0.348,      # 2 vCPU, 16 GB RAM
-            "db.r5.xlarge": 0.696,     # 4 vCPU, 32 GB RAM
-            "db.r5.2xlarge": self.PRICING.get("neptune_db_r5_2xlarge", 1.392),  # 8 vCPU, 64 GB RAM
-            "db.r5.4xlarge": self.PRICING.get("neptune_db_r5_4xlarge", 2.784),  # 16 vCPU, 128 GB RAM
-            "db.r5.8xlarge": 5.568,    # 32 vCPU, 256 GB RAM
-            "db.r5.12xlarge": 8.352,   # 48 vCPU, 384 GB RAM
-            "db.r5.16xlarge": 11.136,  # 64 vCPU, 512 GB RAM
-            "db.r5.24xlarge": 16.704,  # 96 vCPU, 768 GB RAM
-            "db.t3.medium": 0.073,     # 2 vCPU, 4 GB RAM (dev/test)
-        }
-        instance_hourly_rate = instance_rate_map.get(instance_type, 0.348)  # Default to db.r5.large
-        instance_cost = instance_hourly_rate * monthly_hours * instance_count
-
-        # Storage cost (Neptune auto-scales, pay for what you use)
-        storage_rate = self.PRICING.get("neptune_storage_per_gb", 0.10)
-        storage_cost = storage_gb * storage_rate
-
-        # I/O cost (per million requests)
-        io_rate = self.PRICING.get("neptune_io_per_million", 0.20)
-        io_cost = (estimated_io_requests_per_month / 1_000_000) * io_rate
-
-        # Backup storage cost (beyond cluster storage)
-        backup_rate = self.PRICING.get("neptune_backup_storage_per_gb", 0.021)
-        backup_cost = backup_storage_gb * backup_rate
-
-        total_cost = instance_cost + storage_cost + io_cost + backup_cost
-
-        return round(total_cost, 2)
-
-    def _calculate_neptune_optimization(
-        self,
-        cluster_identifier: str,
-        instance_type: str,
-        instance_count: int,
-        storage_gb: float,
-        backup_retention_days: int,
-        multi_az: bool,
-        avg_connections_7d: float,
-        engine_version: str,
-        status: str,
-        tags: dict,
-        region: str,
-    ) -> list[OptimizationScenario]:
-        """
-        Calculate optimization scenarios for AWS Neptune Database Cluster.
-
-        Neptune Optimization Scenarios:
-        1. Zero Connections (CRITICAL) - No database connections for 7+ days → Delete cluster
-        2. Low Connections (HIGH) - <5 avg connections on expensive instance (≥db.r5.2xlarge) → Downsize to db.r5.large
-        3. Single Read Replica Dev/Test (MEDIUM) - Dev/test cluster with read replicas → Remove replicas
-        4. Excessive Backup Retention (MEDIUM) - Backup retention >30 days for dev/test → Reduce to 7 days
-        5. Single-AZ Production (LOW) - Production cluster without Multi-AZ → Enable Multi-AZ
-
-        Args:
-            cluster_identifier: Neptune cluster ID
-            instance_type: Instance type (e.g., 'db.r5.large')
-            instance_count: Number of instances (writer + replicas)
-            storage_gb: Storage size in GB
-            backup_retention_days: Backup retention period in days
-            multi_az: Multi-AZ deployment enabled
-            avg_connections_7d: Average connections over last 7 days
-            engine_version: Neptune engine version
-            status: Cluster status (available, stopped, etc.)
-            tags: Resource tags
-            region: AWS region
-
-        Returns:
-            List of optimization scenarios with priority, estimated savings, and recommendations
-        """
-        scenarios = []
-
-        # Current cost
-        current_cost = self._calculate_neptune_monthly_cost(
-            instance_type=instance_type,
-            instance_count=instance_count,
-            storage_gb=storage_gb,
-            backup_storage_gb=storage_gb * 0.1,  # Estimate 10% backup overhead
-            estimated_io_requests_per_month=50_000_000,  # Default estimate
-            region=region,
-        )
-
-        # Detect environment from tags
-        env = tags.get("Environment", tags.get("environment", "")).lower()
-        is_production = env in ["production", "prod", "prd"]
-
-        # =============================================
-        # SCENARIO 1: Zero Connections (CRITICAL)
-        # =============================================
-        if avg_connections_7d == 0.0 and status == "available":
-            # No connections for 7+ days → Delete cluster
-            potential_savings = current_cost
-            scenarios.append(
-                OptimizationScenario(
-                    scenario_name="neptune_zero_connections",
-                    priority="CRITICAL",
-                    estimated_monthly_savings=potential_savings,
-                    current_monthly_cost=current_cost,
-                    optimized_monthly_cost=0.0,
-                    confidence_level="high",
-                    description=(
-                        f"Neptune cluster '{cluster_identifier}' has zero database connections "
-                        f"over the last 7 days. This cluster is completely idle and should be deleted."
-                    ),
-                    recommendation=(
-                        "Delete this Neptune cluster to eliminate costs:\n"
-                        f"1. Take final snapshot: aws neptune create-db-cluster-snapshot\n"
-                        f"2. Delete cluster: aws neptune delete-db-cluster --db-cluster-identifier {cluster_identifier}\n"
-                        f"3. Estimated savings: ${potential_savings:.2f}/month (100%)"
-                    ),
-                    action_complexity="low",
-                    risk_level="low",
-                    implementation_time="5 minutes",
-                )
-            )
-
-        # =============================================
-        # SCENARIO 2: Low Connections + Expensive Instance (HIGH)
-        # =============================================
-        expensive_instances = ["db.r5.2xlarge", "db.r5.4xlarge", "db.r5.8xlarge", "db.r5.12xlarge"]
-        if avg_connections_7d < 5.0 and instance_type in expensive_instances:
-            # Low usage on expensive instance → Downsize to db.r5.large
-            optimized_cost = self._calculate_neptune_monthly_cost(
-                instance_type="db.r5.large",
-                instance_count=instance_count,
-                storage_gb=storage_gb,
-                backup_storage_gb=storage_gb * 0.1,
-                estimated_io_requests_per_month=50_000_000,
-                region=region,
-            )
-            potential_savings = current_cost - optimized_cost
-
-            scenarios.append(
-                OptimizationScenario(
-                    scenario_name="neptune_low_connections_expensive_instance",
-                    priority="HIGH",
-                    estimated_monthly_savings=potential_savings,
-                    current_monthly_cost=current_cost,
-                    optimized_monthly_cost=optimized_cost,
-                    confidence_level="high",
-                    description=(
-                        f"Neptune cluster '{cluster_identifier}' has low connection usage "
-                        f"(avg {avg_connections_7d:.1f} connections) but uses expensive instance type '{instance_type}'. "
-                        f"This is over-provisioned for the workload."
-                    ),
-                    recommendation=(
-                        f"Downsize to db.r5.large to match workload:\n"
-                        f"1. Modify cluster: aws neptune modify-db-cluster --db-cluster-identifier {cluster_identifier} --apply-immediately\n"
-                        f"2. Modify instances: aws neptune modify-db-instance --db-instance-class db.r5.large\n"
-                        f"3. Monitor performance after change\n"
-                        f"4. Estimated savings: ${potential_savings:.2f}/month ({(potential_savings / current_cost * 100):.0f}%)"
-                    ),
-                    action_complexity="medium",
-                    risk_level="low",
-                    implementation_time="15 minutes",
-                )
-            )
-
-        # =============================================
-        # SCENARIO 3: Dev/Test with Read Replicas (MEDIUM)
-        # =============================================
-        if not is_production and instance_count > 1:
-            # Dev/test cluster with read replicas → Remove replicas
-            optimized_cost = self._calculate_neptune_monthly_cost(
-                instance_type=instance_type,
-                instance_count=1,  # Writer only
-                storage_gb=storage_gb,
-                backup_storage_gb=storage_gb * 0.1,
-                estimated_io_requests_per_month=50_000_000,
-                region=region,
-            )
-            potential_savings = current_cost - optimized_cost
-
-            scenarios.append(
-                OptimizationScenario(
-                    scenario_name="neptune_dev_test_read_replicas",
-                    priority="MEDIUM",
-                    estimated_monthly_savings=potential_savings,
-                    current_monthly_cost=current_cost,
-                    optimized_monthly_cost=optimized_cost,
-                    confidence_level="high",
-                    description=(
-                        f"Neptune cluster '{cluster_identifier}' is tagged as dev/test but has "
-                        f"{instance_count} instances (including read replicas). Read replicas are "
-                        f"typically not required for non-production workloads."
-                    ),
-                    recommendation=(
-                        f"Remove read replicas to reduce costs:\n"
-                        f"1. Identify replica instances: aws neptune describe-db-instances --filters Name=db-cluster-id,Values={cluster_identifier}\n"
-                        f"2. Delete replicas: aws neptune delete-db-instance --db-instance-identifier <replica-id>\n"
-                        f"3. Keep only writer instance\n"
-                        f"4. Estimated savings: ${potential_savings:.2f}/month ({(potential_savings / current_cost * 100):.0f}%)"
-                    ),
-                    action_complexity="medium",
-                    risk_level="low",
-                    implementation_time="10 minutes",
-                )
-            )
-
-        # =============================================
-        # SCENARIO 4: Excessive Backup Retention (MEDIUM)
-        # =============================================
-        if not is_production and backup_retention_days > 30:
-            # Long backup retention for dev/test → Reduce to 7 days
-            # Approximate backup storage savings
-            backup_storage_gb = storage_gb * 0.1  # Estimate 10% backup overhead
-            backup_rate = self.PRICING.get("neptune_backup_storage_per_gb", 0.021)
-            backup_savings = backup_storage_gb * backup_rate * 0.5  # ~50% reduction
-
-            scenarios.append(
-                OptimizationScenario(
-                    scenario_name="neptune_excessive_backup_retention",
-                    priority="MEDIUM",
-                    estimated_monthly_savings=backup_savings,
-                    current_monthly_cost=current_cost,
-                    optimized_monthly_cost=current_cost - backup_savings,
-                    confidence_level="medium",
-                    description=(
-                        f"Neptune cluster '{cluster_identifier}' is tagged as dev/test but has "
-                        f"backup retention set to {backup_retention_days} days. This is excessive "
-                        f"for non-production workloads and increases backup storage costs."
-                    ),
-                    recommendation=(
-                        f"Reduce backup retention to 7 days:\n"
-                        f"1. Modify cluster: aws neptune modify-db-cluster --db-cluster-identifier {cluster_identifier} --backup-retention-period 7\n"
-                        f"2. Old backups will be automatically deleted after 7 days\n"
-                        f"3. Estimated savings: ${backup_savings:.2f}/month (backup storage reduction)"
-                    ),
-                    action_complexity="low",
-                    risk_level="low",
-                    implementation_time="5 minutes",
-                )
-            )
-
-        # =============================================
-        # SCENARIO 5: Single-AZ Production (LOW)
-        # =============================================
-        if is_production and not multi_az:
-            # Production cluster without Multi-AZ → Enable Multi-AZ
-            scenarios.append(
-                OptimizationScenario(
-                    scenario_name="neptune_single_az_production",
-                    priority="LOW",
-                    estimated_monthly_savings=0.0,  # This is a reliability improvement, not cost savings
-                    current_monthly_cost=current_cost,
-                    optimized_monthly_cost=current_cost,
-                    confidence_level="high",
-                    description=(
-                        f"Neptune cluster '{cluster_identifier}' is tagged as production but does not have "
-                        f"Multi-AZ deployment enabled. This creates a single point of failure and reduces "
-                        f"availability during maintenance or AZ failures."
-                    ),
-                    recommendation=(
-                        f"Enable Multi-AZ for high availability:\n"
-                        f"1. Create read replica in different AZ: aws neptune create-db-instance --availability-zone <different-az>\n"
-                        f"2. Configure automatic failover\n"
-                        f"3. This improves reliability but increases cost (additional replica)\n"
-                        f"4. Cost impact: +${(current_cost / instance_count):.2f}/month per replica"
-                    ),
-                    action_complexity="medium",
-                    risk_level="low",
-                    implementation_time="20 minutes",
-                )
-            )
-
-        return scenarios
-
-    async def scan_neptune_clusters(self, region: str) -> list[AllCloudResourceData]:
-        """
-        Scan ALL AWS Neptune Database Clusters for cost intelligence.
-
-        AWS Neptune is a fully managed graph database service that supports both Apache TinkerPop Gremlin
-        and W3C's SPARQL query languages. Neptune is optimized for storing billions of relationships
-        and querying the graph with milliseconds latency.
-
-        Use Cases:
-        - Knowledge graphs (fraud detection, recommendation engines)
-        - Identity graphs (social networking, user profiles)
-        - Network/IT operations (dependency tracking, impact analysis)
-
-        CloudWatch Metrics Used:
-        - DatabaseConnections (AWS/Neptune) - Active database connections
-
-        Cost Optimization Scenarios:
-        1. Zero Connections (CRITICAL) - No connections for 7+ days → Delete
-        2. Low Connections + Expensive Instance (HIGH) - <5 connections on ≥db.r5.2xlarge → Downsize
-        3. Dev/Test with Read Replicas (MEDIUM) - Remove replicas for non-prod
-        4. Excessive Backup Retention (MEDIUM) - >30 days for dev/test → Reduce to 7 days
-        5. Single-AZ Production (LOW) - Enable Multi-AZ for reliability
-
-        Args:
-            region: AWS region to scan
-
-        Returns:
-            List of AllCloudResourceData for all Neptune clusters in region
-        """
-        resources = []
-
-        try:
-            async with self.session.client("neptune", region_name=region) as neptune:
-                # Describe all Neptune clusters
-                response = await neptune.describe_db_clusters()
-                clusters = response.get("DBClusters", [])
-
-                logger.info(
-                    "neptune.clusters_found",
-                    region=region,
-                    cluster_count=len(clusters),
-                )
-
-                for cluster in clusters:
-                    try:
-                        cluster_identifier = cluster.get("DBClusterIdentifier", "unknown")
-                        engine = cluster.get("Engine", "")
-
-                        # Only process Neptune clusters (skip Aurora, RDS)
-                        if engine != "neptune":
-                            continue
-
-                        # Extract cluster details
-                        status = cluster.get("Status", "unknown")
-                        instance_type = "db.r5.large"  # Default
-                        instance_count = 0
-
-                        # Get instance details from cluster members
-                        members = cluster.get("DBClusterMembers", [])
-                        instance_count = len(members)
-
-                        # Get instance type from first member
-                        if members:
-                            first_member_id = members[0].get("DBInstanceIdentifier")
-                            instances_response = await neptune.describe_db_instances(
-                                DBInstanceIdentifier=first_member_id
-                            )
-                            instances = instances_response.get("DBInstances", [])
-                            if instances:
-                                instance_type = instances[0].get("DBInstanceClass", "db.r5.large")
-
-                        storage_gb = cluster.get("AllocatedStorage", 0)  # Neptune auto-scales
-                        backup_retention_days = cluster.get("BackupRetentionPeriod", 1)
-                        multi_az = cluster.get("MultiAZ", False)
-                        engine_version = cluster.get("EngineVersion", "unknown")
-
-                        # Extract tags
-                        tags_list = cluster.get("TagList", [])
-                        tags = {tag["Key"]: tag["Value"] for tag in tags_list}
-
-                        # ====================================
-                        # CLOUDWATCH METRICS (7-day lookback)
-                        # ====================================
-                        end_time = datetime.now(timezone.utc)
-                        start_time = end_time - timedelta(days=7)
-
-                        # Metric: DatabaseConnections (active connections)
-                        avg_connections_7d = await self._get_cloudwatch_metric_average(
-                            region=region,
-                            namespace="AWS/Neptune",
-                            metric_name="DatabaseConnections",
-                            dimensions=[
-                                {"Name": "DBClusterIdentifier", "Value": cluster_identifier}
-                            ],
-                            start_time=start_time,
-                            end_time=end_time,
-                            period=3600,  # 1 hour
-                            statistic="Average",
-                        )
-
-                        # ====================================
-                        # COST CALCULATION
-                        # ====================================
-                        monthly_cost = self._calculate_neptune_monthly_cost(
-                            instance_type=instance_type,
-                            instance_count=instance_count,
-                            storage_gb=storage_gb if storage_gb > 0 else 10.0,  # Min 10 GB
-                            backup_storage_gb=(storage_gb if storage_gb > 0 else 10.0) * 0.1,
-                            estimated_io_requests_per_month=50_000_000,  # Default estimate
-                            region=region,
-                        )
-
-                        # ====================================
-                        # OPTIMIZATION SCENARIOS
-                        # ====================================
-                        optimization_scenarios = self._calculate_neptune_optimization(
-                            cluster_identifier=cluster_identifier,
-                            instance_type=instance_type,
-                            instance_count=instance_count,
-                            storage_gb=storage_gb if storage_gb > 0 else 10.0,
-                            backup_retention_days=backup_retention_days,
-                            multi_az=multi_az,
-                            avg_connections_7d=avg_connections_7d,
-                            engine_version=engine_version,
-                            status=status,
-                            tags=tags,
-                            region=region,
-                        )
-
-                        # ====================================
-                        # CHECK IF ORPHAN (Zero connections for 7+ days)
-                        # ====================================
-                        is_orphan = avg_connections_7d == 0.0 and status == "available"
-
-                        # ====================================
-                        # CREATE RESOURCE DATA
-                        # ====================================
-                        resource = AllCloudResourceData(
-                            resource_type="neptune_cluster",
-                            resource_id=cluster.get("DbClusterResourceId", cluster_identifier),
-                            resource_name=cluster_identifier,
-                            region=region,
-                            estimated_monthly_cost=monthly_cost,
-                            currency="USD",
-                            resource_metadata={
-                                "cluster_identifier": cluster_identifier,
-                                "engine": engine,
-                                "engine_version": engine_version,
-                                "status": status,
-                                "instance_type": instance_type,
-                                "instance_count": instance_count,
-                                "storage_gb": storage_gb,
-                                "backup_retention_days": backup_retention_days,
-                                "multi_az": multi_az,
-                                "endpoint": cluster.get("Endpoint", ""),
-                                "reader_endpoint": cluster.get("ReaderEndpoint", ""),
-                                "avg_connections_7d": round(avg_connections_7d, 2),
-                                "tags": tags,
-                            },
-                            optimization_scenarios=optimization_scenarios,
-                            is_orphan=is_orphan,
-                            created_at_cloud=cluster.get("ClusterCreateTime"),
-                        )
-
-                        resources.append(resource)
-
-                        logger.debug(
-                            "neptune.cluster_scanned",
-                            cluster_identifier=cluster_identifier,
-                            instance_type=instance_type,
-                            instance_count=instance_count,
-                            monthly_cost=monthly_cost,
-                            avg_connections_7d=round(avg_connections_7d, 2),
-                            scenarios_count=len(optimization_scenarios),
-                            is_orphan=is_orphan,
-                        )
-
-                    except Exception as e:
-                        logger.error(
-                            "neptune.cluster_scan_failed",
-                            cluster_identifier=cluster.get("DBClusterIdentifier", "unknown"),
-                            region=region,
-                            error=str(e),
-                        )
-                        continue
-
-        except Exception as e:
-            logger.error(
-                "neptune.scan_failed",
-                region=region,
-                error=str(e),
-            )
-
-        return resources
-
-    # ============================================================
-    # RESSOURCE 23 : MSK (MANAGED STREAMING FOR APACHE KAFKA)
-    # ============================================================
-
-    def _calculate_msk_monthly_cost(
-        self,
-        broker_instance_type: str,
-        broker_count: int,
-        storage_per_broker_gb: int,
-        estimated_data_transfer_gb: float,
-        region: str,
-    ) -> float:
-        """
-        Calculate estimated monthly cost for AWS MSK (Managed Streaming for Apache Kafka) Cluster.
-
-        MSK is a fully managed Apache Kafka service that makes it easy to build and run applications
-        that use Apache Kafka to process streaming data. MSK manages Kafka cluster operations,
-        patching, and monitoring.
-
-        Cost Components:
-        1. Broker instance cost (kafka.m5.large, kafka.m5.xlarge, kafka.m5.2xlarge, etc.)
-        2. Storage cost ($0.10 per GB-month per broker)
-        3. Data transfer cost ($0.01 per GB for cross-AZ/cross-region)
-
-        Args:
-            broker_instance_type: Broker instance type (e.g., 'kafka.m5.large', 'kafka.m5.2xlarge')
-            broker_count: Number of broker nodes (typically 2-3 for HA)
-            storage_per_broker_gb: Storage allocated per broker in GB
-            estimated_data_transfer_gb: Estimated cross-AZ data transfer per month
-            region: AWS region
-
-        Returns:
-            Estimated monthly cost in USD
-
-        Example:
-            3-broker cluster with kafka.m5.large, 1000 GB storage/broker, 500 GB transfer:
-            - Brokers: $0.42/hour * 730 hours * 3 = $919.80
-            - Storage: 1000 GB * $0.10 * 3 = $300.00
-            - Data transfer: 500 GB * $0.01 = $5.00
-            - Total: $1,224.80/month
-        """
-        monthly_hours = 730
-
-        # Broker instance cost
-        broker_rate_map = {
-            "kafka.m5.large": 0.42,     # 2 vCPU, 8 GB RAM
-            "kafka.m5.xlarge": 0.84,    # 4 vCPU, 16 GB RAM
-            "kafka.m5.2xlarge": self.PRICING.get("msk_kafka_m5_2xlarge", 0.84),  # 8 vCPU, 32 GB RAM
-            "kafka.m5.4xlarge": self.PRICING.get("msk_kafka_m5_4xlarge", 1.68),  # 16 vCPU, 64 GB RAM
-            "kafka.m5.8xlarge": 3.36,   # 32 vCPU, 128 GB RAM
-            "kafka.m5.12xlarge": 5.04,  # 48 vCPU, 192 GB RAM
-            "kafka.m5.16xlarge": 6.72,  # 64 vCPU, 256 GB RAM
-            "kafka.m5.24xlarge": 10.08, # 96 vCPU, 384 GB RAM
-            "kafka.t3.small": 0.07,     # 2 vCPU, 2 GB RAM (dev/test)
-        }
-        broker_hourly_rate = broker_rate_map.get(broker_instance_type, 0.42)  # Default to kafka.m5.large
-        broker_cost = broker_hourly_rate * monthly_hours * broker_count
-
-        # Storage cost (per broker)
-        storage_rate = self.PRICING.get("msk_storage_per_gb", 0.10)
-        storage_cost = storage_per_broker_gb * storage_rate * broker_count
-
-        # Data transfer cost (cross-AZ/cross-region)
-        data_transfer_rate = self.PRICING.get("msk_data_transfer_per_gb", 0.01)
-        data_transfer_cost = estimated_data_transfer_gb * data_transfer_rate
-
-        total_cost = broker_cost + storage_cost + data_transfer_cost
-
-        return round(total_cost, 2)
-
-    def _calculate_msk_optimization(
-        self,
-        cluster_name: str,
-        broker_instance_type: str,
-        broker_count: int,
-        storage_per_broker_gb: int,
-        avg_bytes_in_per_sec_7d: float,
-        avg_bytes_out_per_sec_7d: float,
-        avg_cpu_percent_7d: float,
-        kafka_version: str,
-        state: str,
-        tags: dict,
-        region: str,
-    ) -> list[OptimizationScenario]:
-        """
-        Calculate optimization scenarios for AWS MSK (Managed Streaming for Apache Kafka) Cluster.
-
-        MSK Optimization Scenarios:
-        1. Zero Throughput (CRITICAL) - No messages for 7+ days → Delete cluster
-        2. Low Throughput + Expensive Brokers (HIGH) - Low throughput on expensive brokers (≥kafka.m5.2xlarge) → Downsize
-        3. Over-provisioned Brokers (MEDIUM) - Low CPU (<20%) on expensive brokers → Downsize
-        4. Excessive Storage (MEDIUM) - Storage usage <20% with large provisioned → Reduce storage
-        5. Dev/Test with 3+ Brokers (MEDIUM) - Non-prod cluster with HA configuration → Reduce to 1-2 brokers
-        6. No Auto-Scaling (LOW) - Manual storage provisioning → Enable auto-scaling
-
-        Args:
-            cluster_name: MSK cluster name
-            broker_instance_type: Broker instance type (e.g., 'kafka.m5.large')
-            broker_count: Number of broker nodes
-            storage_per_broker_gb: Storage per broker in GB
-            avg_bytes_in_per_sec_7d: Average incoming bytes/sec over 7 days
-            avg_bytes_out_per_sec_7d: Average outgoing bytes/sec over 7 days
-            avg_cpu_percent_7d: Average CPU utilization over 7 days
-            kafka_version: Apache Kafka version
-            state: Cluster state (ACTIVE, CREATING, DELETING, etc.)
-            tags: Resource tags
-            region: AWS region
-
-        Returns:
-            List of optimization scenarios with priority, estimated savings, and recommendations
-        """
-        scenarios = []
-
-        # Current cost
-        estimated_data_transfer_gb = (avg_bytes_out_per_sec_7d * 86400 * 30) / (1024 ** 3)  # Monthly estimate
-        current_cost = self._calculate_msk_monthly_cost(
-            broker_instance_type=broker_instance_type,
-            broker_count=broker_count,
-            storage_per_broker_gb=storage_per_broker_gb,
-            estimated_data_transfer_gb=estimated_data_transfer_gb,
-            region=region,
-        )
-
-        # Detect environment from tags
-        env = tags.get("Environment", tags.get("environment", "")).lower()
-        is_production = env in ["production", "prod", "prd"]
-
-        # Calculate total throughput (bytes/sec)
-        total_throughput_bps = avg_bytes_in_per_sec_7d + avg_bytes_out_per_sec_7d
-
-        # =============================================
-        # SCENARIO 1: Zero Throughput (CRITICAL)
-        # =============================================
-        if total_throughput_bps == 0.0 and state == "ACTIVE":
-            # No messages for 7+ days → Delete cluster
-            potential_savings = current_cost
-            scenarios.append(
-                OptimizationScenario(
-                    scenario_name="msk_zero_throughput",
-                    priority="CRITICAL",
-                    estimated_monthly_savings=potential_savings,
-                    current_monthly_cost=current_cost,
-                    optimized_monthly_cost=0.0,
-                    confidence_level="high",
-                    description=(
-                        f"MSK cluster '{cluster_name}' has zero message throughput "
-                        f"over the last 7 days. This cluster is completely idle and should be deleted."
-                    ),
-                    recommendation=(
-                        "Delete this MSK cluster to eliminate costs:\n"
-                        f"1. Backup configuration: aws kafka describe-cluster --cluster-arn <arn>\n"
-                        f"2. Delete cluster: aws kafka delete-cluster --cluster-arn <arn>\n"
-                        f"3. Estimated savings: ${potential_savings:.2f}/month (100%)"
-                    ),
-                    action_complexity="low",
-                    risk_level="low",
-                    implementation_time="5 minutes",
-                )
-            )
-
-        # =============================================
-        # SCENARIO 2: Low Throughput + Expensive Brokers (HIGH)
-        # =============================================
-        expensive_brokers = ["kafka.m5.2xlarge", "kafka.m5.4xlarge", "kafka.m5.8xlarge", "kafka.m5.12xlarge"]
-        # Convert bytes/sec to MB/sec for readability
-        throughput_mbps = total_throughput_bps / (1024 ** 2)
-
-        if throughput_mbps < 10.0 and broker_instance_type in expensive_brokers:
-            # Low throughput (<10 MB/s) on expensive brokers → Downsize to kafka.m5.large
-            optimized_cost = self._calculate_msk_monthly_cost(
-                broker_instance_type="kafka.m5.large",
-                broker_count=broker_count,
-                storage_per_broker_gb=storage_per_broker_gb,
-                estimated_data_transfer_gb=estimated_data_transfer_gb,
-                region=region,
-            )
-            potential_savings = current_cost - optimized_cost
-
-            scenarios.append(
-                OptimizationScenario(
-                    scenario_name="msk_low_throughput_expensive_brokers",
-                    priority="HIGH",
-                    estimated_monthly_savings=potential_savings,
-                    current_monthly_cost=current_cost,
-                    optimized_monthly_cost=optimized_cost,
-                    confidence_level="high",
-                    description=(
-                        f"MSK cluster '{cluster_name}' has low throughput "
-                        f"(avg {throughput_mbps:.2f} MB/s) but uses expensive broker type '{broker_instance_type}'. "
-                        f"This is over-provisioned for the workload."
-                    ),
-                    recommendation=(
-                        f"Downsize to kafka.m5.large to match workload:\n"
-                        f"1. Create new configuration with kafka.m5.large brokers\n"
-                        f"2. Update cluster: aws kafka update-broker-type --cluster-arn <arn> --target-instance-type kafka.m5.large\n"
-                        f"3. Monitor performance after change\n"
-                        f"4. Estimated savings: ${potential_savings:.2f}/month ({(potential_savings / current_cost * 100):.0f}%)"
-                    ),
-                    action_complexity="medium",
-                    risk_level="low",
-                    implementation_time="30 minutes",
-                )
-            )
-
-        # =============================================
-        # SCENARIO 3: Over-provisioned Brokers (MEDIUM)
-        # =============================================
-        if avg_cpu_percent_7d < 20.0 and broker_instance_type in expensive_brokers:
-            # Low CPU (<20%) on expensive brokers → Downsize
-            optimized_cost = self._calculate_msk_monthly_cost(
-                broker_instance_type="kafka.m5.large",
-                broker_count=broker_count,
-                storage_per_broker_gb=storage_per_broker_gb,
-                estimated_data_transfer_gb=estimated_data_transfer_gb,
-                region=region,
-            )
-            potential_savings = current_cost - optimized_cost
-
-            scenarios.append(
-                OptimizationScenario(
-                    scenario_name="msk_over_provisioned_brokers",
-                    priority="MEDIUM",
-                    estimated_monthly_savings=potential_savings,
-                    current_monthly_cost=current_cost,
-                    optimized_monthly_cost=optimized_cost,
-                    confidence_level="high",
-                    description=(
-                        f"MSK cluster '{cluster_name}' has low CPU utilization "
-                        f"(avg {avg_cpu_percent_7d:.1f}%) on expensive broker type '{broker_instance_type}'. "
-                        f"Brokers are under-utilized and can be downsized."
-                    ),
-                    recommendation=(
-                        f"Downsize to kafka.m5.large based on CPU utilization:\n"
-                        f"1. Review workload patterns over 30 days\n"
-                        f"2. Update broker type: aws kafka update-broker-type --target-instance-type kafka.m5.large\n"
-                        f"3. Monitor CPU and throughput metrics\n"
-                        f"4. Estimated savings: ${potential_savings:.2f}/month ({(potential_savings / current_cost * 100):.0f}%)"
-                    ),
-                    action_complexity="medium",
-                    risk_level="low",
-                    implementation_time="30 minutes",
-                )
-            )
-
-        # =============================================
-        # SCENARIO 4: Excessive Storage (MEDIUM)
-        # =============================================
-        if storage_per_broker_gb >= 1000:
-            # Large storage allocation (≥1 TB/broker) → Consider reducing if under-utilized
-            # Estimate 50% reduction potential
-            optimized_storage = int(storage_per_broker_gb * 0.5)
-            optimized_cost = self._calculate_msk_monthly_cost(
-                broker_instance_type=broker_instance_type,
-                broker_count=broker_count,
-                storage_per_broker_gb=optimized_storage,
-                estimated_data_transfer_gb=estimated_data_transfer_gb,
-                region=region,
-            )
-            potential_savings = current_cost - optimized_cost
-
-            scenarios.append(
-                OptimizationScenario(
-                    scenario_name="msk_excessive_storage",
-                    priority="MEDIUM",
-                    estimated_monthly_savings=potential_savings,
-                    current_monthly_cost=current_cost,
-                    optimized_monthly_cost=optimized_cost,
-                    confidence_level="medium",
-                    description=(
-                        f"MSK cluster '{cluster_name}' has large storage allocation "
-                        f"({storage_per_broker_gb} GB per broker). Review actual usage to "
-                        f"determine if storage can be reduced."
-                    ),
-                    recommendation=(
-                        f"Review storage usage and reduce if under-utilized:\n"
-                        f"1. Check storage utilization: aws cloudwatch get-metric-statistics --namespace AWS/Kafka --metric-name KafkaDataLogsDiskUsed\n"
-                        f"2. If usage <20%, reduce storage to {optimized_storage} GB per broker\n"
-                        f"3. Enable storage auto-scaling for future growth\n"
-                        f"4. Estimated savings: ${potential_savings:.2f}/month ({(potential_savings / current_cost * 100):.0f}%)"
-                    ),
-                    action_complexity="medium",
-                    risk_level="medium",
-                    implementation_time="20 minutes",
-                )
-            )
-
-        # =============================================
-        # SCENARIO 5: Dev/Test with 3+ Brokers (MEDIUM)
-        # =============================================
-        if not is_production and broker_count >= 3:
-            # Dev/test cluster with high availability → Reduce to 1-2 brokers
-            optimized_broker_count = 1
-            optimized_cost = self._calculate_msk_monthly_cost(
-                broker_instance_type=broker_instance_type,
-                broker_count=optimized_broker_count,
-                storage_per_broker_gb=storage_per_broker_gb,
-                estimated_data_transfer_gb=estimated_data_transfer_gb,
-                region=region,
-            )
-            potential_savings = current_cost - optimized_cost
-
-            scenarios.append(
-                OptimizationScenario(
-                    scenario_name="msk_dev_test_high_availability",
-                    priority="MEDIUM",
-                    estimated_monthly_savings=potential_savings,
-                    current_monthly_cost=current_cost,
-                    optimized_monthly_cost=optimized_cost,
-                    confidence_level="high",
-                    description=(
-                        f"MSK cluster '{cluster_name}' is tagged as dev/test but has "
-                        f"{broker_count} brokers (high availability configuration). "
-                        f"Non-production workloads typically don't require HA."
-                    ),
-                    recommendation=(
-                        f"Reduce broker count to 1 for dev/test:\n"
-                        f"1. ⚠️ MSK does not support in-place broker count changes\n"
-                        f"2. Create new cluster with 1 broker: aws kafka create-cluster --number-of-broker-nodes 1\n"
-                        f"3. Migrate topics and data from old cluster\n"
-                        f"4. Delete old cluster\n"
-                        f"5. Estimated savings: ${potential_savings:.2f}/month ({(potential_savings / current_cost * 100):.0f}%)"
-                    ),
-                    action_complexity="high",
-                    risk_level="medium",
-                    implementation_time="2 hours",
-                )
-            )
-
-        # =============================================
-        # SCENARIO 6: No Auto-Scaling (LOW)
-        # =============================================
-        # Note: MSK auto-scaling is determined by storage configuration, not exposed in describe-cluster
-        # This scenario is informational/best-practice recommendation
-        scenarios.append(
-            OptimizationScenario(
-                scenario_name="msk_no_auto_scaling",
-                priority="LOW",
-                estimated_monthly_savings=0.0,  # Prevents over-provisioning, not direct savings
-                current_monthly_cost=current_cost,
-                optimized_monthly_cost=current_cost,
-                confidence_level="medium",
-                description=(
-                    f"MSK cluster '{cluster_name}' may not have storage auto-scaling enabled. "
-                    f"Auto-scaling prevents storage exhaustion and reduces over-provisioning costs."
-                ),
-                recommendation=(
-                    f"Enable storage auto-scaling for cost optimization:\n"
-                    f"1. Check current configuration: aws kafka describe-cluster --cluster-arn <arn>\n"
-                    f"2. Enable auto-scaling: aws kafka update-storage --cluster-arn <arn> --provisioned-throughput Enabled=true\n"
-                    f"3. Set target utilization to 60-70%\n"
-                    f"4. Benefit: Automatic storage adjustment based on usage"
-                ),
-                action_complexity="low",
-                risk_level="low",
-                implementation_time="10 minutes",
-            )
-        )
-
-        return scenarios
-
-    async def scan_msk_clusters(self, region: str) -> list[AllCloudResourceData]:
-        """
-        Scan ALL AWS MSK (Managed Streaming for Apache Kafka) Clusters for cost intelligence.
-
-        AWS MSK is a fully managed service for Apache Kafka that makes it easy to build and run
-        applications that use Apache Kafka to process streaming data. MSK manages the Kafka cluster
-        infrastructure, operations, and monitoring.
-
-        Use Cases:
-        - Real-time data pipelines (log aggregation, event sourcing)
-        - Stream processing (fraud detection, clickstream analysis)
-        - Microservices communication (event-driven architectures)
-
-        CloudWatch Metrics Used:
-        - BytesInPerSec (AWS/Kafka) - Incoming bytes per second
-        - BytesOutPerSec (AWS/Kafka) - Outgoing bytes per second
-        - CpuUser (AWS/Kafka) - CPU utilization (user space)
-
-        Cost Optimization Scenarios:
-        1. Zero Throughput (CRITICAL) - No messages for 7+ days → Delete
-        2. Low Throughput + Expensive Brokers (HIGH) - <10 MB/s on ≥kafka.m5.2xlarge → Downsize
-        3. Over-provisioned Brokers (MEDIUM) - Low CPU (<20%) on expensive brokers → Downsize
-        4. Excessive Storage (MEDIUM) - Large storage allocation (≥1 TB) → Review usage
-        5. Dev/Test with 3+ Brokers (MEDIUM) - Non-prod with HA → Reduce to 1-2 brokers
-        6. No Auto-Scaling (LOW) - Enable storage auto-scaling for cost efficiency
-
-        Args:
-            region: AWS region to scan
-
-        Returns:
-            List of AllCloudResourceData for all MSK clusters in region
-        """
-        resources = []
-
-        try:
-            async with self.session.client("kafka", region_name=region) as kafka:
-                # List all MSK clusters
-                response = await kafka.list_clusters_v2()
-                cluster_info_list = response.get("ClusterInfoList", [])
-
-                logger.info(
-                    "msk.clusters_found",
-                    region=region,
-                    cluster_count=len(cluster_info_list),
-                )
-
-                for cluster_info in cluster_info_list:
-                    try:
-                        cluster_arn = cluster_info.get("ClusterArn", "")
-                        cluster_name = cluster_info.get("ClusterName", "unknown")
-                        state = cluster_info.get("State", "UNKNOWN")
-
-                        # Get detailed cluster info
-                        detail_response = await kafka.describe_cluster_v2(
-                            ClusterArn=cluster_arn
-                        )
-                        cluster = detail_response.get("ClusterInfo", {})
-
-                        # Extract cluster details
-                        provisioned = cluster.get("Provisioned", {})
-                        broker_node_group = provisioned.get("BrokerNodeGroupInfo", {})
-
-                        broker_instance_type = broker_node_group.get("InstanceType", "kafka.m5.large")
-                        broker_count = provisioned.get("NumberOfBrokerNodes", 0)
-
-                        storage_info = broker_node_group.get("StorageInfo", {})
-                        ebs_storage = storage_info.get("EbsStorageInfo", {})
-                        storage_per_broker_gb = ebs_storage.get("VolumeSize", 0)
-
-                        kafka_version = provisioned.get("KafkaVersion", "unknown")
-
-                        # Extract tags
-                        tags = cluster.get("Tags", {})
-
-                        # ====================================
-                        # CLOUDWATCH METRICS (7-day lookback)
-                        # ====================================
-                        end_time = datetime.now(timezone.utc)
-                        start_time = end_time - timedelta(days=7)
-
-                        # Metric: BytesInPerSec (incoming messages)
-                        avg_bytes_in_per_sec_7d = await self._get_cloudwatch_metric_average(
-                            region=region,
-                            namespace="AWS/Kafka",
-                            metric_name="BytesInPerSec",
-                            dimensions=[
-                                {"Name": "Cluster Name", "Value": cluster_name}
-                            ],
-                            start_time=start_time,
-                            end_time=end_time,
-                            period=3600,  # 1 hour
-                            statistic="Average",
-                        )
-
-                        # Metric: BytesOutPerSec (outgoing messages)
-                        avg_bytes_out_per_sec_7d = await self._get_cloudwatch_metric_average(
-                            region=region,
-                            namespace="AWS/Kafka",
-                            metric_name="BytesOutPerSec",
-                            dimensions=[
-                                {"Name": "Cluster Name", "Value": cluster_name}
-                            ],
-                            start_time=start_time,
-                            end_time=end_time,
-                            period=3600,  # 1 hour
-                            statistic="Average",
-                        )
-
-                        # Metric: CpuUser (CPU utilization)
-                        avg_cpu_percent_7d = await self._get_cloudwatch_metric_average(
-                            region=region,
-                            namespace="AWS/Kafka",
-                            metric_name="CpuUser",
-                            dimensions=[
-                                {"Name": "Cluster Name", "Value": cluster_name}
-                            ],
-                            start_time=start_time,
-                            end_time=end_time,
-                            period=3600,  # 1 hour
-                            statistic="Average",
-                        )
-
-                        # ====================================
-                        # COST CALCULATION
-                        # ====================================
-                        estimated_data_transfer_gb = (avg_bytes_out_per_sec_7d * 86400 * 30) / (1024 ** 3)
-                        monthly_cost = self._calculate_msk_monthly_cost(
-                            broker_instance_type=broker_instance_type,
-                            broker_count=broker_count,
-                            storage_per_broker_gb=storage_per_broker_gb,
-                            estimated_data_transfer_gb=estimated_data_transfer_gb,
-                            region=region,
-                        )
-
-                        # ====================================
-                        # OPTIMIZATION SCENARIOS
-                        # ====================================
-                        optimization_scenarios = self._calculate_msk_optimization(
-                            cluster_name=cluster_name,
-                            broker_instance_type=broker_instance_type,
-                            broker_count=broker_count,
-                            storage_per_broker_gb=storage_per_broker_gb,
-                            avg_bytes_in_per_sec_7d=avg_bytes_in_per_sec_7d,
-                            avg_bytes_out_per_sec_7d=avg_bytes_out_per_sec_7d,
-                            avg_cpu_percent_7d=avg_cpu_percent_7d,
-                            kafka_version=kafka_version,
-                            state=state,
-                            tags=tags,
-                            region=region,
-                        )
-
-                        # ====================================
-                        # CHECK IF ORPHAN (Zero throughput for 7+ days)
-                        # ====================================
-                        total_throughput = avg_bytes_in_per_sec_7d + avg_bytes_out_per_sec_7d
-                        is_orphan = total_throughput == 0.0 and state == "ACTIVE"
-
-                        # ====================================
-                        # CREATE RESOURCE DATA
-                        # ====================================
-                        resource = AllCloudResourceData(
-                            resource_type="msk_cluster",
-                            resource_id=cluster_arn,
-                            resource_name=cluster_name,
-                            region=region,
-                            estimated_monthly_cost=monthly_cost,
-                            currency="USD",
-                            resource_metadata={
-                                "cluster_name": cluster_name,
-                                "cluster_arn": cluster_arn,
-                                "state": state,
-                                "broker_instance_type": broker_instance_type,
-                                "broker_count": broker_count,
-                                "storage_per_broker_gb": storage_per_broker_gb,
-                                "kafka_version": kafka_version,
-                                "avg_bytes_in_per_sec_7d": round(avg_bytes_in_per_sec_7d, 2),
-                                "avg_bytes_out_per_sec_7d": round(avg_bytes_out_per_sec_7d, 2),
-                                "avg_cpu_percent_7d": round(avg_cpu_percent_7d, 2),
-                                "tags": tags,
-                            },
-                            optimization_scenarios=optimization_scenarios,
-                            is_orphan=is_orphan,
-                            created_at_cloud=cluster.get("CreationTime"),
-                        )
-
-                        resources.append(resource)
-
-                        logger.debug(
-                            "msk.cluster_scanned",
-                            cluster_name=cluster_name,
-                            broker_instance_type=broker_instance_type,
-                            broker_count=broker_count,
-                            monthly_cost=monthly_cost,
-                            avg_throughput_mbps=round((avg_bytes_in_per_sec_7d + avg_bytes_out_per_sec_7d) / (1024 ** 2), 2),
-                            scenarios_count=len(optimization_scenarios),
-                            is_orphan=is_orphan,
-                        )
-
-                    except Exception as e:
-                        logger.error(
-                            "msk.cluster_scan_failed",
-                            cluster_arn=cluster_info.get("ClusterArn", "unknown"),
-                            region=region,
-                            error=str(e),
-                        )
-                        continue
-
-        except Exception as e:
-            logger.error(
-                "msk.scan_failed",
-                region=region,
-                error=str(e),
-            )
-
-        return resources
-
-    # ============================================================
-    # RESSOURCE 24 : SAGEMAKER ENDPOINT (ML INFERENCE)
-    # ============================================================
 
     def _calculate_sagemaker_endpoint_monthly_cost(
         self,
@@ -27324,11 +30243,11 @@ class AzureInventoryScanner:
 
         # Instance cost based on type
         instance_rate_map = {
-            "ml.m5.large": self.PRICING.get("sagemaker_ml_m5_large", 0.115),      # 2 vCPU, 8 GB RAM
-            "ml.m5.xlarge": self.PRICING.get("sagemaker_ml_m5_xlarge", 0.23),     # 4 vCPU, 16 GB RAM
-            "ml.m5.2xlarge": self.PRICING.get("sagemaker_ml_m5_2xlarge", 0.46),   # 8 vCPU, 32 GB RAM
-            "ml.m5.4xlarge": self.PRICING.get("sagemaker_ml_m5_4xlarge", 0.92),   # 16 vCPU, 64 GB RAM
-            "ml.t3.medium": self.PRICING.get("sagemaker_ml_t3_medium", 0.056),    # 2 vCPU, 4 GB RAM (dev/test)
+            "ml.m5.large": self.provider.PRICING.get("sagemaker_ml_m5_large", 0.115),      # 2 vCPU, 8 GB RAM
+            "ml.m5.xlarge": self.provider.PRICING.get("sagemaker_ml_m5_xlarge", 0.23),     # 4 vCPU, 16 GB RAM
+            "ml.m5.2xlarge": self.provider.PRICING.get("sagemaker_ml_m5_2xlarge", 0.46),   # 8 vCPU, 32 GB RAM
+            "ml.m5.4xlarge": self.provider.PRICING.get("sagemaker_ml_m5_4xlarge", 0.92),   # 16 vCPU, 64 GB RAM
+            "ml.t3.medium": self.provider.PRICING.get("sagemaker_ml_t3_medium", 0.056),    # 2 vCPU, 4 GB RAM (dev/test)
         }
 
         # Extract base instance type (ml.m5.large, ml.m5.xlarge, etc.)
@@ -27779,2381 +30698,6 @@ class AzureInventoryScanner:
     # RESSOURCE 25 : REDSHIFT CLUSTER (DATA WAREHOUSE)
     # ============================================================
 
-    def _calculate_redshift_monthly_cost(
-        self,
-        node_type: str,
-        number_of_nodes: int,
-        storage_gb: float,
-        region: str,
-    ) -> float:
-        """
-        Calculate estimated monthly cost for AWS Redshift Cluster.
-
-        Redshift is a fully managed data warehouse service optimized for analytics workloads.
-        It uses columnar storage and parallel query execution for fast query performance.
-
-        Cost Components:
-        1. Node cost (dc2.large, dc2.xlarge, ra3.xlplus, ra3.4xlarge, etc.)
-        2. Storage cost (for RA3 nodes only - managed storage)
-        3. Backup storage cost (not included - typically minimal)
-
-        Args:
-            node_type: Node type (e.g., 'dc2.large', 'ra3.xlplus')
-            number_of_nodes: Number of nodes in cluster
-            storage_gb: Storage size in GB (for RA3 only)
-            region: AWS region
-
-        Returns:
-            Estimated monthly cost in USD
-
-        Example:
-            2-node cluster with dc2.large:
-            - Nodes: $0.25/hour * 730 hours * 2 = $365/month
-        """
-        monthly_hours = 730
-
-        # Node cost based on type
-        node_rate_map = {
-            "dc2.large": self.PRICING.get("redshift_dc2_large", 0.25),         # 2 vCPU, 15 GB RAM, 160 GB SSD
-            "dc2.xlarge": self.PRICING.get("redshift_dc2_xlarge", 1.00),       # 4 vCPU, 31 GB RAM, 2.56 TB SSD
-            "dc2.8xlarge": self.PRICING.get("redshift_dc2_8xlarge", 4.80),     # 32 vCPU, 244 GB RAM, 2.56 TB SSD
-            "ra3.xlplus": self.PRICING.get("redshift_ra3_xlplus", 1.086),      # 4 vCPU, 32 GB RAM, managed storage
-            "ra3.4xlarge": self.PRICING.get("redshift_ra3_4xlarge", 3.26),     # 12 vCPU, 96 GB RAM, managed storage
-            "ra3.16xlarge": 13.04,   # 48 vCPU, 384 GB RAM, managed storage
-        }
-
-        node_hourly_rate = node_rate_map.get(node_type, 0.25)  # Default to dc2.large
-        node_cost = node_hourly_rate * monthly_hours * number_of_nodes
-
-        # Storage cost (only for RA3 nodes with managed storage)
-        storage_cost = 0.0
-        if "ra3" in node_type and storage_gb > 0:
-            storage_rate = self.PRICING.get("redshift_storage_per_gb", 0.024)
-            storage_cost = storage_gb * storage_rate
-
-        total_cost = node_cost + storage_cost
-
-        return round(total_cost, 2)
-
-    def _calculate_redshift_optimization(
-        self,
-        cluster_identifier: str,
-        node_type: str,
-        number_of_nodes: int,
-        storage_gb: float,
-        avg_connections_7d: float,
-        avg_cpu_percent_7d: float,
-        avg_disk_usage_percent: float,
-        cluster_status: str,
-        tags: dict,
-        region: str,
-    ) -> list[OptimizationScenario]:
-        """
-        Calculate optimization scenarios for AWS Redshift Cluster.
-
-        Redshift Optimization Scenarios:
-        1. Zero Connections (CRITICAL) - No database connections for 7+ days → Pause/Delete cluster
-        2. Low Query Volume + Expensive Nodes (HIGH) - Low usage on expensive nodes (≥dc2.8xlarge) → Downsize or migrate to Aurora
-        3. Over-provisioned Nodes (MEDIUM) - Low CPU (<30%) + multi-node cluster → Reduce node count
-        4. Dev/Test Multi-Node (MEDIUM) - Dev/test cluster with >1 node → Single node cluster
-        5. No Concurrency Scaling (LOW) - Manual scaling → Enable concurrency scaling
-
-        Args:
-            cluster_identifier: Cluster identifier
-            node_type: Node type (e.g., 'dc2.large')
-            number_of_nodes: Number of nodes
-            storage_gb: Storage size in GB
-            avg_connections_7d: Average connections over 7 days
-            avg_cpu_percent_7d: Average CPU utilization over 7 days
-            avg_disk_usage_percent: Average disk usage percentage
-            cluster_status: Cluster status (available, paused, etc.)
-            tags: Resource tags
-            region: AWS region
-
-        Returns:
-            List of optimization scenarios with priority, estimated savings, and recommendations
-        """
-        scenarios = []
-
-        # Current cost
-        current_cost = self._calculate_redshift_monthly_cost(
-            node_type=node_type,
-            number_of_nodes=number_of_nodes,
-            storage_gb=storage_gb,
-            region=region,
-        )
-
-        # Detect environment from tags
-        env = tags.get("Environment", tags.get("environment", "")).lower()
-        is_production = env in ["production", "prod", "prd"]
-
-        # =============================================
-        # SCENARIO 1: Zero Connections (CRITICAL)
-        # =============================================
-        if avg_connections_7d < 0.1 and cluster_status == "available":
-            # No connections for 7+ days → Pause or Delete cluster
-            potential_savings = current_cost
-            scenarios.append(
-                OptimizationScenario(
-                    scenario_name="redshift_zero_connections",
-                    priority="CRITICAL",
-                    estimated_monthly_savings=potential_savings,
-                    current_monthly_cost=current_cost,
-                    optimized_monthly_cost=0.0,
-                    confidence_level="high",
-                    description=(
-                        f"Redshift cluster '{cluster_identifier}' has zero database connections "
-                        f"over the last 7 days. This cluster is completely idle."
-                    ),
-                    recommendation=(
-                        "Pause or delete this Redshift cluster:\n"
-                        f"1. Pause cluster (retains data): aws redshift pause-cluster --cluster-identifier {cluster_identifier}\n"
-                        f"2. Or delete cluster: aws redshift delete-cluster --cluster-identifier {cluster_identifier} --final-cluster-snapshot-identifier final-snapshot\n"
-                        f"3. Paused clusters only incur storage costs (~10% of compute cost)\n"
-                        f"4. Estimated savings: ${potential_savings:.2f}/month (100% if deleted, ~90% if paused)"
-                    ),
-                    action_complexity="low",
-                    risk_level="low",
-                    implementation_time="5 minutes",
-                )
-            )
-
-        # =============================================
-        # SCENARIO 2: Low Query Volume + Expensive Nodes (HIGH)
-        # =============================================
-        expensive_nodes = ["dc2.8xlarge", "ra3.4xlarge", "ra3.16xlarge"]
-        if avg_connections_7d < 10.0 and node_type in expensive_nodes:
-            # Low connections (<10 avg) on expensive nodes → Downsize to dc2.large or migrate
-            optimized_cost = self._calculate_redshift_monthly_cost(
-                node_type="dc2.large",
-                number_of_nodes=number_of_nodes,
-                storage_gb=0,  # dc2 has local storage
-                region=region,
-            )
-            potential_savings = current_cost - optimized_cost
-
-            scenarios.append(
-                OptimizationScenario(
-                    scenario_name="redshift_low_query_volume_expensive_nodes",
-                    priority="HIGH",
-                    estimated_monthly_savings=potential_savings,
-                    current_monthly_cost=current_cost,
-                    optimized_monthly_cost=optimized_cost,
-                    confidence_level="high",
-                    description=(
-                        f"Redshift cluster '{cluster_identifier}' has low connection rate "
-                        f"(avg {avg_connections_7d:.1f} connections) but uses expensive node type '{node_type}'. "
-                        f"Consider downsizing to dc2.large or migrating to Aurora PostgreSQL for OLTP workloads."
-                    ),
-                    recommendation=(
-                        f"Downsize to dc2.large or migrate to Aurora:\n"
-                        f"1. If OLAP workload: Resize cluster to dc2.large: aws redshift modify-cluster --node-type dc2.large\n"
-                        f"2. If OLTP workload: Migrate to Aurora PostgreSQL (lower cost for transactional queries)\n"
-                        f"3. Take snapshot before resize for rollback option\n"
-                        f"4. Estimated savings: ${potential_savings:.2f}/month ({(potential_savings / current_cost * 100):.0f}%)"
-                    ),
-                    action_complexity="medium",
-                    risk_level="medium",
-                    implementation_time="1 hour",
-                )
-            )
-
-        # =============================================
-        # SCENARIO 3: Over-provisioned Nodes (MEDIUM)
-        # =============================================
-        if avg_cpu_percent_7d < 30.0 and number_of_nodes > 1:
-            # Low CPU (<30%) + multi-node → Reduce node count
-            optimized_nodes = max(1, number_of_nodes // 2)
-            optimized_cost = self._calculate_redshift_monthly_cost(
-                node_type=node_type,
-                number_of_nodes=optimized_nodes,
-                storage_gb=storage_gb if "ra3" in node_type else 0,
-                region=region,
-            )
-            potential_savings = current_cost - optimized_cost
-
-            scenarios.append(
-                OptimizationScenario(
-                    scenario_name="redshift_over_provisioned_nodes",
-                    priority="MEDIUM",
-                    estimated_monthly_savings=potential_savings,
-                    current_monthly_cost=current_cost,
-                    optimized_monthly_cost=optimized_cost,
-                    confidence_level="high",
-                    description=(
-                        f"Redshift cluster '{cluster_identifier}' has low CPU utilization "
-                        f"(avg {avg_cpu_percent_7d:.1f}%) with {number_of_nodes} nodes. "
-                        f"The cluster is over-provisioned and can be downsized."
-                    ),
-                    recommendation=(
-                        f"Reduce node count to {optimized_nodes} nodes:\n"
-                        f"1. Resize cluster: aws redshift modify-cluster --cluster-identifier {cluster_identifier} --number-of-nodes {optimized_nodes}\n"
-                        f"2. Monitor query performance after resize\n"
-                        f"3. Redshift will redistribute data automatically\n"
-                        f"4. Estimated savings: ${potential_savings:.2f}/month ({(potential_savings / current_cost * 100):.0f}%)"
-                    ),
-                    action_complexity="medium",
-                    risk_level="low",
-                    implementation_time="30 minutes",
-                )
-            )
-
-        # =============================================
-        # SCENARIO 4: Dev/Test Multi-Node (MEDIUM)
-        # =============================================
-        if not is_production and number_of_nodes > 1:
-            # Dev/test cluster with multi-node → Single node
-            optimized_cost = self._calculate_redshift_monthly_cost(
-                node_type=node_type,
-                number_of_nodes=1,
-                storage_gb=storage_gb if "ra3" in node_type else 0,
-                region=region,
-            )
-            potential_savings = current_cost - optimized_cost
-
-            scenarios.append(
-                OptimizationScenario(
-                    scenario_name="redshift_dev_test_multi_node",
-                    priority="MEDIUM",
-                    estimated_monthly_savings=potential_savings,
-                    current_monthly_cost=current_cost,
-                    optimized_monthly_cost=optimized_cost,
-                    confidence_level="high",
-                    description=(
-                        f"Redshift cluster '{cluster_identifier}' is tagged as dev/test but has "
-                        f"{number_of_nodes} nodes. Dev/test workloads typically don't require "
-                        f"multi-node clusters for parallel processing."
-                    ),
-                    recommendation=(
-                        f"Reduce to single-node cluster for dev/test:\n"
-                        f"1. Resize cluster: aws redshift modify-cluster --cluster-identifier {cluster_identifier} --number-of-nodes 1\n"
-                        f"2. Single node is sufficient for most dev/test workloads\n"
-                        f"3. Use production cluster for load testing\n"
-                        f"4. Estimated savings: ${potential_savings:.2f}/month ({(potential_savings / current_cost * 100):.0f}%)"
-                    ),
-                    action_complexity="low",
-                    risk_level="low",
-                    implementation_time="20 minutes",
-                )
-            )
-
-        # =============================================
-        # SCENARIO 5: No Concurrency Scaling (LOW)
-        # =============================================
-        # Note: Concurrency scaling is determined by cluster settings, not exposed in describe-clusters
-        # This scenario is informational/best-practice recommendation
-        scenarios.append(
-            OptimizationScenario(
-                scenario_name="redshift_no_concurrency_scaling",
-                priority="LOW",
-                estimated_monthly_savings=0.0,  # Variable savings based on workload spikes
-                current_monthly_cost=current_cost,
-                optimized_monthly_cost=current_cost,
-                confidence_level="medium",
-                description=(
-                    f"Redshift cluster '{cluster_identifier}' may not have concurrency scaling enabled. "
-                    f"Concurrency scaling automatically adds compute capacity during query spikes, "
-                    f"preventing queue delays without over-provisioning base cluster."
-                ),
-                recommendation=(
-                    f"Enable concurrency scaling for cost efficiency:\n"
-                    f"1. Enable in cluster parameter group: concurrency_scaling_mode = auto\n"
-                    f"2. Set max_concurrency_scaling_clusters (default: 10)\n"
-                    f"3. Free for up to 1 hour/day of usage\n"
-                    f"4. Benefit: Handle query spikes without over-provisioning base cluster"
-                ),
-                action_complexity="low",
-                risk_level="low",
-                implementation_time="10 minutes",
-            )
-        )
-
-        return scenarios
-
-    async def scan_redshift_clusters(self, region: str) -> list[AllCloudResourceData]:
-        """
-        Scan ALL AWS Redshift Clusters for cost intelligence.
-
-        AWS Redshift is a fully managed data warehouse service optimized for analytics workloads.
-        It uses columnar storage and parallel query execution for fast performance on large datasets.
-
-        Use Cases:
-        - Business intelligence (BI) and analytics
-        - Data warehousing (ETL pipelines)
-        - Log analysis and event data processing
-
-        CloudWatch Metrics Used:
-        - DatabaseConnections (AWS/Redshift) - Average database connections
-        - CPUUtilization (AWS/Redshift) - CPU usage percentage
-        - PercentageDiskSpaceUsed (AWS/Redshift) - Disk usage percentage
-
-        Cost Optimization Scenarios:
-        1. Zero Connections (CRITICAL) - No connections for 7+ days → Pause/Delete
-        2. Low Query Volume + Expensive Nodes (HIGH) - <10 connections on expensive nodes → Downsize
-        3. Over-provisioned Nodes (MEDIUM) - Low CPU (<30%) + multi-node → Reduce nodes
-        4. Dev/Test Multi-Node (MEDIUM) - Dev/test with >1 node → Single node
-        5. No Concurrency Scaling (LOW) - Enable concurrency scaling for spike handling
-
-        Args:
-            region: AWS region to scan
-
-        Returns:
-            List of AllCloudResourceData for all Redshift clusters in region
-        """
-        resources = []
-
-        try:
-            async with self.session.client("redshift", region_name=region) as redshift:
-                # Describe all Redshift clusters
-                response = await redshift.describe_clusters()
-                clusters = response.get("Clusters", [])
-
-                logger.info(
-                    "redshift.clusters_found",
-                    region=region,
-                    cluster_count=len(clusters),
-                )
-
-                for cluster in clusters:
-                    try:
-                        cluster_identifier = cluster.get("ClusterIdentifier", "unknown")
-                        cluster_status = cluster.get("ClusterStatus", "unknown")
-
-                        # Extract cluster details
-                        node_type = cluster.get("NodeType", "dc2.large")
-                        number_of_nodes = cluster.get("NumberOfNodes", 1)
-
-                        # Calculate storage (for RA3 nodes, use TotalStorageCapacity; for DC2, estimate)
-                        storage_gb = 0.0
-                        if "ra3" in node_type:
-                            storage_gb = cluster.get("TotalStorageCapacity", 0) / (1024 ** 3)  # Convert bytes to GB
-
-                        # Extract tags
-                        tags_list = cluster.get("Tags", [])
-                        tags = {tag["Key"]: tag["Value"] for tag in tags_list}
-
-                        # ====================================
-                        # CLOUDWATCH METRICS (7-day lookback)
-                        # ====================================
-                        end_time = datetime.now(timezone.utc)
-                        start_time = end_time - timedelta(days=7)
-
-                        # Metric: DatabaseConnections (average connections)
-                        avg_connections_7d = await self._get_cloudwatch_metric_average(
-                            region=region,
-                            namespace="AWS/Redshift",
-                            metric_name="DatabaseConnections",
-                            dimensions=[
-                                {"Name": "ClusterIdentifier", "Value": cluster_identifier}
-                            ],
-                            start_time=start_time,
-                            end_time=end_time,
-                            period=3600,  # 1 hour
-                            statistic="Average",
-                        )
-
-                        # Metric: CPUUtilization (CPU usage)
-                        avg_cpu_percent_7d = await self._get_cloudwatch_metric_average(
-                            region=region,
-                            namespace="AWS/Redshift",
-                            metric_name="CPUUtilization",
-                            dimensions=[
-                                {"Name": "ClusterIdentifier", "Value": cluster_identifier}
-                            ],
-                            start_time=start_time,
-                            end_time=end_time,
-                            period=3600,  # 1 hour
-                            statistic="Average",
-                        )
-
-                        # Metric: PercentageDiskSpaceUsed (disk usage)
-                        avg_disk_usage_percent = await self._get_cloudwatch_metric_average(
-                            region=region,
-                            namespace="AWS/Redshift",
-                            metric_name="PercentageDiskSpaceUsed",
-                            dimensions=[
-                                {"Name": "ClusterIdentifier", "Value": cluster_identifier}
-                            ],
-                            start_time=start_time,
-                            end_time=end_time,
-                            period=3600,  # 1 hour
-                            statistic="Average",
-                        )
-
-                        # ====================================
-                        # COST CALCULATION
-                        # ====================================
-                        monthly_cost = self._calculate_redshift_monthly_cost(
-                            node_type=node_type,
-                            number_of_nodes=number_of_nodes,
-                            storage_gb=storage_gb,
-                            region=region,
-                        )
-
-                        # ====================================
-                        # OPTIMIZATION SCENARIOS
-                        # ====================================
-                        optimization_scenarios = self._calculate_redshift_optimization(
-                            cluster_identifier=cluster_identifier,
-                            node_type=node_type,
-                            number_of_nodes=number_of_nodes,
-                            storage_gb=storage_gb,
-                            avg_connections_7d=avg_connections_7d,
-                            avg_cpu_percent_7d=avg_cpu_percent_7d,
-                            avg_disk_usage_percent=avg_disk_usage_percent,
-                            cluster_status=cluster_status,
-                            tags=tags,
-                            region=region,
-                        )
-
-                        # ====================================
-                        # CHECK IF ORPHAN (Zero connections for 7+ days)
-                        # ====================================
-                        is_orphan = avg_connections_7d < 0.1 and cluster_status == "available"
-
-                        # ====================================
-                        # CREATE RESOURCE DATA
-                        # ====================================
-                        resource = AllCloudResourceData(
-                            resource_type="redshift_cluster",
-                            resource_id=cluster_identifier,
-                            resource_name=cluster_identifier,
-                            region=region,
-                            estimated_monthly_cost=monthly_cost,
-                            currency="USD",
-                            resource_metadata={
-                                "cluster_identifier": cluster_identifier,
-                                "cluster_status": cluster_status,
-                                "node_type": node_type,
-                                "number_of_nodes": number_of_nodes,
-                                "storage_gb": round(storage_gb, 2) if storage_gb > 0 else 0,
-                                "endpoint": cluster.get("Endpoint", {}).get("Address", ""),
-                                "avg_connections_7d": round(avg_connections_7d, 2),
-                                "avg_cpu_percent_7d": round(avg_cpu_percent_7d, 2),
-                                "avg_disk_usage_percent": round(avg_disk_usage_percent, 2),
-                                "tags": tags,
-                            },
-                            optimization_scenarios=optimization_scenarios,
-                            is_orphan=is_orphan,
-                            created_at_cloud=cluster.get("ClusterCreateTime"),
-                        )
-
-                        resources.append(resource)
-
-                        logger.debug(
-                            "redshift.cluster_scanned",
-                            cluster_identifier=cluster_identifier,
-                            node_type=node_type,
-                            number_of_nodes=number_of_nodes,
-                            monthly_cost=monthly_cost,
-                            avg_connections_7d=round(avg_connections_7d, 2),
-                            scenarios_count=len(optimization_scenarios),
-                            is_orphan=is_orphan,
-                        )
-
-                    except Exception as e:
-                        logger.error(
-                            "redshift.cluster_scan_failed",
-                            cluster_identifier=cluster.get("ClusterIdentifier", "unknown"),
-                            region=region,
-                            error=str(e),
-                        )
-                        continue
-
-        except Exception as e:
-            logger.error(
-                "redshift.scan_failed",
-                region=region,
-                error=str(e),
-            )
-
-        return resources
-
-    # ============================================================
-    # RESSOURCE 26 : VPN CONNECTION (SITE-TO-SITE VPN)
-    # ============================================================
-
-    def _calculate_vpn_connection_monthly_cost(
-        self,
-        region: str,
-    ) -> float:
-        """
-        Calculate estimated monthly cost for AWS VPN Connection.
-
-        VPN Connections provide secure connectivity between on-premises networks and AWS VPCs
-        using IPsec tunnels. Each connection has 2 tunnels for redundancy.
-
-        Cost Components:
-        1. Connection cost ($36/month flat rate per connection)
-        2. Data transfer cost (not included - varies by usage)
-
-        Args:
-            region: AWS region
-
-        Returns:
-            Estimated monthly cost in USD (flat rate)
-
-        Example:
-            Single VPN Connection:
-            - Connection: $36/month (flat rate)
-        """
-        # VPN Connection is a flat rate ($36/month)
-        vpn_cost = self.PRICING.get("vpn_connection", 36.00)
-
-        return round(vpn_cost, 2)
-
-    def _calculate_vpn_connection_optimization(
-        self,
-        vpn_id: str,
-        total_bytes_in_30d: float,
-        total_bytes_out_30d: float,
-        tunnel_1_state: str,
-        tunnel_2_state: str,
-        vpn_state: str,
-        tags: dict,
-        region: str,
-    ) -> list[OptimizationScenario]:
-        """
-        Calculate optimization scenarios for AWS VPN Connection.
-
-        VPN Connection Optimization Scenarios:
-        1. Zero Data Transfer (CRITICAL) - No data transfer for 30+ days → Delete connection
-        2. Low Data Transfer (HIGH) - <100 MB/month + available state → Delete or consolidate
-        3. Single Tunnel Active (MEDIUM) - Only 1 of 2 tunnels UP → Check redundancy requirements
-        4. Replaced by Transit Gateway (MEDIUM) - Transit Gateway exists → Migrate to TGW
-        5. Dev/Test VPN (LOW) - Dev/test connection always up → Delete when not needed
-
-        Args:
-            vpn_id: VPN Connection ID
-            total_bytes_in_30d: Total incoming bytes over 30 days
-            total_bytes_out_30d: Total outgoing bytes over 30 days
-            tunnel_1_state: Tunnel 1 state (UP/DOWN)
-            tunnel_2_state: Tunnel 2 state (UP/DOWN)
-            vpn_state: VPN state (available, deleted, etc.)
-            tags: Resource tags
-            region: AWS region
-
-        Returns:
-            List of optimization scenarios with priority, estimated savings, and recommendations
-        """
-        scenarios = []
-
-        # Current cost (flat rate)
-        current_cost = self._calculate_vpn_connection_monthly_cost(region=region)
-
-        # Detect environment from tags
-        env = tags.get("Environment", tags.get("environment", "")).lower()
-        is_production = env in ["production", "prod", "prd"]
-
-        # Calculate total data transfer
-        total_bytes_transferred = total_bytes_in_30d + total_bytes_out_30d
-        total_mb_transferred = total_bytes_transferred / (1024 ** 2)
-
-        # =============================================
-        # SCENARIO 1: Zero Data Transfer (CRITICAL)
-        # =============================================
-        if total_bytes_transferred == 0 and vpn_state == "available":
-            # No data transfer for 30+ days → Delete connection
-            potential_savings = current_cost
-            scenarios.append(
-                OptimizationScenario(
-                    scenario_name="vpn_zero_data_transfer",
-                    priority="CRITICAL",
-                    estimated_monthly_savings=potential_savings,
-                    current_monthly_cost=current_cost,
-                    optimized_monthly_cost=0.0,
-                    confidence_level="high",
-                    description=(
-                        f"VPN Connection '{vpn_id}' has zero data transfer "
-                        f"over the last 30 days. This connection is completely idle and should be deleted."
-                    ),
-                    recommendation=(
-                        "Delete this VPN Connection to eliminate costs:\n"
-                        f"1. Verify no active routes pointing to this VPN\n"
-                        f"2. Delete VPN connection: aws ec2 delete-vpn-connection --vpn-connection-id {vpn_id}\n"
-                        f"3. Estimated savings: ${potential_savings:.2f}/month (100%)"
-                    ),
-                    action_complexity="low",
-                    risk_level="low",
-                    implementation_time="5 minutes",
-                )
-            )
-
-        # =============================================
-        # SCENARIO 2: Low Data Transfer (HIGH)
-        # =============================================
-        if total_mb_transferred < 100 and total_mb_transferred > 0 and vpn_state == "available":
-            # Low data transfer (<100 MB/month) → Delete or consolidate
-            potential_savings = current_cost
-            scenarios.append(
-                OptimizationScenario(
-                    scenario_name="vpn_low_data_transfer",
-                    priority="HIGH",
-                    estimated_monthly_savings=potential_savings,
-                    current_monthly_cost=current_cost,
-                    optimized_monthly_cost=0.0,
-                    confidence_level="high",
-                    description=(
-                        f"VPN Connection '{vpn_id}' has very low data transfer "
-                        f"({total_mb_transferred:.2f} MB over 30 days). This suggests minimal usage "
-                        f"and the connection may no longer be needed."
-                    ),
-                    recommendation=(
-                        f"Delete or consolidate VPN connection:\n"
-                        f"1. Investigate if workload can be migrated to AWS or consolidated with another VPN\n"
-                        f"2. If no longer needed: aws ec2 delete-vpn-connection --vpn-connection-id {vpn_id}\n"
-                        f"3. Estimated savings: ${potential_savings:.2f}/month (100%)"
-                    ),
-                    action_complexity="medium",
-                    risk_level="medium",
-                    implementation_time="15 minutes",
-                )
-            )
-
-        # =============================================
-        # SCENARIO 3: Single Tunnel Active (MEDIUM)
-        # =============================================
-        if vpn_state == "available" and ((tunnel_1_state == "UP" and tunnel_2_state == "DOWN") or
-                                          (tunnel_1_state == "DOWN" and tunnel_2_state == "UP")):
-            # Only one tunnel UP → Check redundancy
-            scenarios.append(
-                OptimizationScenario(
-                    scenario_name="vpn_single_tunnel_active",
-                    priority="MEDIUM",
-                    estimated_monthly_savings=0.0,  # Reliability issue, not cost savings
-                    current_monthly_cost=current_cost,
-                    optimized_monthly_cost=current_cost,
-                    confidence_level="high",
-                    description=(
-                        f"VPN Connection '{vpn_id}' has only one tunnel UP (Tunnel 1: {tunnel_1_state}, "
-                        f"Tunnel 2: {tunnel_2_state}). VPN connections should have both tunnels UP "
-                        f"for redundancy and high availability."
-                    ),
-                    recommendation=(
-                        f"Investigate and restore second tunnel:\n"
-                        f"1. Check on-premises VPN device configuration for both tunnels\n"
-                        f"2. Verify IPsec settings match AWS configuration\n"
-                        f"3. Review CloudWatch VPN tunnel status metrics\n"
-                        f"4. Both tunnels should be UP for redundancy (no cost impact)"
-                    ),
-                    action_complexity="medium",
-                    risk_level="high",
-                    implementation_time="30 minutes",
-                )
-            )
-
-        # =============================================
-        # SCENARIO 4: Replaced by Transit Gateway (MEDIUM)
-        # =============================================
-        # Note: This requires checking if Transit Gateway exists in same VPC/region
-        # This is a heuristic recommendation - actual migration requires analysis
-        scenarios.append(
-            OptimizationScenario(
-                scenario_name="vpn_replaced_by_transit_gateway",
-                priority="MEDIUM",
-                estimated_monthly_savings=0.0,  # TGW may be more cost-effective at scale
-                current_monthly_cost=current_cost,
-                optimized_monthly_cost=current_cost,
-                confidence_level="low",
-                description=(
-                    f"VPN Connection '{vpn_id}' may be a candidate for Transit Gateway migration. "
-                    f"Transit Gateway provides centralized connectivity management and can be more "
-                    f"cost-effective for multiple VPN connections or VPCs."
-                ),
-                recommendation=(
-                    f"Consider migrating to Transit Gateway if you have:\n"
-                    f"1. Multiple VPN connections (3+ VPNs)\n"
-                    f"2. Multiple VPC peering connections\n"
-                    f"3. Centralized network architecture requirement\n"
-                    f"4. Note: TGW has hourly charge ($0.05/hour) but simplifies management at scale"
-                ),
-                action_complexity="high",
-                risk_level="medium",
-                implementation_time="2 hours",
-            )
-        )
-
-        # =============================================
-        # SCENARIO 5: Dev/Test VPN Always Up (LOW)
-        # =============================================
-        if not is_production and vpn_state == "available":
-            # Dev/test VPN always up → Delete when not needed
-            potential_savings = current_cost * 0.5  # Assume 50% time not needed
-            scenarios.append(
-                OptimizationScenario(
-                    scenario_name="vpn_dev_test_always_up",
-                    priority="LOW",
-                    estimated_monthly_savings=potential_savings,
-                    current_monthly_cost=current_cost,
-                    optimized_monthly_cost=current_cost - potential_savings,
-                    confidence_level="medium",
-                    description=(
-                        f"VPN Connection '{vpn_id}' is tagged as dev/test but remains UP continuously. "
-                        f"Dev/test VPNs are typically only needed during business hours or active development periods."
-                    ),
-                    recommendation=(
-                        f"Delete VPN when not needed for dev/test:\n"
-                        f"1. Delete VPN outside business hours: aws ec2 delete-vpn-connection --vpn-connection-id {vpn_id}\n"
-                        f"2. Recreate when needed (configuration can be saved as template)\n"
-                        f"3. Or use Lambda to automate start/stop based on schedule\n"
-                        f"4. Estimated savings: ~${potential_savings:.2f}/month (50% time savings)"
-                    ),
-                    action_complexity="medium",
-                    risk_level="low",
-                    implementation_time="20 minutes",
-                )
-            )
-
-        return scenarios
-
-    async def scan_vpn_connections(self, region: str) -> list[AllCloudResourceData]:
-        """
-        Scan ALL AWS VPN Connections for cost intelligence.
-
-        AWS VPN Connections provide secure connectivity between on-premises networks and AWS VPCs
-        using IPsec tunnels. Each connection has 2 tunnels for redundancy and high availability.
-
-        Use Cases:
-        - Hybrid cloud connectivity (on-premises to AWS)
-        - Disaster recovery (backup connectivity)
-        - Secure remote access (site-to-site VPN)
-
-        CloudWatch Metrics Used:
-        - TunnelDataIn (AWS/VPN) - Incoming bytes over 30 days
-        - TunnelDataOut (AWS/VPN) - Outgoing bytes over 30 days
-        - TunnelState (AWS/VPN) - Tunnel status (UP/DOWN)
-
-        Cost Optimization Scenarios:
-        1. Zero Data Transfer (CRITICAL) - No data transfer for 30+ days → Delete
-        2. Low Data Transfer (HIGH) - <100 MB/month → Delete or consolidate
-        3. Single Tunnel Active (MEDIUM) - Only 1 of 2 tunnels UP → Fix redundancy
-        4. Replaced by Transit Gateway (MEDIUM) - Migrate to TGW for scale
-        5. Dev/Test VPN Always Up (LOW) - Delete when not needed
-
-        Args:
-            region: AWS region to scan
-
-        Returns:
-            List of AllCloudResourceData for all VPN Connections in region
-        """
-        resources = []
-
-        try:
-            async with self.session.client("ec2", region_name=region) as ec2:
-                # Describe all VPN connections
-                response = await ec2.describe_vpn_connections()
-                vpn_connections = response.get("VpnConnections", [])
-
-                logger.info(
-                    "vpn.connections_found",
-                    region=region,
-                    vpn_count=len(vpn_connections),
-                )
-
-                for vpn in vpn_connections:
-                    try:
-                        vpn_id = vpn.get("VpnConnectionId", "unknown")
-                        vpn_state = vpn.get("State", "unknown")
-
-                        # Skip deleted/deleting VPN connections
-                        if vpn_state in ["deleted", "deleting"]:
-                            continue
-
-                        # Extract VPN details
-                        vpn_type = vpn.get("Type", "ipsec.1")
-                        customer_gateway_id = vpn.get("CustomerGatewayId", "")
-                        vpn_gateway_id = vpn.get("VpnGatewayId", "")
-
-                        # Extract tunnel states
-                        vgw_telemetry = vpn.get("VgwTelemetry", [])
-                        tunnel_1_state = "DOWN"
-                        tunnel_2_state = "DOWN"
-
-                        if len(vgw_telemetry) >= 1:
-                            tunnel_1_state = vgw_telemetry[0].get("Status", "DOWN")
-                        if len(vgw_telemetry) >= 2:
-                            tunnel_2_state = vgw_telemetry[1].get("Status", "DOWN")
-
-                        # Extract tags
-                        tags_list = vpn.get("Tags", [])
-                        tags = {tag["Key"]: tag["Value"] for tag in tags_list}
-
-                        # ====================================
-                        # CLOUDWATCH METRICS (30-day lookback)
-                        # ====================================
-                        end_time = datetime.now(timezone.utc)
-                        start_time = end_time - timedelta(days=30)
-
-                        # Metric: TunnelDataIn (incoming bytes)
-                        total_bytes_in_30d = await self._get_cloudwatch_metric_sum(
-                            region=region,
-                            namespace="AWS/VPN",
-                            metric_name="TunnelDataIn",
-                            dimensions=[
-                                {"Name": "VpnId", "Value": vpn_id}
-                            ],
-                            start_time=start_time,
-                            end_time=end_time,
-                            period=86400,  # 1 day
-                        )
-
-                        # Metric: TunnelDataOut (outgoing bytes)
-                        total_bytes_out_30d = await self._get_cloudwatch_metric_sum(
-                            region=region,
-                            namespace="AWS/VPN",
-                            metric_name="TunnelDataOut",
-                            dimensions=[
-                                {"Name": "VpnId", "Value": vpn_id}
-                            ],
-                            start_time=start_time,
-                            end_time=end_time,
-                            period=86400,  # 1 day
-                        )
-
-                        # ====================================
-                        # COST CALCULATION
-                        # ====================================
-                        monthly_cost = self._calculate_vpn_connection_monthly_cost(region=region)
-
-                        # ====================================
-                        # OPTIMIZATION SCENARIOS
-                        # ====================================
-                        optimization_scenarios = self._calculate_vpn_connection_optimization(
-                            vpn_id=vpn_id,
-                            total_bytes_in_30d=total_bytes_in_30d,
-                            total_bytes_out_30d=total_bytes_out_30d,
-                            tunnel_1_state=tunnel_1_state,
-                            tunnel_2_state=tunnel_2_state,
-                            vpn_state=vpn_state,
-                            tags=tags,
-                            region=region,
-                        )
-
-                        # ====================================
-                        # CHECK IF ORPHAN (Zero data transfer for 30+ days)
-                        # ====================================
-                        total_bytes_transferred = total_bytes_in_30d + total_bytes_out_30d
-                        is_orphan = total_bytes_transferred == 0 and vpn_state == "available"
-
-                        # ====================================
-                        # CREATE RESOURCE DATA
-                        # ====================================
-                        resource = AllCloudResourceData(
-                            resource_type="vpn_connection",
-                            resource_id=vpn_id,
-                            resource_name=tags.get("Name", vpn_id),
-                            region=region,
-                            estimated_monthly_cost=monthly_cost,
-                            currency="USD",
-                            resource_metadata={
-                                "vpn_id": vpn_id,
-                                "vpn_state": vpn_state,
-                                "vpn_type": vpn_type,
-                                "customer_gateway_id": customer_gateway_id,
-                                "vpn_gateway_id": vpn_gateway_id,
-                                "tunnel_1_state": tunnel_1_state,
-                                "tunnel_2_state": tunnel_2_state,
-                                "total_bytes_in_30d": int(total_bytes_in_30d),
-                                "total_bytes_out_30d": int(total_bytes_out_30d),
-                                "total_mb_transferred_30d": round((total_bytes_in_30d + total_bytes_out_30d) / (1024 ** 2), 2),
-                                "tags": tags,
-                            },
-                            optimization_scenarios=optimization_scenarios,
-                            is_orphan=is_orphan,
-                            created_at_cloud=None,  # VPN connections don't have creation time in API
-                        )
-
-                        resources.append(resource)
-
-                        logger.debug(
-                            "vpn.connection_scanned",
-                            vpn_id=vpn_id,
-                            vpn_state=vpn_state,
-                            monthly_cost=monthly_cost,
-                            total_mb_transferred_30d=round((total_bytes_in_30d + total_bytes_out_30d) / (1024 ** 2), 2),
-                            scenarios_count=len(optimization_scenarios),
-                            is_orphan=is_orphan,
-                        )
-
-                    except Exception as e:
-                        logger.error(
-                            "vpn.connection_scan_failed",
-                            vpn_id=vpn.get("VpnConnectionId", "unknown"),
-                            region=region,
-                            error=str(e),
-                        )
-                        continue
-
-        except Exception as e:
-            logger.error(
-                "vpn.scan_failed",
-                region=region,
-                error=str(e),
-            )
-
-        return resources
-
-    # ============================================================
-    # RESSOURCE 27 : TRANSIT GATEWAY ATTACHMENT
-    # ============================================================
-
-    def _calculate_transit_gateway_monthly_cost(
-        self,
-        region: str,
-    ) -> float:
-        """
-        Calculate estimated monthly cost for AWS Transit Gateway Attachment.
-
-        Transit Gateway Attachments connect VPCs, VPNs, and on-premises networks
-        to a central Transit Gateway for simplified network topology.
-
-        Cost Components:
-        1. Attachment cost ($36/month flat rate per attachment)
-        2. Data processing cost (not included - varies by usage)
-
-        Args:
-            region: AWS region
-
-        Returns:
-            Estimated monthly cost in USD (flat rate)
-
-        Example:
-            Single TGW Attachment:
-            - Attachment: $36/month (flat rate)
-        """
-        # Transit Gateway Attachment is a flat rate ($36/month)
-        tgw_attachment_cost = self.PRICING.get("transit_gateway_attachment", 36.00)
-
-        return round(tgw_attachment_cost, 2)
-
-    def _calculate_transit_gateway_optimization(
-        self,
-        attachment_id: str,
-        total_bytes_in_30d: float,
-        total_bytes_out_30d: float,
-        packet_drop_blackhole: float,
-        attachment_state: str,
-        resource_type: str,
-        tags: dict,
-        region: str,
-    ) -> list[OptimizationScenario]:
-        """
-        Calculate optimization scenarios for AWS Transit Gateway Attachment.
-
-        Transit Gateway Attachment Optimization Scenarios:
-        1. Zero Data Transfer (CRITICAL) - No data transfer for 30+ days → Delete attachment
-        2. Very Low Data Transfer (HIGH) - <100 MB/month → Delete or consolidate
-        3. Blackhole Packet Drops (MEDIUM) - Route invalid → Fix routing tables
-        4. Duplicate Attachment (MEDIUM) - Same VPC + TGW → Remove duplicates
-        5. Dev/Test Attachment (LOW) - Dev/test attachment always on → Delete when not needed
-
-        Args:
-            attachment_id: Transit Gateway Attachment ID
-            total_bytes_in_30d: Total incoming bytes over 30 days
-            total_bytes_out_30d: Total outgoing bytes over 30 days
-            packet_drop_blackhole: Packet drops due to blackhole routes over 7 days
-            attachment_state: Attachment state (available, deleted, etc.)
-            resource_type: Attachment resource type (vpc, vpn, etc.)
-            tags: Resource tags
-            region: AWS region
-
-        Returns:
-            List of optimization scenarios with priority, estimated savings, and recommendations
-        """
-        scenarios = []
-
-        # Current cost (flat rate)
-        current_cost = self._calculate_transit_gateway_monthly_cost(region=region)
-
-        # Detect environment from tags
-        env = tags.get("Environment", tags.get("environment", "")).lower()
-        is_production = env in ["production", "prod", "prd"]
-
-        # Calculate total data transfer
-        total_bytes_transferred = total_bytes_in_30d + total_bytes_out_30d
-        total_mb_transferred = total_bytes_transferred / (1024 ** 2)
-
-        # =============================================
-        # SCENARIO 1: Zero Data Transfer (CRITICAL)
-        # =============================================
-        if total_bytes_transferred == 0 and attachment_state == "available":
-            # No data transfer for 30+ days → Delete attachment
-            potential_savings = current_cost
-            scenarios.append(
-                OptimizationScenario(
-                    scenario_name="tgw_zero_data_transfer",
-                    priority="CRITICAL",
-                    estimated_monthly_savings=potential_savings,
-                    current_monthly_cost=current_cost,
-                    optimized_monthly_cost=0.0,
-                    confidence_level="high",
-                    description=(
-                        f"Transit Gateway Attachment '{attachment_id}' has zero data transfer "
-                        f"over the last 30 days. This attachment is completely idle and should be deleted."
-                    ),
-                    recommendation=(
-                        "Delete this Transit Gateway Attachment to eliminate costs:\n"
-                        "1. Verify no critical traffic is routed through this attachment\n"
-                        "2. aws ec2 delete-transit-gateway-attachment --transit-gateway-attachment-id "
-                        f"{attachment_id} --region {region}\n"
-                        "3. Update route tables if necessary\n\n"
-                        f"💰 Monthly Savings: ${potential_savings:.2f}"
-                    ),
-                    optimization_score=95,
-                )
-            )
-
-        # =============================================
-        # SCENARIO 2: Very Low Data Transfer (HIGH)
-        # =============================================
-        elif 0 < total_mb_transferred < 100 and attachment_state == "available":
-            # <100 MB/month → Delete or consolidate
-            potential_savings = current_cost
-            scenarios.append(
-                OptimizationScenario(
-                    scenario_name="tgw_low_data_transfer",
-                    priority="HIGH",
-                    estimated_monthly_savings=potential_savings,
-                    current_monthly_cost=current_cost,
-                    optimized_monthly_cost=0.0,
-                    confidence_level="high",
-                    description=(
-                        f"Transit Gateway Attachment '{attachment_id}' has very low data transfer "
-                        f"({total_mb_transferred:.2f} MB over 30 days). Consider consolidating traffic "
-                        f"through other attachments or deleting if not critical."
-                    ),
-                    recommendation=(
-                        "Delete or consolidate this Transit Gateway Attachment:\n"
-                        f"1. Current data transfer: {total_mb_transferred:.2f} MB/month\n"
-                        "2. Consider consolidating traffic through other attachments\n"
-                        "3. If not critical, delete to save costs\n"
-                        "4. aws ec2 delete-transit-gateway-attachment --transit-gateway-attachment-id "
-                        f"{attachment_id} --region {region}\n\n"
-                        f"💰 Monthly Savings: ${potential_savings:.2f}"
-                    ),
-                    optimization_score=85,
-                )
-            )
-
-        # =============================================
-        # SCENARIO 3: Blackhole Packet Drops (MEDIUM)
-        # =============================================
-        if packet_drop_blackhole > 1000:
-            # Route invalid → Fix routing tables
-            potential_savings = 0.0  # Opportunity cost
-            scenarios.append(
-                OptimizationScenario(
-                    scenario_name="tgw_blackhole_packet_drops",
-                    priority="MEDIUM",
-                    estimated_monthly_savings=potential_savings,
-                    current_monthly_cost=current_cost,
-                    optimized_monthly_cost=current_cost,
-                    confidence_level="high",
-                    description=(
-                        f"Transit Gateway Attachment '{attachment_id}' has {int(packet_drop_blackhole)} "
-                        f"blackhole packet drops over 7 days. This indicates invalid routing configuration. "
-                        f"The attachment is configured but not functioning properly."
-                    ),
-                    recommendation=(
-                        "Fix routing configuration for this Transit Gateway Attachment:\n"
-                        f"1. Blackhole packet drops: {int(packet_drop_blackhole)} (last 7 days)\n"
-                        "2. Check Transit Gateway route tables: aws ec2 describe-transit-gateway-route-tables\n"
-                        "3. Verify VPC/VPN route tables for valid routes\n"
-                        "4. Fix routes or delete attachment if not needed\n\n"
-                        "⚠️ No direct cost savings, but improves network reliability"
-                    ),
-                    optimization_score=70,
-                )
-            )
-
-        # =============================================
-        # SCENARIO 4: Duplicate Attachment (MEDIUM)
-        # =============================================
-        # Note: This scenario requires cross-attachment analysis, which is complex.
-        # For simplicity, we'll check if there are tags indicating duplication.
-        duplicate_tag = tags.get("Duplicate", tags.get("duplicate", "")).lower()
-        if duplicate_tag in ["true", "yes", "1"]:
-            # Same VPC + TGW → Remove duplicates
-            potential_savings = current_cost
-            scenarios.append(
-                OptimizationScenario(
-                    scenario_name="tgw_duplicate_attachment",
-                    priority="MEDIUM",
-                    estimated_monthly_savings=potential_savings,
-                    current_monthly_cost=current_cost,
-                    optimized_monthly_cost=0.0,
-                    confidence_level="medium",
-                    description=(
-                        f"Transit Gateway Attachment '{attachment_id}' appears to be a duplicate "
-                        f"(based on tags). Multiple attachments for the same VPC/Transit Gateway "
-                        f"can be consolidated."
-                    ),
-                    recommendation=(
-                        "Remove duplicate Transit Gateway Attachment:\n"
-                        "1. List all attachments: aws ec2 describe-transit-gateway-attachments\n"
-                        "2. Identify duplicate attachments for same VPC/TGW\n"
-                        "3. Delete duplicate: aws ec2 delete-transit-gateway-attachment "
-                        f"--transit-gateway-attachment-id {attachment_id} --region {region}\n\n"
-                        f"💰 Monthly Savings: ${potential_savings:.2f}"
-                    ),
-                    optimization_score=65,
-                )
-            )
-
-        # =============================================
-        # SCENARIO 5: Dev/Test Attachment (LOW)
-        # =============================================
-        if not is_production and env in ["dev", "test", "staging", "development"]:
-            # Dev/test attachment always on → Delete when not needed
-            potential_savings = current_cost
-            scenarios.append(
-                OptimizationScenario(
-                    scenario_name="tgw_dev_test_always_on",
-                    priority="LOW",
-                    estimated_monthly_savings=potential_savings,
-                    current_monthly_cost=current_cost,
-                    optimized_monthly_cost=0.0,
-                    confidence_level="medium",
-                    description=(
-                        f"Transit Gateway Attachment '{attachment_id}' is tagged as '{env}' environment "
-                        f"but remains always on. Dev/test attachments should be deleted when not in use."
-                    ),
-                    recommendation=(
-                        "Delete dev/test Transit Gateway Attachment when not needed:\n"
-                        f"1. Environment: {env}\n"
-                        "2. Delete during off-hours or non-testing periods\n"
-                        "3. Recreate when needed (IaC: Terraform/CloudFormation)\n"
-                        "4. aws ec2 delete-transit-gateway-attachment --transit-gateway-attachment-id "
-                        f"{attachment_id} --region {region}\n\n"
-                        f"💰 Monthly Savings: ${potential_savings:.2f}"
-                    ),
-                    optimization_score=50,
-                )
-            )
-
-        return scenarios
-
-    async def scan_transit_gateway_attachments(
-        self, region: str
-    ) -> list[AllCloudResourceData]:
-        """
-        Scan ALL AWS Transit Gateway Attachments for cost intelligence.
-
-        Transit Gateway Attachments connect VPCs, VPNs, Direct Connect gateways,
-        and peering connections to a central Transit Gateway hub.
-
-        CloudWatch Metrics Used:
-        - BytesIn (AWS/TransitGateway) - Incoming bytes over 30 days
-        - BytesOut (AWS/TransitGateway) - Outgoing bytes over 30 days
-        - PacketDropCountBlackhole (AWS/TransitGateway) - Packet drops due to invalid routes
-
-        Cost Optimization Scenarios:
-        1. Zero Data Transfer (CRITICAL) - No data transfer for 30+ days → Delete
-        2. Very Low Data Transfer (HIGH) - <100 MB/month → Delete or consolidate
-        3. Blackhole Packet Drops (MEDIUM) - Route invalid → Fix routing tables
-        4. Duplicate Attachment (MEDIUM) - Same VPC + TGW → Remove duplicates
-        5. Dev/Test Attachment (LOW) - Dev/test attachment always on → Delete when not needed
-
-        Args:
-            region: AWS region to scan
-
-        Returns:
-            List of all Transit Gateway Attachments with optimization recommendations
-        """
-        import structlog
-
-        logger = structlog.get_logger()
-        resources = []
-
-        try:
-            async with self.provider.session.client("ec2", region_name=region) as ec2:
-                async with self.provider.session.client(
-                    "cloudwatch", region_name=region
-                ) as cw:
-                    # Describe all Transit Gateway attachments
-                    response = await ec2.describe_transit_gateway_attachments()
-
-                    for attachment in response.get("TransitGatewayAttachments", []):
-                        try:
-                            attachment_id = attachment["TransitGatewayAttachmentId"]
-                            attachment_state = attachment.get("State", "unknown")
-                            resource_type = attachment.get("ResourceType", "unknown")
-
-                            # Skip deleted/deleting/failed attachments
-                            if attachment_state in ["deleted", "deleting", "failed"]:
-                                continue
-
-                            # Extract tags
-                            tags = {}
-                            for tag in attachment.get("Tags", []):
-                                tags[tag["Key"]] = tag["Value"]
-
-                            # ====================================
-                            # CLOUDWATCH METRICS (30-day lookback)
-                            # ====================================
-                            now = datetime.now(timezone.utc)
-                            start_time = now - timedelta(days=30)
-
-                            # BytesIn metric (30 days)
-                            bytes_in_response = await cw.get_metric_statistics(
-                                Namespace="AWS/TransitGateway",
-                                MetricName="BytesIn",
-                                Dimensions=[
-                                    {
-                                        "Name": "TransitGatewayAttachment",
-                                        "Value": attachment_id,
-                                    },
-                                ],
-                                StartTime=start_time,
-                                EndTime=now,
-                                Period=86400,  # 1 day
-                                Statistics=["Sum"],
-                            )
-                            total_bytes_in_30d = sum(
-                                dp["Sum"]
-                                for dp in bytes_in_response.get("Datapoints", [])
-                            )
-
-                            # BytesOut metric (30 days)
-                            bytes_out_response = await cw.get_metric_statistics(
-                                Namespace="AWS/TransitGateway",
-                                MetricName="BytesOut",
-                                Dimensions=[
-                                    {
-                                        "Name": "TransitGatewayAttachment",
-                                        "Value": attachment_id,
-                                    },
-                                ],
-                                StartTime=start_time,
-                                EndTime=now,
-                                Period=86400,  # 1 day
-                                Statistics=["Sum"],
-                            )
-                            total_bytes_out_30d = sum(
-                                dp["Sum"]
-                                for dp in bytes_out_response.get("Datapoints", [])
-                            )
-
-                            # PacketDropCountBlackhole metric (7 days)
-                            start_time_7d = now - timedelta(days=7)
-                            blackhole_response = await cw.get_metric_statistics(
-                                Namespace="AWS/TransitGateway",
-                                MetricName="PacketDropCountBlackhole",
-                                Dimensions=[
-                                    {
-                                        "Name": "TransitGatewayAttachment",
-                                        "Value": attachment_id,
-                                    },
-                                ],
-                                StartTime=start_time_7d,
-                                EndTime=now,
-                                Period=3600,  # 1 hour
-                                Statistics=["Sum"],
-                            )
-                            packet_drop_blackhole = sum(
-                                dp["Sum"]
-                                for dp in blackhole_response.get("Datapoints", [])
-                            )
-
-                            # ====================================
-                            # COST CALCULATION
-                            # ====================================
-                            monthly_cost = self._calculate_transit_gateway_monthly_cost(
-                                region=region
-                            )
-
-                            # ====================================
-                            # OPTIMIZATION SCENARIOS
-                            # ====================================
-                            optimization_scenarios = (
-                                self._calculate_transit_gateway_optimization(
-                                    attachment_id=attachment_id,
-                                    total_bytes_in_30d=total_bytes_in_30d,
-                                    total_bytes_out_30d=total_bytes_out_30d,
-                                    packet_drop_blackhole=packet_drop_blackhole,
-                                    attachment_state=attachment_state,
-                                    resource_type=resource_type,
-                                    tags=tags,
-                                    region=region,
-                                )
-                            )
-
-                            # ====================================
-                            # ORPHAN DETECTION
-                            # ====================================
-                            total_bytes_transferred = (
-                                total_bytes_in_30d + total_bytes_out_30d
-                            )
-                            is_orphan = (
-                                total_bytes_transferred == 0
-                                and attachment_state == "available"
-                            )
-
-                            # Apply detection rules filtering
-                            creation_time = attachment.get("CreationTime")
-                            resource_age_days = None
-                            if isinstance(creation_time, datetime):
-                                resource_age_days = (datetime.utcnow() - creation_time.replace(tzinfo=None)).days
-
-                            if not self._should_include_resource("transit_gateway_attachment", resource_age_days):
-                                logger.debug("inventory.transit_gateway_filtered", attachment_id=attachment_id, age=resource_age_days)
-                                continue
-
-                            # ====================================
-                            # CREATE RESOURCE DATA
-                            # ====================================
-                            resource = AllCloudResourceData(
-                                resource_type="transit_gateway_attachment",
-                                resource_id=attachment_id,
-                                resource_name=tags.get("Name", attachment_id),
-                                region=region,
-                                estimated_monthly_cost=monthly_cost,
-                                currency="USD",
-                                resource_metadata={
-                                    "attachment_id": attachment_id,
-                                    "attachment_state": attachment_state,
-                                    "resource_type": resource_type,
-                                    "transit_gateway_id": attachment.get(
-                                        "TransitGatewayId", "unknown"
-                                    ),
-                                    "resource_id": attachment.get(
-                                        "ResourceId", "unknown"
-                                    ),
-                                    "resource_owner_id": attachment.get(
-                                        "ResourceOwnerId", "unknown"
-                                    ),
-                                    "total_bytes_in_30d": int(total_bytes_in_30d),
-                                    "total_bytes_out_30d": int(total_bytes_out_30d),
-                                    "total_mb_transferred_30d": round(
-                                        (total_bytes_in_30d + total_bytes_out_30d)
-                                        / (1024**2),
-                                        2,
-                                    ),
-                                    "packet_drop_blackhole_7d": int(
-                                        packet_drop_blackhole
-                                    ),
-                                    "tags": tags,
-                                },
-                                optimization_scenarios=optimization_scenarios,
-                                is_orphan=is_orphan,
-                                created_at_cloud=attachment.get("CreationTime"),
-                            )
-
-                            resources.append(resource)
-
-                            logger.debug(
-                                "tgw.attachment_scanned",
-                                attachment_id=attachment_id,
-                                attachment_state=attachment_state,
-                                monthly_cost=monthly_cost,
-                                total_mb_transferred_30d=round(
-                                    (total_bytes_in_30d + total_bytes_out_30d)
-                                    / (1024**2),
-                                    2,
-                                ),
-                                scenarios_count=len(optimization_scenarios),
-                                is_orphan=is_orphan,
-                            )
-
-                        except Exception as e:
-                            logger.error(
-                                "tgw.attachment_scan_failed",
-                                attachment_id=attachment.get(
-                                    "TransitGatewayAttachmentId", "unknown"
-                                ),
-                                region=region,
-                                error=str(e),
-                            )
-                            continue
-
-        except Exception as e:
-            logger.error(
-                "tgw.scan_failed",
-                region=region,
-                error=str(e),
-            )
-
-        return resources
-
-    # ============================================================
-    # RESSOURCE 28 : GLOBAL ACCELERATOR (CDN)
-    # ============================================================
-
-    def _calculate_global_accelerator_monthly_cost(
-        self,
-        region: str = "global",
-    ) -> float:
-        """
-        Calculate estimated monthly cost for AWS Global Accelerator.
-
-        Global Accelerator improves application availability and performance by routing traffic
-        through the AWS global network to optimal endpoints.
-
-        Cost Components:
-        1. Fixed fee ($18/month per accelerator)
-        2. Data transfer cost (not included - $0.025/GB varies by usage)
-
-        Args:
-            region: AWS region (always "global" for Global Accelerator)
-
-        Returns:
-            Estimated monthly cost in USD (fixed fee only)
-
-        Example:
-            Single Global Accelerator:
-            - Fixed fee: $18/month
-            - Data transfer: Variable (not included in base cost)
-        """
-        # Global Accelerator fixed fee ($18/month)
-        ga_cost = self.PRICING.get("global_accelerator", 18.00)
-
-        return round(ga_cost, 2)
-
-    def _calculate_global_accelerator_optimization(
-        self,
-        accelerator_arn: str,
-        accelerator_name: str,
-        endpoint_count: int,
-        total_bytes_in_30d: float,
-        active_flow_count_7d: float,
-        enabled: bool,
-        tags: dict,
-        region: str = "global",
-    ) -> list[OptimizationScenario]:
-        """
-        Calculate optimization scenarios for AWS Global Accelerator.
-
-        Global Accelerator Optimization Scenarios:
-        1. Zero Endpoints Configured (CRITICAL) - No endpoints → Delete accelerator
-        2. Zero Traffic (HIGH) - No traffic for 30+ days → Delete accelerator
-        3. Very Low Traffic (MEDIUM) - <1 GB/month → Use CloudFront instead
-        4. No Active Flows (MEDIUM) - No active connections for 7+ days → Delete
-        5. Disabled Accelerator (LOW) - Accelerator disabled but still charged → Delete
-
-        Args:
-            accelerator_arn: Global Accelerator ARN
-            accelerator_name: Accelerator name
-            endpoint_count: Number of endpoints configured
-            total_bytes_in_30d: Total processed bytes over 30 days
-            active_flow_count_7d: Active flow count over 7 days
-            enabled: Whether accelerator is enabled
-            tags: Resource tags
-            region: AWS region (always "global")
-
-        Returns:
-            List of optimization scenarios with priority, estimated savings, and recommendations
-        """
-        scenarios = []
-
-        # Current cost (fixed fee only, data transfer not included)
-        current_cost = self._calculate_global_accelerator_monthly_cost(region=region)
-
-        # Detect environment from tags
-        env = tags.get("Environment", tags.get("environment", "")).lower()
-        is_production = env in ["production", "prod", "prd"]
-
-        # Calculate data transfer in GB
-        total_gb_transferred = total_bytes_in_30d / (1024**3)
-
-        # =============================================
-        # SCENARIO 1: Zero Endpoints Configured (CRITICAL)
-        # =============================================
-        if endpoint_count == 0:
-            # No endpoints → Delete accelerator
-            potential_savings = current_cost
-            scenarios.append(
-                OptimizationScenario(
-                    scenario_name="ga_zero_endpoints",
-                    priority="CRITICAL",
-                    estimated_monthly_savings=potential_savings,
-                    current_monthly_cost=current_cost,
-                    optimized_monthly_cost=0.0,
-                    confidence_level="high",
-                    description=(
-                        f"Global Accelerator '{accelerator_name}' has zero endpoints configured. "
-                        f"Without endpoints, the accelerator serves no purpose and should be deleted."
-                    ),
-                    recommendation=(
-                        "Delete Global Accelerator with no endpoints:\n"
-                        "1. Verify no endpoints are configured: aws globalaccelerator list-accelerators\n"
-                        f"2. Delete accelerator: aws globalaccelerator delete-accelerator --accelerator-arn {accelerator_arn}\n"
-                        "3. Wait for deletion to complete (can take a few minutes)\n\n"
-                        f"💰 Monthly Savings: ${potential_savings:.2f}"
-                    ),
-                    optimization_score=95,
-                )
-            )
-
-        # =============================================
-        # SCENARIO 2: Zero Traffic (HIGH)
-        # =============================================
-        elif total_bytes_in_30d == 0 and endpoint_count > 0:
-            # No traffic for 30+ days → Delete accelerator
-            potential_savings = current_cost
-            scenarios.append(
-                OptimizationScenario(
-                    scenario_name="ga_zero_traffic",
-                    priority="HIGH",
-                    estimated_monthly_savings=potential_savings,
-                    current_monthly_cost=current_cost,
-                    optimized_monthly_cost=0.0,
-                    confidence_level="high",
-                    description=(
-                        f"Global Accelerator '{accelerator_name}' has {endpoint_count} endpoint(s) "
-                        f"but zero traffic over the last 30 days. The accelerator is not being used."
-                    ),
-                    recommendation=(
-                        "Delete Global Accelerator with zero traffic:\n"
-                        "1. Verify no traffic: Check CloudWatch ProcessedBytesIn metric\n"
-                        f"2. Delete accelerator: aws globalaccelerator delete-accelerator --accelerator-arn {accelerator_arn}\n"
-                        "3. Remove DNS records pointing to accelerator\n\n"
-                        f"💰 Monthly Savings: ${potential_savings:.2f}"
-                    ),
-                    optimization_score=85,
-                )
-            )
-
-        # =============================================
-        # SCENARIO 3: Very Low Traffic (MEDIUM)
-        # =============================================
-        elif 0 < total_gb_transferred < 1:
-            # <1 GB/month → Use CloudFront instead
-            potential_savings = current_cost  # CloudFront has no fixed fee
-            scenarios.append(
-                OptimizationScenario(
-                    scenario_name="ga_low_traffic",
-                    priority="MEDIUM",
-                    estimated_monthly_savings=potential_savings,
-                    current_monthly_cost=current_cost,
-                    optimized_monthly_cost=0.0,
-                    confidence_level="medium",
-                    description=(
-                        f"Global Accelerator '{accelerator_name}' has very low traffic "
-                        f"({total_gb_transferred:.2f} GB over 30 days). For low traffic volumes, "
-                        f"CloudFront is more cost-effective (no fixed fee, $0.085/GB)."
-                    ),
-                    recommendation=(
-                        "Migrate from Global Accelerator to CloudFront for low traffic:\n"
-                        f"1. Current traffic: {total_gb_transferred:.2f} GB/month\n"
-                        f"2. Global Accelerator cost: ${current_cost}/month + ${total_gb_transferred * 0.025:.2f} (data transfer)\n"
-                        f"3. CloudFront cost: ${total_gb_transferred * 0.085:.2f} (no fixed fee)\n"
-                        "4. Migrate to CloudFront distribution\n"
-                        f"5. Delete accelerator: aws globalaccelerator delete-accelerator --accelerator-arn {accelerator_arn}\n\n"
-                        f"💰 Monthly Savings: ${potential_savings:.2f} (fixed fee)"
-                    ),
-                    optimization_score=70,
-                )
-            )
-
-        # =============================================
-        # SCENARIO 4: No Active Flows (MEDIUM)
-        # =============================================
-        if active_flow_count_7d == 0 and endpoint_count > 0:
-            # No active connections for 7+ days → Delete
-            potential_savings = current_cost
-            scenarios.append(
-                OptimizationScenario(
-                    scenario_name="ga_no_active_flows",
-                    priority="MEDIUM",
-                    estimated_monthly_savings=potential_savings,
-                    current_monthly_cost=current_cost,
-                    optimized_monthly_cost=0.0,
-                    confidence_level="high",
-                    description=(
-                        f"Global Accelerator '{accelerator_name}' has no active flows over the last 7 days. "
-                        f"No clients are actively using the accelerator."
-                    ),
-                    recommendation=(
-                        "Delete Global Accelerator with no active connections:\n"
-                        "1. Verify no active flows: Check CloudWatch ActiveFlowCount metric\n"
-                        f"2. Delete accelerator: aws globalaccelerator delete-accelerator --accelerator-arn {accelerator_arn}\n"
-                        "3. Update DNS records if necessary\n\n"
-                        f"💰 Monthly Savings: ${potential_savings:.2f}"
-                    ),
-                    optimization_score=65,
-                )
-            )
-
-        # =============================================
-        # SCENARIO 5: Disabled Accelerator (LOW)
-        # =============================================
-        if not enabled:
-            # Accelerator disabled but still charged → Delete
-            potential_savings = current_cost
-            scenarios.append(
-                OptimizationScenario(
-                    scenario_name="ga_disabled_accelerator",
-                    priority="LOW",
-                    estimated_monthly_savings=potential_savings,
-                    current_monthly_cost=current_cost,
-                    optimized_monthly_cost=0.0,
-                    confidence_level="high",
-                    description=(
-                        f"Global Accelerator '{accelerator_name}' is disabled but still incurs charges "
-                        f"(${current_cost}/month). Disabled accelerators should be deleted, not just disabled."
-                    ),
-                    recommendation=(
-                        "Delete disabled Global Accelerator (still charged):\n"
-                        "1. Accelerator is disabled but still costs money\n"
-                        f"2. Delete accelerator: aws globalaccelerator delete-accelerator --accelerator-arn {accelerator_arn}\n"
-                        "3. Recreate when needed if necessary\n\n"
-                        f"💰 Monthly Savings: ${potential_savings:.2f}"
-                    ),
-                    optimization_score=50,
-                )
-            )
-
-        return scenarios
-
-    async def scan_global_accelerators(
-        self, region: str
-    ) -> list[AllCloudResourceData]:
-        """
-        Scan ALL AWS Global Accelerators for cost intelligence.
-
-        Global Accelerator is a global service that improves application availability
-        and performance by routing traffic through AWS's global network.
-
-        IMPORTANT: Global Accelerator is a global service. This scan should only
-        be run in us-west-2 region to avoid duplicate results.
-
-        CloudWatch Metrics Used:
-        - ProcessedBytesIn (AWS/GlobalAccelerator) - Incoming bytes over 30 days
-        - ActiveFlowCount (AWS/GlobalAccelerator) - Active connections over 7 days
-
-        Cost Optimization Scenarios:
-        1. Zero Endpoints Configured (CRITICAL) - No endpoints → Delete accelerator
-        2. Zero Traffic (HIGH) - No traffic for 30+ days → Delete accelerator
-        3. Very Low Traffic (MEDIUM) - <1 GB/month → Use CloudFront instead
-        4. No Active Flows (MEDIUM) - No active connections for 7+ days → Delete
-        5. Disabled Accelerator (LOW) - Accelerator disabled but still charged → Delete
-
-        Args:
-            region: AWS region to scan (must be us-west-2 for Global Accelerator)
-
-        Returns:
-            List of all Global Accelerators with optimization recommendations
-        """
-        import structlog
-
-        logger = structlog.get_logger()
-        resources = []
-
-        # Global Accelerator is a global service, only check in us-west-2
-        if region != "us-west-2":
-            logger.debug("ga.skip_region", region=region, reason="Global Accelerator is only scanned in us-west-2")
-            return resources
-
-        try:
-            async with self.provider.session.client(
-                "globalaccelerator", region_name="us-west-2"
-            ) as ga:
-                async with self.provider.session.client(
-                    "cloudwatch", region_name="us-west-2"
-                ) as cw:
-                    # List all Global Accelerators
-                    response = await ga.list_accelerators()
-
-                    for accelerator in response.get("Accelerators", []):
-                        try:
-                            accelerator_arn = accelerator["AcceleratorArn"]
-                            accelerator_name = accelerator.get(
-                                "Name", accelerator_arn.split("/")[-1]
-                            )
-                            enabled = accelerator.get("Enabled", False)
-                            status = accelerator.get("Status", "unknown")
-
-                            # Skip deleted accelerators
-                            if status == "IN_PROGRESS":
-                                continue
-
-                            # Count endpoints
-                            endpoint_count = 0
-                            try:
-                                listeners_response = await ga.list_listeners(
-                                    AcceleratorArn=accelerator_arn
-                                )
-                                for listener in listeners_response.get("Listeners", []):
-                                    listener_arn = listener["ListenerArn"]
-                                    endpoint_groups = await ga.list_endpoint_groups(
-                                        ListenerArn=listener_arn
-                                    )
-                                    for eg in endpoint_groups.get("EndpointGroups", []):
-                                        endpoint_count += len(
-                                            eg.get("EndpointDescriptions", [])
-                                        )
-                            except Exception as e:
-                                logger.warning(
-                                    "ga.endpoint_count_failed",
-                                    accelerator_arn=accelerator_arn,
-                                    error=str(e),
-                                )
-
-                            # Extract tags
-                            tags = {}
-                            try:
-                                tags_response = await ga.list_tags_for_resource(
-                                    ResourceArn=accelerator_arn
-                                )
-                                for tag in tags_response.get("Tags", []):
-                                    tags[tag["Key"]] = tag["Value"]
-                            except Exception as e:
-                                logger.warning(
-                                    "ga.tags_failed",
-                                    accelerator_arn=accelerator_arn,
-                                    error=str(e),
-                                )
-
-                            # ====================================
-                            # CLOUDWATCH METRICS
-                            # ====================================
-                            now = datetime.now(timezone.utc)
-
-                            # ProcessedBytesIn metric (30 days)
-                            start_time_30d = now - timedelta(days=30)
-                            try:
-                                bytes_in_response = await cw.get_metric_statistics(
-                                    Namespace="AWS/GlobalAccelerator",
-                                    MetricName="ProcessedBytesIn",
-                                    Dimensions=[
-                                        {"Name": "Accelerator", "Value": accelerator_arn},
-                                    ],
-                                    StartTime=start_time_30d,
-                                    EndTime=now,
-                                    Period=86400,  # 1 day
-                                    Statistics=["Sum"],
-                                )
-                                total_bytes_in_30d = sum(
-                                    dp["Sum"]
-                                    for dp in bytes_in_response.get("Datapoints", [])
-                                )
-                            except Exception as e:
-                                logger.warning(
-                                    "ga.bytes_in_metric_failed",
-                                    accelerator_arn=accelerator_arn,
-                                    error=str(e),
-                                )
-                                total_bytes_in_30d = 0
-
-                            # ActiveFlowCount metric (7 days)
-                            start_time_7d = now - timedelta(days=7)
-                            try:
-                                flow_count_response = await cw.get_metric_statistics(
-                                    Namespace="AWS/GlobalAccelerator",
-                                    MetricName="ActiveFlowCount",
-                                    Dimensions=[
-                                        {"Name": "Accelerator", "Value": accelerator_arn},
-                                    ],
-                                    StartTime=start_time_7d,
-                                    EndTime=now,
-                                    Period=3600,  # 1 hour
-                                    Statistics=["Average"],
-                                )
-                                active_flow_count_7d = sum(
-                                    dp["Average"]
-                                    for dp in flow_count_response.get("Datapoints", [])
-                                )
-                            except Exception as e:
-                                logger.warning(
-                                    "ga.flow_count_metric_failed",
-                                    accelerator_arn=accelerator_arn,
-                                    error=str(e),
-                                )
-                                active_flow_count_7d = 0
-
-                            # ====================================
-                            # COST CALCULATION
-                            # ====================================
-                            monthly_cost = self._calculate_global_accelerator_monthly_cost(
-                                region="global"
-                            )
-
-                            # ====================================
-                            # OPTIMIZATION SCENARIOS
-                            # ====================================
-                            optimization_scenarios = (
-                                self._calculate_global_accelerator_optimization(
-                                    accelerator_arn=accelerator_arn,
-                                    accelerator_name=accelerator_name,
-                                    endpoint_count=endpoint_count,
-                                    total_bytes_in_30d=total_bytes_in_30d,
-                                    active_flow_count_7d=active_flow_count_7d,
-                                    enabled=enabled,
-                                    tags=tags,
-                                    region="global",
-                                )
-                            )
-
-                            # ====================================
-                            # ORPHAN DETECTION
-                            # ====================================
-                            is_orphan = (
-                                endpoint_count == 0
-                                or (total_bytes_in_30d == 0 and endpoint_count > 0)
-                            )
-
-                            # Apply detection rules filtering
-                            created_time = accelerator.get("CreatedTime")
-                            resource_age_days = None
-                            if isinstance(created_time, datetime):
-                                resource_age_days = (datetime.utcnow() - created_time.replace(tzinfo=None)).days
-
-                            if not self._should_include_resource("global_accelerator", resource_age_days):
-                                logger.debug("inventory.global_accelerator_filtered", accelerator_arn=accelerator_arn, age=resource_age_days)
-                                continue
-
-                            # ====================================
-                            # CREATE RESOURCE DATA
-                            # ====================================
-                            resource = AllCloudResourceData(
-                                resource_type="global_accelerator",
-                                resource_id=accelerator_arn,
-                                resource_name=accelerator_name,
-                                region="global",
-                                estimated_monthly_cost=monthly_cost,
-                                currency="USD",
-                                resource_metadata={
-                                    "accelerator_arn": accelerator_arn,
-                                    "accelerator_name": accelerator_name,
-                                    "enabled": enabled,
-                                    "status": status,
-                                    "endpoint_count": endpoint_count,
-                                    "ip_addresses": accelerator.get("IpSets", []),
-                                    "dns_name": accelerator.get("DnsName", ""),
-                                    "total_bytes_in_30d": int(total_bytes_in_30d),
-                                    "total_gb_transferred_30d": round(
-                                        total_bytes_in_30d / (1024**3), 2
-                                    ),
-                                    "active_flow_count_7d": round(active_flow_count_7d, 2),
-                                    "tags": tags,
-                                },
-                                optimization_scenarios=optimization_scenarios,
-                                is_orphan=is_orphan,
-                                created_at_cloud=accelerator.get("CreatedTime"),
-                            )
-
-                            resources.append(resource)
-
-                            logger.debug(
-                                "ga.accelerator_scanned",
-                                accelerator_name=accelerator_name,
-                                enabled=enabled,
-                                endpoint_count=endpoint_count,
-                                monthly_cost=monthly_cost,
-                                total_gb_transferred_30d=round(
-                                    total_bytes_in_30d / (1024**3), 2
-                                ),
-                                scenarios_count=len(optimization_scenarios),
-                                is_orphan=is_orphan,
-                            )
-
-                        except Exception as e:
-                            logger.error(
-                                "ga.accelerator_scan_failed",
-                                accelerator_arn=accelerator.get("AcceleratorArn", "unknown"),
-                                error=str(e),
-                            )
-                            continue
-
-        except Exception as e:
-            logger.error(
-                "ga.scan_failed",
-                region=region,
-                error=str(e),
-            )
-
-        return resources
-
-    # ============================================================
-    # RESSOURCE 29 : DOCUMENTDB CLUSTER (MONGODB-COMPATIBLE DATABASE)
-    # ============================================================
-
-    def _calculate_documentdb_monthly_cost(
-        self,
-        instance_count: int,
-        instance_class: str,
-        region: str,
-    ) -> float:
-        """
-        Calculate estimated monthly cost for AWS DocumentDB Cluster.
-
-        DocumentDB is a fully managed MongoDB-compatible database service
-        with support for multi-instance clusters.
-
-        Cost Components:
-        1. Instance cost (per instance per hour)
-        2. Storage cost (billed separately, not included here)
-        3. I/O cost (billed separately, not included here)
-
-        Args:
-            instance_count: Number of instances in the cluster
-            instance_class: Instance class (e.g., db.r5.large)
-            region: AWS region
-
-        Returns:
-            Estimated monthly cost in USD (instances only)
-
-        Example:
-            Single db.r5.large instance:
-            - Instance: $0.277/hour × 730 hours = ~$199/month
-        """
-        monthly_hours = 730
-
-        # Instance pricing (only db.r5.large for MVP, default for others)
-        instance_hourly_rate = self.PRICING.get("documentdb_r5_large", 0.277)
-
-        # Calculate total cost for all instances
-        total_cost = instance_hourly_rate * monthly_hours * instance_count
-
-        return round(total_cost, 2)
-
-    def _calculate_documentdb_optimization(
-        self,
-        cluster_id: str,
-        instance_count: int,
-        instance_class: str,
-        avg_connections_7d: float,
-        avg_cpu_7d: float,
-        cluster_status: str,
-        tags: dict,
-        region: str,
-    ) -> list[OptimizationScenario]:
-        """
-        Calculate optimization scenarios for AWS DocumentDB Cluster.
-
-        DocumentDB Cluster Optimization Scenarios:
-        1. Zero Connections (CRITICAL) - No connections for 7+ days → Delete cluster
-        2. Very Low Connections + Multi-Instance (HIGH) - <5 connections/day + >1 instance → Reduce instances
-        3. Low CPU + Multi-Instance (MEDIUM) - <20% CPU + >1 instance → Reduce instances
-        4. Stopped Cluster (MEDIUM) - Status = stopped + age > 7 days → Delete or snapshot
-        5. Oversized Instance (LOW) - Dev/test with production instance → Downsize
-
-        Args:
-            cluster_id: DocumentDB cluster identifier
-            instance_count: Number of instances in the cluster
-            instance_class: Instance class (e.g., db.r5.large)
-            avg_connections_7d: Average database connections over 7 days
-            avg_cpu_7d: Average CPU utilization over 7 days
-            cluster_status: Cluster status (available, stopped, etc.)
-            tags: Resource tags
-            region: AWS region
-
-        Returns:
-            List of optimization scenarios with priority, estimated savings, and recommendations
-        """
-        scenarios = []
-
-        # Current cost (per instance)
-        current_cost = self._calculate_documentdb_monthly_cost(
-            instance_count=instance_count,
-            instance_class=instance_class,
-            region=region,
-        )
-
-        # Cost per instance
-        cost_per_instance = current_cost / max(instance_count, 1)
-
-        # Detect environment from tags
-        env = tags.get("Environment", tags.get("environment", "")).lower()
-        is_production = env in ["production", "prod", "prd"]
-
-        # =============================================
-        # SCENARIO 1: Zero Connections (CRITICAL)
-        # =============================================
-        if avg_connections_7d == 0 and cluster_status == "available":
-            # No connections for 7+ days → Delete cluster
-            potential_savings = current_cost
-            scenarios.append(
-                OptimizationScenario(
-                    scenario_name="documentdb_zero_connections",
-                    priority="CRITICAL",
-                    estimated_monthly_savings=potential_savings,
-                    current_monthly_cost=current_cost,
-                    optimized_monthly_cost=0.0,
-                    confidence_level="high",
-                    description=(
-                        f"DocumentDB Cluster '{cluster_id}' has zero database connections "
-                        f"over the last 7 days ({instance_count} instance(s), ${current_cost}/month). "
-                        f"The cluster is completely idle and should be deleted."
-                    ),
-                    recommendation=(
-                        "Delete DocumentDB Cluster with zero connections:\n"
-                        "1. Verify no applications are using this cluster\n"
-                        f"2. Create final snapshot (optional): aws docdb create-db-cluster-snapshot --db-cluster-identifier {cluster_id} --db-cluster-snapshot-identifier final-snapshot-{cluster_id}\n"
-                        f"3. Delete cluster: aws docdb delete-db-cluster --db-cluster-identifier {cluster_id} --skip-final-snapshot --region {region}\n\n"
-                        f"💰 Monthly Savings: ${potential_savings:.2f}"
-                    ),
-                    optimization_score=95,
-                )
-            )
-
-        # =============================================
-        # SCENARIO 2: Very Low Connections + Multi-Instance (HIGH)
-        # =============================================
-        elif avg_connections_7d < 5 and instance_count > 1 and cluster_status == "available":
-            # <5 connections/day + >1 instance → Reduce to 1 instance
-            instances_to_remove = instance_count - 1
-            potential_savings = cost_per_instance * instances_to_remove
-            scenarios.append(
-                OptimizationScenario(
-                    scenario_name="documentdb_low_connections_multi_instance",
-                    priority="HIGH",
-                    estimated_monthly_savings=potential_savings,
-                    current_monthly_cost=current_cost,
-                    optimized_monthly_cost=cost_per_instance,
-                    confidence_level="high",
-                    description=(
-                        f"DocumentDB Cluster '{cluster_id}' has very low connection volume "
-                        f"({avg_connections_7d:.1f} connections over 7 days) but runs {instance_count} instances. "
-                        f"Reduce to 1 instance for dev/test workloads."
-                    ),
-                    recommendation=(
-                        "Reduce DocumentDB Cluster to 1 instance:\n"
-                        f"1. Current: {instance_count} instances, avg {avg_connections_7d:.1f} connections\n"
-                        f"2. Delete {instances_to_remove} instance(s): aws docdb delete-db-instance --db-instance-identifier <instance-id> --region {region}\n"
-                        "3. Keep only primary instance for low workloads\n\n"
-                        f"💰 Monthly Savings: ${potential_savings:.2f} ({instances_to_remove} instance(s))"
-                    ),
-                    optimization_score=85,
-                )
-            )
-
-        # =============================================
-        # SCENARIO 3: Low CPU + Multi-Instance (MEDIUM)
-        # =============================================
-        if avg_cpu_7d < 20 and instance_count > 1 and cluster_status == "available":
-            # <20% CPU + >1 instance → Reduce instances or downsize
-            instances_to_remove = instance_count - 1
-            potential_savings = cost_per_instance * instances_to_remove
-            scenarios.append(
-                OptimizationScenario(
-                    scenario_name="documentdb_low_cpu_multi_instance",
-                    priority="MEDIUM",
-                    estimated_monthly_savings=potential_savings,
-                    current_monthly_cost=current_cost,
-                    optimized_monthly_cost=cost_per_instance,
-                    confidence_level="medium",
-                    description=(
-                        f"DocumentDB Cluster '{cluster_id}' has low CPU utilization "
-                        f"({avg_cpu_7d:.1f}% over 7 days) with {instance_count} instances. "
-                        f"The cluster is over-provisioned and can be scaled down."
-                    ),
-                    recommendation=(
-                        "Reduce DocumentDB Cluster instances or downsize:\n"
-                        f"1. Current: {instance_count} instances, avg {avg_cpu_7d:.1f}% CPU\n"
-                        f"2. Option A: Delete {instances_to_remove} instance(s) (save ${potential_savings:.2f}/month)\n"
-                        f"3. Option B: Downsize instance class (e.g., {instance_class} → db.t3.medium)\n"
-                        "4. Monitor performance after change\n\n"
-                        f"💰 Monthly Savings: ${potential_savings:.2f} (remove instances)"
-                    ),
-                    optimization_score=70,
-                )
-            )
-
-        # =============================================
-        # SCENARIO 4: Stopped Cluster (MEDIUM)
-        # =============================================
-        if cluster_status == "stopped":
-            # Status = stopped → Delete or snapshot
-            potential_savings = current_cost  # Stopped clusters don't incur instance costs, but storage still costs
-            scenarios.append(
-                OptimizationScenario(
-                    scenario_name="documentdb_stopped_cluster",
-                    priority="MEDIUM",
-                    estimated_monthly_savings=potential_savings,
-                    current_monthly_cost=current_cost,
-                    optimized_monthly_cost=0.0,
-                    confidence_level="high",
-                    description=(
-                        f"DocumentDB Cluster '{cluster_id}' is stopped ({instance_count} instance(s)). "
-                        f"Stopped clusters still incur storage costs. Consider creating a snapshot and deleting."
-                    ),
-                    recommendation=(
-                        "Delete stopped DocumentDB Cluster (storage still charged):\n"
-                        "1. Cluster is stopped but storage is still billed\n"
-                        f"2. Create final snapshot: aws docdb create-db-cluster-snapshot --db-cluster-identifier {cluster_id} --db-cluster-snapshot-identifier final-snapshot-{cluster_id}\n"
-                        f"3. Delete cluster: aws docdb delete-db-cluster --db-cluster-identifier {cluster_id} --skip-final-snapshot --region {region}\n"
-                        "4. Restore from snapshot when needed\n\n"
-                        f"💰 Monthly Savings: ${potential_savings:.2f} (instance cost) + storage cost"
-                    ),
-                    optimization_score=65,
-                )
-            )
-
-        # =============================================
-        # SCENARIO 5: Oversized Instance (LOW)
-        # =============================================
-        if not is_production and env in ["dev", "test", "staging", "development"]:
-            # Dev/test with production instance → Downsize
-            # Estimate 50% savings by downsizing to db.t3.medium
-            potential_savings = current_cost * 0.5
-            scenarios.append(
-                OptimizationScenario(
-                    scenario_name="documentdb_oversized_instance_dev",
-                    priority="LOW",
-                    estimated_monthly_savings=potential_savings,
-                    current_monthly_cost=current_cost,
-                    optimized_monthly_cost=current_cost * 0.5,
-                    confidence_level="medium",
-                    description=(
-                        f"DocumentDB Cluster '{cluster_id}' is tagged as '{env}' environment "
-                        f"but uses production-grade instance class '{instance_class}'. "
-                        f"Dev/test environments should use smaller instance types."
-                    ),
-                    recommendation=(
-                        "Downsize DocumentDB Cluster for dev/test:\n"
-                        f"1. Environment: {env}\n"
-                        f"2. Current: {instance_class} ({instance_count} instance(s))\n"
-                        "3. Recommended: db.t3.medium or db.t4g.medium for dev/test\n"
-                        f"4. Modify instance class: aws docdb modify-db-instance --db-instance-identifier <instance-id> --db-instance-class db.t3.medium --apply-immediately --region {region}\n\n"
-                        f"💰 Monthly Savings: ~${potential_savings:.2f} (50% reduction)"
-                    ),
-                    optimization_score=50,
-                )
-            )
-
-        return scenarios
-
-    async def scan_documentdb_clusters(
-        self, region: str
-    ) -> list[AllCloudResourceData]:
-        """
-        Scan ALL AWS DocumentDB Clusters for cost intelligence.
-
-        DocumentDB is a fully managed MongoDB-compatible database service
-        designed for JSON data storage and querying.
-
-        CloudWatch Metrics Used:
-        - DatabaseConnections (AWS/DocDB) - Average connections over 7 days
-        - CPUUtilization (AWS/DocDB) - Average CPU % over 7 days
-        - FreeableMemory (AWS/DocDB) - Available memory
-
-        Cost Optimization Scenarios:
-        1. Zero Connections (CRITICAL) - No connections for 7+ days → Delete cluster
-        2. Very Low Connections + Multi-Instance (HIGH) - <5 connections/day + >1 instance → Reduce instances
-        3. Low CPU + Multi-Instance (MEDIUM) - <20% CPU + >1 instance → Reduce instances
-        4. Stopped Cluster (MEDIUM) - Status = stopped + age > 7 days → Delete or snapshot
-        5. Oversized Instance (LOW) - Dev/test with production instance → Downsize
-
-        Args:
-            region: AWS region to scan
-
-        Returns:
-            List of all DocumentDB Clusters with optimization recommendations
-        """
-        import structlog
-
-        logger = structlog.get_logger()
-        resources = []
-
-        try:
-            async with self.provider.session.client("docdb", region_name=region) as docdb:
-                async with self.provider.session.client(
-                    "cloudwatch", region_name=region
-                ) as cw:
-                    # Describe all DocumentDB clusters
-                    response = await docdb.describe_db_clusters()
-
-                    for cluster in response.get("DBClusters", []):
-                        try:
-                            cluster_id = cluster["DBClusterIdentifier"]
-                            cluster_status = cluster.get("Status", "unknown")
-                            engine = cluster.get("Engine", "docdb")
-                            engine_version = cluster.get("EngineVersion", "unknown")
-
-                            # Get cluster members (instances)
-                            cluster_members = cluster.get("DBClusterMembers", [])
-                            instance_count = len(cluster_members)
-
-                            # Get instance class (from first instance)
-                            instance_class = "db.r5.large"  # Default
-                            if instance_count > 0:
-                                try:
-                                    first_instance_id = cluster_members[0].get(
-                                        "DBInstanceIdentifier"
-                                    )
-                                    if first_instance_id:
-                                        instances_response = (
-                                            await docdb.describe_db_instances(
-                                                DBInstanceIdentifier=first_instance_id
-                                            )
-                                        )
-                                        if instances_response.get("DBInstances"):
-                                            instance_class = instances_response[
-                                                "DBInstances"
-                                            ][0].get("DBInstanceClass", "db.r5.large")
-                                except Exception as e:
-                                    logger.warning(
-                                        "documentdb.instance_class_failed",
-                                        cluster_id=cluster_id,
-                                        error=str(e),
-                                    )
-
-                            # Extract tags
-                            tags = {}
-                            for tag in cluster.get("TagList", []):
-                                tags[tag["Key"]] = tag["Value"]
-
-                            # ====================================
-                            # CLOUDWATCH METRICS (7-day lookback)
-                            # ====================================
-                            now = datetime.now(timezone.utc)
-                            start_time = now - timedelta(days=7)
-
-                            # DatabaseConnections metric (7 days)
-                            try:
-                                connections_response = await cw.get_metric_statistics(
-                                    Namespace="AWS/DocDB",
-                                    MetricName="DatabaseConnections",
-                                    Dimensions=[
-                                        {"Name": "DBClusterIdentifier", "Value": cluster_id},
-                                    ],
-                                    StartTime=start_time,
-                                    EndTime=now,
-                                    Period=3600,  # 1 hour
-                                    Statistics=["Average"],
-                                )
-                                datapoints = connections_response.get("Datapoints", [])
-                                avg_connections_7d = (
-                                    sum(dp["Average"] for dp in datapoints) / len(datapoints)
-                                    if datapoints
-                                    else 0
-                                )
-                            except Exception as e:
-                                logger.warning(
-                                    "documentdb.connections_metric_failed",
-                                    cluster_id=cluster_id,
-                                    error=str(e),
-                                )
-                                avg_connections_7d = 0
-
-                            # CPUUtilization metric (7 days)
-                            try:
-                                cpu_response = await cw.get_metric_statistics(
-                                    Namespace="AWS/DocDB",
-                                    MetricName="CPUUtilization",
-                                    Dimensions=[
-                                        {"Name": "DBClusterIdentifier", "Value": cluster_id},
-                                    ],
-                                    StartTime=start_time,
-                                    EndTime=now,
-                                    Period=3600,  # 1 hour
-                                    Statistics=["Average"],
-                                )
-                                datapoints = cpu_response.get("Datapoints", [])
-                                avg_cpu_7d = (
-                                    sum(dp["Average"] for dp in datapoints) / len(datapoints)
-                                    if datapoints
-                                    else 0
-                                )
-                            except Exception as e:
-                                logger.warning(
-                                    "documentdb.cpu_metric_failed",
-                                    cluster_id=cluster_id,
-                                    error=str(e),
-                                )
-                                avg_cpu_7d = 0
-
-                            # ====================================
-                            # COST CALCULATION
-                            # ====================================
-                            monthly_cost = self._calculate_documentdb_monthly_cost(
-                                instance_count=max(instance_count, 1),
-                                instance_class=instance_class,
-                                region=region,
-                            )
-
-                            # ====================================
-                            # OPTIMIZATION SCENARIOS
-                            # ====================================
-                            optimization_scenarios = self._calculate_documentdb_optimization(
-                                cluster_id=cluster_id,
-                                instance_count=instance_count,
-                                instance_class=instance_class,
-                                avg_connections_7d=avg_connections_7d,
-                                avg_cpu_7d=avg_cpu_7d,
-                                cluster_status=cluster_status,
-                                tags=tags,
-                                region=region,
-                            )
-
-                            # ====================================
-                            # ORPHAN DETECTION
-                            # ====================================
-                            is_orphan = avg_connections_7d < 0.1 and cluster_status == "available"
-
-                            # Apply detection rules filtering
-                            cluster_create_time = cluster.get("ClusterCreateTime")
-                            resource_age_days = None
-                            if isinstance(cluster_create_time, datetime):
-                                resource_age_days = (datetime.utcnow() - cluster_create_time.replace(tzinfo=None)).days
-
-                            if not self._should_include_resource("documentdb_cluster", resource_age_days):
-                                logger.debug("inventory.documentdb_filtered", cluster_id=cluster_id, age=resource_age_days)
-                                continue
-
-                            # ====================================
-                            # CREATE RESOURCE DATA
-                            # ====================================
-                            resource = AllCloudResourceData(
-                                resource_type="documentdb_cluster",
-                                resource_id=cluster_id,
-                                resource_name=cluster_id,
-                                region=region,
-                                estimated_monthly_cost=monthly_cost,
-                                currency="USD",
-                                resource_metadata={
-                                    "cluster_id": cluster_id,
-                                    "cluster_status": cluster_status,
-                                    "engine": engine,
-                                    "engine_version": engine_version,
-                                    "instance_count": instance_count,
-                                    "instance_class": instance_class,
-                                    "cluster_endpoint": cluster.get("Endpoint", ""),
-                                    "reader_endpoint": cluster.get("ReaderEndpoint", ""),
-                                    "port": cluster.get("Port", 27017),
-                                    "multi_az": cluster.get("MultiAZ", False),
-                                    "storage_encrypted": cluster.get("StorageEncrypted", False),
-                                    "avg_connections_7d": round(avg_connections_7d, 2),
-                                    "avg_cpu_7d": round(avg_cpu_7d, 2),
-                                    "tags": tags,
-                                },
-                                optimization_scenarios=optimization_scenarios,
-                                is_orphan=is_orphan,
-                                created_at_cloud=cluster.get("ClusterCreateTime"),
-                            )
-
-                            resources.append(resource)
-
-                            logger.debug(
-                                "documentdb.cluster_scanned",
-                                cluster_id=cluster_id,
-                                cluster_status=cluster_status,
-                                instance_count=instance_count,
-                                monthly_cost=monthly_cost,
-                                avg_connections_7d=round(avg_connections_7d, 2),
-                                avg_cpu_7d=round(avg_cpu_7d, 2),
-                                scenarios_count=len(optimization_scenarios),
-                                is_orphan=is_orphan,
-                            )
-
-                        except Exception as e:
-                            logger.error(
-                                "documentdb.cluster_scan_failed",
-                                cluster_id=cluster.get("DBClusterIdentifier", "unknown"),
-                                region=region,
-                                error=str(e),
-                            )
-                            continue
-
-        except Exception as e:
-            logger.error(
-                "documentdb.scan_failed",
-                region=region,
-                error=str(e),
-            )
-
-        return resources
 
     # ============================================================
     # RESSOURCE 30 : ECR REPOSITORY (ELASTIC CONTAINER REGISTRY)
@@ -30186,7 +30730,7 @@ class AzureInventoryScanner:
             - Storage: 10 GB × $0.10/GB = $1.00/month
         """
         # Storage cost ($0.10 per GB/month)
-        storage_cost_per_gb = self.PRICING.get("ecr_storage_per_gb", 0.10)
+        storage_cost_per_gb = self.provider.PRICING.get("ecr_storage_per_gb", 0.10)
         storage_cost = storage_gb * storage_cost_per_gb
 
         return round(storage_cost, 2)
@@ -30605,7 +31149,7 @@ class AzureInventoryScanner:
                             # Apply detection rules filtering
                             resource_age_days = None
                             if isinstance(created_at, datetime):
-                                resource_age_days = (datetime.utcnow() - created_at.replace(tzinfo=None)).days
+                                resource_age_days = self._safe_datetime_age(created_at)
 
                             if not self._should_include_resource("ecr_repository", resource_age_days):
                                 logger.debug("inventory.ecr_filtered", repository_name=repository_name, age=resource_age_days)
@@ -30712,9 +31256,9 @@ class AzureInventoryScanner:
         billable_publishes = max(0, publishes_30d - free_tier)
 
         if topic_type == "fifo":
-            rate_per_million = self.PRICING.get("sns_fifo_per_million", 0.60)
+            rate_per_million = self.provider.PRICING.get("sns_fifo_per_million", 0.60)
         else:  # standard
-            rate_per_million = self.PRICING.get("sns_standard_per_million", 0.50)
+            rate_per_million = self.provider.PRICING.get("sns_standard_per_million", 0.50)
 
         cost = (billable_publishes / 1_000_000) * rate_per_million
 
@@ -31130,9 +31674,9 @@ class AzureInventoryScanner:
         billable_requests = max(0, requests_30d - free_tier)
 
         if queue_type == "fifo":
-            rate_per_million = self.PRICING.get("sqs_fifo_per_million", 0.50)
+            rate_per_million = self.provider.PRICING.get("sqs_fifo_per_million", 0.50)
         else:  # standard
-            rate_per_million = self.PRICING.get("sqs_standard_per_million", 0.40)
+            rate_per_million = self.provider.PRICING.get("sqs_standard_per_million", 0.40)
 
         cost = (billable_requests / 1_000_000) * rate_per_million
 
@@ -31547,7 +32091,7 @@ class AzureInventoryScanner:
             - Total: $0.90/month
         """
         # Secrets Manager charges per secret stored
-        secret_cost = self.PRICING.get("secrets_manager_per_secret", 0.40)
+        secret_cost = self.provider.PRICING.get("secrets_manager_per_secret", 0.40)
 
         return round(secret_cost, 2)
 
@@ -31808,7 +32352,7 @@ class AzureInventoryScanner:
                             # Apply detection rules filtering
                             resource_age_days = None
                             if isinstance(created_date, datetime):
-                                resource_age_days = (datetime.utcnow() - created_date.replace(tzinfo=None)).days
+                                resource_age_days = self._safe_datetime_age(created_date)
 
                             if not self._should_include_resource("secrets_manager_secret", resource_age_days):
                                 logger.debug("inventory.secrets_manager_filtered", secret_name=secret_name, age=resource_age_days)
@@ -31898,9 +32442,9 @@ class AzureInventoryScanner:
             - Cost: 100 × $0.01 = $1.00/month
         """
         if storage_tier == "cold":
-            rate_per_gb = self.PRICING.get("backup_cold_storage_per_gb", 0.01)
+            rate_per_gb = self.provider.PRICING.get("backup_cold_storage_per_gb", 0.01)
         else:  # warm (default)
-            rate_per_gb = self.PRICING.get("backup_warm_storage_per_gb", 0.05)
+            rate_per_gb = self.provider.PRICING.get("backup_warm_storage_per_gb", 0.05)
 
         cost = storage_gb * rate_per_gb
 
@@ -32273,7 +32817,7 @@ class AzureInventoryScanner:
                             vault_creation_date = vault.get("CreationDate")
                             resource_age_days = None
                             if isinstance(vault_creation_date, datetime):
-                                resource_age_days = (datetime.utcnow() - vault_creation_date.replace(tzinfo=None)).days
+                                resource_age_days = self._safe_datetime_age(vault_creation_date)
 
                             if not self._should_include_resource("backup_vault", resource_age_days):
                                 logger.debug("inventory.backup_vault_filtered", vault_name=vault_name, age=resource_age_days)
@@ -32366,10 +32910,10 @@ class AzureInventoryScanner:
             - Provisioned: (1 × $0.0064 + 2 × $0.0007) × 730 = $5.69/month
             - Total: $62.63/month
         """
-        vcpu_active_rate = self.PRICING.get("app_runner_vcpu_active", 0.064)
-        vcpu_provisioned_rate = self.PRICING.get("app_runner_vcpu_provisioned", 0.0064)
-        memory_active_rate = self.PRICING.get("app_runner_memory_active", 0.007)
-        memory_provisioned_rate = self.PRICING.get("app_runner_memory_provisioned", 0.0007)
+        vcpu_active_rate = self.provider.PRICING.get("app_runner_vcpu_active", 0.064)
+        vcpu_provisioned_rate = self.provider.PRICING.get("app_runner_vcpu_provisioned", 0.0064)
+        memory_active_rate = self.provider.PRICING.get("app_runner_memory_active", 0.007)
+        memory_provisioned_rate = self.provider.PRICING.get("app_runner_memory_provisioned", 0.0007)
 
         # Calculate active cost
         active_cost = (vcpu * vcpu_active_rate + memory_gb * memory_active_rate) * active_hours
@@ -32813,7 +33357,7 @@ class AzureInventoryScanner:
                             # Apply detection rules filtering
                             resource_age_days = None
                             if isinstance(creation_time, datetime):
-                                resource_age_days = (datetime.utcnow() - creation_time.replace(tzinfo=None)).days
+                                resource_age_days = self._safe_datetime_age(creation_time)
 
                             if not self._should_include_resource("app_runner_service", resource_age_days):
                                 logger.debug("inventory.app_runner_filtered", service_name=service_name, age=resource_age_days)
@@ -32899,11 +33443,11 @@ class AzureInventoryScanner:
 
         # Map bundle to pricing
         pricing_map = {
-            "nano": self.PRICING.get("lightsail_nano", 3.50),
-            "micro": self.PRICING.get("lightsail_micro", 5.00),
-            "small": self.PRICING.get("lightsail_small", 10.00),
-            "medium": self.PRICING.get("lightsail_medium", 20.00),
-            "large": self.PRICING.get("lightsail_large", 40.00),
+            "nano": self.provider.PRICING.get("lightsail_nano", 3.50),
+            "micro": self.provider.PRICING.get("lightsail_micro", 5.00),
+            "small": self.provider.PRICING.get("lightsail_small", 10.00),
+            "medium": self.provider.PRICING.get("lightsail_medium", 20.00),
+            "large": self.provider.PRICING.get("lightsail_large", 40.00),
             "xlarge": 80.00,  # Not in PRICING yet
             "2xlarge": 160.00,  # Not in PRICING yet
         }
@@ -33228,7 +33772,7 @@ class AzureInventoryScanner:
                             resource_metadata={
                                 "bundle_id": bundle_id,
                                 "instance_state": instance_state,
-                                "created_at": created_at.isoformat() if created_at else None,
+                                "created_at": created_at.isoformat() if (created_at and isinstance(created_at, datetime)) else None,
                                 "cpu_utilization_avg": round(cpu_utilization_avg, 2),
                                 "network_in_30d_gb": round(network_in_30d / (1024**3), 2),
                                 "network_out_30d_gb": round(network_out_30d / (1024**3), 2),
@@ -33294,10 +33838,10 @@ class AzureInventoryScanner:
         """
         # Map compute type to Always-On pricing
         pricing_map = {
-            "VALUE": self.PRICING.get("workspaces_value", 25.00),
-            "STANDARD": self.PRICING.get("workspaces_standard", 35.00),
-            "PERFORMANCE": self.PRICING.get("workspaces_performance", 60.00),
-            "POWER": self.PRICING.get("workspaces_power", 80.00),
+            "VALUE": self.provider.PRICING.get("workspaces_value", 25.00),
+            "STANDARD": self.provider.PRICING.get("workspaces_standard", 35.00),
+            "PERFORMANCE": self.provider.PRICING.get("workspaces_performance", 60.00),
+            "POWER": self.provider.PRICING.get("workspaces_power", 80.00),
             "POWERPRO": 120.00,  # Not in PRICING yet
             "GRAPHICS": 145.00,  # Not in PRICING yet
         }
@@ -33711,11 +34255,11 @@ class AzureInventoryScanner:
         """
         # EMR surcharge rates (approximate, varies by region)
         if instance_type.startswith(("t3.", "t2.", "m5.large")):
-            emr_surcharge = self.PRICING.get("emr_surcharge_small", 0.03)
+            emr_surcharge = self.provider.PRICING.get("emr_surcharge_small", 0.03)
         elif instance_type.startswith(("m5.xlarge", "c5.xlarge", "m5.2xlarge")):
-            emr_surcharge = self.PRICING.get("emr_surcharge_medium", 0.096)
+            emr_surcharge = self.provider.PRICING.get("emr_surcharge_medium", 0.096)
         else:  # Large instances (r5.4xlarge+, etc.)
-            emr_surcharge = self.PRICING.get("emr_surcharge_large", 0.27)
+            emr_surcharge = self.provider.PRICING.get("emr_surcharge_large", 0.27)
 
         # Simplified EC2 cost estimation (actual cost varies by instance type)
         # This is a rough estimate - real implementation would query AWS Pricing API
@@ -34078,7 +34622,7 @@ class AzureInventoryScanner:
                             # Apply detection rules filtering
                             resource_age_days = None
                             if isinstance(creation_time, datetime):
-                                resource_age_days = (datetime.utcnow() - creation_time.replace(tzinfo=None)).days
+                                resource_age_days = self._safe_datetime_age(creation_time)
 
                             if not self._should_include_resource("emr_cluster", resource_age_days):
                                 logger.debug("inventory.emr_filtered", cluster_id=cluster_id, age=resource_age_days)
@@ -34157,11 +34701,11 @@ class AzureInventoryScanner:
         """
         # SageMaker notebook instance pricing (approximate, varies by region)
         hourly_rate_map = {
-            "ml.t3.medium": self.PRICING.get("sagemaker_ml_t3_medium", 0.0582),
+            "ml.t3.medium": self.provider.PRICING.get("sagemaker_ml_t3_medium", 0.0582),
             "ml.t3.large": 0.1164,
             "ml.t3.xlarge": 0.2328,
-            "ml.m5.large": self.PRICING.get("sagemaker_ml_m5_large", 0.134),
-            "ml.m5.xlarge": self.PRICING.get("sagemaker_ml_m5_xlarge", 0.269),
+            "ml.m5.large": self.provider.PRICING.get("sagemaker_ml_m5_large", 0.134),
+            "ml.m5.xlarge": self.provider.PRICING.get("sagemaker_ml_m5_xlarge", 0.269),
             "ml.m5.2xlarge": 0.538,
             "ml.m5.4xlarge": 1.075,
             "ml.p3.2xlarge": 3.825,  # GPU instance
@@ -34491,7 +35035,7 @@ class AzureInventoryScanner:
                             # Apply detection rules filtering
                             resource_age_days = None
                             if isinstance(creation_time, datetime):
-                                resource_age_days = (datetime.utcnow() - creation_time.replace(tzinfo=None)).days
+                                resource_age_days = self._safe_datetime_age(creation_time)
 
                             if not self._should_include_resource("sagemaker_notebook", resource_age_days):
                                 logger.debug("inventory.sagemaker_notebook_filtered", notebook_name=notebook_name, age=resource_age_days)
@@ -34569,8 +35113,8 @@ class AzureInventoryScanner:
             Estimated monthly cost in USD
         """
         # Transfer Family endpoint pricing
-        endpoint_per_hour = self.PRICING.get("transfer_family_endpoint_per_hour", 0.30)
-        data_transfer_per_gb = self.PRICING.get("transfer_family_data_transfer_per_gb", 0.04)
+        endpoint_per_hour = self.provider.PRICING.get("transfer_family_endpoint_per_hour", 0.30)
+        data_transfer_per_gb = self.provider.PRICING.get("transfer_family_data_transfer_per_gb", 0.04)
 
         endpoint_cost = endpoint_per_hour * running_hours
         data_transfer_cost = data_transfer_per_gb * data_transfer_gb
@@ -34620,7 +35164,7 @@ class AzureInventoryScanner:
         monthly_cost = self._calculate_transfer_family_monthly_cost(
             running_hours, data_transfer_gb, region
         )
-        endpoint_cost = self.PRICING.get("transfer_family_endpoint_per_hour", 0.30) * running_hours
+        endpoint_cost = self.provider.PRICING.get("transfer_family_endpoint_per_hour", 0.30) * running_hours
 
         # Scenario 1: Endpoint Zero Transfers (CRITICAL - 95)
         if files_transferred_30d == 0 and age_days >= 30:
@@ -34895,7 +35439,7 @@ class AzureInventoryScanner:
                             # Apply detection rules filtering
                             resource_age_days = None
                             if isinstance(creation_time, datetime):
-                                resource_age_days = (datetime.utcnow() - creation_time.replace(tzinfo=None)).days
+                                resource_age_days = self._safe_datetime_age(creation_time)
 
                             if not self._should_include_resource("transfer_family_server", resource_age_days):
                                 logger.debug("inventory.transfer_family_filtered", server_id=server_id, age=resource_age_days)
@@ -34977,10 +35521,10 @@ class AzureInventoryScanner:
         """
         # EC2 instance cost (simplified - actual cost varies)
         ec2_hourly_rate = {
-            "t3.micro": self.PRICING.get("elastic_beanstalk_ec2_t3_micro", 0.0104),
+            "t3.micro": self.provider.PRICING.get("elastic_beanstalk_ec2_t3_micro", 0.0104),
             "t3.small": 0.0208,
             "t3.medium": 0.0416,
-            "m5.large": self.PRICING.get("elastic_beanstalk_ec2_m5_large", 0.096),
+            "m5.large": self.provider.PRICING.get("elastic_beanstalk_ec2_m5_large", 0.096),
             "m5.xlarge": 0.192,
         }.get(instance_type, 0.0104)  # Default to t3.micro
 
@@ -34989,7 +35533,7 @@ class AzureInventoryScanner:
         # Load balancer cost (if present)
         elb_cost = 0.0
         if has_load_balancer:
-            elb_hourly_rate = self.PRICING.get("elastic_beanstalk_elb", 0.0225)
+            elb_hourly_rate = self.provider.PRICING.get("elastic_beanstalk_elb", 0.0225)
             elb_cost = elb_hourly_rate * running_hours
 
         total_cost = ec2_cost + elb_cost
@@ -35343,7 +35887,7 @@ class AzureInventoryScanner:
                         # Apply detection rules filtering
                         resource_age_days = None
                         if isinstance(creation_time, datetime):
-                            resource_age_days = (datetime.utcnow() - creation_time.replace(tzinfo=None)).days
+                            resource_age_days = self._safe_datetime_age(creation_time)
 
                         if not self._should_include_resource("elastic_beanstalk_environment", resource_age_days):
                             logger.debug("inventory.elastic_beanstalk_filtered", environment_name=environment_name, age=resource_age_days)
@@ -35424,14 +35968,14 @@ class AzureInventoryScanner:
         """
         # Port hour pricing based on bandwidth
         if "10" in bandwidth or "10Gbps" in bandwidth:
-            port_hourly_rate = self.PRICING.get("direct_connect_10gbps_port_hour", 2.25)
+            port_hourly_rate = self.provider.PRICING.get("direct_connect_10gbps_port_hour", 2.25)
         elif "100" in bandwidth or "100Gbps" in bandwidth:
             port_hourly_rate = 25.0  # ~$18,000/month for 100Gbps
         else:  # 1Gbps or lower
-            port_hourly_rate = self.PRICING.get("direct_connect_1gbps_port_hour", 0.30)
+            port_hourly_rate = self.provider.PRICING.get("direct_connect_1gbps_port_hour", 0.30)
 
         # Data transfer OUT pricing (IN is free)
-        data_transfer_rate = self.PRICING.get("direct_connect_data_transfer_out_per_gb", 0.02)
+        data_transfer_rate = self.provider.PRICING.get("direct_connect_data_transfer_out_per_gb", 0.02)
 
         port_cost = port_hourly_rate * running_hours
         data_transfer_cost = data_transfer_rate * data_transfer_out_gb
@@ -35761,7 +36305,7 @@ class AzureInventoryScanner:
                         # Apply detection rules filtering
                         resource_age_days = None
                         if isinstance(creation_time, datetime):
-                            resource_age_days = (datetime.utcnow() - creation_time.replace(tzinfo=None)).days
+                            resource_age_days = self._safe_datetime_age(creation_time)
 
                         if not self._should_include_resource("direct_connect_connection", resource_age_days):
                             logger.debug("inventory.direct_connect_filtered", connection_id=connection_id, age=resource_age_days)
@@ -35839,17 +36383,17 @@ class AzureInventoryScanner:
         """
         # Broker instance pricing
         instance_hourly_rate = {
-            "mq.t3.micro": self.PRICING.get("mq_broker_t3_micro", 0.0375),
+            "mq.t3.micro": self.provider.PRICING.get("mq_broker_t3_micro", 0.0375),
             "mq.t3.small": 0.075,
             "mq.t3.medium": 0.150,
-            "mq.m5.large": self.PRICING.get("mq_broker_m5_large", 0.598),
+            "mq.m5.large": self.provider.PRICING.get("mq_broker_m5_large", 0.598),
             "mq.m5.xlarge": 1.195,
             "mq.m5.2xlarge": 2.390,
             "mq.m5.4xlarge": 4.780,
         }.get(instance_type, 0.0375)  # Default to t3.micro
 
         # Storage pricing
-        storage_monthly_rate = self.PRICING.get("mq_storage_per_gb", 0.10)
+        storage_monthly_rate = self.provider.PRICING.get("mq_storage_per_gb", 0.10)
 
         instance_cost = instance_hourly_rate * running_hours
         storage_cost = storage_monthly_rate * storage_gb
@@ -36228,7 +36772,7 @@ class AzureInventoryScanner:
                         # Apply detection rules filtering
                         resource_age_days = None
                         if isinstance(creation_time, datetime):
-                            resource_age_days = (datetime.utcnow() - creation_time.replace(tzinfo=None)).days
+                            resource_age_days = self._safe_datetime_age(creation_time)
 
                         if not self._should_include_resource("mq_broker", resource_age_days):
                             logger.debug("inventory.mq_broker_filtered", broker_id=broker_id, age=resource_age_days)

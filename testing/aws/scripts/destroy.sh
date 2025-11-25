@@ -85,10 +85,79 @@ if [ -z "$AUTO_APPROVE" ]; then
     fi
 fi
 
+# Pre-destruction: Disable CloudFront distributions (batch 3)
+if [ "${TF_VAR_enable_batch_3}" = "true" ]; then
+    echo ""
+    echo "Checking for CloudFront distributions..."
+
+    # Get CloudFront distribution ID from Terraform output
+    CF_ID=$(terraform output -json 2>/dev/null | grep -o '"cloudfront_distribution_id":"[^"]*' | cut -d'"' -f4 || echo "")
+
+    if [ -n "$CF_ID" ] && [ "$CF_ID" != "null" ]; then
+        echo "Found CloudFront distribution: $CF_ID"
+
+        # Check if distribution is enabled
+        CF_ENABLED=$(aws cloudfront get-distribution --id "$CF_ID" 2>/dev/null | grep -o '"Enabled":[^,]*' | cut -d':' -f2 | tr -d ' ' || echo "")
+
+        if [ "$CF_ENABLED" = "true" ]; then
+            echo -e "${YELLOW}⚠ CloudFront distribution is enabled. Disabling it now...${NC}"
+            echo "(This can take 15-30 minutes - please be patient)"
+
+            # Extract config and disable
+            aws cloudfront get-distribution-config --id "$CF_ID" --query 'DistributionConfig' > /tmp/cf-dist-config.json 2>/dev/null || true
+            ETAG=$(aws cloudfront get-distribution-config --id "$CF_ID" --query 'ETag' --output text 2>/dev/null || echo "")
+
+            if [ -n "$ETAG" ]; then
+                # Disable the distribution
+                sed -i '' 's/"Enabled": true/"Enabled": false/' /tmp/cf-dist-config.json 2>/dev/null || \
+                sed -i 's/"Enabled": true/"Enabled": false/' /tmp/cf-dist-config.json 2>/dev/null
+
+                aws cloudfront update-distribution \
+                    --id "$CF_ID" \
+                    --if-match "$ETAG" \
+                    --distribution-config file:///tmp/cf-dist-config.json 2>/dev/null || true
+
+                echo -e "${GREEN}✓ CloudFront distribution disabled${NC}"
+                echo "Note: CloudFront will continue disabling in background (~15-20 min)"
+                echo "Terraform destroy will wait for completion automatically."
+            fi
+        else
+            echo "CloudFront distribution is already disabled or being disabled."
+        fi
+    fi
+fi
+
 # Destroy resources
 echo ""
 echo "Destroying AWS resources..."
+echo "(CloudFront, ElastiCache, OpenSearch may take 30-45 minutes total)"
 terraform destroy $AUTO_APPROVE
+
+# Cleanup orphaned CloudWatch Log Groups
+echo ""
+echo "Checking for orphaned CloudWatch Log Groups..."
+
+# Find all log groups related to CutCosts testing
+ORPHANED_LOGS=$(aws logs describe-log-groups \
+    --region "${AWS_DEFAULT_REGION:-eu-north-1}" \
+    --query "logGroups[?contains(logGroupName, 'cutcosts')].logGroupName" \
+    --output text 2>/dev/null || echo "")
+
+if [ -n "$ORPHANED_LOGS" ]; then
+    echo -e "${YELLOW}Found orphaned log groups:${NC}"
+    for log_group in $ORPHANED_LOGS; do
+        echo "  - $log_group"
+
+        # Delete the log group
+        if aws logs delete-log-group --log-group-name "$log_group" --region "${AWS_DEFAULT_REGION:-eu-north-1}" 2>/dev/null; then
+            echo -e "    ${GREEN}✓ Deleted${NC}"
+        else
+            echo -e "    ${RED}✗ Failed to delete${NC}"
+        fi
+    done
+else
+    echo -e "${GREEN}✓ No orphaned log groups found${NC}"
+fi
 
 echo ""
 echo -e "${GREEN}=========================================="

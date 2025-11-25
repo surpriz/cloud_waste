@@ -53,6 +53,36 @@ terraform -chdir=terraform show | grep -A 5 "monthly_cost"
 ./scripts/destroy.sh
 ```
 
+## 🎉 Implementation Status (November 25, 2025)
+
+### ✅ AWS Cost Optimization Hub - COMPLETE
+
+L'implémentation de **AWS Cost Optimization Hub** est **terminée et validée** avec succès le **25 novembre 2025**.
+
+**Résultats de test Batch 4** :
+- ✅ **10 types de ressources** détectés avec précision à 100%
+- ✅ **Coût total détecté** : $1,295.43/mois
+- ✅ **Dual scanner system** : `AWSProvider` (Waste) + `AWSInventoryScanner` (Optimization)
+- ✅ **Zéro duplicate** après correction des bugs
+
+**Ressources testées avec succès** :
+1. **Redshift Cluster** - $792.78/mois (CRITICAL - 0 connections)
+2. **DocumentDB Cluster** - $202.21/mois (CRITICAL - 0 connections)
+3. **MSK Cluster** - $104.20/mois (CRITICAL - 0 throughput)
+4. **Neptune Cluster** - $63.39/mois (CRITICAL - 0 connections)
+5. **VPN Connection** - $36.00/mois (CRITICAL - 0 data transfer)
+6. **Transit Gateway** - $36.00/mois (CRITICAL - 0 data transfer)
+7. **Load Balancer (ALB)** - $28.45/mois (Optimized)
+8. **Global Accelerator** - $18.00/mois (HIGH - 0 traffic)
+9. **VPC Endpoint S3** - $7.20/mois (HIGH - migrate to gateway)
+10. **VPC Endpoint** - $7.20/mois (LOW - enable private DNS)
+
+**🎯 Prochaines étapes** :
+- 🔄 **Waste Detection** : Implémentation de scénarios supplémentaires pour AWS
+- 🔄 **Azure/GCP/M365** : Extension du Cost Optimization Hub aux autres providers
+
+---
+
 ## 📊 Ressources Créées
 
 ### Batch 1 : Core Resources (7 ressources)
@@ -85,12 +115,21 @@ terraform -chdir=terraform show | grep -A 5 "monthly_cost"
 
 **Sous-total Batch 3** : ~$378/mois
 
-### Batch 4 : Platform/Messaging (3 ressources)
-- ✅ Elastic Beanstalk Environment - `$0/mois` (service gratuit, paie EC2)
-- ✅ Direct Connect Connection 1Gbps - `$216/mois`
-- ✅ MQ Broker t3.micro - `$27/mois`
+### Batch 4 : Cost Optimization Hub Resources (10 ressources)
+- ✅ Redshift Cluster dc2.large - `$792.78/mois`
+- ✅ DocumentDB Cluster db.t3.medium - `$202.21/mois`
+- ✅ MSK Cluster t3.small (1 broker) - `$104.20/mois`
+- ✅ Neptune Cluster db.t3.medium - `$63.39/mois`
+- ✅ VPN Connection - `$36.00/mois`
+- ✅ Transit Gateway - `$36.00/mois`
+- ✅ Application Load Balancer - `$28.45/mois`
+- ✅ Global Accelerator - `$18.00/mois`
+- ✅ VPC Endpoint S3 - `$7.20/mois`
+- ✅ VPC Endpoint - `$7.20/mois`
 
-**Sous-total Batch 4** : ~$243/mois
+**Sous-total Batch 4** : ~$1,295/mois
+
+**⚠️ IMPORTANT** : Batch 4 contient des ressources coûteuses (Redshift, DocumentDB, Neptune). Utilisé exclusivement pour valider **AWS Cost Optimization Hub**.
 
 ### Batch 5 : Search/IaC (2 ressources)
 - ✅ Kendra Index Developer Edition - `$700/mois`
@@ -258,6 +297,97 @@ terraform show
 terraform state list
 ```
 
+## 🐛 Bugs Corrigés Pendant l'Implémentation
+
+### Bug 1 : Détection en Double (DocumentDB/Neptune)
+
+**Problème** : Le cluster Neptune apparaissait 2 fois (comme `neptune_cluster` ET `documentdb_cluster`), résultant en 12 ressources au lieu de 10.
+
+**Cause** : L'API AWS DocumentDB (`docdb.describe_db_clusters()`) retourne à la fois DocumentDB ET Neptune car ils partagent la même API.
+
+**Correction** : Ajout d'un filtre dans `scan_documentdb_clusters()` pour ignorer les clusters Neptune.
+
+**Fichier** : `/backend/app/services/inventory_scanner.py:11195-11197`
+
+```python
+engine = cluster.get("Engine", "docdb")
+
+# Skip Neptune clusters (handled by scan_neptune_clusters)
+if engine != "docdb":
+    continue
+```
+
+**Date de correction** : 25 novembre 2025
+
+---
+
+### Bug 2 : Mauvaise Classification RDS
+
+**Problème** : Les instances DocumentDB et Neptune apparaissaient comme `rds_instance`, causant des duplicates supplémentaires.
+
+**Cause** : L'API AWS RDS (`rds.describe_db_instances()`) retourne TOUTES les instances de bases de données, incluant DocumentDB et Neptune.
+
+**Correction** : Ajout d'un filtre dans `scan_rds_instances()` pour ignorer DocumentDB/Neptune.
+
+**Fichier** : `/backend/app/services/inventory_scanner.py:1257-1259`
+
+```python
+db_engine = db_instance["Engine"]
+
+# Skip DocumentDB and Neptune instances (handled by their dedicated cluster scanners)
+if db_engine in ["docdb", "neptune"]:
+    continue
+```
+
+**Date de correction** : 25 novembre 2025
+
+---
+
+### Bug 3 : VPN Connection Non Détectée
+
+**Problème** : La VPN Connection existait dans AWS mais n'était pas détectée lors du scan.
+
+**Erreur Celery** :
+```
+[error] vpn.connection_scan_failed error=AWSInventoryScanner._get_cloudwatch_metric_sum() missing 1 required positional argument: 'statistic'
+```
+
+**Cause** : La méthode `_get_cloudwatch_metric_sum()` requiert le paramètre `statistic` mais les appels ne le fournissaient pas.
+
+**Correction** : Ajout de `statistic="Sum"` aux deux appels CloudWatch dans `scan_vpn_connections()`.
+
+**Fichier** : `/backend/app/services/inventory_scanner.py:9779, 9793`
+
+```python
+# Before fix
+total_bytes_in_30d = await self._get_cloudwatch_metric_sum(
+    region=region,
+    namespace="AWS/VPN",
+    metric_name="TunnelDataIn",
+    dimensions=[{"Name": "VpnId", "Value": vpn_id}],
+    start_time=start_time,
+    end_time=end_time,
+    period=86400,
+    # statistic parameter was MISSING
+)
+
+# After fix
+total_bytes_in_30d = await self._get_cloudwatch_metric_sum(
+    region=region,
+    namespace="AWS/VPN",
+    metric_name="TunnelDataIn",
+    dimensions=[{"Name": "VpnId", "Value": vpn_id}],
+    start_time=start_time,
+    end_time=end_time,
+    period=86400,
+    statistic="Sum",  # ✅ ADDED
+)
+```
+
+**Date de correction** : 25 novembre 2025
+
+---
+
 ## 🐛 Dépannage
 
 ### Erreur : "Insufficient permissions"
@@ -273,6 +403,42 @@ terraform state list
 ### Coûts inattendus
 ➜ Vérifiez que toutes les ressources ont été détruites : `./scripts/status.sh`
 ➜ Vérifiez AWS Cost Explorer pour les coûts cachés
+
+### CloudWatch Log Groups orphelins
+⚠️ **Comportement AWS** : Certains services créent automatiquement des CloudWatch Log Groups qui ne sont PAS gérés par Terraform.
+
+**Services concernés** :
+- `/aws/sagemaker/*` - SageMaker Endpoints
+- `/aws/lambda/*` - Lambda functions
+- `/aws/ecs/*` - ECS tasks
+- `/aws/apigateway/*` - API Gateway (si logging activé)
+
+**Problème** : Quand vous faites `terraform destroy`, ces logs ne sont PAS supprimés automatiquement et génèrent des coûts (même minimes).
+
+**Solution** : Le script `destroy.sh` nettoie maintenant AUTOMATIQUEMENT tous les CloudWatch Log Groups orphelins contenant "cutcosts" dans leur nom.
+
+```bash
+./scripts/destroy.sh --force
+
+# Output:
+# Destroying AWS resources...
+# Terraform destroy complete!
+#
+# Checking for orphaned CloudWatch Log Groups...
+# Found orphaned log groups:
+#   - /aws/sagemaker/Endpoints/cutcosts-testing-sagemaker-endpoint
+#     ✓ Deleted
+#
+# All resources destroyed successfully!
+```
+
+**Vérification manuelle** :
+```bash
+aws logs describe-log-groups \
+  --region eu-north-1 \
+  --query "logGroups[?contains(logGroupName, 'cutcosts')].logGroupName" \
+  --output table
+```
 
 ## 🔄 Workflow Recommandé
 
@@ -316,6 +482,7 @@ Pour des questions sur cette infrastructure de test :
 
 ---
 
-**Version** : 1.0
-**Dernière mise à jour** : 2025-01-18
+**Version** : 2.0
+**Dernière mise à jour** : 2025-11-25
 **Région** : eu-north-1 (Europe Stockholm)
+**Statut** : AWS Cost Optimization Hub - IMPLÉMENTATION TERMINÉE ✅

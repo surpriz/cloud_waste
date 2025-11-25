@@ -894,7 +894,7 @@ class AWSProvider(CloudProviderBase):
                         attached_instance_id = attachments[0].get("InstanceId")
 
                     # Calculate volume age in days
-                    age_days = self._safe_datetime_age(created_at)
+                    age_days = (datetime.now(timezone.utc) - created_at).days
 
                     # Skip if volume is too young
                     if age_days < min_age_days:
@@ -1143,7 +1143,7 @@ class AWSProvider(CloudProviderBase):
                             throughput = volume.get("Throughput")
 
                             # Calculate volume age
-                            volume_age_days = self._safe_datetime_age(created_at)
+                            volume_age_days = (datetime.now(timezone.utc) - created_at).days
 
                             # Skip if volume is too young
                             if volume_age_days < min_age_days:
@@ -1264,7 +1264,7 @@ class AWSProvider(CloudProviderBase):
                     volume_id = volume["VolumeId"]
                     size_gb = volume["Size"]
                     created_at = volume["CreateTime"]
-                    age_days = self._safe_datetime_age(created_at)
+                    age_days = (datetime.now(timezone.utc) - created_at).days
 
                     # Skip if volume is too young or too small
                     if age_days < min_age_days or size_gb < min_size_gb:
@@ -1363,7 +1363,7 @@ class AWSProvider(CloudProviderBase):
                     size_gb = volume["Size"]
                     iops = volume.get("Iops", 0)
                     created_at = volume["CreateTime"]
-                    age_days = self._safe_datetime_age(created_at)
+                    age_days = (datetime.now(timezone.utc) - created_at).days
 
                     if age_days < min_age_days:
                         continue
@@ -1470,7 +1470,7 @@ class AWSProvider(CloudProviderBase):
                     iops = volume.get("Iops", 0)
                     throughput = volume.get("Throughput")
                     created_at = volume["CreateTime"]
-                    age_days = self._safe_datetime_age(created_at)
+                    age_days = (datetime.now(timezone.utc) - created_at).days
 
                     if age_days < min_age_days:
                         continue
@@ -1587,7 +1587,7 @@ class AWSProvider(CloudProviderBase):
                     iops = volume.get("Iops", 3000)
                     throughput = volume.get("Throughput")
                     created_at = volume["CreateTime"]
-                    age_days = self._safe_datetime_age(created_at)
+                    age_days = (datetime.now(timezone.utc) - created_at).days
 
                     # Skip if no provisioned throughput or within baseline
                     if not throughput or throughput <= baseline_throughput:
@@ -2080,7 +2080,7 @@ class AWSProvider(CloudProviderBase):
                     # Calculate age using native AllocationTime
                     # If AllocationTime is not available (older EIPs), assume it's old enough to be flagged
                     if allocation_time:
-                        age_days = self._safe_datetime_age(allocation_time)
+                        age_days = (datetime.now(timezone.utc) - allocation_time).days
                     else:
                         # Fallback: if no AllocationTime, assume EIP is old (30 days)
                         # This ensures we don't miss unassociated EIPs that lack this metadata
@@ -2111,7 +2111,7 @@ class AWSProvider(CloudProviderBase):
                                 if date_match:
                                     stopped_time_str = date_match.group(1)
                                     stopped_time = datetime.strptime(stopped_time_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
-                                    stopped_days = self._safe_datetime_age(stopped_time)
+                                    stopped_days = (datetime.now(timezone.utc) - stopped_time).days
                             except Exception:
                                 # Fallback: assume stopped recently if we can't parse
                                 stopped_days = 0
@@ -2271,7 +2271,7 @@ class AWSProvider(CloudProviderBase):
                         if not allocation_time:
                             continue
 
-                        age_days = self._safe_datetime_age(allocation_time)
+                        age_days = (datetime.now(timezone.utc) - allocation_time).days
                         if age_days < min_age_days:
                             continue
 
@@ -2392,7 +2392,7 @@ class AWSProvider(CloudProviderBase):
                     if not allocation_time:
                         continue
 
-                    age_days = self._safe_datetime_age(allocation_time)
+                    age_days = (datetime.now(timezone.utc) - allocation_time).days
                     if age_days < min_age_days:
                         continue
 
@@ -2512,7 +2512,7 @@ class AWSProvider(CloudProviderBase):
                     if not allocation_time:
                         continue
 
-                    age_days = self._safe_datetime_age(allocation_time)
+                    age_days = (datetime.now(timezone.utc) - allocation_time).days
 
                     if age_days < min_age_days or age_days < min_never_used_days:
                         continue
@@ -2635,7 +2635,7 @@ class AWSProvider(CloudProviderBase):
                         continue
 
                     create_time = nat_info["create_time"]
-                    age_days = self._safe_datetime_age(create_time)
+                    age_days = (datetime.now(timezone.utc) - create_time).days
 
                     if age_days < nat_gateway_min_idle_days:
                         continue
@@ -2767,7 +2767,7 @@ class AWSProvider(CloudProviderBase):
                         continue
 
                     launch_time = running_instances[instance_id]
-                    running_days = self._safe_datetime_age(launch_time)
+                    running_days = (datetime.now(timezone.utc) - launch_time).days
 
                     if running_days < min_idle_days:
                         continue
@@ -2784,7 +2784,7 @@ class AWSProvider(CloudProviderBase):
                         continue  # Instance has sufficient network activity
 
                     # This instance (and its EIP) is idle!
-                    age_days = self._safe_datetime_age(allocation_time)
+                    age_days = (datetime.now(timezone.utc) - allocation_time).days
 
                     # Extract name from tags
                     name = None
@@ -2894,7 +2894,7 @@ class AWSProvider(CloudProviderBase):
                     if not allocation_time:
                         continue
 
-                    age_days = self._safe_datetime_age(allocation_time)
+                    age_days = (datetime.now(timezone.utc) - allocation_time).days
                     if age_days < min_age_days:
                         continue
 
@@ -2914,7 +2914,7 @@ class AWSProvider(CloudProviderBase):
 
                     # This EIP has low traffic!
                     launch_time = running_instances[instance_id]
-                    running_days = self._safe_datetime_age(launch_time)
+                    running_days = (datetime.now(timezone.utc) - launch_time).days
 
                     # Extract name from tags
                     name = None
@@ -3039,7 +3039,7 @@ class AWSProvider(CloudProviderBase):
                         continue
 
                     create_time = nat_info["create_time"]
-                    age_days = self._safe_datetime_age(create_time)
+                    age_days = (datetime.now(timezone.utc) - create_time).days
 
                     if age_days < nat_gateway_zero_connections_days:
                         continue
@@ -3170,7 +3170,7 @@ class AWSProvider(CloudProviderBase):
                     if not allocation_time:
                         continue
 
-                    age_days = self._safe_datetime_age(allocation_time)
+                    age_days = (datetime.now(timezone.utc) - allocation_time).days
 
                     # Get CloudWatch status check metrics for the instance
                     metrics = await self._get_ec2_network_metrics(
@@ -3187,7 +3187,7 @@ class AWSProvider(CloudProviderBase):
 
                     # This instance is failing status checks!
                     launch_time = running_instances[instance_id]
-                    running_days = self._safe_datetime_age(launch_time)
+                    running_days = (datetime.now(timezone.utc) - launch_time).days
 
                     if running_days < min_failed_days:
                         continue
@@ -3301,7 +3301,7 @@ class AWSProvider(CloudProviderBase):
                     if not start_time:
                         continue
 
-                    age_days = self._safe_datetime_age(start_time)
+                    age_days = (datetime.now(timezone.utc) - start_time).days
 
                     should_flag = False
                     orphan_type = ""
@@ -3477,7 +3477,7 @@ class AWSProvider(CloudProviderBase):
                                 if not start_time:
                                     continue
 
-                                age_days = self._safe_datetime_age(start_time)
+                                age_days = (datetime.now(timezone.utc) - start_time).days
                                 size_gb = snapshot["VolumeSize"]
                                 monthly_cost = size_gb * self.PRICING["snapshot_per_gb"]
 
@@ -3570,7 +3570,7 @@ class AWSProvider(CloudProviderBase):
                 for ami in all_amis:
                     ami_id = ami["ImageId"]
                     ami_creation_date = datetime.fromisoformat(ami["CreationDate"].replace('Z', '+00:00'))
-                    ami_age_days = self._safe_datetime_age(ami_creation_date)
+                    ami_age_days = (datetime.now(timezone.utc) - ami_creation_date).days
 
                     # Only check AMIs old enough
                     if ami_age_days < min_ami_unused_days:
@@ -3621,7 +3621,7 @@ class AWSProvider(CloudProviderBase):
                         if not start_time:
                             continue
 
-                        age_days = self._safe_datetime_age(start_time)
+                        age_days = (datetime.now(timezone.utc) - start_time).days
                         size_gb = snapshot["VolumeSize"]
                         monthly_cost = size_gb * self.PRICING["snapshot_per_gb"]
 
@@ -3714,7 +3714,7 @@ class AWSProvider(CloudProviderBase):
                     if not start_time:
                         continue
 
-                    age_days = self._safe_datetime_age(start_time)
+                    age_days = (datetime.now(timezone.utc) - start_time).days
 
                     # Check if snapshot is old enough
                     if age_days < old_unused_age_days:
@@ -3829,7 +3829,7 @@ class AWSProvider(CloudProviderBase):
                     if not start_time:
                         continue
 
-                    age_days = self._safe_datetime_age(start_time)
+                    age_days = (datetime.now(timezone.utc) - start_time).days
 
                     # Check if snapshot is old enough
                     if age_days < min_age_days:
@@ -3940,7 +3940,7 @@ class AWSProvider(CloudProviderBase):
                     if not start_time:
                         continue
 
-                    age_days = self._safe_datetime_age(start_time)
+                    age_days = (datetime.now(timezone.utc) - start_time).days
 
                     # Flag if in error state OR pending for too long
                     should_flag = False
@@ -4044,7 +4044,7 @@ class AWSProvider(CloudProviderBase):
                     if not start_time:
                         continue
 
-                    age_days = self._safe_datetime_age(start_time)
+                    age_days = (datetime.now(timezone.utc) - start_time).days
 
                     # Flag if no tags and old enough
                     if not tags and age_days >= min_untagged_age_days:
@@ -4131,7 +4131,7 @@ class AWSProvider(CloudProviderBase):
                     if not start_time:
                         continue
 
-                    age_days = self._safe_datetime_age(start_time)
+                    age_days = (datetime.now(timezone.utc) - start_time).days
 
                     # Check if snapshot is old enough
                     if age_days < nonprod_max_days:
@@ -4265,7 +4265,7 @@ class AWSProvider(CloudProviderBase):
 
                             if time_diff_hours <= duplicate_window_hours:
                                 snapshot_id = snapshot["SnapshotId"]
-                                age_days = self._safe_datetime_age(snapshot_start_time)
+                                age_days = (datetime.now(timezone.utc) - snapshot_start_time).days
                                 size_gb = snapshot["VolumeSize"]
                                 monthly_cost = size_gb * self.PRICING["snapshot_per_gb"]
 
@@ -5061,7 +5061,7 @@ class AWSProvider(CloudProviderBase):
                         instance_id = instance['InstanceId']
                         instance_type = instance['InstanceType']
                         launch_time = instance['LaunchTime']
-                        age_days = self._safe_datetime_age(launch_time)
+                        age_days = (datetime.now(timezone.utc) - launch_time).days
 
                         if age_days < min_age_days:
                             continue
@@ -5140,7 +5140,7 @@ class AWSProvider(CloudProviderBase):
                         instance_id = instance['InstanceId']
                         instance_type = instance['InstanceType']
                         launch_time = instance['LaunchTime']
-                        age_days = self._safe_datetime_age(launch_time)
+                        age_days = (datetime.now(timezone.utc) - launch_time).days
                         tags = instance.get('Tags', [])
 
                         if not tags and age_days >= min_age_days:
@@ -5229,7 +5229,7 @@ class AWSProvider(CloudProviderBase):
                         instance_id = instance['InstanceId']
                         instance_type = instance['InstanceType']
                         launch_time = instance['LaunchTime']
-                        age_days = self._safe_datetime_age(launch_time)
+                        age_days = (datetime.now(timezone.utc) - launch_time).days
 
                         if age_days < min_uptime_days:
                             continue
@@ -5440,7 +5440,7 @@ class AWSProvider(CloudProviderBase):
                         lb_name = lb["LoadBalancerName"]
                         lb_type = lb["Type"]  # 'application', 'network', or 'gateway'
                         created_at = lb["CreatedTime"]
-                        age_days = self._safe_datetime_age(created_at)
+                        age_days = (datetime.now(created_at.tzinfo) - created_at).days
 
                         # Skip resources younger than min_age_days
                         if age_days < min_age_days:
@@ -5637,7 +5637,7 @@ class AWSProvider(CloudProviderBase):
                     for lb in response.get("LoadBalancerDescriptions", []):
                         lb_name = lb["LoadBalancerName"]
                         created_at = lb["CreatedTime"]
-                        age_days = self._safe_datetime_age(created_at)
+                        age_days = (datetime.now(created_at.tzinfo) - created_at).days
 
                         # Skip resources younger than min_age_days
                         if age_days < min_age_days:
@@ -7586,7 +7586,7 @@ class AWSProvider(CloudProviderBase):
                         fs_id = fs["FileSystemId"]
                         fs_type = fs["FileSystemType"]  # LUSTRE, WINDOWS, ONTAP, OPENZFS
                         created_at = fs["CreationTime"]
-                        age_days = self._safe_datetime_age(created_at)
+                        age_days = (datetime.now(timezone.utc) - created_at).days
 
                         if age_days < min_age_days:
                             continue
@@ -7828,7 +7828,7 @@ class AWSProvider(CloudProviderBase):
                                 total_backup_size_gb = 0
 
                                 for backup in backups:
-                                    backup_age_days = self._safe_datetime_age(backup.get("CreationTime"))
+                                    backup_age_days = (datetime.now(timezone.utc) - backup["CreationTime"]).days
                                     backup_size_gb = backup.get("Volume", {}).get("VolumeSize", 0) if "Volume" in backup else 0
                                     total_backup_size_gb += backup_size_gb
 
@@ -8139,7 +8139,7 @@ class AWSProvider(CloudProviderBase):
                     for cluster in response.get("DBClusters", []):
                         cluster_id = cluster["DBClusterIdentifier"]
                         created_at = cluster["ClusterCreateTime"]
-                        age_days = self._safe_datetime_age(created_at)
+                        age_days = (datetime.now(timezone.utc) - created_at).days
 
                         if age_days < min_age_days:
                             continue
@@ -8239,7 +8239,7 @@ class AWSProvider(CloudProviderBase):
                         cluster_arn = cluster["ClusterArn"]
                         cluster_name = cluster["ClusterName"]
                         created_at = cluster["CreationTime"]
-                        age_days = self._safe_datetime_age(created_at)
+                        age_days = (datetime.now(timezone.utc) - created_at).days
 
                         if age_days < min_age_days:
                             continue
@@ -8424,7 +8424,7 @@ class AWSProvider(CloudProviderBase):
 
                             # Basic metadata
                             created_at = cluster["createdAt"]
-                            age_days = self._safe_datetime_age(created_at)
+                            age_days = (datetime.now(timezone.utc) - created_at).days
                             k8s_version = cluster.get("version", "Unknown")
                             cluster_status = cluster.get("status", "Unknown")
 
@@ -8957,7 +8957,7 @@ class AWSProvider(CloudProviderBase):
                     for endpoint in response.get("Endpoints", []):
                         endpoint_name = endpoint["EndpointName"]
                         created_at = endpoint["CreationTime"]
-                        age_days = self._safe_datetime_age(created_at)
+                        age_days = (datetime.now(timezone.utc) - created_at).days
 
                         if age_days < min_age_days:
                             continue
@@ -9069,7 +9069,7 @@ class AWSProvider(CloudProviderBase):
                     for cluster in response.get("Clusters", []):
                         cluster_id = cluster["ClusterIdentifier"]
                         created_at = cluster["ClusterCreateTime"]
-                        age_days = self._safe_datetime_age(created_at)
+                        age_days = (datetime.now(timezone.utc) - created_at).days
 
                         if age_days < min_age_days:
                             continue
@@ -9214,7 +9214,7 @@ class AWSProvider(CloudProviderBase):
                         if not created_at:
                             continue
 
-                        age_days = self._safe_datetime_age(created_at)
+                        age_days = (datetime.now(timezone.utc) - created_at).days
 
                         # Skip very young clusters
                         if age_days < min_age_days:
@@ -9593,7 +9593,7 @@ class AWSProvider(CloudProviderBase):
                         if not created_at:
                             continue
 
-                        age_days = self._safe_datetime_age(created_at)
+                        age_days = (datetime.now(timezone.utc) - created_at).days
 
                         if age_days < min_age_days:
                             continue
@@ -9702,7 +9702,7 @@ class AWSProvider(CloudProviderBase):
                         if not created_at:
                             continue
 
-                        age_days = self._safe_datetime_age(created_at)
+                        age_days = (datetime.now(timezone.utc) - created_at).days
 
                         if age_days < min_age_days:
                             continue
@@ -9818,7 +9818,7 @@ class AWSProvider(CloudProviderBase):
                         if not created_at:
                             continue
 
-                        age_days = self._safe_datetime_age(created_at)
+                        age_days = (datetime.now(timezone.utc) - created_at).days
 
                         if age_days < min_age_days:
                             continue
@@ -9947,7 +9947,7 @@ class AWSProvider(CloudProviderBase):
                         if not created_at:
                             continue
 
-                        age_days = self._safe_datetime_age(created_at)
+                        age_days = (datetime.now(timezone.utc) - created_at).days
 
                         # Skip very young streams
                         if age_days < min_age_days:
@@ -10253,7 +10253,7 @@ class AWSProvider(CloudProviderBase):
                     if not created_at:
                         continue
 
-                    age_days = self._safe_datetime_age(created_at)
+                    age_days = (datetime.now(timezone.utc) - created_at).days
 
                     if age_days < min_age_days:
                         continue
@@ -10336,7 +10336,7 @@ class AWSProvider(CloudProviderBase):
                         if not created_at:
                             continue
 
-                        age_days = self._safe_datetime_age(created_at)
+                        age_days = (datetime.now(timezone.utc) - created_at).days
 
                         if age_days < min_age_days:
                             continue
@@ -10496,7 +10496,7 @@ class AWSProvider(CloudProviderBase):
                         continue
 
                     # Calculate bucket age
-                    bucket_age_days = self._safe_datetime_age(bucket_creation_date)
+                    bucket_age_days = (datetime.now(timezone.utc) - bucket_creation_date).days
                     print(f"🗄️ [DEBUG] Bucket {bucket_name}: age={bucket_age_days} days, min_required={min_bucket_age_days} days")
 
                     # Skip young buckets
@@ -10558,7 +10558,7 @@ class AWSProvider(CloudProviderBase):
                                 for upload in multipart_uploads:
                                     initiated = upload.get("Initiated")
                                     if initiated:
-                                        days_since_upload = self._safe_datetime_age(initiated)
+                                        days_since_upload = (datetime.now(timezone.utc) - initiated).days
                                         if days_since_upload >= multipart_age_days:
                                             old_multiparts.append(upload)
                                             # Estimate size (multipart uploads can be large, estimate 100MB each)
@@ -10592,7 +10592,7 @@ class AWSProvider(CloudProviderBase):
                                     has_lifecycle = False  # Treat errors as no lifecycle
 
                             if not has_lifecycle:
-                                days_since_oldest = self._safe_datetime_age(oldest_object_date)
+                                days_since_oldest = (datetime.now(timezone.utc) - oldest_object_date).days
                                 if days_since_oldest >= lifecycle_age_threshold_days:
                                     orphan_type = "no_lifecycle"
                                     orphan_reason = f"No lifecycle policy, objects are {days_since_oldest}+ days old ({object_count} objects, {bucket_size_gb:.2f} GB)"
@@ -10607,7 +10607,7 @@ class AWSProvider(CloudProviderBase):
 
                         # PRIORITY 3: All objects very old (fallback)
                         if orphan_type is None and detect_old_objects and object_count > 0 and oldest_object_date and newest_object_date:
-                            days_since_newest = self._safe_datetime_age(newest_object_date)
+                            days_since_newest = (datetime.now(timezone.utc) - newest_object_date).days
                             if days_since_newest >= object_age_threshold_days:
                                 orphan_type = "old_objects"
                                 orphan_reason = f"All {object_count} objects are {days_since_newest}+ days old (no recent activity)"
@@ -10638,7 +10638,7 @@ class AWSProvider(CloudProviderBase):
                             # Check if objects are in Standard but should be in IA/Glacier
                             standard_size_bytes = storage_classes.get("STANDARD", 0)
                             if standard_size_bytes > 0 and oldest_object_date:
-                                days_since_oldest = self._safe_datetime_age(oldest_object_date)
+                                days_since_oldest = (datetime.now(timezone.utc) - oldest_object_date).days
                                 if days_since_oldest >= min_object_age_for_ia:
                                     standard_size_gb = standard_size_bytes / (1024 ** 3)
                                     # Calculate potential savings: Standard ($0.023) → Standard-IA ($0.0125)
@@ -10748,7 +10748,7 @@ class AWSProvider(CloudProviderBase):
                             glacier_bytes = storage_classes.get("GLACIER", 0) + storage_classes.get("DEEP_ARCHIVE", 0) + storage_classes.get("GLACIER_IR", 0)
 
                             if glacier_bytes > 0 and oldest_object_date:
-                                days_since_oldest_glacier = self._safe_datetime_age(oldest_object_date)
+                                days_since_oldest_glacier = (datetime.now(timezone.utc) - oldest_object_date).days
                                 if days_since_oldest_glacier >= glacier_min_age_days:
                                     glacier_size_gb = glacier_bytes / (1024 ** 3)
                                     # Note: Without CloudWatch RestoreRequests metrics, we flag old Glacier objects
@@ -10775,8 +10775,8 @@ class AWSProvider(CloudProviderBase):
                                         "bucket_size_gb": round(bucket_size_gb, 2),
                                         "creation_date": bucket_creation_date.isoformat(),
                                         "bucket_age_days": bucket_age_days,
-                                        "oldest_object_days": self._safe_datetime_age(oldest_object_date) if oldest_object_date else None,
-                                        "newest_object_days": self._safe_datetime_age(newest_object_date) if newest_object_date else None,
+                                        "oldest_object_days": (datetime.now(timezone.utc) - oldest_object_date).days if oldest_object_date else None,
+                                        "newest_object_days": (datetime.now(timezone.utc) - newest_object_date).days if newest_object_date else None,
                                         "storage_classes": {k: round(v / (1024 ** 3), 2) for k, v in storage_classes.items()},
                                         "orphan_type": orphan_type,
                                         "orphan_reason": orphan_reason,
@@ -10923,7 +10923,7 @@ class AWSProvider(CloudProviderBase):
                             # Parse creation date
                             try:
                                 creation_date = datetime.fromisoformat(last_modified.replace("Z", "+00:00"))
-                                age_days = self._safe_datetime_age(creation_date)
+                                age_days = (datetime.now(timezone.utc) - creation_date).days
                             except Exception:
                                 age_days = 0
 
@@ -11484,7 +11484,7 @@ class AWSProvider(CloudProviderBase):
 
                         # Calculate age
                         try:
-                            age_days = self._safe_datetime_age(creation_date)
+                            age_days = (datetime.now(timezone.utc) - creation_date).days
                         except Exception:
                             age_days = 0
 

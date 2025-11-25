@@ -2,7 +2,7 @@
 
 import asyncio
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import select
@@ -42,6 +42,33 @@ async def get_db_session() -> AsyncSession:
     """Get database session for async operations."""
     async with AsyncSessionLocal() as session:
         return session
+
+
+def _normalize_datetime(dt: Any) -> datetime | None:
+    """
+    Convert any datetime to naive UTC datetime for PostgreSQL.
+
+    PostgreSQL columns are 'timestamp without time zone', so we must:
+    1. Convert timezone-aware datetimes (e.g. tzlocal()) to UTC
+    2. Strip timezone info before insertion
+
+    Args:
+        dt: Any value (datetime, None, or other)
+
+    Returns:
+        Naive datetime in UTC, or None if input is None/invalid
+    """
+    if dt is None:
+        return None
+    if not isinstance(dt, datetime):
+        return None
+
+    if dt.tzinfo is None:
+        # Already naive - assume it's UTC
+        return dt
+    else:
+        # Convert to UTC then strip timezone for PostgreSQL
+        return dt.astimezone(timezone.utc).replace(tzinfo=None)
 
 
 @celery_app.task(name="app.workers.tasks.scan_cloud_account", bind=True)
@@ -84,6 +111,10 @@ async def _scan_cloud_account_async(
         Dict with scan results
     """
     async with AsyncSessionLocal() as db:
+        # Initialize structlog logger for this function
+        import structlog
+        logger = structlog.get_logger()
+
         try:
             # Get scan record
             result = await db.execute(select(Scan).where(Scan.id == scan_id))
@@ -118,6 +149,31 @@ async def _scan_cloud_account_async(
                 account.credentials_encrypted
             )
             credentials = json.loads(credentials_json)
+
+            # DEBUG: Verify credentials loaded (mask sensitive data)
+            logger.info(
+                "credentials.decrypted",
+                account_identifier=account.account_identifier,
+                credential_keys=list(credentials.keys()),
+            )
+
+            # Validate and log credential presence
+            access_key = credentials.get('access_key_id', 'MISSING')
+            secret_key = credentials.get('secret_access_key', 'MISSING')
+
+            if access_key != 'MISSING' and secret_key != 'MISSING':
+                logger.info(
+                    "credentials.validated",
+                    access_key_prefix=access_key[:8],
+                    access_key_length=len(access_key),
+                    secret_key_length=len(secret_key),
+                )
+            else:
+                logger.error(
+                    "credentials.missing",
+                    has_access_key=access_key != 'MISSING',
+                    has_secret_key=secret_key != 'MISSING',
+                )
 
             # Get user's detection rules
             from app.crud import detection_rule as detection_rule_crud
@@ -279,9 +335,6 @@ async def _scan_cloud_account_async(
                 # This runs in addition to orphan scanning to provide complete
                 # resource visibility and optimization recommendations
                 # ===================================================================
-                import structlog
-                logger = structlog.get_logger()
-
                 try:
                     logger.info(
                         "inventory.scan_start",
@@ -435,6 +488,216 @@ async def _scan_cloud_account_async(
                     except Exception as e:
                         logger.warning("inventory.fargate_scan_skipped", error=str(e))
 
+                    # Scan ElastiCache Clusters (all) - BATCH 3
+                    try:
+                        for region in regions_to_scan:
+                            elasticache_resources = await inventory_scanner.scan_elasticache_clusters(region)
+                            all_inventory_resources.extend(elasticache_resources)
+                            logger.info(
+                                "inventory.elasticache_scanned",
+                                region=region,
+                                elasticache_count=len(elasticache_resources),
+                            )
+                    except Exception as e:
+                        logger.warning("inventory.elasticache_scan_skipped", error=str(e))
+
+                    # Scan Kinesis Streams (all) - BATCH 3
+                    try:
+                        for region in regions_to_scan:
+                            kinesis_resources = await inventory_scanner.scan_kinesis_streams(region)
+                            all_inventory_resources.extend(kinesis_resources)
+                            logger.info(
+                                "inventory.kinesis_scanned",
+                                region=region,
+                                kinesis_count=len(kinesis_resources),
+                            )
+                    except Exception as e:
+                        logger.warning("inventory.kinesis_scan_skipped", error=str(e))
+
+                    # Scan EFS File Systems (all) - BATCH 3
+                    try:
+                        for region in regions_to_scan:
+                            efs_resources = await inventory_scanner.scan_efs_file_systems(region)
+                            all_inventory_resources.extend(efs_resources)
+                            logger.info(
+                                "inventory.efs_scanned",
+                                region=region,
+                                efs_count=len(efs_resources),
+                            )
+                    except Exception as e:
+                        logger.warning("inventory.efs_scan_skipped", error=str(e))
+
+                    # Scan OpenSearch Domains (all) - BATCH 3
+                    try:
+                        for region in regions_to_scan:
+                            opensearch_resources = await inventory_scanner.scan_opensearch_domains(region)
+                            all_inventory_resources.extend(opensearch_resources)
+                            logger.info(
+                                "inventory.opensearch_scanned",
+                                region=region,
+                                opensearch_count=len(opensearch_resources),
+                            )
+                    except Exception as e:
+                        logger.warning("inventory.opensearch_scan_skipped", error=str(e))
+
+                    # Scan API Gateways (all) - BATCH 3
+                    try:
+                        for region in regions_to_scan:
+                            api_gateway_resources = await inventory_scanner.scan_api_gateways(region)
+                            all_inventory_resources.extend(api_gateway_resources)
+                            logger.info(
+                                "inventory.api_gateway_scanned",
+                                region=region,
+                                api_gateway_count=len(api_gateway_resources),
+                            )
+                    except Exception as e:
+                        logger.warning("inventory.api_gateway_scan_skipped", error=str(e))
+
+                    # Scan CloudWatch Log Groups (all) - BATCH 3
+                    try:
+                        for region in regions_to_scan:
+                            cloudwatch_log_resources = await inventory_scanner.scan_cloudwatch_log_groups(region)
+                            all_inventory_resources.extend(cloudwatch_log_resources)
+                            logger.info(
+                                "inventory.cloudwatch_logs_scanned",
+                                region=region,
+                                cloudwatch_log_count=len(cloudwatch_log_resources),
+                            )
+                    except Exception as e:
+                        logger.warning("inventory.cloudwatch_logs_scan_skipped", error=str(e))
+
+                    # Scan ECS Clusters (all) - BATCH 3
+                    try:
+                        for region in regions_to_scan:
+                            ecs_cluster_resources = await inventory_scanner.scan_ecs_clusters(region)
+                            all_inventory_resources.extend(ecs_cluster_resources)
+                            logger.info(
+                                "inventory.ecs_clusters_scanned",
+                                region=region,
+                                ecs_cluster_count=len(ecs_cluster_resources),
+                            )
+                    except Exception as e:
+                        logger.warning("inventory.ecs_clusters_scan_skipped", error=str(e))
+
+                    # Scan CloudFront Distributions (global, once) - BATCH 3
+                    try:
+                        if regions_to_scan:
+                            cloudfront_resources = await inventory_scanner.scan_cloudfront_distributions()
+                            all_inventory_resources.extend(cloudfront_resources)
+                            logger.info(
+                                "inventory.cloudfront_scanned",
+                                cloudfront_count=len(cloudfront_resources),
+                            )
+                    except Exception as e:
+                        logger.warning("inventory.cloudfront_scan_skipped", error=str(e))
+
+                    # =========================================================================
+                    # BATCH 4: Advanced Services ($561/month)
+                    # =========================================================================
+
+                    # Scan VPC Endpoints - BATCH 4
+                    try:
+                        for region in regions_to_scan:
+                            vpc_endpoint_resources = await inventory_scanner.scan_vpc_endpoints(region)
+                            all_inventory_resources.extend(vpc_endpoint_resources)
+                            logger.info(
+                                "inventory.vpc_endpoints_scanned",
+                                region=region,
+                                vpc_endpoint_count=len(vpc_endpoint_resources),
+                            )
+                    except Exception as e:
+                        logger.warning("inventory.vpc_endpoints_scan_skipped", error=str(e))
+
+                    # Scan Neptune Clusters - BATCH 4
+                    try:
+                        for region in regions_to_scan:
+                            neptune_resources = await inventory_scanner.scan_neptune_clusters(region)
+                            all_inventory_resources.extend(neptune_resources)
+                            logger.info(
+                                "inventory.neptune_scanned",
+                                region=region,
+                                neptune_count=len(neptune_resources),
+                            )
+                    except Exception as e:
+                        logger.warning("inventory.neptune_scan_skipped", error=str(e))
+
+                    # Scan MSK (Kafka) Clusters - BATCH 4
+                    try:
+                        for region in regions_to_scan:
+                            msk_resources = await inventory_scanner.scan_msk_clusters(region)
+                            all_inventory_resources.extend(msk_resources)
+                            logger.info(
+                                "inventory.msk_scanned",
+                                region=region,
+                                msk_count=len(msk_resources),
+                            )
+                    except Exception as e:
+                        logger.warning("inventory.msk_scan_skipped", error=str(e))
+
+                    # Scan Redshift Clusters - BATCH 4
+                    try:
+                        for region in regions_to_scan:
+                            redshift_resources = await inventory_scanner.scan_redshift_clusters(region)
+                            all_inventory_resources.extend(redshift_resources)
+                            logger.info(
+                                "inventory.redshift_scanned",
+                                region=region,
+                                redshift_count=len(redshift_resources),
+                            )
+                    except Exception as e:
+                        logger.warning("inventory.redshift_scan_skipped", error=str(e))
+
+                    # Scan VPN Connections - BATCH 4
+                    try:
+                        for region in regions_to_scan:
+                            vpn_resources = await inventory_scanner.scan_vpn_connections(region)
+                            all_inventory_resources.extend(vpn_resources)
+                            logger.info(
+                                "inventory.vpn_connections_scanned",
+                                region=region,
+                                vpn_count=len(vpn_resources),
+                            )
+                    except Exception as e:
+                        logger.warning("inventory.vpn_connections_scan_skipped", error=str(e))
+
+                    # Scan Transit Gateway Attachments - BATCH 4
+                    try:
+                        for region in regions_to_scan:
+                            tgw_resources = await inventory_scanner.scan_transit_gateway_attachments(region)
+                            all_inventory_resources.extend(tgw_resources)
+                            logger.info(
+                                "inventory.transit_gateway_attachments_scanned",
+                                region=region,
+                                tgw_attachment_count=len(tgw_resources),
+                            )
+                    except Exception as e:
+                        logger.warning("inventory.transit_gateway_attachments_scan_skipped", error=str(e))
+
+                    # Scan Global Accelerators (global, once) - BATCH 4
+                    try:
+                        if regions_to_scan:
+                            global_accelerator_resources = await inventory_scanner.scan_global_accelerators("us-west-2")
+                            all_inventory_resources.extend(global_accelerator_resources)
+                            logger.info(
+                                "inventory.global_accelerators_scanned",
+                                global_accelerator_count=len(global_accelerator_resources),
+                            )
+                    except Exception as e:
+                        logger.warning("inventory.global_accelerators_scan_skipped", error=str(e))
+
+                    # Scan DocumentDB Clusters - BATCH 4
+                    try:
+                        for region in regions_to_scan:
+                            documentdb_resources = await inventory_scanner.scan_documentdb_clusters(region)
+                            all_inventory_resources.extend(documentdb_resources)
+                            logger.info(
+                                "inventory.documentdb_scanned",
+                                region=region,
+                                documentdb_count=len(documentdb_resources),
+                            )
+                    except Exception as e:
+                        logger.warning("inventory.documentdb_scan_skipped", error=str(e))
+
                     # Save all inventory resources to database
                     for resource in all_inventory_resources:
                         all_cloud_resource = AllCloudResource(
@@ -459,7 +722,7 @@ async def _scan_cloud_account_async(
                             resource_metadata=resource.resource_metadata,
                             tags=resource.tags,
                             resource_status=resource.resource_status,
-                            created_at_cloud=resource.created_at_cloud,
+                            created_at_cloud=_normalize_datetime(resource.created_at_cloud),
                         )
                         db.add(all_cloud_resource)
 
@@ -621,9 +884,6 @@ async def _scan_cloud_account_async(
                 # This runs in addition to orphan scanning to provide complete
                 # resource visibility and optimization recommendations
                 # ===================================================================
-                import structlog
-                logger = structlog.get_logger()
-
                 try:
                     logger.info(
                         "inventory.scan_start",
@@ -1288,7 +1548,7 @@ async def _scan_cloud_account_async(
                             resource_metadata=resource.resource_metadata,
                             tags=resource.tags,
                             resource_status=resource.resource_status,
-                            created_at_cloud=resource.created_at_cloud,
+                            created_at_cloud=_normalize_datetime(resource.created_at_cloud),
                         )
                         db.add(all_cloud_resource)
 
