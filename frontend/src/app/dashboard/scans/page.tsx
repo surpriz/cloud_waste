@@ -168,9 +168,9 @@ export default function ScansPage() {
 
   const handleDeleteAll = async () => {
     const confirmed = await showDestructiveConfirm({
-      title: "Supprimer tous les scans",
-      message: "Êtes-vous sûr de vouloir supprimer tous les scans ? Cette action est irréversible.",
-      confirmText: "Supprimer tout",
+      title: "Delete All Scans",
+      message: "Are you sure you want to delete all scans? This action is irreversible.",
+      confirmText: "Delete All",
     });
 
     if (!confirmed) {
@@ -382,10 +382,10 @@ export default function ScansPage() {
                 onClick={handleDeleteAll}
                 disabled={isDeletingAll}
                 className="flex items-center gap-2 rounded-lg bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700 disabled:bg-red-300 transition-colors"
-                title="Supprimer tous les scans"
+                title="Delete All Scans"
               >
                 <Trash2 className={`h-4 w-4 ${isDeletingAll ? "animate-spin" : ""}`} />
-                Supprimer tous les scans
+                Delete All Scans
               </button>
             )}
           </div>

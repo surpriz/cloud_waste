@@ -1518,7 +1518,7 @@ export default function SettingsPage() {
       title: "Reset ALL detection rules",
       message: "This will delete all your custom settings for all 20+ resource types.",
       confirmText: "Reset All",
-      warningText: "Action irréversible",
+      warningText: "Irreversible action",
     });
 
     if (!confirmed) return;

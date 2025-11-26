@@ -80,9 +80,9 @@ export const Dialog: React.FC<DialogProps> = ({
   // Get default button texts
   const confirmText =
     options.confirmText ||
-    (type === 'alert' ? 'OK' : type === 'destructive' ? 'Supprimer' : 'Confirmer');
-  const cancelText = options.cancelText || 'Annuler';
-  const warningText = options.warningText || 'Action irréversible';
+    (type === 'alert' ? 'OK' : type === 'destructive' ? 'Delete' : 'Confirm');
+  const cancelText = options.cancelText || 'Cancel';
+  const warningText = options.warningText || 'Irreversible action';
 
   return (
     <>
