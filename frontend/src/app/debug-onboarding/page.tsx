@@ -1,6 +1,7 @@
 "use client";
 
 import { useOnboardingStore } from "@/stores/useOnboardingStore";
+import { useDialog } from "@/hooks/useDialog";
 import { useRouter } from "next/navigation";
 import { RefreshCw, Trash2, Eye } from "lucide-react";
 
@@ -12,18 +13,19 @@ import { RefreshCw, Trash2, Eye } from "lucide-react";
  */
 export default function DebugOnboardingPage() {
   const router = useRouter();
+  const { showAlert } = useDialog();
   const store = useOnboardingStore();
 
-  const handleReset = () => {
+  const handleReset = async () => {
     store.resetOnboarding();
     // Note: Storage is now user-scoped, so resetOnboarding() handles cleanup
-    alert("Onboarding reset! Redirecting to dashboard...");
+    await showAlert("Onboarding reset! Redirecting to dashboard...");
     router.push("/dashboard");
   };
 
-  const handleClearLocalStorage = () => {
+  const handleClearLocalStorage = async () => {
     localStorage.clear();
-    alert("All localStorage cleared! Reload the page.");
+    await showAlert("All localStorage cleared! Reload the page.");
     window.location.reload();
   };
 

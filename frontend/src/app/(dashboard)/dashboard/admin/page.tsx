@@ -3,11 +3,13 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { adminAPI } from "@/lib/api";
+import { useDialog } from "@/hooks/useDialog";
 import type { User, AdminStats, PricingStats, MLDataStats, MLExportResponse, SESMetrics, SESIdentityMetrics } from "@/types";
 import { Shield, Users, UserCheck, UserX, Crown, Ban, CheckCircle, DollarSign, TrendingUp, Database, Download, Mail, AlertTriangle, CheckCircle2 } from "lucide-react";
 
 export default function AdminPage() {
   const router = useRouter();
+  const { showConfirm, showDestructiveConfirm } = useDialog();
   const [users, setUsers] = useState<User[]>([]);
   const [stats, setStats] = useState<AdminStats | null>(null);
   const [pricingStats, setPricingStats] = useState<PricingStats | null>(null);
@@ -78,13 +80,15 @@ export default function AdminPage() {
   };
 
   const handleToggleSuperuser = async (user: User) => {
-    if (
-      !confirm(
-        `Are you sure you want to ${
-          user.is_superuser ? "demote" : "promote"
-        } ${user.email} ${user.is_superuser ? "from" : "to"} admin?`
-      )
-    ) {
+    const confirmed = await showConfirm({
+      title: `${user.is_superuser ? "Demote" : "Promote"} Admin`,
+      message: `Are you sure you want to ${
+        user.is_superuser ? "demote" : "promote"
+      } ${user.email} ${user.is_superuser ? "from" : "to"} admin?`,
+      confirmText: user.is_superuser ? "Demote" : "Promote",
+    });
+
+    if (!confirmed) {
       return;
     }
 
@@ -100,11 +104,14 @@ export default function AdminPage() {
   };
 
   const handleDeleteUser = async (user: User) => {
-    if (
-      !confirm(
-        `⚠️ WARNING: Are you sure you want to PERMANENTLY DELETE user ${user.email}?\n\nThis will delete:\n- User account\n- All cloud accounts\n- All scans\n- All orphan resources\n- All chat conversations\n\nThis action CANNOT be undone!`
-      )
-    ) {
+    const confirmed = await showDestructiveConfirm({
+      title: `Delete User ${user.email}`,
+      message: `This will delete:\n- User account\n- All cloud accounts\n- All scans\n- All orphan resources\n- All chat conversations`,
+      confirmText: "Delete User",
+      warningText: "This action CANNOT be undone!",
+    });
+
+    if (!confirmed) {
       return;
     }
 

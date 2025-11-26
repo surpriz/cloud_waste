@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { adminAPI } from "@/lib/api";
+import { useDialog } from "@/hooks/useDialog";
 import type { PricingStats, PricingCacheItem } from "@/types";
 import {
   DollarSign,
@@ -15,6 +16,7 @@ import {
 } from "lucide-react";
 
 export default function AdminPricingPage() {
+  const { showAlert } = useDialog();
   const [stats, setStats] = useState<PricingStats | null>(null);
   const [cacheItems, setCacheItems] = useState<PricingCacheItem[]>([]);
   const [loading, setLoading] = useState(true);
@@ -82,7 +84,7 @@ export default function AdminPricingPage() {
           setRefreshing(false);
           setRefreshTaskId(null);
           await loadData(); // Reload data
-          alert(`Pricing refresh completed! Updated: ${status.updated_count}, Failed: ${status.failed_count}`);
+          await showAlert(`Pricing refresh completed! Updated: ${status.updated_count}, Failed: ${status.failed_count}`);
         } else if (status.status === "error") {
           setRefreshing(false);
           setRefreshTaskId(null);

@@ -5,6 +5,7 @@ import { useAccountStore } from "@/stores/useAccountStore";
 import { useScanStore } from "@/stores/useScanStore";
 import { ScanProgressModal } from "@/components/dashboard/ScanProgressModal";
 import { scansAPI } from "@/lib/api";
+import { useDialog } from "@/hooks/useDialog";
 import {
   Play,
   RefreshCw,
@@ -25,6 +26,7 @@ export default function ScansPage() {
   const { accounts, fetchAccounts } = useAccountStore();
   const { scans, fetchScans, createScan, deleteAllScans, summary, fetchSummary, isLoading } =
     useScanStore();
+  const { showAlert, showConfirm, showDestructiveConfirm } = useDialog();
   const [selectedAccountIds, setSelectedAccountIds] = useState<string[]>([]);
   const [isDeletingAll, setIsDeletingAll] = useState(false);
   const [isScanning, setIsScanning] = useState(false);
@@ -103,7 +105,7 @@ export default function ScansPage() {
 
   const handleScanSelected = async () => {
     if (selectedAccountIds.length === 0) {
-      alert("Please select at least one account");
+      await showAlert("Please select at least one account");
       return;
     }
 
@@ -132,11 +134,16 @@ export default function ScansPage() {
 
   const handleScanAll = async () => {
     if (accounts.length === 0) {
-      alert("No accounts available to scan");
+      await showAlert("No accounts available to scan");
       return;
     }
 
-    if (!confirm(`Start scanning all ${accounts.length} accounts?`)) {
+    const confirmed = await showConfirm({
+      message: `Start scanning all ${accounts.length} accounts?`,
+      confirmText: "Start Scan",
+    });
+
+    if (!confirmed) {
       return;
     }
 
@@ -160,7 +167,13 @@ export default function ScansPage() {
   };
 
   const handleDeleteAll = async () => {
-    if (!confirm("Êtes-vous sûr de vouloir supprimer tous les scans ? Cette action est irréversible.")) {
+    const confirmed = await showDestructiveConfirm({
+      title: "Supprimer tous les scans",
+      message: "Êtes-vous sûr de vouloir supprimer tous les scans ? Cette action est irréversible.",
+      confirmText: "Supprimer tout",
+    });
+
+    if (!confirmed) {
       return;
     }
 
@@ -426,6 +439,7 @@ function StatCard({ title, value, icon: Icon, color }: any) {
 function ScanRow({ scan, onViewProgress }: any) {
   const { accounts } = useAccountStore();
   const { deleteScan, fetchScans } = useScanStore();
+  const { showDestructiveConfirm } = useDialog();
   const [isDeleting, setIsDeleting] = useState(false);
   const [progress, setProgress] = useState<any>(null);
   const account = accounts.find((a) => a.id === scan.cloud_account_id);
@@ -480,7 +494,13 @@ function ScanRow({ scan, onViewProgress }: any) {
   const StatusIcon = config.icon;
 
   const handleDelete = async () => {
-    if (!confirm("Are you sure you want to delete this scan?")) return;
+    const confirmed = await showDestructiveConfirm({
+      title: "Delete Scan",
+      message: "Are you sure you want to delete this scan?",
+      confirmText: "Delete",
+    });
+
+    if (!confirmed) return;
 
     setIsDeleting(true);
     try {

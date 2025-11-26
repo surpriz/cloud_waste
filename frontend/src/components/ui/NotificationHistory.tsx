@@ -3,6 +3,7 @@
 import { useState, useRef, useEffect } from "react";
 import { Bell, CheckCircle2, XCircle, Trash2 } from "lucide-react";
 import type { Notification } from "@/hooks/useNotifications";
+import { useDialog } from "@/hooks/useDialog";
 
 interface NotificationHistoryProps {
   notifications: Notification[];
@@ -12,6 +13,7 @@ interface NotificationHistoryProps {
 export function NotificationHistory({ notifications, onClearHistory }: NotificationHistoryProps) {
   const [isOpen, setIsOpen] = useState(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
+  const { showConfirm } = useDialog();
 
   // Close dropdown when clicking outside
   useEffect(() => {
@@ -40,8 +42,13 @@ export function NotificationHistory({ notifications, onClearHistory }: Notificat
     return `${Math.floor(diff / 86400)}d ago`;
   };
 
-  const handleClearAll = () => {
-    if (confirm("Clear all notification history?")) {
+  const handleClearAll = async () => {
+    const confirmed = await showConfirm({
+      message: "Clear all notification history?",
+      confirmText: "Clear All",
+    });
+
+    if (confirmed) {
       onClearHistory();
       setIsOpen(false);
     }

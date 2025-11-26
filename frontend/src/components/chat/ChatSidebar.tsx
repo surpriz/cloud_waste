@@ -7,6 +7,7 @@
 import { useEffect } from "react";
 import { MessageSquare, Plus, Trash2 } from "lucide-react";
 import { useChatStore } from "@/stores/useChatStore";
+import { useDialog } from "@/hooks/useDialog";
 
 export function ChatSidebar() {
   const {
@@ -18,6 +19,7 @@ export function ChatSidebar() {
     deleteConversation,
     isLoading,
   } = useChatStore();
+  const { showDestructiveConfirm } = useDialog();
 
   useEffect(() => {
     loadConversations();
@@ -41,7 +43,13 @@ export function ChatSidebar() {
 
   const handleDeleteConversation = async (id: string, e: React.MouseEvent) => {
     e.stopPropagation();
-    if (window.confirm("Are you sure you want to delete this conversation?")) {
+    const confirmed = await showDestructiveConfirm({
+      title: "Delete Conversation",
+      message: "Are you sure you want to delete this conversation?",
+      confirmText: "Delete",
+    });
+
+    if (confirmed) {
       try {
         await deleteConversation(id);
       } catch (error) {

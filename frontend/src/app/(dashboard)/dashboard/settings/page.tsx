@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { User, Bell, Shield, Trash2, Save, Key, Sliders, RotateCcw, HardDrive, Globe, Camera, Server, Activity, Zap, Database, ArrowLeft, Network, AlertTriangle, TrendingDown, Archive, TestTube, Copy, Clock, Cpu, Users, FileText, Search, ChevronDown, Box, XCircle, Tag, DollarSign, AlertCircle, Layers, Calendar, TrendingUp, PackageOpen, Workflow } from "lucide-react";
 import Link from "next/link";
 import { useNotifications } from "@/hooks/useNotifications";
+import { useDialog } from "@/hooks/useDialog";
 import { Toast } from "@/components/ui/Toast";
 import { NotificationHistory } from "@/components/ui/NotificationHistory";
 import { BasicModeView } from "@/components/detection/BasicModeView";
@@ -1385,6 +1386,7 @@ export default function SettingsPage() {
 
   // Use advanced notification system
   const { currentNotification, history, showSuccess, showError, dismiss, clearHistory } = useNotifications();
+  const { showConfirm, showDestructiveConfirm } = useDialog();
 
   // Save viewMode to localStorage when it changes
   useEffect(() => {
@@ -1485,7 +1487,12 @@ export default function SettingsPage() {
   };
 
   const resetRule = async (resourceType: string) => {
-    if (!confirm("Reset this rule to default values?")) return;
+    const confirmed = await showConfirm({
+      message: "Reset this rule to default values?",
+      confirmText: "Reset",
+    });
+
+    if (!confirmed) return;
 
     try {
       const token = localStorage.getItem("access_token");
@@ -1507,7 +1514,14 @@ export default function SettingsPage() {
   };
 
   const resetAllRules = async () => {
-    if (!confirm("⚠️ Reset ALL detection rules to default values?\n\nThis will delete all your custom settings for all 20+ resource types.")) return;
+    const confirmed = await showDestructiveConfirm({
+      title: "Reset ALL detection rules",
+      message: "This will delete all your custom settings for all 20+ resource types.",
+      confirmText: "Reset All",
+      warningText: "Action irréversible",
+    });
+
+    if (!confirmed) return;
 
     try {
       const token = localStorage.getItem("access_token");
@@ -1530,7 +1544,13 @@ export default function SettingsPage() {
   };
 
   const setAllToZeroDays = async () => {
-    if (!confirm("🔧 [ADMIN] Set ALL min_age_days to 0 for immediate testing?\n\nThis will allow newly created resources to be detected immediately without waiting 3 days.\n\nThis is useful for testing AWS resource deployment.")) return;
+    const confirmed = await showConfirm({
+      title: "🔧 [ADMIN] Set ALL min_age_days to 0",
+      message: "This will allow newly created resources to be detected immediately without waiting 3 days. This is useful for testing AWS resource deployment.",
+      confirmText: "Enable Testing Mode",
+    });
+
+    if (!confirmed) return;
 
     try {
       const token = localStorage.getItem("access_token");

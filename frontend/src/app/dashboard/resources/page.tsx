@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { useResourceStore } from "@/stores/useResourceStore";
 import { useAccountStore } from "@/stores/useAccountStore";
 import { useOnboardingStore } from "@/stores/useOnboardingStore";
+import { useDialog } from "@/hooks/useDialog";
 import {
   Filter,
   RefreshCw,
@@ -284,6 +285,7 @@ export default function ResourcesPage() {
     isLoading,
   } = useResourceStore();
   const { accounts, fetchAccounts } = useAccountStore();
+  const { showDestructiveConfirm } = useDialog();
 
   const [showFilters, setShowFilters] = useState(false);
 
@@ -325,7 +327,13 @@ export default function ResourcesPage() {
   };
 
   const handleDelete = async (resourceId: string) => {
-    if (!confirm("Delete this resource record? This will NOT delete the actual AWS resource.")) {
+    const confirmed = await showDestructiveConfirm({
+      title: "Delete Resource Record",
+      message: "This will NOT delete the actual cloud resource, only the record in CutCosts.",
+      confirmText: "Delete Record",
+    });
+
+    if (!confirmed) {
       return;
     }
     try {

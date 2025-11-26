@@ -4,6 +4,7 @@ import "./globals.css";
 import { CookieBanner } from "@/components/legal/CookieBanner";
 import { StructuredData } from "@/components/seo/StructuredData";
 import { SentryProvider } from "@/components/providers/SentryProvider";
+import { DialogProvider } from "@/components/ui/DialogProvider";
 
 const inter = Inter({ subsets: ["latin"] });
 
@@ -108,6 +109,7 @@ export default function RootLayout({
         <SentryProvider>
           {children}
           <CookieBanner />
+          <DialogProvider />
         </SentryProvider>
       </body>
     </html>
