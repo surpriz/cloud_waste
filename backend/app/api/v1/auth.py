@@ -18,6 +18,7 @@ from app.schemas.token import RefreshTokenRequest, Token
 from app.schemas.user import User as UserSchema
 from app.schemas.user import UserCreate, UserUpdate
 from app.services import email_service
+from app.services.subscription_service import SubscriptionService
 
 router = APIRouter()
 logger = structlog.get_logger()
@@ -54,6 +55,21 @@ async def register(
 
     # Create new user (email_verified defaults to False)
     user = await user_crud.create_user(db, user_in)
+
+    # Create free subscription for new user
+    subscription_service = SubscriptionService(db)
+    try:
+        await subscription_service.create_free_subscription(user.id)
+        logger.info(
+            "auth.free_subscription_created",
+            user_id=str(user.id),
+        )
+    except Exception as e:
+        logger.error(
+            "auth.free_subscription_failed",
+            user_id=str(user.id),
+            error=str(e),
+        )
 
     # Generate verification token
     verification_token = await user_crud.set_verification_token(db, user)

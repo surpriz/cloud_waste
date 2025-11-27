@@ -14,6 +14,8 @@ from app.models.resource_lifecycle_event import ResourceLifecycleEvent
 from app.models.cloudwatch_metrics_history import CloudWatchMetricsHistory
 from app.models.user_action_pattern import UserActionPattern
 from app.models.cost_trend_data import CostTrendData
+from app.models.subscription_plan import SubscriptionPlan
+from app.models.user_subscription import UserSubscription
 
 __all__ = [
     "User",
@@ -31,4 +33,6 @@ __all__ = [
     "CloudWatchMetricsHistory",
     "UserActionPattern",
     "CostTrendData",
+    "SubscriptionPlan",
+    "UserSubscription",
 ]

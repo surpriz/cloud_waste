@@ -607,6 +607,33 @@ export const adminAPI = {
       }
     );
   },
+
+  // Subscription Management
+  async getSubscriptionPlans(): Promise<import("@/types/subscription").SubscriptionPlan[]> {
+    return fetchAPI<import("@/types/subscription").SubscriptionPlan[]>("/api/v1/subscriptions/plans");
+  },
+
+  async getCurrentSubscription(): Promise<import("@/types/subscription").UserSubscription> {
+    return fetchAPI<import("@/types/subscription").UserSubscription>("/api/v1/subscriptions/current");
+  },
+
+  async createCheckoutSession(
+    request: import("@/types/subscription").CreateCheckoutSessionRequest
+  ): Promise<import("@/types/subscription").CreateCheckoutSessionResponse> {
+    return fetchAPI<import("@/types/subscription").CreateCheckoutSessionResponse>("/api/v1/subscriptions/create-checkout-session", {
+      method: "POST",
+      body: JSON.stringify(request),
+    });
+  },
+
+  async createPortalSession(
+    request: import("@/types/subscription").CreatePortalSessionRequest
+  ): Promise<import("@/types/subscription").CreatePortalSessionResponse> {
+    return fetchAPI<import("@/types/subscription").CreatePortalSessionResponse>("/api/v1/subscriptions/create-portal-session", {
+      method: "POST",
+      body: JSON.stringify(request),
+    });
+  },
 };
 
 export { APIError, clearAuthTokens, getAuthToken, setAuthTokens };

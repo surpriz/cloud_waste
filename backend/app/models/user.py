@@ -64,6 +64,11 @@ class User(Base):
         default=True,
         nullable=False,
     )
+    stripe_customer_id: Mapped[str | None] = mapped_column(
+        String(255),
+        nullable=True,
+        index=True,
+    )
     created_at: Mapped[datetime] = mapped_column(
         server_default=func.now(),
         nullable=False,
@@ -92,6 +97,12 @@ class User(Base):
     )
     preferences: Mapped["UserPreferences"] = relationship(  # type: ignore
         "UserPreferences",
+        back_populates="user",
+        cascade="all, delete-orphan",
+        uselist=False,  # One-to-one relationship
+    )
+    subscription: Mapped["UserSubscription"] = relationship(  # type: ignore
+        "UserSubscription",
         back_populates="user",
         cascade="all, delete-orphan",
         uselist=False,  # One-to-one relationship
