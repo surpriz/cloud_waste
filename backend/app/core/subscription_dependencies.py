@@ -6,8 +6,8 @@ from typing import Annotated
 from fastapi import Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.deps import get_current_active_user
 from app.core.database import get_db
-from app.core.security import get_current_active_user
 from app.models.user import User
 from app.services.subscription_service import SubscriptionService
 

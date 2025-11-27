@@ -2,6 +2,7 @@
 
 import { useAuthStore } from "@/stores/useAuthStore";
 import { Bell, User, Menu } from "lucide-react";
+import { SubscriptionBadge } from "@/components/subscription";
 
 interface HeaderProps {
   onOpenMobileMenu?: () => void;
@@ -35,6 +36,9 @@ export function Header({ onOpenMobileMenu }: HeaderProps) {
       </div>
 
       <div className="flex items-center gap-2 md:gap-4">
+        {/* Subscription Badge */}
+        <SubscriptionBadge size="sm" />
+
         {/* Notifications */}
         <button className="relative rounded-full p-2 text-gray-400 hover:bg-gray-100 hover:text-gray-600">
           <Bell className="h-5 w-5" />
