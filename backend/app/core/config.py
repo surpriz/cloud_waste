@@ -121,6 +121,13 @@ class Settings(BaseSettings):
     RATE_LIMIT_ADMIN: str = "50/minute"  # Admin endpoints
     RATE_LIMIT_API_DEFAULT: str = "100/minute"  # Default for all API endpoints
 
+    # Stripe Payment
+    STRIPE_SECRET_KEY: str = ""
+    STRIPE_PUBLISHABLE_KEY: str = ""
+    STRIPE_WEBHOOK_SECRET: str = ""
+    STRIPE_PRICE_ID_PRO: str = ""  # Stripe Price ID for Pro plan
+    STRIPE_PRICE_ID_ENTERPRISE: str = ""  # Stripe Price ID for Enterprise plan
+
     @field_validator("ALLOWED_ORIGINS", mode="before")
     @classmethod
     def parse_allowed_origins(cls, v: str | List[str]) -> List[str]:

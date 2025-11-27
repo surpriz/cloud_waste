@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_active_user, get_db
 from app.core.rate_limit import api_default_limit
+from app.core.subscription_dependencies import check_cloud_account_limit
 from app.crud import cloud_account as cloud_account_crud
 from app.models.user import User
 from app.schemas.cloud_account import (
@@ -36,15 +37,16 @@ async def create_cloud_account(
     response: Response,
     account_in: CloudAccountCreate,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(get_current_active_user)],
+    current_user: Annotated[User, Depends(check_cloud_account_limit)],
 ) -> CloudAccount:
     """
     Create a new cloud account connection.
 
     This endpoint:
-    1. Validates the provided credentials
-    2. Encrypts the credentials before storage
-    3. Creates the cloud account record
+    1. Checks subscription limits for cloud accounts
+    2. Validates the provided credentials
+    3. Encrypts the credentials before storage
+    4. Creates the cloud account record
 
     Args:
         account_in: Cloud account creation data
@@ -55,7 +57,7 @@ async def create_cloud_account(
         Created cloud account (without credentials)
 
     Raises:
-        HTTPException: If validation fails or account creation fails
+        HTTPException: If validation fails, limit exceeded, or account creation fails
     """
     # Validate credentials before storing
     if account_in.provider == "aws":

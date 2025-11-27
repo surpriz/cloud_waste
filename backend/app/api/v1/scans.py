@@ -10,11 +10,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_active_user, get_db
 from app.core.rate_limit import scan_limit
+from app.core.subscription_dependencies import check_scan_limit
 from app.crud import cloud_account as cloud_account_crud
 from app.crud import scan as scan_crud
 from app.models.scan import ScanType
 from app.models.user import User
 from app.schemas.scan import Scan, ScanCreate, ScanProgress, ScanSummary, ScanWithResources
+from app.services.subscription_service import SubscriptionService
 from app.workers.celery_app import celery_app
 from app.workers.tasks import scan_cloud_account
 
@@ -28,13 +30,15 @@ async def create_scan(
     response: Response,
     scan_in: ScanCreate,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(get_current_active_user)],
+    current_user: Annotated[User, Depends(check_scan_limit)],
 ) -> Scan:
     """
     Create a new scan job for a cloud account.
 
     Validates that the account belongs to the current user and queues
     a background task to perform the scan.
+
+    Checks subscription limits before allowing scan.
     """
     # Verify account belongs to user
     account = await cloud_account_crud.get_cloud_account_by_id(
@@ -55,6 +59,10 @@ async def create_scan(
 
     # Create scan record
     scan = await scan_crud.create_scan(db, scan_in)
+
+    # Increment scan usage counter
+    subscription_service = SubscriptionService(db)
+    await subscription_service.increment_scan_usage(current_user.id)
 
     # Ensure database transaction is fully committed before queuing task
     await db.commit()
@@ -79,7 +87,7 @@ async def create_inventory_scan(
     response: Response,
     scan_request: InventoryScanRequest,
     db: Annotated[AsyncSession, Depends(get_db)],
-    current_user: Annotated[User, Depends(get_current_active_user)],
+    current_user: Annotated[User, Depends(check_scan_limit)],
 ) -> Scan:
     """
     Create a new inventory scan job for Cost Optimization Hub.
@@ -90,6 +98,8 @@ async def create_inventory_scan(
     Difference from regular scan:
     - Regular scan: Detects orphaned/wasted resources → Waste Detection tab
     - Inventory scan: Scans ALL resources → Cost Optimization Hub tab
+
+    Checks subscription limits before allowing scan.
 
     Args:
         cloud_account_id: UUID of the cloud account to scan
@@ -123,6 +133,10 @@ async def create_inventory_scan(
     )
 
     scan = await scan_crud.create_scan(db, scan_in)
+
+    # Increment scan usage counter
+    subscription_service = SubscriptionService(db)
+    await subscription_service.increment_scan_usage(current_user.id)
 
     # Ensure database transaction is fully committed before queuing task
     await db.commit()
