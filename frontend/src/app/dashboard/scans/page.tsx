@@ -3,6 +3,8 @@
 import { useEffect, useState } from "react";
 import { useAccountStore } from "@/stores/useAccountStore";
 import { useScanStore } from "@/stores/useScanStore";
+import useSubscriptionStore from "@/stores/useSubscriptionStore";
+import { UpgradeDialog } from "@/components/subscription";
 import { ScanProgressModal } from "@/components/dashboard/ScanProgressModal";
 import { scansAPI } from "@/lib/api";
 import { useDialog } from "@/hooks/useDialog";
@@ -26,12 +28,14 @@ export default function ScansPage() {
   const { accounts, fetchAccounts } = useAccountStore();
   const { scans, fetchScans, createScan, deleteAllScans, summary, fetchSummary, isLoading } =
     useScanStore();
+  const { canScan } = useSubscriptionStore();
   const { showAlert, showConfirm, showDestructiveConfirm } = useDialog();
   const [selectedAccountIds, setSelectedAccountIds] = useState<string[]>([]);
   const [isDeletingAll, setIsDeletingAll] = useState(false);
   const [isScanning, setIsScanning] = useState(false);
   const [activeScanId, setActiveScanId] = useState<string | null>(null);
   const [showProgressModal, setShowProgressModal] = useState(false);
+  const [showUpgradeDialog, setShowUpgradeDialog] = useState(false);
 
   useEffect(() => {
     fetchAccounts();
@@ -109,6 +113,12 @@ export default function ScansPage() {
       return;
     }
 
+    // Check subscription limits
+    if (!canScan()) {
+      setShowUpgradeDialog(true);
+      return;
+    }
+
     setIsScanning(true);
     try {
       // Launch scans for all selected accounts
@@ -135,6 +145,12 @@ export default function ScansPage() {
   const handleScanAll = async () => {
     if (accounts.length === 0) {
       await showAlert("No accounts available to scan");
+      return;
+    }
+
+    // Check subscription limits
+    if (!canScan()) {
+      setShowUpgradeDialog(true);
       return;
     }
 
@@ -190,6 +206,13 @@ export default function ScansPage() {
 
   return (
     <div className="space-y-4 md:space-y-6">
+      {/* Upgrade Dialog */}
+      <UpgradeDialog
+        open={showUpgradeDialog}
+        onOpenChange={setShowUpgradeDialog}
+        reason="scan_limit"
+      />
+
       {/* Progress Modal */}
       {activeScanId && (
         <ScanProgressModal

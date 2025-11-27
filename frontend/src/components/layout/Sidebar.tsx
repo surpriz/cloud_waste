@@ -15,6 +15,8 @@ import {
   Shield,
   Trash2,
   Sparkles,
+  CreditCard,
+  DollarSign,
 } from "lucide-react";
 import { useAuthStore } from "@/stores/useAuthStore";
 
@@ -26,6 +28,8 @@ const navigation = [
   { name: "Cost Optimization", href: "/dashboard/cost-intelligence", icon: Sparkles },
   { name: "🤖 AI Assistant", href: "/dashboard/assistant", icon: MessageSquare },
   { name: "💰 Impact & Savings", href: "/dashboard/impact", icon: TrendingUp },
+  { name: "Subscription", href: "/dashboard/subscription", icon: CreditCard },
+  { name: "Pricing Plans", href: "/pricing", icon: DollarSign },
   { name: "Settings", href: "/dashboard/settings", icon: Settings },
   { name: "Documentation", href: "/dashboard/docs", icon: BookOpen },
 ];

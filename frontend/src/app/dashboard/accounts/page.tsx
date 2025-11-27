@@ -2,12 +2,16 @@
 
 import { useEffect, useState } from "react";
 import { useAccountStore } from "@/stores/useAccountStore";
+import useSubscriptionStore from "@/stores/useSubscriptionStore";
+import { UpgradeDialog } from "@/components/subscription";
 import { accountsAPI } from "@/lib/api";
 import { Plus, Trash2, RefreshCw, CheckCircle, XCircle, HelpCircle, ChevronDown, ChevronUp, Copy, ExternalLink, Edit, Info, AlertCircle } from "lucide-react";
 
 export default function AccountsPage() {
   const { accounts, fetchAccounts, deleteAccount, isLoading } = useAccountStore();
+  const { canAddCloudAccount } = useSubscriptionStore();
   const [showProviderSelector, setShowProviderSelector] = useState(false);
+  const [showUpgradeDialog, setShowUpgradeDialog] = useState(false);
   const [selectedProvider, setSelectedProvider] = useState<"aws" | "azure" | "gcp" | "microsoft365" | null>(null);
   const [editingAccount, setEditingAccount] = useState<any>(null);
 
@@ -16,6 +20,13 @@ export default function AccountsPage() {
   }, [fetchAccounts]);
 
   const handleAddAccount = (provider: "aws" | "azure" | "gcp" | "microsoft365") => {
+    // Check subscription limits before allowing account creation
+    if (!canAddCloudAccount()) {
+      setShowProviderSelector(false);
+      setShowUpgradeDialog(true);
+      return;
+    }
+
     setSelectedProvider(provider);
     setShowProviderSelector(false);
   };
@@ -26,6 +37,13 @@ export default function AccountsPage() {
 
   return (
     <div className="space-y-4 md:space-y-6">
+      {/* Upgrade Dialog */}
+      <UpgradeDialog
+        open={showUpgradeDialog}
+        onOpenChange={setShowUpgradeDialog}
+        reason="cloud_account_limit"
+      />
+
       {/* Header */}
       <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
         <div>

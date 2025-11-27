@@ -1,183 +1,122 @@
-/**
- * Dialog Component
- *
- * Custom styled dialog component matching CutCost design system.
- * Supports 3 variants: alert, confirm, and destructive.
- */
+"use client"
 
-'use client';
+import * as React from "react"
+import * as DialogPrimitive from "@radix-ui/react-dialog"
+import { X } from "lucide-react"
 
-import React, { useEffect, useRef } from 'react';
-import { Info, AlertCircle, AlertTriangle } from 'lucide-react';
-import type { DialogType, DialogOptions } from '@/types/dialog';
+import { cn } from "@/lib/utils"
 
-interface DialogProps {
-  isOpen: boolean;
-  type: DialogType;
-  options: DialogOptions;
-  onConfirm: () => void;
-  onCancel: () => void;
+const Dialog = DialogPrimitive.Root
+
+const DialogTrigger = DialogPrimitive.Trigger
+
+const DialogPortal = DialogPrimitive.Portal
+
+const DialogClose = DialogPrimitive.Close
+
+const DialogOverlay = React.forwardRef<
+  React.ElementRef<typeof DialogPrimitive.Overlay>,
+  React.ComponentPropsWithoutRef<typeof DialogPrimitive.Overlay>
+>(({ className, ...props }, ref) => (
+  <DialogPrimitive.Overlay
+    ref={ref}
+    className={cn(
+      "fixed inset-0 z-50 bg-black/80  data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0",
+      className
+    )}
+    {...props}
+  />
+))
+DialogOverlay.displayName = DialogPrimitive.Overlay.displayName
+
+const DialogContent = React.forwardRef<
+  React.ElementRef<typeof DialogPrimitive.Content>,
+  React.ComponentPropsWithoutRef<typeof DialogPrimitive.Content>
+>(({ className, children, ...props }, ref) => (
+  <DialogPortal>
+    <DialogOverlay />
+    <DialogPrimitive.Content
+      ref={ref}
+      className={cn(
+        "fixed left-[50%] top-[50%] z-50 grid w-full max-w-lg translate-x-[-50%] translate-y-[-50%] gap-4 border bg-background p-6 shadow-lg duration-200 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 data-[state=closed]:slide-out-to-left-1/2 data-[state=closed]:slide-out-to-top-[48%] data-[state=open]:slide-in-from-left-1/2 data-[state=open]:slide-in-from-top-[48%] sm:rounded-lg",
+        className
+      )}
+      {...props}
+    >
+      {children}
+      <DialogPrimitive.Close className="absolute right-4 top-4 rounded-sm opacity-70 ring-offset-background transition-opacity hover:opacity-100 focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 disabled:pointer-events-none data-[state=open]:bg-accent data-[state=open]:text-muted-foreground">
+        <X className="h-4 w-4" />
+        <span className="sr-only">Close</span>
+      </DialogPrimitive.Close>
+    </DialogPrimitive.Content>
+  </DialogPortal>
+))
+DialogContent.displayName = DialogPrimitive.Content.displayName
+
+const DialogHeader = ({
+  className,
+  ...props
+}: React.HTMLAttributes<HTMLDivElement>) => (
+  <div
+    className={cn(
+      "flex flex-col space-y-1.5 text-center sm:text-left",
+      className
+    )}
+    {...props}
+  />
+)
+DialogHeader.displayName = "DialogHeader"
+
+const DialogFooter = ({
+  className,
+  ...props
+}: React.HTMLAttributes<HTMLDivElement>) => (
+  <div
+    className={cn(
+      "flex flex-col-reverse sm:flex-row sm:justify-end sm:space-x-2",
+      className
+    )}
+    {...props}
+  />
+)
+DialogFooter.displayName = "DialogFooter"
+
+const DialogTitle = React.forwardRef<
+  React.ElementRef<typeof DialogPrimitive.Title>,
+  React.ComponentPropsWithoutRef<typeof DialogPrimitive.Title>
+>(({ className, ...props }, ref) => (
+  <DialogPrimitive.Title
+    ref={ref}
+    className={cn(
+      "text-lg font-semibold leading-none tracking-tight",
+      className
+    )}
+    {...props}
+  />
+))
+DialogTitle.displayName = DialogPrimitive.Title.displayName
+
+const DialogDescription = React.forwardRef<
+  React.ElementRef<typeof DialogPrimitive.Description>,
+  React.ComponentPropsWithoutRef<typeof DialogPrimitive.Description>
+>(({ className, ...props }, ref) => (
+  <DialogPrimitive.Description
+    ref={ref}
+    className={cn("text-sm text-muted-foreground", className)}
+    {...props}
+  />
+))
+DialogDescription.displayName = DialogPrimitive.Description.displayName
+
+export {
+  Dialog,
+  DialogPortal,
+  DialogOverlay,
+  DialogClose,
+  DialogTrigger,
+  DialogContent,
+  DialogHeader,
+  DialogFooter,
+  DialogTitle,
+  DialogDescription,
 }
-
-export const Dialog: React.FC<DialogProps> = ({
-  isOpen,
-  type,
-  options,
-  onConfirm,
-  onCancel,
-}) => {
-  const confirmButtonRef = useRef<HTMLButtonElement>(null);
-
-  // Handle keyboard events
-  useEffect(() => {
-    if (!isOpen) return;
-
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
-        event.preventDefault();
-        onCancel();
-      } else if (event.key === 'Enter') {
-        event.preventDefault();
-        onConfirm();
-      }
-    };
-
-    document.addEventListener('keydown', handleKeyDown);
-    return () => document.removeEventListener('keydown', handleKeyDown);
-  }, [isOpen, onConfirm, onCancel]);
-
-  // Auto-focus confirm button when dialog opens
-  useEffect(() => {
-    if (isOpen && confirmButtonRef.current) {
-      confirmButtonRef.current.focus();
-    }
-  }, [isOpen]);
-
-  if (!isOpen) return null;
-
-  // Handle overlay click
-  const handleOverlayClick = (event: React.MouseEvent<HTMLDivElement>) => {
-    // For destructive dialogs, don't close on overlay click (force conscious choice)
-    if (type === 'destructive') return;
-
-    // Only close if clicking the overlay itself, not its children
-    if (event.target === event.currentTarget) {
-      onCancel();
-    }
-  };
-
-  // Get icon component based on dialog type
-  const Icon = type === 'destructive' ? AlertTriangle : type === 'confirm' ? AlertCircle : Info;
-
-  // Get icon color class
-  const iconColorClass =
-    type === 'destructive' ? 'text-red-600' : 'text-blue-600';
-
-  // Get border color class
-  const borderColorClass =
-    type === 'destructive' ? 'border-red-300' : 'border-gray-200';
-
-  // Get default button texts
-  const confirmText =
-    options.confirmText ||
-    (type === 'alert' ? 'OK' : type === 'destructive' ? 'Delete' : 'Confirm');
-  const cancelText = options.cancelText || 'Cancel';
-  const warningText = options.warningText || 'Irreversible action';
-
-  return (
-    <>
-      {/* Overlay */}
-      <div
-        className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[100] animate-fade-in"
-        onClick={handleOverlayClick}
-        aria-hidden="true"
-      />
-
-      {/* Dialog Container */}
-      <div
-        className="fixed inset-0 z-[101] flex items-center justify-center p-4"
-        onClick={handleOverlayClick}
-      >
-        {/* Dialog Card */}
-        <div
-          className={`w-full max-w-md bg-white rounded-2xl border-2 ${borderColorClass} shadow-xl animate-scale-in pointer-events-auto`}
-          role="dialog"
-          aria-modal="true"
-          aria-labelledby={options.title ? 'dialog-title' : undefined}
-          aria-describedby="dialog-message"
-        >
-          {/* Content */}
-          <div className="p-6">
-            {/* Icon + Title Section */}
-            <div className="flex items-start gap-4 mb-4">
-              {/* Icon */}
-              <div className="flex-shrink-0 mt-0.5">
-                <Icon className={`h-6 w-6 ${iconColorClass}`} aria-hidden="true" />
-              </div>
-
-              {/* Title + Message */}
-              <div className="flex-1">
-                {options.title && (
-                  <h2
-                    id="dialog-title"
-                    className="text-lg font-semibold text-gray-900 mb-2"
-                  >
-                    {options.title}
-                  </h2>
-                )}
-
-                <p
-                  id="dialog-message"
-                  className="text-gray-700 leading-relaxed"
-                >
-                  {options.message}
-                </p>
-
-                {/* Warning badge for destructive dialogs */}
-                {type === 'destructive' && (
-                  <div className="mt-3 inline-flex items-center gap-1.5 px-3 py-1 bg-red-50 border border-red-200 rounded-lg">
-                    <span className="text-red-600 font-medium text-sm">
-                      ⚠️ {warningText}
-                    </span>
-                  </div>
-                )}
-              </div>
-            </div>
-
-            {/* Buttons */}
-            <div className="flex gap-3 mt-6">
-              {/* Cancel button (for confirm and destructive dialogs) */}
-              {type !== 'alert' && (
-                <button
-                  type="button"
-                  onClick={onCancel}
-                  className="flex-1 px-4 py-2 border-2 border-gray-300 bg-white text-gray-700 hover:bg-gray-50 rounded-lg font-semibold transition-colors"
-                >
-                  {cancelText}
-                </button>
-              )}
-
-              {/* Confirm button */}
-              <button
-                ref={confirmButtonRef}
-                type="button"
-                onClick={onConfirm}
-                className={`${
-                  type === 'alert' ? 'w-full' : 'flex-1'
-                } px-4 py-2 ${
-                  type === 'destructive'
-                    ? 'bg-red-600 hover:bg-red-700'
-                    : 'bg-blue-600 hover:bg-blue-700'
-                } text-white rounded-lg font-semibold transition-colors focus:outline-none focus:ring-2 focus:ring-offset-2 ${
-                  type === 'destructive' ? 'focus:ring-red-500' : 'focus:ring-blue-500'
-                }`}
-              >
-                {confirmText}
-              </button>
-            </div>
-          </div>
-        </div>
-      </div>
-    </>
-  );
-};

@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import { adminAPI } from "@/lib/api";
 import { useDialog } from "@/hooks/useDialog";
 import type { User, AdminStats, PricingStats, MLDataStats, MLExportResponse, SESMetrics, SESIdentityMetrics } from "@/types";
-import { Shield, Users, UserCheck, UserX, Crown, Ban, CheckCircle, DollarSign, TrendingUp, Database, Download, Mail, AlertTriangle, CheckCircle2 } from "lucide-react";
+import { Shield, Users, UserCheck, UserX, Crown, Ban, CheckCircle, DollarSign, TrendingUp, Database, Download, Mail, AlertTriangle, CheckCircle2, CreditCard, Zap, Sparkles } from "lucide-react";
 
 export default function AdminPage() {
   const router = useRouter();
@@ -223,6 +223,67 @@ export default function AdminPage() {
                 </div>
                 <Crown className="h-12 w-12 text-purple-600" />
               </div>
+            </div>
+          </div>
+        )}
+
+        {/* Subscription Management Widget */}
+        {stats && (
+          <div className="mb-8 bg-gradient-to-r from-purple-50 to-pink-50 rounded-lg shadow-sm border border-purple-200 p-6">
+            <div className="flex items-center justify-between">
+              <div className="flex-1">
+                <div className="flex items-center gap-4 mb-4">
+                  <CreditCard className="h-10 w-10 text-purple-600" />
+                  <div>
+                    <h3 className="text-lg font-semibold text-gray-900 flex items-center gap-2">
+                      Subscription Management
+                      <span className="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-green-100 text-green-800">
+                        ✅ Active
+                      </span>
+                    </h3>
+                    <p className="text-sm text-gray-600 mt-1">
+                      User subscription tiers and payment status
+                    </p>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-3 gap-4">
+                  <div className="bg-white rounded-lg p-4 border border-gray-200">
+                    <div className="flex items-center gap-2 mb-1">
+                      <Zap className="h-4 w-4 text-gray-500" />
+                      <p className="text-sm text-gray-600">Free Plan</p>
+                    </div>
+                    <p className="text-2xl font-bold text-gray-700">
+                      {users.filter(u => !u.subscription || u.subscription.plan?.name === 'free').length}
+                    </p>
+                  </div>
+                  <div className="bg-white rounded-lg p-4 border border-blue-200">
+                    <div className="flex items-center gap-2 mb-1">
+                      <Sparkles className="h-4 w-4 text-blue-600" />
+                      <p className="text-sm text-gray-600">Pro Plan</p>
+                    </div>
+                    <p className="text-2xl font-bold text-blue-600">
+                      {users.filter(u => u.subscription?.plan?.name === 'pro').length}
+                    </p>
+                  </div>
+                  <div className="bg-white rounded-lg p-4 border border-purple-200">
+                    <div className="flex items-center gap-2 mb-1">
+                      <Crown className="h-4 w-4 text-purple-600" />
+                      <p className="text-sm text-gray-600">Enterprise</p>
+                    </div>
+                    <p className="text-2xl font-bold text-purple-600">
+                      {users.filter(u => u.subscription?.plan?.name === 'enterprise').length}
+                    </p>
+                  </div>
+                </div>
+              </div>
+              <button
+                onClick={() => router.push("/pricing")}
+                className="flex items-center gap-2 px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 ml-4"
+              >
+                <CreditCard className="h-4 w-4" />
+                View Pricing →
+              </button>
             </div>
           </div>
         )}
