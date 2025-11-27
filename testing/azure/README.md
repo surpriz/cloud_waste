@@ -34,14 +34,6 @@ Infrastructure automatisée pour créer des ressources Azure de test et valider 
 - **Région** : Europe (West Europe) - `westeurope`
 - **SSH Key** : `~/.ssh/id_rsa.pub` (pour la VM)
 
-
-  2. Credentials du Service Principal :
-    - Client ID: 08e4afb1-82ba-4e2a-b7a3-40e7d5d3c6f3
-    - Client Secret: iaL8Q~HfGmtWqbvPcVcDBdYfIVo_RlPF_87zVcqd
-    - Subscription ID: cef281a1-741b-4748-8a38-84b5328b04c3
-    - Tenant ID: 9eca59b5-de4b-434e-86ea-0e90723e2871
-  3. Régions: westeurope
-
 ## 🚀 Quick Start
 
 ### 1. Configuration initiale
