@@ -81,6 +81,33 @@ class SubscriptionService:
         )
         return result.scalar_one_or_none()
 
+    async def get_or_create_user_subscription(
+        self, user_id: UUID
+    ) -> UserSubscription:
+        """Get user's active subscription or create free subscription if none exists.
+
+        This method ensures all users always have a valid subscription.
+        New users or users without a subscription get a free plan automatically.
+
+        Args:
+            user_id: User ID
+
+        Returns:
+            UserSubscription (existing or newly created free subscription)
+
+        Raises:
+            ValueError: If free plan not found in database
+        """
+        # Try to get existing subscription
+        subscription = await self.get_user_subscription(user_id)
+
+        # If no subscription exists, create a free one
+        if not subscription:
+            logger.info(f"No subscription found for user {user_id}, creating free subscription")
+            subscription = await self.create_free_subscription(user_id)
+
+        return subscription
+
     async def create_free_subscription(
         self, user_id: UUID
     ) -> UserSubscription:
@@ -282,21 +309,28 @@ class SubscriptionService:
             )
             return
 
+        # Update status
         subscription.status = stripe_subscription["status"]
-        subscription.current_period_start = datetime.fromtimestamp(
-            stripe_subscription["current_period_start"]
+
+        # Update period dates only if present (Stripe sometimes omits these during cancellations)
+        if "current_period_start" in stripe_subscription:
+            subscription.current_period_start = datetime.fromtimestamp(
+                stripe_subscription["current_period_start"]
+            )
+        if "current_period_end" in stripe_subscription:
+            subscription.current_period_end = datetime.fromtimestamp(
+                stripe_subscription["current_period_end"]
+            )
+
+        # Update cancellation flag
+        subscription.cancel_at_period_end = stripe_subscription.get(
+            "cancel_at_period_end", False
         )
-        subscription.current_period_end = datetime.fromtimestamp(
-            stripe_subscription["current_period_end"]
-        )
-        subscription.cancel_at_period_end = stripe_subscription[
-            "cancel_at_period_end"
-        ]
 
         await self.db.commit()
 
         logger.info(
-            f"Updated subscription {stripe_subscription['id']} status to {stripe_subscription['status']}"
+            f"Updated subscription {stripe_subscription['id']} status to {stripe_subscription['status']}, cancel_at_period_end={subscription.cancel_at_period_end}"
         )
 
     async def handle_subscription_deleted(

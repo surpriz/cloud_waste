@@ -20,6 +20,9 @@ async def check_scan_limit(
 ) -> User:
     """Dependency to check if user can perform a scan.
 
+    For free tier users, scans are unlimited to allow testing and development.
+    For paid plans (Pro/Enterprise), enforce subscription limits normally.
+
     Args:
         current_user: Current authenticated user
         db: Database session
@@ -28,9 +31,18 @@ async def check_scan_limit(
         User if allowed
 
     Raises:
-        HTTPException: If scan limit exceeded
+        HTTPException: If scan limit exceeded (paid plans only)
     """
     service = SubscriptionService(db)
+
+    # Get or create subscription (auto-creates free subscription if none exists)
+    subscription = await service.get_or_create_user_subscription(current_user.id)
+
+    # Free tier users have unlimited scans for testing and development
+    if subscription.plan.name == "free":
+        return current_user
+
+    # For paid plans (Pro/Enterprise), enforce subscription limits
     can_scan, error_message = await service.check_scan_limit(current_user.id)
 
     if not can_scan:

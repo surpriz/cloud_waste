@@ -13,7 +13,7 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import useSubscriptionStore from "@/stores/useSubscriptionStore";
-import useAuthStore from "@/stores/useAuthStore";
+import { useAuthStore } from "@/stores/useAuthStore";
 
 export default function PricingPage() {
   const router = useRouter();

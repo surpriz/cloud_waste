@@ -88,7 +88,7 @@ fi
 TOTAL_COST=0
 echo "Batches to create:"
 [ "${TF_VAR_enable_batch_1}" = "true" ] && echo "  ✓ Batch 1 (Core) - ~€68/month" && TOTAL_COST=$((TOTAL_COST + 68))
-[ "${TF_VAR_enable_batch_2}" = "true" ] && echo "  ✓ Batch 2 (Advanced) - TBD" && TOTAL_COST=$((TOTAL_COST + 0))
+[ "${TF_VAR_enable_batch_2}" = "true" ] && echo "  ✓ Batch 2 (Advanced) - ~€71/month" && TOTAL_COST=$((TOTAL_COST + 71))
 [ "${TF_VAR_enable_batch_3}" = "true" ] && echo "  ✓ Batch 3 (Premium) - TBD" && TOTAL_COST=$((TOTAL_COST + 0))
 
 if [ $TOTAL_COST -eq 0 ]; then

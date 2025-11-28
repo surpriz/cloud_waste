@@ -118,13 +118,13 @@ echo -e "${GREEN}✓ Found${NC}"
 echo ""
 echo "Batch Configuration:"
 echo "  Batch 1 (Core): ${TF_VAR_enable_batch_1:-false} (~€68/month)"
-echo "  Batch 2 (Advanced): ${TF_VAR_enable_batch_2:-false} (TBD)"
+echo "  Batch 2 (Advanced): ${TF_VAR_enable_batch_2:-false} (~€71/month)"
 echo "  Batch 3 (Premium): ${TF_VAR_enable_batch_3:-false} (TBD)"
 
 # Calculate total cost
 TOTAL_COST=0
 [ "${TF_VAR_enable_batch_1}" = "true" ] && TOTAL_COST=$((TOTAL_COST + 68))
-[ "${TF_VAR_enable_batch_2}" = "true" ] && TOTAL_COST=$((TOTAL_COST + 0))
+[ "${TF_VAR_enable_batch_2}" = "true" ] && TOTAL_COST=$((TOTAL_COST + 71))
 [ "${TF_VAR_enable_batch_3}" = "true" ] && TOTAL_COST=$((TOTAL_COST + 0))
 
 echo ""

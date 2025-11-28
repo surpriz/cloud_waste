@@ -97,18 +97,27 @@ terraform -chdir=terraform show | grep -A 5 "monthly_cost"
 
 **Sous-total Batch 1** : ~€68/mois (~$73/mois)
 
-### Batch 2 : Advanced Resources (À venir)
-- 🔄 En cours de planification
+### Batch 2 : Advanced Resources (6 ressources)
+
+- ✅ **Disk Snapshot** 100GB orphaned snapshot (source disk deleted) - `€2/mois`
+- ✅ **NAT Gateway** Standard SKU (no subnet attached) - `€35/mois`
+- ✅ **Azure SQL Database** Basic tier (stopped/idle) - `€4/mois`
+- ✅ **AKS Cluster** Standard_B2s 1 node (minimal workload) - `€30/mois`
+- ✅ **Function App** Consumption plan (zero executions) - `€0/mois (pay-per-execution)`
+- ✅ **Cosmos DB** Table API serverless (zero requests) - `€0/mois (pay-per-request)`
+
+**Sous-total Batch 2** : ~€71/mois (~$76/mois)
 
 ### Batch 3 : Premium Resources (À venir)
 - 🔄 En cours de planification
 
 ---
 
-**💰 COÛT TOTAL ESTIMÉ** : ~€68/mois (Batch 1 uniquement)
+**💰 COÛT TOTAL ESTIMÉ** : ~€68/mois (Batch 1) + ~€71/mois (Batch 2) = ~€139/mois (tous batches)
 
 ⚠️  **RECOMMANDATION** :
 - Créer UNIQUEMENT Batch 1 pour commencer (~€68/mois)
+- Tester Batch 2 séparément (~€71/mois) avec `./scripts/create.sh --batch 2`
 - Détruire immédiatement après test avec `./scripts/destroy.sh`
 - La VM est automatiquement deallocated (€0/mois)
 
@@ -121,6 +130,14 @@ terraform -chdir=terraform show | grep -A 5 "monthly_cost"
 4. **Load Balancer** - Zero traffic (Scenario 1 - HIGH)
 5. **Storage Account** - Minimal usage (Scenario 3 - LOW)
 6. **ExpressRoute Circuit** - Zero traffic (Scenario 1 - CRITICAL)
+
+### Batch 2
+1. **Disk Snapshot** - Orphaned snapshot (source disk deleted) (Scenario 1 - HIGH)
+2. **NAT Gateway** - No subnet attached (Scenario 1 - CRITICAL)
+3. **Azure SQL Database** - Stopped/Idle connections (Scenario 1 - CRITICAL)
+4. **AKS Cluster** - Minimal workload/stopped (Scenario 1 - CRITICAL)
+5. **Function App** - Zero executions (Scenario 1 - HIGH)
+6. **Cosmos DB** - Zero requests (Scenario 1 - HIGH)
 
 ## 🔧 Scripts Disponibles
 

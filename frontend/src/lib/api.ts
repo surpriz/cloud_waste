@@ -636,4 +636,16 @@ export const adminAPI = {
   },
 };
 
+// Default export with all API methods
+const api = {
+  ...authAPI,
+  ...accountsAPI,
+  ...scansAPI,
+  ...resourcesAPI,
+  ...impactAPI,
+  ...chatAPI,
+  ...adminAPI,
+};
+
+export default api;
 export { APIError, clearAuthTokens, getAuthToken, setAuthTokens };

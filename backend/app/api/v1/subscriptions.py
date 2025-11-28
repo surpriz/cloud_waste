@@ -47,22 +47,28 @@ async def get_current_subscription(
 ) -> UserSubscriptionResponse:
     """Get current user's subscription.
 
+    If the user doesn't have a subscription, a free subscription is created automatically.
+    This ensures all users always have access to the platform's basic features.
+
     Returns:
-        User's active subscription
+        User's active subscription (existing or newly created free subscription)
 
     Raises:
-        HTTPException: If no active subscription found
+        HTTPException: If free plan not found in database (configuration error)
     """
     service = SubscriptionService(db)
-    subscription = await service.get_user_subscription(current_user.id)
 
-    if not subscription:
+    try:
+        # Get or create subscription (auto-creates free subscription if needed)
+        subscription = await service.get_or_create_user_subscription(current_user.id)
+        return UserSubscriptionResponse.model_validate(subscription)
+    except ValueError as e:
+        # This should only happen if free plan is not configured in database
+        logger.error(f"Failed to get/create subscription for user {current_user.id}: {str(e)}")
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="No active subscription found",
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Subscription system not properly configured. Please contact support.",
         )
-
-    return UserSubscriptionResponse.model_validate(subscription)
 
 
 @router.post(

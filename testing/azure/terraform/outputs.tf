@@ -48,7 +48,13 @@ output "batch_1_resources" {
 output "batch_2_resources" {
   description = "Batch 2 resource IDs and names"
   value = var.enable_batch_2 ? {
-    # Will be populated when batch2.tf is created
+    disk_snapshot_id         = try(azurerm_snapshot.orphaned[0].id, null)
+    nat_gateway_id           = try(azurerm_nat_gateway.no_subnet[0].id, null)
+    sql_server_name          = try(azurerm_mssql_server.test[0].name, null)
+    sql_database_name        = try(azurerm_mssql_database.stopped[0].name, null)
+    aks_cluster_name         = try(azurerm_kubernetes_cluster.test[0].name, null)
+    function_app_name        = try(azurerm_linux_function_app.test[0].name, null)
+    cosmosdb_account_name    = try(azurerm_cosmosdb_account.test[0].name, null)
   } : null
 }
 
@@ -65,9 +71,9 @@ output "estimated_monthly_cost" {
   description = "Estimated monthly cost in EUR"
   value = {
     batch_1 = var.enable_batch_1 ? 68 : 0
-    batch_2 = var.enable_batch_2 ? 0 : 0
+    batch_2 = var.enable_batch_2 ? 71 : 0
     batch_3 = var.enable_batch_3 ? 0 : 0
-    total   = (var.enable_batch_1 ? 68 : 0) + (var.enable_batch_2 ? 0 : 0) + (var.enable_batch_3 ? 0 : 0)
+    total   = (var.enable_batch_1 ? 68 : 0) + (var.enable_batch_2 ? 71 : 0) + (var.enable_batch_3 ? 0 : 0)
   }
 }
 
@@ -82,5 +88,19 @@ output "batch_1_cost_breakdown" {
     storage_account    = 1
     expressroute_circuit = 45
     total              = 68
+  } : null
+}
+
+# Detailed Cost Breakdown (Batch 2)
+output "batch_2_cost_breakdown" {
+  description = "Detailed monthly cost breakdown for Batch 2 in EUR"
+  value = var.enable_batch_2 ? {
+    disk_snapshot       = 2
+    nat_gateway        = 35
+    sql_database       = 4
+    aks_cluster        = 30
+    function_app       = 0  # €0 pay-per-execution (Consumption plan)
+    cosmosdb           = 0  # €0 pay-per-request (Serverless)
+    total              = 71
   } : null
 }

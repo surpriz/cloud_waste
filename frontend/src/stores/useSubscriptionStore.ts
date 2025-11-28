@@ -9,6 +9,47 @@ import type {
   UserSubscription,
 } from "@/types/subscription";
 
+/**
+ * Default free subscription used as fallback when API fails.
+ * This prevents crashes when pages try to access subscription.plan
+ * while the real subscription is being fetched or if API fails.
+ */
+const DEFAULT_FREE_SUBSCRIPTION: UserSubscription = {
+  id: "",
+  user_id: "",
+  plan_id: "",
+  plan: {
+    id: "",
+    name: "free",
+    display_name: "Free",
+    description: "Free tier with basic features",
+    price_monthly: 0,
+    price_yearly: 0,
+    max_scans_per_month: 10,
+    max_cloud_accounts: 1,
+    has_ai_chat: false,
+    has_impact_tracking: false,
+    has_email_notifications: false,
+    has_api_access: false,
+    has_priority_support: false,
+    is_active: true,
+    stripe_price_id: null,
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+  },
+  status: "active",
+  current_period_start: new Date().toISOString(),
+  current_period_end: null,
+  scans_used_this_month: 0,
+  last_scan_reset_at: new Date().toISOString(),
+  stripe_subscription_id: null,
+  stripe_customer_id: null,
+  cancel_at_period_end: false,
+  canceled_at: null,
+  created_at: new Date().toISOString(),
+  updated_at: new Date().toISOString(),
+};
+
 interface SubscriptionState {
   // Data
   plans: SubscriptionPlan[];
@@ -85,7 +126,14 @@ const useSubscriptionStore = create<SubscriptionState>((set, get) => ({
         error instanceof Error
           ? error.message
           : "Failed to fetch subscription";
-      set({ subscriptionError: message, isLoadingSubscription: false });
+
+      // Use default free subscription as fallback to prevent crashes
+      // This ensures pages can still access subscription.plan safely
+      set({
+        currentSubscription: DEFAULT_FREE_SUBSCRIPTION,
+        subscriptionError: message,
+        isLoadingSubscription: false,
+      });
     }
   },
 

@@ -11,7 +11,7 @@ This document compares the testing infrastructure and detection results between 
 | Provider | Batches | Resources Tested | Detection Rate | Status |
 |----------|---------|------------------|----------------|--------|
 | **AWS** | 5 batches | 25 resource types | TBD | ✅ Implemented |
-| **Azure** | 1 batch (Batch #1) | 6 resource types | **85.7%** | ✅ Tested |
+| **Azure** | 2 batches (Batch #1, #2) | 12 resource types | **Batch #1: 85.7%** | ✅ Batch #1 Tested, Batch #2 Ready |
 | **GCP** | 0 batches | 0 resource types | N/A | 🔄 Planned |
 | **M365** | 0 batches | 0 resource types | N/A | 🔄 Planned |
 
@@ -175,6 +175,23 @@ testing/{provider}/
 - Storage Account: €1
 - ExpressRoute Circuit: €45
 - **Total: ~€68/month**
+
+### Monthly Costs (Batch #2)
+
+| Provider | Estimated Cost |
+|----------|----------------|
+| **Azure Batch #2** | ~€71/month (~$76/month) |
+
+**Azure Batch #2:**
+- Disk Snapshot (100GB): €2
+- NAT Gateway: €35
+- Azure SQL Database (Basic): €4
+- AKS Cluster (1 node, B2s): €30
+- Function App (Consumption): €0 (pay-per-execution)
+- Cosmos DB (Serverless): €0 (pay-per-request)
+- **Total: ~€71/month**
+
+**Note:** Batch #2 focuses on advanced Azure services (databases, containers, serverless) with similar monthly cost to Batch #1.
 
 ---
 
