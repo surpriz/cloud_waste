@@ -74,8 +74,7 @@ rollback() {
         print_step "Reconstruction avec la version stable..."
         docker compose -f "$COMPOSE_FILE" build --no-cache \
             --build-arg NEXT_PUBLIC_SENTRY_DSN="$NEXT_PUBLIC_SENTRY_DSN" \
-            --build-arg NEXT_PUBLIC_SENTRY_ENVIRONMENT="${NEXT_PUBLIC_SENTRY_ENVIRONMENT:-production}" \
-            --parallel
+            --build-arg NEXT_PUBLIC_SENTRY_ENVIRONMENT="${NEXT_PUBLIC_SENTRY_ENVIRONMENT:-production}"
         docker compose -f "$COMPOSE_FILE" up -d
 
         print_success "Rollback terminé - Application restaurée à la version stable"
@@ -151,10 +150,10 @@ while [ $BUILD_RETRY_COUNT -lt $MAX_BUILD_RETRIES ]; do
     print_step "Tentative de build #$((BUILD_RETRY_COUNT + 1))/$MAX_BUILD_RETRIES..."
 
     # Build with Sentry variables as build args for frontend
+    # Note: Building sequentially (no --parallel) to reduce VPS resource usage and prevent BuildKit crashes
     if docker compose -f "$COMPOSE_FILE" build \
         --build-arg NEXT_PUBLIC_SENTRY_DSN="$NEXT_PUBLIC_SENTRY_DSN" \
-        --build-arg NEXT_PUBLIC_SENTRY_ENVIRONMENT="${NEXT_PUBLIC_SENTRY_ENVIRONMENT:-production}" \
-        --parallel; then
+        --build-arg NEXT_PUBLIC_SENTRY_ENVIRONMENT="${NEXT_PUBLIC_SENTRY_ENVIRONMENT:-production}"; then
         BUILD_SUCCESS=true
         print_success "Nouvelles images construites avec succès (avec variables Sentry)"
         break
