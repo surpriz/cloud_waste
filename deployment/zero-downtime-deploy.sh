@@ -72,6 +72,8 @@ rollback() {
 
         # Rebuild and restart with stable version
         print_step "Reconstruction avec la version stable..."
+        # Disable BuildKit for rollback too (same reason as main build)
+        export DOCKER_BUILDKIT=0
         docker compose -f "$COMPOSE_FILE" build --no-cache \
             --build-arg NEXT_PUBLIC_SENTRY_DSN="$NEXT_PUBLIC_SENTRY_DSN" \
             --build-arg NEXT_PUBLIC_SENTRY_ENVIRONMENT="${NEXT_PUBLIC_SENTRY_ENVIRONMENT:-production}"
@@ -135,6 +137,11 @@ echo ""
 
 print_step "Construction des nouvelles images Docker..."
 print_warning "Les conteneurs actuels restent actifs pendant le build"
+
+# Disable BuildKit to prevent crashes on limited VPS resources
+# BuildKit is more performant but crashes on VPS with limited RAM/CPU
+# The legacy builder is slower but more stable
+export DOCKER_BUILDKIT=0
 
 # Set Docker build timeout to 20 minutes (1200s)
 # Increased from 600s to handle heavy Next.js builds on limited VPS resources
