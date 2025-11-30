@@ -8,7 +8,7 @@
 'use client';
 
 import React from 'react';
-import { Dialog } from './Dialog';
+import { Dialog } from './dialog';
 import { useDialogStore } from '@/stores/useDialogStore';
 
 export const DialogProvider: React.FC = () => {
