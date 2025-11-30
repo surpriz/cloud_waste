@@ -21,7 +21,7 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-} from "@/components/ui/dialog";
+} from "@/components/ui/RadixDialog";
 import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
 
